@@ -4,7 +4,8 @@
 
 ![STEAM 商店头图](https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/322330/header_schinese.jpg?t=1736195686)
 
-[Steam 群组](https://steamcommunity.com/groups/lst99)
+[![Steam](https://img.shields.io/badge/Steam-000000?logo=steam&logoColor=white)](https://steamcommunity.com/groups/lst99)
+[![Discord](https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white)](https://discord.gg/4N3aeNsFt8)
 
 ## 镜像地址 quay.io/wh2099/dst-server
 
