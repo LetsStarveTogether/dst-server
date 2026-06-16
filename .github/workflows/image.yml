@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "0 * * * *"
+    # Avoid top-of-hour load.
+    - cron: '9-59/15 * * * *'
   workflow_dispatch:
     inputs:
       force_build:
@@ -22,35 +23,85 @@ on:
           - latest
           - beta
 
+permissions: {}
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BUILD_TARGET: ${{ inputs.build_target || 'both' }}
+  BUILDS_URL: https://s3.amazonaws.com/dstbuilds/builds.json
+  FORCE_BUILD: ${{ inputs.force_build && 'true' || 'false' }}
+
 jobs:
   latest:
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.build_target == 'latest' || github.event.inputs.build_target == 'both' || github.event.inputs.build_target == '' }}
+    if: ${{ inputs.build_target == 'latest' || inputs.build_target == 'both' || inputs.build_target == '' }}
+    permissions:
+      contents: read
+    outputs:
+      force_build: ${{ steps.check.outputs.force_build || 'false' }}
+      need_update: ${{ steps.check.outputs.need_update || 'false' }}
+      version: ${{ steps.check.outputs.version || '' }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Check Version
         id: check
-        run: |
-          FORCE_BUILD="${{ github.event.inputs.force_build }}"
-          if [ "$FORCE_BUILD" = "true" ]; then
-            echo "Force build enabled, skipping version check" >> $GITHUB_STEP_SUMMARY
-            echo "need_update=true" >> $GITHUB_OUTPUT
-            echo "force_build=true" >> $GITHUB_OUTPUT
-          else
-            NEW_VERSION=$(curl -s https://s3.amazonaws.com/dstbuilds/builds.json | jq '.release[-1] | tonumber')
-            OLD_VERSION=$(cat version.txt)
-            if [ "$NEW_VERSION" -gt "$OLD_VERSION" ]; then
-              echo "Need Update $OLD_VERSION -> $NEW_VERSION" >> $GITHUB_STEP_SUMMARY
-              echo "need_update=true" >> $GITHUB_OUTPUT
-              echo "force_build=false" >> $GITHUB_OUTPUT
-              echo -n $NEW_VERSION > version.txt
-            else
-              echo "Skip Update $OLD_VERSION : $NEW_VERSION" >> $GITHUB_STEP_SUMMARY
-              echo "need_update=false" >> $GITHUB_OUTPUT
-              echo "force_build=false" >> $GITHUB_OUTPUT
-            fi
-          fi
+        uses: actions/github-script@v9
+        env:
+          CHANNEL: release
+          IMAGE_TAG: latest
+          VERSION_PATH: version.txt
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+
+            const currentVersionText = await fs.readFile(process.env.VERSION_PATH, 'utf8');
+            const currentVersion = Number(currentVersionText.trim());
+            if (!Number.isSafeInteger(currentVersion)) {
+              throw new Error(`Invalid version in ${process.env.VERSION_PATH}: ${currentVersionText}`);
+            }
+
+            let summary;
+
+            if (process.env.FORCE_BUILD === 'true') {
+              core.setOutput('need_update', 'true');
+              core.setOutput('force_build', 'true');
+              core.setOutput('version', String(currentVersion));
+              summary = `Force Build ${process.env.IMAGE_TAG} ${currentVersion}`;
+            } else {
+              core.setOutput('force_build', 'false');
+
+              const response = await fetch(process.env.BUILDS_URL);
+              if (!response.ok) {
+                throw new Error(`Failed to fetch builds.json: ${response.status} ${response.statusText}`);
+              }
+
+              const builds = await response.json();
+              const versions = (Array.isArray(builds[process.env.CHANNEL]) ? builds[process.env.CHANNEL] : [])
+                .filter((value) => /^\d+$/.test(String(value)))
+                .map(Number)
+                .filter(Number.isSafeInteger)
+                .sort((left, right) => left - right);
+              const newVersion = versions.at(-1);
+              if (!Number.isSafeInteger(newVersion)) {
+                throw new Error(`No numeric version found for ${process.env.CHANNEL}`);
+              }
+
+              if (newVersion > currentVersion) {
+                core.setOutput('need_update', 'true');
+                core.setOutput('version', String(newVersion));
+                summary = `Need Update ${process.env.IMAGE_TAG} ${currentVersion} -> ${newVersion}`;
+              } else {
+                core.setOutput('need_update', 'false');
+                core.setOutput('version', String(currentVersion));
+                summary = `Skip Update ${process.env.IMAGE_TAG} ${currentVersion}`;
+              }
+            }
+
+            await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
 
       - name: Build Image
         if: ${{ steps.check.outputs.need_update == 'true' }}
@@ -73,41 +124,73 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
-      - name: Update version.txt
-        if: ${{ steps.check.outputs.need_update == 'true' && steps.check.outputs.force_build == 'false' }}
-        uses: EndBug/add-and-commit@v9
-        with:
-          add: version.txt
-          default_author: github_actions
-
   beta:
     runs-on: ubuntu-latest
     if: false
+    permissions:
+      contents: read
+    outputs:
+      force_build: ${{ steps.check.outputs.force_build || 'false' }}
+      need_update: ${{ steps.check.outputs.need_update || 'false' }}
+      version: ${{ steps.check.outputs.version || '' }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Check Version
         id: check
-        run: |
-          FORCE_BUILD="${{ github.event.inputs.force_build }}"
-          if [ "$FORCE_BUILD" = "true" ]; then
-            echo "Force build enabled, skipping version check" >> $GITHUB_STEP_SUMMARY
-            echo "need_update=true" >> $GITHUB_OUTPUT
-            echo "force_build=true" >> $GITHUB_OUTPUT
-          else
-            NEW_VERSION=$(curl -s https://s3.amazonaws.com/dstbuilds/builds.json | jq '.updatebeta[-1] | tonumber')
-            OLD_VERSION=$(cat beta-version.txt)
-            if [ "$NEW_VERSION" -gt "$OLD_VERSION" ]; then
-              echo "Need Update $OLD_VERSION -> $NEW_VERSION" >> $GITHUB_STEP_SUMMARY
-              echo "need_update=true" >> $GITHUB_OUTPUT
-              echo "force_build=false" >> $GITHUB_OUTPUT
-              echo -n $NEW_VERSION > beta-version.txt
-            else
-              echo "Skip Update $OLD_VERSION : $NEW_VERSION" >> $GITHUB_STEP_SUMMARY
-              echo "need_update=false" >> $GITHUB_OUTPUT
-              echo "force_build=false" >> $GITHUB_OUTPUT
-            fi
-          fi
+        uses: actions/github-script@v9
+        env:
+          CHANNEL: updatebeta
+          IMAGE_TAG: beta
+          VERSION_PATH: beta-version.txt
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+
+            const currentVersionText = await fs.readFile(process.env.VERSION_PATH, 'utf8');
+            const currentVersion = Number(currentVersionText.trim());
+            if (!Number.isSafeInteger(currentVersion)) {
+              throw new Error(`Invalid version in ${process.env.VERSION_PATH}: ${currentVersionText}`);
+            }
+
+            let summary;
+
+            if (process.env.FORCE_BUILD === 'true') {
+              core.setOutput('need_update', 'true');
+              core.setOutput('force_build', 'true');
+              core.setOutput('version', String(currentVersion));
+              summary = `Force Build ${process.env.IMAGE_TAG} ${currentVersion}`;
+            } else {
+              core.setOutput('force_build', 'false');
+
+              const response = await fetch(process.env.BUILDS_URL);
+              if (!response.ok) {
+                throw new Error(`Failed to fetch builds.json: ${response.status} ${response.statusText}`);
+              }
+
+              const builds = await response.json();
+              const versions = (Array.isArray(builds[process.env.CHANNEL]) ? builds[process.env.CHANNEL] : [])
+                .filter((value) => /^\d+$/.test(String(value)))
+                .map(Number)
+                .filter(Number.isSafeInteger)
+                .sort((left, right) => left - right);
+              const newVersion = versions.at(-1);
+              if (!Number.isSafeInteger(newVersion)) {
+                throw new Error(`No numeric version found for ${process.env.CHANNEL}`);
+              }
+
+              if (newVersion > currentVersion) {
+                core.setOutput('need_update', 'true');
+                core.setOutput('version', String(newVersion));
+                summary = `Need Update ${process.env.IMAGE_TAG} ${currentVersion} -> ${newVersion}`;
+              } else {
+                core.setOutput('need_update', 'false');
+                core.setOutput('version', String(currentVersion));
+                summary = `Skip Update ${process.env.IMAGE_TAG} ${currentVersion}`;
+              }
+            }
+
+            await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
 
       - name: Build Image
         if: ${{ steps.check.outputs.need_update == 'true' }}
@@ -132,9 +215,72 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
-      - name: Update version.txt
-        if: ${{ steps.check.outputs.need_update == 'true' && steps.check.outputs.force_build == 'false' }}
+  commit:
+    name: Commit versions
+    needs:
+      - latest
+      - beta
+    if: ${{ always() && needs.latest.result != 'failure' && needs.latest.result != 'cancelled' && needs.beta.result != 'failure' && needs.beta.result != 'cancelled' && ((needs.latest.outputs.need_update == 'true' && needs.latest.outputs.force_build == 'false') || (needs.beta.outputs.need_update == 'true' && needs.beta.outputs.force_build == 'false')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Write versions
+        id: versions
+        env:
+          BETA_FORCE_BUILD: ${{ needs.beta.outputs.force_build || 'false' }}
+          BETA_NEED_UPDATE: ${{ needs.beta.outputs.need_update || 'false' }}
+          BETA_VERSION: ${{ needs.beta.outputs.version }}
+          LATEST_FORCE_BUILD: ${{ needs.latest.outputs.force_build || 'false' }}
+          LATEST_NEED_UPDATE: ${{ needs.latest.outputs.need_update || 'false' }}
+          LATEST_VERSION: ${{ needs.latest.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          add_paths=()
+          updated_versions=()
+
+          if [[ "${LATEST_NEED_UPDATE}" == "true" && "${LATEST_FORCE_BUILD}" == "false" ]]; then
+            [[ -n "${LATEST_VERSION}" ]] || { echo 'Missing latest version' >&2; exit 1; }
+            printf '%s' "${LATEST_VERSION}" > version.txt
+            add_paths+=("version.txt")
+            updated_versions+=("latest:${LATEST_VERSION}")
+          fi
+
+          if [[ "${BETA_NEED_UPDATE}" == "true" && "${BETA_FORCE_BUILD}" == "false" ]]; then
+            [[ -n "${BETA_VERSION}" ]] || { echo 'Missing beta version' >&2; exit 1; }
+            printf '%s' "${BETA_VERSION}" > beta-version.txt
+            add_paths+=("beta-version.txt")
+            updated_versions+=("beta:${BETA_VERSION}")
+          fi
+
+          if [[ "${#updated_versions[@]}" -eq 1 ]]; then
+            target="${updated_versions[0]%%:*}"
+            version="${updated_versions[0]#*:}"
+            commit_message="chore(image): update ${target} to ${version}"
+          else
+            commit_message='chore(image): update versions'
+          fi
+
+          if git diff --quiet -- "${add_paths[@]}"; then
+            echo 'has_changes=false' >> "${GITHUB_OUTPUT}"
+            echo "Skip Commit ${updated_versions[*]}: no changes" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          echo 'has_changes=true' >> "${GITHUB_OUTPUT}"
+          echo "add=${add_paths[*]}" >> "${GITHUB_OUTPUT}"
+          echo "message=${commit_message}" >> "${GITHUB_OUTPUT}"
+          echo "Commit Versions ${updated_versions[*]}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Commit versions
+        if: steps.versions.outputs.has_changes == 'true'
         uses: EndBug/add-and-commit@v9
         with:
-          add: beta-version.txt
-          default_author: github_actions
+          add: ${{ steps.versions.outputs.add }}
+          message: ${{ steps.versions.outputs.message }}
