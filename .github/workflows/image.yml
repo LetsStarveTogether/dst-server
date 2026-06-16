@@ -33,194 +33,162 @@ env:
   BUILD_TARGET: ${{ inputs.build_target || 'both' }}
   BUILDS_URL: https://s3.amazonaws.com/dstbuilds/builds.json
   FORCE_BUILD: ${{ inputs.force_build && 'true' || 'false' }}
+  IMAGE_NAME: dst-server
+  IMAGE_REGISTRY: quay.io/wh2099
+  IMAGE_TARGETS: |
+    {
+      "latest": {
+        "build_args": "",
+        "channel": "release",
+        "tag": "latest",
+        "version_path": "version.txt"
+      },
+      "beta": {
+        "build_args": "BETA=1",
+        "channel": "updatebeta",
+        "tag": "beta",
+        "version_path": "beta-version.txt"
+      }
+    }
 
 jobs:
-  latest:
-    runs-on: ubuntu-latest
-    if: ${{ inputs.build_target == 'latest' || inputs.build_target == 'both' || inputs.build_target == '' }}
+  detect:
+    name: Detect versions
+    runs-on: self-hosted
     permissions:
       contents: read
     outputs:
-      force_build: ${{ steps.check.outputs.force_build || 'false' }}
-      need_update: ${{ steps.check.outputs.need_update || 'false' }}
-      version: ${{ steps.check.outputs.version || '' }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+      should_commit: ${{ steps.detect.outputs.should_commit }}
+      updates: ${{ steps.detect.outputs.updates }}
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v6
 
-      - name: Check Version
-        id: check
+      - name: Detect versions
+        id: detect
         uses: actions/github-script@v9
-        env:
-          CHANNEL: release
-          IMAGE_TAG: latest
-          VERSION_PATH: version.txt
         with:
           script: |
             const fs = require('node:fs/promises');
 
-            const currentVersionText = await fs.readFile(process.env.VERSION_PATH, 'utf8');
-            const currentVersion = Number(currentVersionText.trim());
-            if (!Number.isSafeInteger(currentVersion)) {
-              throw new Error(`Invalid version in ${process.env.VERSION_PATH}: ${currentVersionText}`);
-            }
+            const buildTarget = process.env.BUILD_TARGET || 'both';
+            const forceBuild = process.env.FORCE_BUILD === 'true';
+            const targets = JSON.parse(process.env.IMAGE_TARGETS);
+            const targetNames = buildTarget === 'both' ? Object.keys(targets) : [buildTarget];
 
-            let summary;
+            const selectedTargets = targetNames.map((name) => {
+              const config = targets[name];
+              if (!config) {
+                throw new Error(`Unknown build target: ${name}`);
+              }
 
-            if (process.env.FORCE_BUILD === 'true') {
-              core.setOutput('need_update', 'true');
-              core.setOutput('force_build', 'true');
-              core.setOutput('version', String(currentVersion));
-              summary = `Force Build ${process.env.IMAGE_TAG} ${currentVersion}`;
-            } else {
-              core.setOutput('force_build', 'false');
+              return { name, ...config };
+            });
 
+            const builds = forceBuild ? undefined : await (async () => {
               const response = await fetch(process.env.BUILDS_URL);
               if (!response.ok) {
                 throw new Error(`Failed to fetch builds.json: ${response.status} ${response.statusText}`);
               }
 
-              const builds = await response.json();
-              const versions = (Array.isArray(builds[process.env.CHANNEL]) ? builds[process.env.CHANNEL] : [])
-                .filter((value) => /^\d+$/.test(String(value)))
-                .map(Number)
-                .filter(Number.isSafeInteger)
-                .sort((left, right) => left - right);
-              const newVersion = versions.at(-1);
-              if (!Number.isSafeInteger(newVersion)) {
-                throw new Error(`No numeric version found for ${process.env.CHANNEL}`);
+              return response.json();
+            })();
+
+            const matrix = [];
+            const summary = [];
+
+            for (const target of selectedTargets) {
+              const currentVersionText = await fs.readFile(target.version_path, 'utf8');
+              const currentVersion = Number(currentVersionText.trim());
+              if (!Number.isSafeInteger(currentVersion)) {
+                throw new Error(`Invalid version in ${target.version_path}: ${currentVersionText}`);
               }
 
-              if (newVersion > currentVersion) {
-                core.setOutput('need_update', 'true');
-                core.setOutput('version', String(newVersion));
-                summary = `Need Update ${process.env.IMAGE_TAG} ${currentVersion} -> ${newVersion}`;
+              let needUpdate = false;
+              let version = currentVersion;
+
+              if (forceBuild) {
+                needUpdate = true;
+                summary.push(`Force Build ${target.tag} ${currentVersion}`);
               } else {
-                core.setOutput('need_update', 'false');
-                core.setOutput('version', String(currentVersion));
-                summary = `Skip Update ${process.env.IMAGE_TAG} ${currentVersion}`;
+                const versions = (Array.isArray(builds[target.channel]) ? builds[target.channel] : [])
+                  .filter((value) => /^\d+$/.test(String(value)))
+                  .map(Number)
+                  .filter(Number.isSafeInteger)
+                  .sort((left, right) => left - right);
+                const remoteVersion = versions.at(-1);
+                if (!Number.isSafeInteger(remoteVersion)) {
+                  throw new Error(`No numeric version found for ${target.channel}`);
+                }
+
+                if (remoteVersion > currentVersion) {
+                  needUpdate = true;
+                  version = remoteVersion;
+                  summary.push(`Need Update ${target.tag} ${currentVersion} -> ${remoteVersion}`);
+                } else {
+                  summary.push(`Skip Update ${target.tag} ${currentVersion}`);
+                }
               }
+
+              matrix.push({
+                build_args: target.build_args,
+                force_build: forceBuild,
+                image_tag: target.tag,
+                name: target.name,
+                need_update: needUpdate,
+                version: String(version),
+                version_path: target.version_path,
+              });
             }
 
-            await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+            core.setOutput('matrix', JSON.stringify({ include: matrix }));
+            core.setOutput('should_commit', String(matrix.some((target) => target.need_update && !target.force_build)));
+            core.setOutput('updates', JSON.stringify(matrix));
+            await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, `${summary.join('\n')}\n`);
 
-      - name: Build Image
-        if: ${{ steps.check.outputs.need_update == 'true' }}
-        id: build
-        uses: redhat-actions/buildah-build@v2
-        with:
-          image: dst-server
-          tags: latest
-          containerfiles: |
-            Containerfile
-
-      - name: Push To Registry
-        if: ${{ steps.check.outputs.need_update == 'true' }}
-        id: push
-        uses: redhat-actions/push-to-registry@v2
-        with:
-          image: ${{ steps.build.outputs.image }}
-          tags: ${{ steps.build.outputs.tags }}
-          registry: quay.io/wh2099
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
-
-  beta:
+  image:
+    name: Build and push ${{ matrix.image_tag }}
+    needs: detect
+    if: ${{ needs.detect.result == 'success' }}
     runs-on: ubuntu-latest
-    if: false
     permissions:
       contents: read
-    outputs:
-      force_build: ${{ steps.check.outputs.force_build || 'false' }}
-      need_update: ${{ steps.check.outputs.need_update || 'false' }}
-      version: ${{ steps.check.outputs.version || '' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        if: ${{ matrix.need_update }}
+        uses: actions/checkout@v6
 
-      - name: Check Version
-        id: check
-        uses: actions/github-script@v9
-        env:
-          CHANNEL: updatebeta
-          IMAGE_TAG: beta
-          VERSION_PATH: beta-version.txt
-        with:
-          script: |
-            const fs = require('node:fs/promises');
-
-            const currentVersionText = await fs.readFile(process.env.VERSION_PATH, 'utf8');
-            const currentVersion = Number(currentVersionText.trim());
-            if (!Number.isSafeInteger(currentVersion)) {
-              throw new Error(`Invalid version in ${process.env.VERSION_PATH}: ${currentVersionText}`);
-            }
-
-            let summary;
-
-            if (process.env.FORCE_BUILD === 'true') {
-              core.setOutput('need_update', 'true');
-              core.setOutput('force_build', 'true');
-              core.setOutput('version', String(currentVersion));
-              summary = `Force Build ${process.env.IMAGE_TAG} ${currentVersion}`;
-            } else {
-              core.setOutput('force_build', 'false');
-
-              const response = await fetch(process.env.BUILDS_URL);
-              if (!response.ok) {
-                throw new Error(`Failed to fetch builds.json: ${response.status} ${response.statusText}`);
-              }
-
-              const builds = await response.json();
-              const versions = (Array.isArray(builds[process.env.CHANNEL]) ? builds[process.env.CHANNEL] : [])
-                .filter((value) => /^\d+$/.test(String(value)))
-                .map(Number)
-                .filter(Number.isSafeInteger)
-                .sort((left, right) => left - right);
-              const newVersion = versions.at(-1);
-              if (!Number.isSafeInteger(newVersion)) {
-                throw new Error(`No numeric version found for ${process.env.CHANNEL}`);
-              }
-
-              if (newVersion > currentVersion) {
-                core.setOutput('need_update', 'true');
-                core.setOutput('version', String(newVersion));
-                summary = `Need Update ${process.env.IMAGE_TAG} ${currentVersion} -> ${newVersion}`;
-              } else {
-                core.setOutput('need_update', 'false');
-                core.setOutput('version', String(currentVersion));
-                summary = `Skip Update ${process.env.IMAGE_TAG} ${currentVersion}`;
-              }
-            }
-
-            await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
-
-      - name: Build Image
-        if: ${{ steps.check.outputs.need_update == 'true' }}
+      - name: Build image
+        if: ${{ matrix.need_update }}
         id: build
         uses: redhat-actions/buildah-build@v2
         with:
-          image: dst-server
-          tags: beta
+          image: ${{ env.IMAGE_NAME }}
+          tags: ${{ matrix.image_tag }}
           containerfiles: |
             Containerfile
-          build-args: |
-            BETA=1
+          build-args: ${{ matrix.build_args }}
 
-      - name: Push To Registry
-        if: ${{ steps.check.outputs.need_update == 'true' }}
-        id: push
+      - name: Push to registry
+        if: ${{ matrix.need_update }}
         uses: redhat-actions/push-to-registry@v2
         with:
           image: ${{ steps.build.outputs.image }}
           tags: ${{ steps.build.outputs.tags }}
-          registry: quay.io/wh2099
+          registry: ${{ env.IMAGE_REGISTRY }}
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
   commit:
     name: Commit versions
     needs:
-      - latest
-      - beta
-    if: ${{ always() && needs.latest.result != 'failure' && needs.latest.result != 'cancelled' && needs.beta.result != 'failure' && needs.beta.result != 'cancelled' && ((needs.latest.outputs.need_update == 'true' && needs.latest.outputs.force_build == 'false') || (needs.beta.outputs.need_update == 'true' && needs.beta.outputs.force_build == 'false')) }}
+      - detect
+      - image
+    if: ${{ always() && needs.detect.result == 'success' && needs.image.result == 'success' && needs.detect.outputs.should_commit == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -232,55 +200,68 @@ jobs:
 
       - name: Write versions
         id: versions
+        uses: actions/github-script@v9
         env:
-          BETA_FORCE_BUILD: ${{ needs.beta.outputs.force_build || 'false' }}
-          BETA_NEED_UPDATE: ${{ needs.beta.outputs.need_update || 'false' }}
-          BETA_VERSION: ${{ needs.beta.outputs.version }}
-          LATEST_FORCE_BUILD: ${{ needs.latest.outputs.force_build || 'false' }}
-          LATEST_NEED_UPDATE: ${{ needs.latest.outputs.need_update || 'false' }}
-          LATEST_VERSION: ${{ needs.latest.outputs.version }}
-        run: |
-          set -euo pipefail
+          TARGET_UPDATES: ${{ needs.detect.outputs.updates }}
+        with:
+          script: |
+            const fs = require('node:fs/promises');
 
-          add_paths=()
-          updated_versions=()
+            const updates = JSON.parse(process.env.TARGET_UPDATES);
+            const selectedUpdates = updates.filter((target) => target.need_update && !target.force_build);
+            const addPaths = [];
+            const updatedVersions = [];
 
-          if [[ "${LATEST_NEED_UPDATE}" == "true" && "${LATEST_FORCE_BUILD}" == "false" ]]; then
-            [[ -n "${LATEST_VERSION}" ]] || { echo 'Missing latest version' >&2; exit 1; }
-            printf '%s' "${LATEST_VERSION}" > version.txt
-            add_paths+=("version.txt")
-            updated_versions+=("latest:${LATEST_VERSION}")
-          fi
+            for (const target of selectedUpdates) {
+              if (!/^\d+$/.test(target.version)) {
+                throw new Error(`Invalid ${target.name} version: ${target.version}`);
+              }
 
-          if [[ "${BETA_NEED_UPDATE}" == "true" && "${BETA_FORCE_BUILD}" == "false" ]]; then
-            [[ -n "${BETA_VERSION}" ]] || { echo 'Missing beta version' >&2; exit 1; }
-            printf '%s' "${BETA_VERSION}" > beta-version.txt
-            add_paths+=("beta-version.txt")
-            updated_versions+=("beta:${BETA_VERSION}")
-          fi
+              await fs.writeFile(target.version_path, target.version);
+              addPaths.push(target.version_path);
+              updatedVersions.push(`${target.name}:${target.version}`);
+            }
 
-          if [[ "${#updated_versions[@]}" -eq 1 ]]; then
-            target="${updated_versions[0]%%:*}"
-            version="${updated_versions[0]#*:}"
-            commit_message="build(image): update ${target} to ${version}"
-          else
-            commit_message='build(image): update versions'
-          fi
+            if (addPaths.length === 0) {
+              core.setOutput('has_changes', 'false');
+              await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, 'Skip Commit: no version updates\n');
+              return;
+            }
 
-          if git diff --quiet -- "${add_paths[@]}"; then
-            echo 'has_changes=false' >> "${GITHUB_OUTPUT}"
-            echo "Skip Commit ${updated_versions[*]}: no changes" >> "${GITHUB_STEP_SUMMARY}"
-            exit 0
-          fi
+            const diff = await exec.getExecOutput('git', ['diff', '--quiet', '--', ...addPaths], {
+              ignoreReturnCode: true,
+              silent: true,
+            });
+            if (diff.exitCode === 0) {
+              core.setOutput('has_changes', 'false');
+              await fs.appendFile(
+                process.env.GITHUB_STEP_SUMMARY,
+                `Skip Commit ${updatedVersions.join(' ')}: no changes\n`,
+              );
+              return;
+            }
+            if (diff.exitCode !== 1) {
+              throw new Error(`git diff failed with exit code ${diff.exitCode}`);
+            }
 
-          echo 'has_changes=true' >> "${GITHUB_OUTPUT}"
-          echo "add=${add_paths[*]}" >> "${GITHUB_OUTPUT}"
-          echo "message=${commit_message}" >> "${GITHUB_OUTPUT}"
-          echo "Commit Versions ${updated_versions[*]}" >> "${GITHUB_STEP_SUMMARY}"
+            const commitMessage = selectedUpdates.length === 1
+              ? `build(image): update ${selectedUpdates[0].name} to ${selectedUpdates[0].version}`
+              : 'build(image): update versions';
+
+            core.setOutput('add', addPaths.join(' '));
+            core.setOutput('has_changes', 'true');
+            core.setOutput('message', commitMessage);
+            await fs.appendFile(
+              process.env.GITHUB_STEP_SUMMARY,
+              `Commit Versions ${updatedVersions.join(' ')}\n`,
+            );
 
       - name: Commit versions
-        if: steps.versions.outputs.has_changes == 'true'
-        uses: EndBug/add-and-commit@v9
+        if: ${{ steps.versions.outputs.has_changes == 'true' }}
+        uses: EndBug/add-and-commit@v10
         with:
           add: ${{ steps.versions.outputs.add }}
+          default_author: user_info
+          committer_name: github-actions[bot]
+          committer_email: 41898282+github-actions[bot]@users.noreply.github.com
           message: ${{ steps.versions.outputs.message }}
