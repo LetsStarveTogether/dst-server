@@ -262,9 +262,9 @@ jobs:
           if [[ "${#updated_versions[@]}" -eq 1 ]]; then
             target="${updated_versions[0]%%:*}"
             version="${updated_versions[0]#*:}"
-            commit_message="chore(image): update ${target} to ${version}"
+            commit_message="build(image): update ${target} to ${version}"
           else
-            commit_message='chore(image): update versions'
+            commit_message='build(image): update versions'
           fi
 
           if git diff --quiet -- "${add_paths[@]}"; then
