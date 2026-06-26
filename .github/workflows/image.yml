@@ -63,7 +63,7 @@ jobs:
       updates: ${{ steps.detect.outputs.updates }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Detect versions
         id: detect
@@ -160,7 +160,7 @@ jobs:
     steps:
       - name: Checkout
         if: ${{ matrix.need_update }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Build image
         if: ${{ matrix.need_update }}
@@ -194,7 +194,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.ref_name }}
 
