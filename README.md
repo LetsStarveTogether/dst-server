@@ -316,7 +316,3 @@ mods  # Mod-related files under the game server install directory
 
 1. [SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD)
 2. [Dedicated Server Quick Setup Guide - Linux](https://forums.kleientertainment.com/forums/topic/64441-dedicated-server-quick-setup-guide-linux/)
-
-## License
-
-[![GPLv3](https://www.gnu.org/graphics/gplv3-or-later.png)](https://www.gnu.org/licenses/gpl-3.0.html)

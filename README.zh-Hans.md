@@ -318,7 +318,3 @@ mods  # mod 相关，在游戏服务端安装目录下
 
 1. [SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD)
 2. [Dedicated Server Quick Setup Guide - Linux](https://forums.kleientertainment.com/forums/topic/64441-dedicated-server-quick-setup-guide-linux/)
-
-## 开源许可证
-
-[![GPLv3](https://www.gnu.org/graphics/gplv3-or-later.png)](https://www.gnu.org/licenses/gpl-3.0.html)
