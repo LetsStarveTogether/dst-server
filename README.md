@@ -33,7 +33,9 @@ English | [简体中文](README.zh-Hans.md)
 
    Follow Klei's [Configure and download the server settings](https://forums.kleientertainment.com/forums/topic/64441-dedicated-server-quick-setup-guide-linux/#:~:text=3.%20Configure%20and%20download%20the%20server%20settings) guide. Extract the downloaded archive and upload the whole configuration folder into the storage path created above.
    - The cluster folder name is not important, but the storage path should contain exactly one cluster folder. Common names are `Cluster_1` and `MyDediServer`.
-   - To customize the world, copy the corresponding files from a local client save into the dedicated server configuration folder. See [Configuration Files](#configuration-files).
+   - To customize the world, add a `worldgenoverride.lua` to each shard that needs it.
+     A client-exported `leveldataoverride.lua` is optional.
+     See [Configuration Files](#configuration-files).
    - `cluster_token.txt` is dedicated-server specific and must be generated from Klei's [server management page](https://accounts.klei.com/account/game/servers?game=DontStarveTogether).
 
 4. Pull the image and start the container.
@@ -90,20 +92,6 @@ When the container starts, this project automatically detects the configuration 
 
 This project starts every shard folder it finds, so multi-layer worlds do not need multiple container starts. Put all shard configuration folders under the same cluster folder.
 
-## TODO
-
-- [ ] Python entrypoint
-  - [x] Manage the dedicated server as child processes
-  - [ ] IPC
-    - [x] Standard input and output
-    - [ ] `-cloudserver`
-  - [ ] Event messages
-    - [ ] Day changes
-    - [ ] Player joins
-    - [ ] Player leaves
-    - [ ] Player deaths
-    - [ ] Player chat
-
 ## Configuration Files
 
 This section describes the dedicated server configuration file structure and variables. Commented values are defaults.
@@ -120,19 +108,66 @@ Cluster_1  # Cluster mode. Forest and Caves are separate server processes.
 ├── Master  # Master server process, usually Forest
 │   ├── server.ini  # Server configuration
 │   ├── modoverrides.lua  # Mod settings
-│   ├── leveldataoverride.lua  # World generation settings
+│   ├── worldgenoverride.lua  # Optional user-editable world generation and world settings
+│   ├── leveldataoverride.lua  # Optional game-managed complete level data
 │   └── save  # Save data
 │       └── ...
 ├── Caves  # Caves server process
 │   ├── server.ini  # Server configuration
 │   ├── modoverrides.lua  # Mod settings
-│   ├── leveldataoverride.lua  # World generation settings
+│   ├── worldgenoverride.lua  # Optional user-editable world generation and world settings
+│   ├── leveldataoverride.lua  # Optional game-managed complete level data
 │   └── save  # Save data
 │       └── ...
 
 mods  # Mod-related files under the game server install directory
 └── dedicated_server_mods_setup.lua  # Mod loading setup
 ```
+
+### World Configuration Overrides
+
+Each shard reads its world configuration independently.
+Place a separate `worldgenoverride.lua` in every shard directory that needs customized settings.
+
+`leveldataoverride.lua` is optional and primarily game-managed.
+It contains a complete, materialized level definition used to transfer settings from a client to cluster servers.
+If present, it replaces the shard's existing or default level data and must not be a partial patch.
+If absent, startup falls back to the supplied or default level data and continues to load `worldgenoverride.lua`.
+Normal dedicated-server configuration therefore does not need this file.
+
+Despite its historical name, `worldgenoverride.lua` controls both world generation and runtime world settings.
+It is loaded after `leveldataoverride.lua`, so its presets and explicit `overrides` have final precedence.
+If both `worldgen_preset` and `settings_preset` resolve successfully, they form a complete replacement.
+Otherwise, the available preset data and explicit `overrides` are merged into the current baseline.
+Set `override_enabled = true` or the file is ignored.
+
+A standard Forest + Caves cluster can omit both `leveldataoverride.lua` files and use these two files:
+
+`Master/worldgenoverride.lua`:
+
+```lua
+return {
+    override_enabled = true,
+    worldgen_preset = "SURVIVAL_TOGETHER",
+    settings_preset = "SURVIVAL_TOGETHER",
+    overrides = {},
+}
+```
+
+`Caves/worldgenoverride.lua`:
+
+```lua
+return {
+    override_enabled = true,
+    worldgen_preset = "DST_CAVE",
+    settings_preset = "DST_CAVE",
+    overrides = {},
+}
+```
+
+An enabled `worldgenoverride.lua` may be rewritten during saves to synchronize current overrides, so stop the shard before editing it.
+The file configures an existing shard; it does not create or enable one.
+The Caves shard still needs its own directory and valid `server.ini`, and `[SHARD] / shard_enabled` must be enabled in `cluster.ini`.
 
 ### cluster.ini
 
@@ -312,7 +347,52 @@ mods  # Mod-related files under the game server install directory
  -- ServerModCollectionSetup("2594933855")
 ```
 
+### Dedicated Server Startup Options
+
+These options belong to `dontstarve_dedicated_server_nullrenderer`, not to Podman.
+This image selects the storage, cluster, shard, mod, and parent-process options automatically, so normal container use does not require them.
+Command-line values override matching settings in `cluster.ini` or `server.ini`.
+
+This summary reconciles Klei's [current command-line guide](https://support.klei.com/hc/en-us/articles/360029556192-Dedicated-Server-Command-Line-Options-Guide) with the original [2016 forum guide](https://forums.kleientertainment.com/forums/topic/64743-dedicated-server-command-line-options-guide/), [mod-update announcement](https://forums.kleientertainment.com/forums/topic/51981-game-update-129926-3122015/), [UGC-directory announcement](https://forums.kleientertainment.com/forums/topic/128047-game-update-456207/), [`-region` workaround](https://forums.kleientertainment.com/klei-bug-tracker/dont-starve-together/503-failed-to-send-server-listings-r33770/), [Linux setup guide](https://forums.kleientertainment.com/forums/topic/64441-dedicated-server-quick-setup-guide-linux/), and developer [`-cloudserver` explanation](https://forums.kleientertainment.com/forums/topic/118972-unix-python-web-portal-for-dedicated-dst-server/#findComment-1344090).
+
+| Option | Description |
+| --- | --- |
+| `-persistent_storage_root <absolute_path>` | Sets the root containing the configuration directory. The defaults are the user's Documents `Klei` folder on Windows, `~/Documents/Klei` on macOS, and `~/.klei` on Linux. |
+| `-conf_dir <name>` | Sets the configuration directory name without slashes. The default is `DoNotStarveTogether`. |
+| `-cluster <name>` | Selects the cluster directory containing `cluster.ini`. The default is `Cluster_1`. |
+| `-shard <name>` | Selects the shard directory containing `server.ini`. The default is `Master`. |
+| `-offline` | Starts an unlisted LAN-only server without Steam features. |
+| `-disabledatacollection` | Disables data collection and therefore restricts the server to offline mode. |
+| `-bind_ip <address>` | Changes the address used to listen for player connections. Most servers do not need this advanced option. |
+| `-region <region>` | Overrides the automatically selected lobby registration region. Known values are `CHINA`, `SING`, `EU`, and `US`; Klei documented `EU` only as a temporary workaround, and the current guide omits this option, so normally leave it unset. |
+| `-port <port>` | Sets the UDP player port and overrides `[NETWORK] / server_port`. Valid values are 1024–65535; each shard needs a different port, and LAN discovery requires 10998–11018. |
+| `-players <count>` | Sets the maximum player count and overrides `[GAMEPLAY] / max_players`. Valid values are 1–64. |
+| `-steam_master_server_port <port>` | Sets Steam's internal master-server port and overrides `[STEAM] / master_server_port`. Use a different 1024–65535 port for every server process on the same host. |
+| `-steam_authentication_port <port>` | Sets Steam's internal authentication port and overrides `[STEAM] / authentication_port`. Use a different 1024–65535 port for every server process on the same host. |
+| `-backup_log_count <count>` | Sets the number of log backups to keep. The default is 100. |
+| `-backup_log_period <seconds>` | Sets the interval between log backups. The default is 86400 seconds. |
+| `-tick <rate>` | Sets client updates per second and overrides `[NETWORK] / tick_rate`. Valid values are 15–60; Klei recommends the default 15 and, for LAN changes, a divisor of 60 such as 20 or 30. |
+| `-fo` | Makes the server friends-only. |
+| `-only_update_server_mods` | Updates the mods listed in `dedicated_server_mods_setup.lua`, then exits without starting a world. |
+| `-skip_update_server_mods` | Skips the server-mod update during startup. |
+| `-ugc_directory <path>` | Overrides the directory used for v2/UGC mods. |
+| `-token <token>` | Passes the cluster token directly instead of reading `cluster_token.txt`. Prefer the file to avoid exposing the secret through process arguments. |
+| `-allow_ioopenwrite_sandbox_escape` | Allows mods and tools to use `io.open` and `io.write`; enable it only for trusted code. |
+| `-monitor_parent_process <pid>` | Stops the server automatically when the specified parent process dies. |
+| `-cloudserver` | Enables Linux-only IPC: file descriptor 3 accepts newline-terminated Lua, descriptor 4 returns results ending in `DST_RemoteCommandDone`, and descriptor 5 emits server events. This image does not enable it. |
+
+The selected shard configuration path is `<persistent_storage_root>/<conf_dir>/<cluster>/<shard>/server.ini`.
+`-console` is deprecated; use `[MISC] / console_enabled` and standard input instead.
+`-backup_logs` was replaced by `-backup_log_count`; use `-backup_log_period` separately to control the interval.
+
 ## References
 
-1. [SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD)
-2. [Dedicated Server Quick Setup Guide - Linux](https://forums.kleientertainment.com/forums/topic/64441-dedicated-server-quick-setup-guide-linux/)
+- [SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD)
+- [Dedicated Server Quick Setup Guide - Linux](https://forums.kleientertainment.com/forums/topic/64441-dedicated-server-quick-setup-guide-linux/)
+- [Dedicated Server Settings Guide](https://forums.kleientertainment.com/forums/topic/64552-dedicated-server-settings-guide/)
+- [Dedicated Server Command Line Options Guide](https://forums.kleientertainment.com/forums/topic/64743-dedicated-server-command-line-options-guide/)
+- [Understanding Shards and Migration Portals](https://forums.kleientertainment.com/forums/topic/59174-understanding-shards-and-migration-portals/)
+- [worldgenoverride.lua with the new post-Caves settings](https://forums.kleientertainment.com/forums/topic/53014-worldgenoverridelua-with-the-new-post-caves-settings/)
+- [[Server Admin] Associate your server with a steam group](https://forums.kleientertainment.com/forums/topic/55994-server-admin-associate-your-server-with-a-steam-group/)
+- [Update 126042 - 2/6/2015](https://forums.kleientertainment.com/forums/topic/50615-update-126042-262015/)
+- [[Game Update] - 455519](https://forums.kleientertainment.com/forums/topic/127822-game-update-455519/)
