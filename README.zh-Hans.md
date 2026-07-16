@@ -33,7 +33,9 @@
 
    参照官方说明 [Configure and download the server settings](https://forums.kleientertainment.com/forums/topic/64441-dedicated-server-quick-setup-guide-linux/#:~:text=3.%20Configure%20and%20download%20the%20server%20settings)，将下载的压缩文件解压，获得*配置文件夹*，将*配置文件夹* **整个** 上传到*存储路径*（上一步提到的）
    - 配置文件夹具体名称不做要求，只要确保*存储路径*下的子文件夹唯一即可（常见名称：“Cluster_1”、“MyDediServer”）
-   - 想自定义世界的话，可以用客户端存档中的配置文件覆盖服务端的对应文件（参见后文 [配置文件说明](#配置文件说明)）
+   - 想自定义世界的话，请在需要的每个分片中添加 `worldgenoverride.lua`。
+     客户端导出的 `leveldataoverride.lua` 可以缺失。
+     参见后文 [配置文件说明](#配置文件说明)。
    - 请注意 cluster_token.txt 为专服独有，且必须通过 [官方管理页面](https://accounts.klei.com/account/game/servers?game=DontStarveTogether) 获取
 
 4. 拉取镜像并启动容器
@@ -90,20 +92,6 @@ echo 'c_announce("服务器需要维护，请大家提前做好准备")' > "Clus
 
 请注意，本项目将启动所有存在配置文件夹的分片，故而多层世界无需多层启动，整合所有分片配置到集群下即可
 
-## TODO
-
-- [ ] Python 入口
-  - [x] 服务端作为受控子进程
-  - [ ] IPC
-    - [x] 通过标准输入输出
-    - [ ] `-cloudserver`
-  - [ ] 事件消息
-    - [ ] 游戏天数变动
-    - [ ] 玩家进入
-    - [ ] 玩家离开
-    - [ ] 玩家死亡
-    - [ ] 玩家发言
-
 ## 配置文件说明
 
 *专服配置文件结构及变量含义，注释中的赋值均为默认值。*
@@ -120,19 +108,66 @@ Cluster_1  # 以集群方式提供服务，地面和洞穴是两个独立的服�
 ├── Master  # 主服务器进程（地面）
 │   ├── server.ini  # 服务器配置
 │   ├── modoverrides.lua  # mod 的设置
-│   ├── leveldataoverride.lua  # 世界（地形、生物等）的设置
+│   ├── worldgenoverride.lua  # 可选，用户维护的世界生成与世界设置
+│   ├── leveldataoverride.lua  # 可选，游戏管理的完整关卡数据
 │   └── save  # 存档
 │       └── ...
 ├── Caves  # 洞穴服务器
 │   ├── server.ini  # 服务器配置
 │   ├── modoverrides.lua  # mod 的设置
-│   ├── leveldataoverride.lua  # 世界（地形、生物等）的设置
+│   ├── worldgenoverride.lua  # 可选，用户维护的世界生成与世界设置
+│   ├── leveldataoverride.lua  # 可选，游戏管理的完整关卡数据
 │   └── save  # 存档
 │       └── ...
 
 mods  # mod 相关，在游戏服务端安装目录下
 └── dedicated_server_mods_setup.lua  # mod 加载设定
 ```
+
+### 世界配置覆盖文件
+
+每个分片都会独立读取自己的世界配置。
+需要自定义的每个分片目录都应分别放置 `worldgenoverride.lua`。
+
+`leveldataoverride.lua` 可以缺失，且主要由游戏管理。
+它保存已经展开的完整关卡定义，用于客户端向集群服务端传递设置。
+它存在时会整体替换分片已有或默认的关卡数据，因此不能只包含局部配置。
+它缺失时，服务端会回退到传入配置或默认关卡数据，并继续加载 `worldgenoverride.lua`。
+因此，正常手工配置专服时不需要该文件。
+
+虽然名称沿用至今，`worldgenoverride.lua` 实际上同时控制世界生成和运行时世界设置。
+它会在 `leveldataoverride.lua` 之后加载，因此其预设和显式 `overrides` 具有最终优先级。
+如果 `worldgen_preset` 和 `settings_preset` 都能成功解析，两者会组成完整配置并整体替换之前的基线。
+否则，服务端会把可用的预设数据和显式 `overrides` 合并到当前基线。
+必须设置 `override_enabled = true`，否则该文件会被忽略。
+
+标准的“森林 + 洞穴”集群可以缺失两个 `leveldataoverride.lua`，只使用以下两个文件：
+
+`Master/worldgenoverride.lua`：
+
+```lua
+return {
+    override_enabled = true,
+    worldgen_preset = "SURVIVAL_TOGETHER",
+    settings_preset = "SURVIVAL_TOGETHER",
+    overrides = {},
+}
+```
+
+`Caves/worldgenoverride.lua`：
+
+```lua
+return {
+    override_enabled = true,
+    worldgen_preset = "DST_CAVE",
+    settings_preset = "DST_CAVE",
+    overrides = {},
+}
+```
+
+已启用的 `worldgenoverride.lua` 可能在存档时被重写以同步当前 `overrides`，因此应先停止分片再编辑。
+该文件只会配置已存在的分片，不会创建或启用分片。
+洞穴分片仍需要自己的目录和有效的 `server.ini`，并且必须在 `cluster.ini` 中启用 `[SHARD] / shard_enabled`。
 
 ### cluster.ini
 
@@ -314,7 +349,52 @@ mods  # mod 相关，在游戏服务端安装目录下
  -- ServerModCollectionSetup("2594933855")
 ```
 
+### 服务端启动参数
+
+这些参数属于 `dontstarve_dedicated_server_nullrenderer`，不是 Podman 参数。
+本镜像会自动设置存储、集群、分片、模组和父进程参数，正常使用容器时无需手动指定。
+命令行参数会覆盖 `cluster.ini` 或 `server.ini` 中对应的设置。
+
+以下内容以 Klei 的[现行命令行参数指南](https://support.klei.com/hc/en-us/articles/360029556192-Dedicated-Server-Command-Line-Options-Guide)为准，并与最初的 [2016 年论坛指南](https://forums.kleientertainment.com/forums/topic/64743-dedicated-server-command-line-options-guide/)、[模组更新参数公告](https://forums.kleientertainment.com/forums/topic/51981-game-update-129926-3122015/)、[UGC 目录参数公告](https://forums.kleientertainment.com/forums/topic/128047-game-update-456207/)、[`-region` 临时解决方案](https://forums.kleientertainment.com/klei-bug-tracker/dont-starve-together/503-failed-to-send-server-listings-r33770/)、[Linux 搭建指南](https://forums.kleientertainment.com/forums/topic/64441-dedicated-server-quick-setup-guide-linux/)及开发者对 [`-cloudserver` 的解答](https://forums.kleientertainment.com/forums/topic/118972-unix-python-web-portal-for-dedicated-dst-server/#findComment-1344090)交叉核对。
+
+| 参数 | 说明 |
+| --- | --- |
+| `-persistent_storage_root <绝对路径>` | 设置配置目录所在的根目录。Windows 默认为用户文档目录下的 `Klei`，macOS 默认为 `~/Documents/Klei`，Linux 默认为 `~/.klei`。 |
+| `-conf_dir <名称>` | 设置不含斜杠的配置目录名，默认为 `DoNotStarveTogether`。 |
+| `-cluster <名称>` | 选择包含 `cluster.ini` 的集群目录，默认为 `Cluster_1`。 |
+| `-shard <名称>` | 选择包含 `server.ini` 的分片目录，默认为 `Master`。 |
+| `-offline` | 以离线模式启动不公开列出的局域网服务器，并禁用 Steam 相关功能。 |
+| `-disabledatacollection` | 禁用数据收集，同时将服务器限制为离线模式。 |
+| `-bind_ip <地址>` | 修改监听玩家连接的地址，多数服务器不需要这个高级选项。 |
+| `-region <区域>` | 覆盖自动选择的注册大厅。已知值为 `CHINA`、`SING`、`EU` 和 `US`；Klei 仅将 `EU` 作为临时解决方案公开说明，现行指南未收录此参数，因此通常不应设置。 |
+| `-port <端口>` | 设置玩家连接使用的 UDP 端口，并覆盖 `[NETWORK] / server_port`。有效范围为 1024–65535；每个分片必须不同，局域网发现要求使用 10998–11018。 |
+| `-players <人数>` | 设置最大玩家数，并覆盖 `[GAMEPLAY] / max_players`。有效范围为 1–64。 |
+| `-steam_master_server_port <端口>` | 设置 Steam 内部主服务器端口，并覆盖 `[STEAM] / master_server_port`。同一主机上的每个服务端进程都应使用不同的 1024–65535 端口。 |
+| `-steam_authentication_port <端口>` | 设置 Steam 内部认证端口，并覆盖 `[STEAM] / authentication_port`。同一主机上的每个服务端进程都应使用不同的 1024–65535 端口。 |
+| `-backup_log_count <数量>` | 设置保留的日志备份数量，默认为 100。 |
+| `-backup_log_period <秒>` | 设置日志备份间隔，默认为 86400 秒。 |
+| `-tick <频率>` | 设置每秒向客户端发送更新的次数，并覆盖 `[NETWORK] / tick_rate`。有效范围为 15–60；Klei 建议保留默认值 15，局域网需要修改时使用 20、30 等 60 的约数。 |
+| `-fo` | 将服务器设为仅好友可加入。 |
+| `-only_update_server_mods` | 更新 `dedicated_server_mods_setup.lua` 中列出的模组，完成后退出而不启动世界。 |
+| `-skip_update_server_mods` | 启动时跳过服务端模组更新。 |
+| `-ugc_directory <路径>` | 覆盖 v2/UGC 模组目录。 |
+| `-token <令牌>` | 直接传入集群令牌，而不读取 `cluster_token.txt`。应优先使用文件，避免通过进程参数暴露令牌。 |
+| `-allow_ioopenwrite_sandbox_escape` | 允许模组和工具使用 `io.open` 与 `io.write`，仅应对可信代码启用。 |
+| `-monitor_parent_process <PID>` | 指定的父进程退出时自动关闭服务端。 |
+| `-cloudserver` | 启用仅限 Linux 的 IPC：文件描述符 3 接收以换行结尾的 Lua，描述符 4 返回以 `DST_RemoteCommandDone` 结束的结果，描述符 5 输出服务端事件。本镜像未启用该参数。 |
+
+最终读取的分片配置路径为 `<persistent_storage_root>/<conf_dir>/<cluster>/<shard>/server.ini`。
+`-console` 已弃用，请改用 `[MISC] / console_enabled` 和标准输入。
+`-backup_logs` 已由 `-backup_log_count` 取代；备份间隔另用 `-backup_log_period` 控制。
+
 ## 参考信息
 
-1. [SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD)
-2. [Dedicated Server Quick Setup Guide - Linux](https://forums.kleientertainment.com/forums/topic/64441-dedicated-server-quick-setup-guide-linux/)
+- [SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD)
+- [Dedicated Server Quick Setup Guide - Linux](https://forums.kleientertainment.com/forums/topic/64441-dedicated-server-quick-setup-guide-linux/)
+- [Dedicated Server Settings Guide](https://forums.kleientertainment.com/forums/topic/64552-dedicated-server-settings-guide/)
+- [Dedicated Server Command Line Options Guide](https://forums.kleientertainment.com/forums/topic/64743-dedicated-server-command-line-options-guide/)
+- [Understanding Shards and Migration Portals](https://forums.kleientertainment.com/forums/topic/59174-understanding-shards-and-migration-portals/)
+- [worldgenoverride.lua with the new post-Caves settings](https://forums.kleientertainment.com/forums/topic/53014-worldgenoverridelua-with-the-new-post-caves-settings/)
+- [[Server Admin] Associate your server with a steam group](https://forums.kleientertainment.com/forums/topic/55994-server-admin-associate-your-server-with-a-steam-group/)
+- [Update 126042 - 2/6/2015](https://forums.kleientertainment.com/forums/topic/50615-update-126042-262015/)
+- [[Game Update] - 455519](https://forums.kleientertainment.com/forums/topic/127822-game-update-455519/)
