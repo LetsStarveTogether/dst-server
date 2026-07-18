@@ -1,0 +1,73 @@
+[project]
+name = "dst-server"
+version = "0.1.0"
+description = "Start and control a Don't Starve Together server process."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.14"
+dependencies = [
+    "logbook>=1.9.2",
+    "opentelemetry-api~=1.44.0",
+    "pydantic>=2.13.4",
+]
+
+[project.optional-dependencies]
+klei = ["aiohttp>=3.14.1,<4", "selectolax>=0.4.11,<0.5"]
+otel = ["opentelemetry-exporter-otlp-proto-http~=1.44.0"]
+
+[dependency-groups]
+dev = [
+    "prek>=0.4.10",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.15.17",
+    "rumdl>=0.2.35",
+    "ty>=0.0.49",
+]
+
+[build-system]
+requires = ["uv_build~=0.11"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+fix = true
+preview = true
+required-version = '>=0.15'
+
+[tool.ruff.lint]
+select = ['ALL']
+ignore = [
+    'missing-trailing-comma',        # Conflicts with `ruff format`.
+    'commented-out-code',            # False positives are common.
+    'TC',                            # Runtime use of typing constructs is common now.
+    'CPY',                           # Covered by the standalone LICENSE file.
+    'too-many-arguments',            # Explicit is better than implicit.
+    'too-many-positional-arguments', # Complex is better than complicated.
+    'no-self-use',                   # Violates the usual practice.
+    'D',                             # Too verbose.
+    'FBT',                           # Too strict.
+    'relative-imports',              # Too absolute.
+    'any-type',                      # We hope to enforce this, but typing is still evolving.
+]
+
+[tool.ruff.lint.pydoclint]
+ignore-one-line-docstrings = true
+
+[tool.ruff.lint.per-file-ignores]
+'tests/**/*.py' = [
+    'assert',                  # Assert statements used for pytest.
+    'magic-value-comparison',  # Magic value used in test cases.
+    'import-private-name',     # OpenTelemetry logs still use private module paths.
+    'compare-to-empty-string', # Be more precise about assertions in tests.
+]
+
+[tool.ty.environment]
+python-platform = "linux"
+
+[tool.ty.src]
+include = ["src", "tests"]
