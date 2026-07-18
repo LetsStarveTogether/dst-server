@@ -73,8 +73,8 @@ jobs:
             const forceBuild = process.env.FORCE_BUILD === 'true';
             const requestedVersion = process.env.GAME_VERSION.trim();
             const targets = [
-              { tag: 'latest', beta: '', channel: 'release', upstream: 'release', versionPath: 'version.txt' },
-              { tag: 'beta', beta: '1', channel: 'beta', upstream: 'updatebeta', versionPath: 'beta-version.txt' },
+              { tag: 'latest', beta: '', channel: 'release', upstream: 'release' },
+              { tag: 'beta', beta: '1', channel: 'beta', upstream: 'updatebeta' },
             ];
             const selectedTargets = targets.filter(({ tag }) => buildTarget === 'both' || tag === buildTarget);
             const isVersion = (version) => /^\d+$/.test(version) && Number.isSafeInteger(Number(version));
@@ -126,16 +126,6 @@ jobs:
               return undefined;
             };
 
-            const bootstrapVersion = async (target) => {
-              const text = await fs.readFile(target.versionPath, 'utf8');
-              const version = text.trim();
-              if (!isVersion(version)) {
-                throw new Error(`Invalid version in ${target.versionPath}: ${text}`);
-              }
-
-              return version;
-            };
-
             const matrix = [];
             const summary = [];
             const created = new Date().toISOString();
@@ -146,7 +136,7 @@ jobs:
               let version;
 
               if (context.eventName === 'push') {
-                version = published || await bootstrapVersion(target);
+                version = published || await upstreamVersion(target.upstream);
                 build = true;
                 summary.push(`${published ? 'Rebuild' : 'Bootstrap'} ${target.tag} ${version}`);
               } else {
