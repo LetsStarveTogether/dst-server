@@ -217,7 +217,7 @@ jobs:
                 throw new Error(`Invalid ${target.name} version: ${target.version}`);
               }
 
-              await fs.writeFile(target.version_path, target.version);
+              await fs.writeFile(target.version_path, `${target.version}\n`);
               addPaths.push(target.version_path);
               updatedVersions.push(`${target.name}:${target.version}`);
             }
