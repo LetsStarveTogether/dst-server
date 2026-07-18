@@ -1,0 +1,16 @@
+return {
+    protocol = 1,
+    prefix = "DST_OTEL|",
+    max_line_bytes = 64 * 1024,
+    installed = false,
+    profile = "off",
+    nonce = nil,
+    sequence = 0,
+    action_sequence = 0,
+    events_emitted = 0,
+    errors = 0,
+    action_hook = false,
+    shard_hook = false,
+    action_allowlist = {},
+    players = setmetatable({}, { __mode = "k" }),
+}
