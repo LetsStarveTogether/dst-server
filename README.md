@@ -103,6 +103,15 @@ It also exposes lifecycle and game events.
 
 Install `dst-server[otel]` for OTLP export or `dst-server[klei]` for Klei build and lobby services.
 
+## Lua Annotations
+
+The `dst-annotations` command generates LSP-compatible Lua definitions from DST components or `modutil.lua`.
+
+```console
+dst-annotations dst-scripts/scripts/components --output components_def.lua
+dst-annotations dst-scripts/scripts/modutil.lua --output modutil_def.lua
+```
+
 ## Documentation
 
 Game server reference:
