@@ -50,6 +50,6 @@ RUN uv sync --locked --extra otel --no-install-project --no-editable
 COPY src ./src
 RUN uv sync --locked --extra otel --no-editable
 
-COPY entrypoint.py /entrypoint.py
+COPY entrypoint.sh /entrypoint.sh
 WORKDIR /
-CMD ["/app/.venv/bin/python", "/entrypoint.py"]
+CMD ["/usr/bin/bash", "/entrypoint.sh"]
