@@ -1,0 +1,49 @@
+[[repos]]
+repo = 'builtin'
+hooks = [
+    {id = 'trailing-whitespace'},
+    {id = 'check-added-large-files'},
+    {id = 'check-case-conflict'},
+    {id = 'check-illegal-windows-names'},
+    {id = 'end-of-file-fixer'},
+    {id = 'fix-byte-order-marker'},
+    {id = 'check-json'},
+    {id = 'check-json5'},
+    {id = 'pretty-format-json'},
+    {id = 'check-toml'},
+    {id = 'check-vcs-permalinks'},
+    {id = 'check-yaml'},
+    {id = 'check-xml'},
+    {id = 'mixed-line-ending'},
+    {id = 'check-symlinks'},
+    {id = 'destroyed-symlinks'},
+    {id = 'check-merge-conflict'},
+    {id = 'detect-private-key'},
+    # {id = 'no-commit-to-branch'},
+    {id = 'check-executables-have-shebangs'},
+    {id = 'check-shebang-scripts-are-executable'},
+]
+
+[[repos]]
+repo = 'local'
+
+[[repos.hooks]]
+id = 'prek-validate-config'
+name = 'prek validate-config'
+entry = 'uv run prek validate-config'
+language = 'system'
+files = '^prek\.toml$'
+
+[[repos.hooks]]
+id = 'rumdl-fmt'
+name = 'rumdl-fmt'
+entry = 'uv run rumdl fmt'
+language = 'system'
+files = '\.md$'
+
+[[repos.hooks]]
+id = 'rumdl-check'
+name = 'rumdl-check'
+entry = 'uv run rumdl check'
+language = 'system'
+files = '\.md$'
