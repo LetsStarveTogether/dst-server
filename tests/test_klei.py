@@ -3,9 +3,13 @@ from __future__ import annotations
 import json as json_module
 from datetime import date
 from http import HTTPMethod
+from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
+from urllib3 import AsyncPoolManager
+from urllib3.exceptions import HTTPError
 
 from dst_server.klei import KleiClient, Platform, Region, VersionPage, VersionType
 
@@ -136,3 +140,35 @@ async def test_klei_client_queries_lobby_and_room_in_order() -> None:
 def test_klei_client_rejects_invalid_concurrency() -> None:
     with pytest.raises(ValueError, match="positive integer"):
         KleiClient(lobby_concurrency=0)
+
+
+async def test_klei_client_uses_urllib3_pool() -> None:
+    class Response:
+        status = 200
+
+        @property
+        async def data(self) -> bytes:
+            return b"response"
+
+    response = Response()
+    pool = AsyncMock(spec=AsyncPoolManager)
+    pool.request.return_value = response
+    client = KleiClient(pool=cast(AsyncPoolManager, pool))
+
+    assert (
+        await client.request(
+            HTTPMethod.POST,
+            "https://klei.test",
+            json={"key": "value"},
+        )
+        == b"response"
+    )
+    pool.request.assert_awaited_once_with(
+        HTTPMethod.POST,
+        "https://klei.test",
+        json={"key": "value"},
+    )
+
+    response.status = 503
+    with pytest.raises(HTTPError, match="HTTP 503"):
+        await client.request(HTTPMethod.POST, "https://klei.test")

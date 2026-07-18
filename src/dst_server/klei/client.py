@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from asyncio import Semaphore, TaskGroup
 from collections.abc import Iterable
-from http import HTTPMethod
+from http import HTTPMethod, HTTPStatus
 from itertools import chain, product
 from types import TracebackType
 from typing import Self
 
-from aiohttp import ClientError, ClientSession, ClientTimeout
 from logbook import Logger
 from pydantic import SecretStr
+from urllib3 import AsyncPoolManager
+from urllib3.exceptions import HTTPError
+from urllib3.util import Timeout
 
 from .enums import Platform, Region
 from .lobby import Capabilities, DataResponse, Lobby, Room
@@ -30,8 +32,8 @@ class KleiClient:
         room_url: str = "https://lobby-v2-{region}.klei.com/lobby/read",
         lobby_concurrency: int = 8,
         room_concurrency: int = 24,
-        timeout: ClientTimeout | None = None,
-        session: ClientSession | None = None,
+        timeout: Timeout | None = None,
+        pool: AsyncPoolManager | None = None,
     ) -> None:
         self.access_token = (
             access_token
@@ -45,9 +47,10 @@ class KleiClient:
         self.room_url = room_url
         self.lobby_concurrency = positive("lobby_concurrency", lobby_concurrency)
         self.room_concurrency = positive("room_concurrency", room_concurrency)
-        self.timeout = timeout or ClientTimeout(total=30, connect=10)
-        self.session = session
-        self.owns_session = session is None
+        self.pool = pool or AsyncPoolManager(
+            timeout=timeout or Timeout(total=30, connect=10)
+        )
+        self.owns_pool = pool is None
 
     async def __aenter__(self) -> Self:
         return self
@@ -62,8 +65,8 @@ class KleiClient:
         await self.close()
 
     async def close(self) -> None:
-        if self.owns_session and self.session is not None:
-            await self.session.close()
+        if self.owns_pool:
+            await self.pool.clear()
 
     async def get_latest_build(self, version_type: str = "release") -> int:
         versions = Builds.model_validate_json(
@@ -146,7 +149,7 @@ class KleiClient:
         url = self.lobby_url.format(region=region, platform=platform.lobby_name)
         try:
             body = await self.request(HTTPMethod.GET, url)
-        except ClientError as error:
+        except HTTPError as error:
             logger.warning(
                 "Klei lobby request failed: {region}/{platform}: {error}",
                 region=region,
@@ -180,7 +183,7 @@ class KleiClient:
         }
         try:
             body = await self.request(HTTPMethod.POST, url, json=payload)
-        except ClientError:
+        except HTTPError:
             return None
         data = DataResponse[Room].model_validate_json(
             body,
@@ -195,11 +198,12 @@ class KleiClient:
         *,
         json: object | None = None,
     ) -> bytes:
-        if self.session is None:
-            self.session = ClientSession(timeout=self.timeout)
-        async with self.session.request(method, url, json=json) as response:
-            response.raise_for_status()
-            return await response.read()
+        response = await self.pool.request(method, url, json=json)
+        body = await response.data
+        if response.status >= HTTPStatus.BAD_REQUEST:
+            msg = f"Klei request failed with HTTP {response.status}: {method} {url}"
+            raise HTTPError(msg)
+        return body
 
 
 def positive(name: str, value: int) -> int:
