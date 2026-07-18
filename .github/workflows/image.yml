@@ -3,16 +3,18 @@ name: Build and Push Image
 on:
   push:
     branches: [main]
-  schedule:
-    # Avoid top-of-hour load.
-    - cron: '9-59/15 * * * *'
+    paths:
+      - '.containerignore'
+      - '.github/workflows/image.yml'
+      - 'Containerfile'
+      - 'entrypoint.py'
+      - 'src/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'README.md'
+      - 'LICENSE'
   workflow_dispatch:
     inputs:
-      force_build:
-        description: 'Force build without version check'
-        required: false
-        default: false
-        type: boolean
       build_target:
         description: 'Build target (latest, beta, or both)'
         required: false
@@ -22,6 +24,16 @@ on:
           - both
           - latest
           - beta
+      force_build:
+        description: 'Build even when this game version is already published'
+        required: false
+        default: false
+        type: boolean
+      game_version:
+        description: 'Optional DST version for a single target'
+        required: false
+        default: ''
+        type: string
 
 permissions: {}
 
@@ -30,127 +42,136 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BUILD_TARGET: ${{ inputs.build_target || 'both' }}
   BUILDS_URL: https://s3.amazonaws.com/dstbuilds/builds.json
-  FORCE_BUILD: ${{ inputs.force_build && 'true' || 'false' }}
   IMAGE_NAME: dst-server
   IMAGE_REGISTRY: quay.io/wh2099
-  IMAGE_TARGETS: |
-    {
-      "latest": {
-        "build_args": "",
-        "channel": "release",
-        "tag": "latest",
-        "version_path": "version.txt"
-      },
-      "beta": {
-        "build_args": "BETA=1",
-        "channel": "updatebeta",
-        "tag": "beta",
-        "version_path": "beta-version.txt"
-      }
-    }
 
 jobs:
   detect:
-    name: Detect versions
+    name: Resolve image versions
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       matrix: ${{ steps.detect.outputs.matrix }}
-      should_commit: ${{ steps.detect.outputs.should_commit }}
-      updates: ${{ steps.detect.outputs.updates }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Detect versions
+      - name: Resolve image versions
         id: detect
         uses: actions/github-script@v9
+        env:
+          BUILD_TARGET: ${{ inputs.build_target || 'both' }}
+          FORCE_BUILD: ${{ inputs.force_build }}
+          GAME_VERSION: ${{ inputs.game_version }}
         with:
           script: |
             const fs = require('node:fs/promises');
 
-            const buildTarget = process.env.BUILD_TARGET || 'both';
+            const buildTarget = process.env.BUILD_TARGET;
             const forceBuild = process.env.FORCE_BUILD === 'true';
-            const targets = JSON.parse(process.env.IMAGE_TARGETS);
-            const targetNames = buildTarget === 'both' ? Object.keys(targets) : [buildTarget];
+            const requestedVersion = process.env.GAME_VERSION.trim();
+            const targets = [
+              { tag: 'latest', beta: '', channel: 'release', upstream: 'release', versionPath: 'version.txt' },
+              { tag: 'beta', beta: '1', channel: 'beta', upstream: 'updatebeta', versionPath: 'beta-version.txt' },
+            ];
+            const selectedTargets = targets.filter(({ tag }) => buildTarget === 'both' || tag === buildTarget);
+            const isVersion = (version) => /^\d+$/.test(version) && Number.isSafeInteger(Number(version));
 
-            const selectedTargets = targetNames.map((name) => {
-              const config = targets[name];
-              if (!config) {
-                throw new Error(`Unknown build target: ${name}`);
+            if (requestedVersion && !isVersion(requestedVersion)) {
+              throw new Error(`Invalid game version: ${requestedVersion}`);
+            }
+            if (requestedVersion && selectedTargets.length !== 1) {
+              throw new Error('game_version requires a single build target');
+            }
+
+            let builds;
+            const upstreamVersion = async (channel) => {
+              if (!builds) {
+                const response = await fetch(process.env.BUILDS_URL);
+                if (!response.ok) {
+                  throw new Error(`Failed to fetch builds.json: ${response.status} ${response.statusText}`);
+                }
+                builds = await response.json();
               }
 
-              return { name, ...config };
-            });
-
-            const builds = forceBuild ? undefined : await (async () => {
-              const response = await fetch(process.env.BUILDS_URL);
-              if (!response.ok) {
-                throw new Error(`Failed to fetch builds.json: ${response.status} ${response.statusText}`);
+              const version = Math.max(
+                ...(Array.isArray(builds[channel]) ? builds[channel] : []).filter(isVersion).map(Number),
+              );
+              if (!Number.isSafeInteger(version)) {
+                throw new Error(`No numeric version found for ${channel}`);
               }
 
-              return response.json();
-            })();
+              return String(version);
+            };
+
+            const publishedVersion = async (target) => {
+              const image = `docker://${process.env.IMAGE_REGISTRY}/${process.env.IMAGE_NAME}:${target.tag}`;
+              const format = [
+                '{{ index .Labels "org.opencontainers.image.version" }}',
+                '{{ index .Labels "io.github.letsstarvetogether.dst.channel" }}',
+              ].join('|');
+              const result = await exec.getExecOutput('skopeo', ['inspect', '--format', format, image], {
+                ignoreReturnCode: true,
+                silent: true,
+              });
+              const [version, channel] = result.stdout.trim().split('|');
+
+              if (result.exitCode === 0 && isVersion(version) && channel === target.channel) {
+                return version;
+              }
+
+              core.warning(`No valid build metadata found for ${target.tag}`);
+              return undefined;
+            };
+
+            const bootstrapVersion = async (target) => {
+              const text = await fs.readFile(target.versionPath, 'utf8');
+              const version = text.trim();
+              if (!isVersion(version)) {
+                throw new Error(`Invalid version in ${target.versionPath}: ${text}`);
+              }
+
+              return version;
+            };
 
             const matrix = [];
             const summary = [];
+            const created = new Date().toISOString();
 
             for (const target of selectedTargets) {
-              const currentVersionText = await fs.readFile(target.version_path, 'utf8');
-              const currentVersion = Number(currentVersionText.trim());
-              if (!Number.isSafeInteger(currentVersion)) {
-                throw new Error(`Invalid version in ${target.version_path}: ${currentVersionText}`);
-              }
+              const published = await publishedVersion(target);
+              let build;
+              let version;
 
-              let needUpdate = false;
-              let version = currentVersion;
-
-              if (forceBuild) {
-                needUpdate = true;
-                summary.push(`Force Build ${target.tag} ${currentVersion}`);
+              if (context.eventName === 'push') {
+                version = published || await bootstrapVersion(target);
+                build = true;
+                summary.push(`${published ? 'Rebuild' : 'Bootstrap'} ${target.tag} ${version}`);
               } else {
-                const versions = (Array.isArray(builds[target.channel]) ? builds[target.channel] : [])
-                  .filter((value) => /^\d+$/.test(String(value)))
-                  .map(Number)
-                  .filter(Number.isSafeInteger)
-                  .sort((left, right) => left - right);
-                const remoteVersion = versions.at(-1);
-                if (!Number.isSafeInteger(remoteVersion)) {
-                  throw new Error(`No numeric version found for ${target.channel}`);
-                }
-
-                if (remoteVersion > currentVersion) {
-                  needUpdate = true;
-                  version = remoteVersion;
-                  summary.push(`Need Update ${target.tag} ${currentVersion} -> ${remoteVersion}`);
-                } else {
-                  summary.push(`Skip Update ${target.tag} ${currentVersion}`);
-                }
+                version = requestedVersion || await upstreamVersion(target.upstream);
+                build = forceBuild || published !== version;
+                summary.push(`${build ? 'Build' : 'Skip'} ${target.tag} ${version}`);
               }
 
               matrix.push({
-                build_args: target.build_args,
-                force_build: forceBuild,
+                beta: target.beta,
+                build,
+                channel: target.channel,
+                created,
                 image_tag: target.tag,
-                name: target.name,
-                need_update: needUpdate,
-                version: String(version),
-                version_path: target.version_path,
+                version,
+                version_tag: `${target.channel}-${version}`,
               });
             }
 
             core.setOutput('matrix', JSON.stringify({ include: matrix }));
-            core.setOutput('should_commit', String(matrix.some((target) => target.need_update && !target.force_build)));
-            core.setOutput('updates', JSON.stringify(matrix));
             await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, `${summary.join('\n')}\n`);
 
   image:
-    name: Build and push ${{ matrix.image_tag }}
+    name: ${{ matrix.build && 'Build' || 'Skip' }} ${{ matrix.image_tag }} ${{ matrix.version }}
     needs: detect
-    if: ${{ needs.detect.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -159,22 +180,31 @@ jobs:
       matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
     steps:
       - name: Checkout
-        if: ${{ matrix.need_update }}
+        if: ${{ matrix.build }}
         uses: actions/checkout@v7
 
       - name: Build image
-        if: ${{ matrix.need_update }}
+        if: ${{ matrix.build }}
         id: build
         uses: redhat-actions/buildah-build@v2
         with:
           image: ${{ env.IMAGE_NAME }}
-          tags: ${{ matrix.image_tag }}
-          containerfiles: |
-            Containerfile
-          build-args: ${{ matrix.build_args }}
+          tags: ${{ matrix.image_tag }} ${{ matrix.version_tag }}
+          containerfiles: Containerfile
+          build-args: |
+            BETA=${{ matrix.beta }}
+            GAME_VERSION=${{ matrix.version }}
+          labels: |
+            org.opencontainers.image.version=${{ matrix.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.created=${{ matrix.created }}
+            org.opencontainers.image.licenses=MIT
+            io.github.letsstarvetogether.dst.channel=${{ matrix.channel }}
 
       - name: Push to registry
-        if: ${{ matrix.need_update }}
+        if: ${{ matrix.build }}
+        id: push
         uses: redhat-actions/push-to-registry@v2
         with:
           image: ${{ steps.build.outputs.image }}
@@ -183,85 +213,28 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
-  commit:
-    name: Commit versions
-    needs:
-      - detect
-      - image
-    if: ${{ always() && needs.detect.result == 'success' && needs.image.result == 'success' && needs.detect.outputs.should_commit == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.ref_name }}
-
-      - name: Write versions
-        id: versions
-        uses: actions/github-script@v9
+      - name: Verify registry metadata
+        if: ${{ matrix.build }}
         env:
-          TARGET_UPDATES: ${{ needs.detect.outputs.updates }}
-        with:
-          script: |
-            const fs = require('node:fs/promises');
+          EXPECTED_CHANNEL: ${{ matrix.channel }}
+          EXPECTED_DIGEST: ${{ steps.push.outputs.digest }}
+          EXPECTED_REVISION: ${{ github.sha }}
+          EXPECTED_VERSION: ${{ matrix.version }}
+          IMAGE_TAG: ${{ matrix.image_tag }}
+          VERSION_TAG: ${{ matrix.version_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
 
-            const updates = JSON.parse(process.env.TARGET_UPDATES);
-            const selectedUpdates = updates.filter((target) => target.need_update && !target.force_build);
-            const addPaths = [];
-            const updatedVersions = [];
+          for tag in "${IMAGE_TAG}" "${VERSION_TAG}"; do
+            read -r digest version revision channel <<< "$(
+              skopeo inspect \
+                --format '{{ .Digest }} {{ index .Labels "org.opencontainers.image.version" }} {{ index .Labels "org.opencontainers.image.revision" }} {{ index .Labels "io.github.letsstarvetogether.dst.channel" }}' \
+                "docker://${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag}"
+            )"
 
-            for (const target of selectedUpdates) {
-              if (!/^\d+$/.test(target.version)) {
-                throw new Error(`Invalid ${target.name} version: ${target.version}`);
-              }
-
-              await fs.writeFile(target.version_path, `${target.version}\n`);
-              addPaths.push(target.version_path);
-              updatedVersions.push(`${target.name}:${target.version}`);
-            }
-
-            if (addPaths.length === 0) {
-              core.setOutput('has_changes', 'false');
-              await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, 'Skip Commit: no version updates\n');
-              return;
-            }
-
-            const diff = await exec.getExecOutput('git', ['diff', '--quiet', '--', ...addPaths], {
-              ignoreReturnCode: true,
-              silent: true,
-            });
-            if (diff.exitCode === 0) {
-              core.setOutput('has_changes', 'false');
-              await fs.appendFile(
-                process.env.GITHUB_STEP_SUMMARY,
-                `Skip Commit ${updatedVersions.join(' ')}: no changes\n`,
-              );
-              return;
-            }
-            if (diff.exitCode !== 1) {
-              throw new Error(`git diff failed with exit code ${diff.exitCode}`);
-            }
-
-            const commitMessage = selectedUpdates.length === 1
-              ? `build(image): update ${selectedUpdates[0].name} to ${selectedUpdates[0].version}`
-              : 'build(image): update versions';
-
-            core.setOutput('add', addPaths.join(' '));
-            core.setOutput('has_changes', 'true');
-            core.setOutput('message', commitMessage);
-            await fs.appendFile(
-              process.env.GITHUB_STEP_SUMMARY,
-              `Commit Versions ${updatedVersions.join(' ')}\n`,
-            );
-
-      - name: Commit versions
-        if: ${{ steps.versions.outputs.has_changes == 'true' }}
-        uses: EndBug/add-and-commit@v10
-        with:
-          add: ${{ steps.versions.outputs.add }}
-          default_author: user_info
-          committer_name: github-actions[bot]
-          committer_email: 41898282+github-actions[bot]@users.noreply.github.com
-          message: ${{ steps.versions.outputs.message }}
+            [[ "${version}" == "${EXPECTED_VERSION}" ]]
+            [[ "${revision}" == "${EXPECTED_REVISION}" ]]
+            [[ "${channel}" == "${EXPECTED_CHANNEL}" ]]
+            [[ "${digest}" == "${EXPECTED_DIGEST}" ]]
+          done
