@@ -5,6 +5,7 @@ LABEL maintainer="wh2099@pm.me"
 
 ARG BETA=""
 ARG DST_64_PKGS="ca-certificates libcurl3-gnutls procps"
+ARG GAME_VERSION
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     UV_COMPILE_BYTECODE=1 \
@@ -33,6 +34,13 @@ RUN chmod u+w / && \
         +login anonymous \
         +app_update 343050 ${BETA:+ -beta updatebeta} validate \
         +quit
+
+# Refuse to publish an image under the wrong DST version.
+RUN installed_version="$(sed -n 's/\r$//; /^[0-9][0-9]*$/p' /install/version.txt)" && \
+    if [ "${installed_version}" != "${GAME_VERSION}" ]; then \
+        echo "Expected DST ${GAME_VERSION}, installed ${installed_version:-invalid}" >&2; \
+        exit 1; \
+    fi
 
 # Install Python dependencies before the SDK to preserve the dependency layer.
 WORKDIR /app
