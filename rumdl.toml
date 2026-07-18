@@ -1,9 +1,0 @@
-[global]
-enable = ['ALL']
-line-length = 120
-
-exclude = [
-    '.git',
-    '.github',
-    'LICENSE',
-]
