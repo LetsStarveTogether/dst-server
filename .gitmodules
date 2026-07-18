@@ -1,0 +1,4 @@
+[submodule "dst-scripts/scripts"]
+	path = dst-scripts/scripts
+	url = git@github.com:LetsStarveTogether/dst-scripts.git
+	branch = main
