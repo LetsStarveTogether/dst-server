@@ -8,6 +8,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = [
     "logbook>=1.9.2",
+    "luaparser>=4.0.1,<5",
     "opentelemetry-api~=1.44.0",
     "pydantic>=2.13.4",
 ]
@@ -15,6 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 klei = ["selectolax>=0.4.11,<0.5", "urllib3-future>=2.22.901,<3"]
 otel = ["opentelemetry-exporter-otlp-proto-http~=1.44.0"]
+
+[project.scripts]
+dst-annotations = "dst_server.annotations.cli:main"
 
 [dependency-groups]
 dev = [
@@ -58,16 +62,19 @@ ignore = [
     'too-many-arguments',            # Explicit is better than implicit.
     'too-many-positional-arguments', # Complex is better than complicated.
     'no-self-use',                   # Violates the usual practice.
+    'blind-except',                  # Dispatch records handler exceptions before re-raising.
     'D',                             # Too verbose.
     'FBT',                           # Too strict.
     'relative-imports',              # Too absolute.
     'any-type',                      # We hope to enforce this, but typing is still evolving.
+    'too-many-return-statements',    # Small resolver functions are branchy by nature.
 ]
 
 [tool.ruff.lint.pydoclint]
 ignore-one-line-docstrings = true
 
 [tool.ruff.lint.per-file-ignores]
+'src/dst_server/annotations/visitors.py' = ['invalid-function-name']
 'tests/**/*.py' = [
     'assert',                  # Assert statements used for pytest.
     'magic-value-comparison',  # Magic value used in test cases.
