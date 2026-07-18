@@ -93,7 +93,9 @@ def prepare_cluster(cluster_path: Path) -> None:
         if not path.is_file():
             raise FileNotFoundError(path)
     for name in PERMISSION_FILES:
-        (cluster_path / name).touch()
+        path = cluster_path / name
+        if not path.is_file():
+            path.touch()
 
 
 def ensure_fifo(path: Path) -> None:

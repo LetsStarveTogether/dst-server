@@ -65,6 +65,21 @@ def test_cluster_and_mod_files_are_prepared(tmp_path: Path) -> None:
     )
 
 
+def test_prepare_cluster_preserves_existing_permission_files(tmp_path: Path) -> None:
+    for name in ("cluster.ini", "cluster_token.txt"):
+        (tmp_path / name).touch()
+    paths = tuple(
+        tmp_path / name for name in ("adminlist.txt", "blocklist.txt", "whitelist.txt")
+    )
+    for path in paths:
+        path.touch()
+        os.utime(path, ns=(0, 0))
+
+    prepare_cluster(tmp_path)
+
+    assert all(path.stat().st_mtime_ns == 0 for path in paths)
+
+
 def test_discovery_requires_one_master(tmp_path: Path) -> None:
     write_shard(tmp_path / "one", is_master=False, name="One")
     write_shard(tmp_path / "two", is_master=False, name="Two")
