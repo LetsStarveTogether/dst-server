@@ -15,7 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 klei = ["selectolax>=0.4.11,<0.5", "urllib3-future>=2.22.901,<3"]
-otel = ["opentelemetry-exporter-otlp-proto-http~=1.44.0"]
+otel = ["opentelemetry-exporter-otlp-proto-grpc~=1.44.0"]
 
 [project.scripts]
 dst-annotations = "dst_server.annotations.cli:main"

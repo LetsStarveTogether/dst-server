@@ -13,13 +13,13 @@ from opentelemetry._logs import (  # ruff:ignore[import-private-name]
     SeverityNumber,
     set_logger_provider,
 )
-from opentelemetry.exporter.otlp.proto.http._log_exporter import (  # ruff:ignore[import-private-name]
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (  # ruff:ignore[import-private-name]
     OTLPLogExporter,
 )
-from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
     OTLPMetricExporter,
 )
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
     OTLPSpanExporter,
 )
 from opentelemetry.sdk._logs import (  # ruff:ignore[import-private-name]
