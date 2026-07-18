@@ -58,7 +58,7 @@ async def prepare_servers(
         shards=len(shards),
         mods=len(mod_ids),
     )
-    if update_mods:
+    if update_mods and mod_ids:
         proxy_url = PROXY_URL if (cluster_path / "mods" / "proxy").is_file() else None
         await update_server_mods(
             executable,

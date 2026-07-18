@@ -14,6 +14,7 @@ from dst_server import (
     update_server_mods,
     workshop_mod_ids,
 )
+from dst_server.runner import prepare_servers
 
 
 def write_shard(path: Path, *, is_master: bool, name: str) -> None:
@@ -103,6 +104,25 @@ def test_ensure_fifo_replaces_regular_file(tmp_path: Path) -> None:
     ensure_fifo(path)
 
     assert stat.S_ISFIFO(path.stat().st_mode)
+
+
+async def test_prepare_servers_skips_updater_without_mods(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    executable = install / "bin64" / "dontstarve_dedicated_server_nullrenderer_x64"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    executable.chmod(0o755)
+    cluster = tmp_path / "cluster"
+    cluster.mkdir()
+    for name in ("cluster.ini", "cluster_token.txt"):
+        (cluster / name).touch()
+    shard = cluster / "forest"
+    write_shard(shard, is_master=True, name="Forest")
+    (shard / "modoverrides.lua").write_text("return {}", encoding="utf-8")
+
+    shards, servers = await prepare_servers(install, cluster, update_mods=True)
+
+    assert len(shards) == len(servers) == 1
 
 
 async def test_mod_updater_uses_isolated_config_ports_and_proxy(tmp_path: Path) -> None:
