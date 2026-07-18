@@ -34,19 +34,6 @@ dev = [
 requires = ["uv_build~=0.11"]
 build-backend = "uv_build"
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-
-[tool.rumdl]
-enable = ['ALL']
-line-length = 120
-exclude = [
-    '.git',
-    '.github',
-    'LICENSE',
-]
-
 [tool.ruff]
 fix = true
 preview = true
@@ -62,11 +49,14 @@ ignore = [
     'too-many-arguments',            # Explicit is better than implicit.
     'too-many-positional-arguments', # Complex is better than complicated.
     'no-self-use',                   # Violates the usual practice.
+    'any-type',                      # Framework boundaries carry protocol and DI values.
+    'builtin-argument-shadowing',    # Event(type=...) is part of the public API.
     'blind-except',                  # Dispatch records handler exceptions before re-raising.
     'D',                             # Too verbose.
+    'subclass-builtin',              # Message and State intentionally mirror built-in containers.
     'FBT',                           # Too strict.
     'relative-imports',              # Too absolute.
-    'any-type',                      # We hope to enforce this, but typing is still evolving.
+    'import-outside-top-level',      # Optional runtime imports keep hard dependencies lazy.
     'too-many-return-statements',    # Small resolver functions are branchy by nature.
 ]
 
@@ -76,14 +66,22 @@ ignore-one-line-docstrings = true
 [tool.ruff.lint.per-file-ignores]
 'src/dst_server/annotations/visitors.py' = ['invalid-function-name']
 'tests/**/*.py' = [
-    'assert',                  # Assert statements used for pytest.
-    'magic-value-comparison',  # Magic value used in test cases.
-    'import-private-name',     # OpenTelemetry logs still use private module paths.
-    'compare-to-empty-string', # Be more precise about assertions in tests.
+    'assert',                     # Assert statements used for pytest.
+    'implicit-namespace-package', # Colocated tests are plain directories, not import packages.
+    'magic-value-comparison',     # Magic value used in test cases.
+    'import-private-name',        # OpenTelemetry still exposes private log modules.
+    'compare-to-empty-string',    # Explicit empty-string comparisons aid assertions.
+    'private-member-access',      # Tests may cover implementation details.
 ]
 
 [tool.ty.environment]
 python-platform = "linux"
 
-[tool.ty.src]
-include = ["src", "tests"]
+[tool.pytest]
+minversion = '9.0'
+asyncio_mode = 'auto'
+
+[tool.rumdl]
+enable = ['ALL']
+line-length = 120
+exclude = ['.git', '.github', 'LICENSE']
