@@ -4,8 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
-from ..events import DriverHealth
-from ..models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
+from dst_server.events import DriverHealth
+from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
 
 
 class Envelope(BaseModel):

@@ -4,8 +4,15 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from ..models import Position
-from ..schema import FiniteFloat, FrozenModel, Identifier, NonNegativeInt, PositiveInt
+from dst_server.models import Position
+from dst_server.schema import (
+    FiniteFloat,
+    FrozenModel,
+    Identifier,
+    NonNegativeInt,
+    PositiveInt,
+)
+
 from .base import CausedData, EntityRef, EventRecord, ItemRef, PlayerData
 
 type EventText = Annotated[str, Field(max_length=256)]

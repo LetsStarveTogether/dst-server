@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from ..schema import (
+from dst_server.schema import (
     Description,
     FiniteFloat,
     FrozenModel,

@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from ..schema import FrozenModel, Identifier, NonNegativeInt
+from dst_server.schema import FrozenModel, Identifier, NonNegativeInt
 
 
 class ServerReadyEvent(FrozenModel):
