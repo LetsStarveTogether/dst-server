@@ -1,0 +1,8 @@
+logs:
+  journal_dir: /data/netdata/log/otel/v1
+  size_of_journal_file: "1GiB"
+  entries_of_journal_file: 1000000
+  duration_of_journal_file: "6 hours"
+  number_of_journal_files: 100000
+  size_of_journal_files: "64TiB"
+  duration_of_journal_files: "365 days"
