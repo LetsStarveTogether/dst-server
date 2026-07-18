@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..schema import FiniteFloat, FrozenModel, Identifier, PositiveInt
+from dst_server.schema import FiniteFloat, FrozenModel, Identifier, PositiveInt
 
 
 class Position(FrozenModel):

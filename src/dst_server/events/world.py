@@ -4,7 +4,8 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from ..schema import FrozenModel, Identifier, Name, NonNegativeInt, PositiveInt
+from dst_server.schema import FrozenModel, Identifier, Name, NonNegativeInt, PositiveInt
+
 from .base import EntityRef, EventRecord
 
 

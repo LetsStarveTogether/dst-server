@@ -4,7 +4,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from ..schema import (
+from dst_server.schema import (
     FiniteFloat,
     FrozenModel,
     Identifier,
@@ -14,6 +14,7 @@ from ..schema import (
     Percent,
     PositiveInt,
 )
+
 from .value import Entity, Position
 
 

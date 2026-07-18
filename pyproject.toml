@@ -55,7 +55,6 @@ ignore = [
     'D',                             # Too verbose.
     'subclass-builtin',              # Message and State intentionally mirror built-in containers.
     'FBT',                           # Too strict.
-    'relative-imports',              # Too absolute.
     'import-outside-top-level',      # Optional runtime imports keep hard dependencies lazy.
     'too-many-return-statements',    # Small resolver functions are branchy by nature.
 ]
