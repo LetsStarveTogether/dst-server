@@ -1,0 +1,21 @@
+[Unit]
+Description=Dont Starve Together Dedicated Server
+After=network-online.target
+Requires=network-online.target
+
+[Service]
+Nice=-1
+
+[Container]
+AutoUpdate=registry
+ContainerName=dst%i
+Network=host
+Image=quay.io/wh2099/dst-server
+Volume=/srv/dst/%i:/cluster
+Volume=/srv/dst/cluster_token.txt:/cluster/cluster_token.txt:ro
+Volume=/srv/dst/adminlist.txt:/cluster/adminlist.txt:ro
+Volume=/srv/dst/blocklist.txt:/cluster/blocklist.txt:ro
+Volume=/srv/dst/whitelist.txt:/cluster/whitelist.txt:ro
+
+[Install]
+WantedBy=default.target
