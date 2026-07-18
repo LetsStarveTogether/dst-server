@@ -77,7 +77,7 @@ def configure_otel(cluster_path: Path) -> OtelPipeline | None:
     if not otel_requested():
         return None
 
-    from .otel import configure_otlp  # ruff:ignore[import-outside-top-level]
+    from .otel import configure_otlp
 
     return configure_otlp(resource_attributes={"dst.cluster.name": cluster_path.name})
 
@@ -95,7 +95,7 @@ def start_observers(
             for server in servers
         ]
 
-    from .otel import export_game_events  # ruff:ignore[import-outside-top-level]
+    from .otel import export_game_events
 
     return [
         asyncio.create_task(

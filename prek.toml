@@ -35,15 +35,9 @@ language = 'system'
 files = '^prek\.toml$'
 
 [[repos.hooks]]
-id = 'rumdl-fmt'
-name = 'rumdl-fmt'
-entry = 'uv run rumdl fmt'
+id = 'just-tc'
+name = 'just tc'
+entry = 'just tc'
 language = 'system'
-files = '\.md$'
-
-[[repos.hooks]]
-id = 'rumdl-check'
-name = 'rumdl-check'
-entry = 'uv run rumdl check'
-language = 'system'
-files = '\.md$'
+always_run = true
+pass_filenames = false
