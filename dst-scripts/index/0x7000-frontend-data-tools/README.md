@@ -1,54 +1,55 @@
-# `0x70000000` 前端数据与工具
+# `0x70000000` Frontend, Data, and Tools
 
-本区把前端栈、HUD、制作界面、静态数据、媒体特效和调试工具放在同一条阅读线上。
-阅读时先判断 Lua 文件是在消费输入、维护 screen 栈、展示数据、注册数据，还是请求权威端改变实体。
+This section connects the frontend stack, HUD, crafting UI, static data, media effects, and debugging tools.
+Classify each Lua file as input handling, screen management, presentation, registration, or an authoritative request.
 
-目录级语义由本 README 承载，独立专题文件只解释具体运行链路。
+## `0x70001111` Purpose and Entry Points
 
-## `0x70001111` 区域定位 / 读者要解决的问题 / 运行时入口与数据入口 / 验证点
+`scripts/frontend.lua` and `scripts/input.lua` are the runtime entry points.
+`scripts/tuning.lua`, `scripts/recipes.lua`, and `scripts/strings.lua` are data entry points.
+`scripts/fx.lua` and `scripts/skin_assets.lua` are mainly registries or presentation assets.
+`scripts/screens/redux/scrapbookdata.lua` is generated presentation data.
 
-`scripts/frontend.lua` 和 `scripts/input.lua` 是前端运行入口。
-`scripts/tuning.lua`、`scripts/recipes.lua`、`scripts/strings.lua` 是数据入口。
-`scripts/fx.lua`、`scripts/skin_assets.lua`、`scripts/screens/redux/scrapbookdata.lua` 更接近注册表或展示素材。
+## `0x70001211` Authority Boundary
 
-## `0x70001211` 区域定位 / 本区边界 / 不把 UI 误读成权威 Gameplay / 边界条件
+HUDs and widgets can consume input, play sounds, open screens, update local UI state, and request remote crafting.
+Remote crafting requests go through a replica or `playercontroller`.
+Authoritative world changes usually remain in a server component, a `playercontroller` RPC, or prefab behaviour.
 
-HUD 和 widget 可以消费输入、播放声音、打开 screen、改变本地 UI 状态，或通过 replica / `playercontroller` 请求远端制作。
-真正改变世界的权威逻辑通常仍落在 server component、`playercontroller` RPC 或 prefab 行为里。
+## `0x70002000` Source Anchors
 
-## `0x70002000` 源码锚点
-
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/input.lua` | `Input:OnControl` | 先让 `TheFrontEnd` 消费输入 |
-| `scripts/frontend.lua` | `FrontEnd` | 维护 `screenstack`、焦点、fade 和 debug panel |
-| `scripts/screens/playerhud.lua` | `PlayerHud` | 游戏内 HUD screen |
-| `scripts/widgets/widget.lua` | `Widget` | UI 树、焦点和 `OnControl` 递归 |
-| `scripts/widgets/controls.lua` | `Controls` | HUD 控件集合 |
-| `scripts/components/playercontroller.lua` | `PlayerController` | 地图控制、放置模式和远端制作请求 |
-| `scripts/recipe.lua` | `Recipe2` | 配方对象与 `AllRecipes` |
-| `scripts/recipes.lua` | `Recipe2(...)` | 官方配方注册 |
-| `scripts/tuning.lua` | `TUNING` | 数值常量与 modifier |
-| `scripts/strings.lua` | `STRINGS` | 文本表 |
-| `scripts/translator.lua` | `TranslateStringTable` | 递归替换文本表 |
-| `scripts/skin_assets.lua` | `skin_assets` | 皮肤资产列表 |
-| `scripts/screens/redux/scrapbookdata.lua` | generated table | Scrapbook 展示数据 |
-| `scripts/fx.lua` | `fx` table | 通用 FX 数据表 |
-| `scripts/prefabs/fx.lua` | `MakeFx` | 把 `fx` table 变成 prefab |
-| `scripts/util.lua` | `DebugSpawn` | 调试生成实体 |
-| `scripts/consolecommands.lua` | `c_` functions | 控制台命令入口 |
+| `scripts/input.lua` | `Input:OnControl` | Gives `TheFrontEnd` the first chance to consume input |
+| `scripts/frontend.lua` | `FrontEnd` | Manages `screenstack`, focus, fades, and debug panels |
+| `scripts/screens/playerhud.lua` | `PlayerHud` | In-game HUD screen |
+| `scripts/widgets/widget.lua` | `Widget` | UI tree, focus, and recursive `OnControl` handling |
+| `scripts/widgets/controls.lua` | `Controls` | HUD control collection |
+| `scripts/components/playercontroller.lua` | `PlayerController` | Map, placement, and remote crafting |
+| `scripts/recipe.lua` | `Recipe2` | Recipe objects and `AllRecipes` |
+| `scripts/recipes.lua` | `Recipe2(...)` | Official recipe registration |
+| `scripts/tuning.lua` | `TUNING` | Numeric constants and modifiers |
+| `scripts/strings.lua` | `STRINGS` | Text table |
+| `scripts/translator.lua` | `TranslateStringTable` | Recursive text-table translation |
+| `scripts/skin_assets.lua` | `skin_assets` | Skin asset list |
+| `scripts/screens/redux/scrapbookdata.lua` | generated table | Scrapbook presentation data |
+| `scripts/fx.lua` | `fx` table | Shared FX definitions |
+| `scripts/prefabs/fx.lua` | `MakeFx` | Converts FX definitions into prefabs |
+| `scripts/util.lua` | `DebugSpawn` | Debug entity spawning |
+| `scripts/consolecommands.lua` | `c_` functions | Console command entry points |
 
-### `0x70002111` 锚点读取顺序 / 从输入到展示 / 搜索信号
+### `0x70002111` Runtime Reading Order
 
-先读 `Input:OnControl`、`FrontEnd:OnControl`、`FrontEnd:PushScreen`。
-再读 `Widget:OnControl`、`PlayerHud:OnControl` 和 `Controls:ToggleMap`。
+Read `Input:OnControl`, `FrontEnd:OnControl`, and `FrontEnd:PushScreen` first.
+Then read `Widget:OnControl`, `PlayerHud:OnControl`, and `Controls:ToggleMap`.
 
-### `0x70002211` 从数据到展示 / 配方、文本和素材 / 验证点
+### `0x70002211` Data Reading Order
 
-数据页应先找注册点，再找读取方。
-例如 `Recipe2` 写入 `AllRecipes`，`CraftingMenuHUD:RebuildRecipes` 生成 `valid_recipes`，制作 UI 再按搜索、过滤和详情面板展示。
+Find each registration point before its consumers.
+`Recipe2` writes to `AllRecipes`, and `CraftingMenuHUD:RebuildRecipes` populates `valid_recipes`.
+The crafting UI then applies search, filters, and details.
 
-## `0x70003000` 运行关系图
+## `0x70003000` Runtime Flow
 
 ~~~mermaid
 flowchart TD
@@ -58,7 +59,7 @@ flowchart TD
     C --> D["top screen OnControl"]
     D --> E["Widget focus tree"]
     D --> F["PlayerHud shortcuts"]
-    B --> G["Input event handlers when UI did not consume"]
+    B --> G["Input event handlers when UI did not consume input"]
     F --> H["Controls / crafting menu / map / chat"]
     H --> I["replica builder or playercontroller request"]
     I --> K["server component / RPC / placement"]
@@ -66,31 +67,29 @@ flowchart TD
     J --> H
 ~~~
 
-### `0x70003111` 关系图读法 / 前端消费优先 / 边界条件
+### `0x70003111` Input Precedence
 
-如果 `TheFrontEnd:OnControl` 返回 `true`，输入不会继续派发到 `Input.oncontrol`。
-这也是排查 UI 挡住 gameplay 操作时最先验证的分叉。
+When `TheFrontEnd:OnControl` returns `true`, input does not reach `Input.oncontrol`.
+Check this branch first when UI blocks a gameplay action.
 
-### `0x70003211` 数据只解释展示 / 数据表与执行方分离 / 验证点
+### `0x70003211` Data Is Not Behaviour
 
-`TUNING`、`STRINGS`、`skin_assets`、`scrapbookdata` 自身不执行 gameplay。
-需要顺着读取方追到 component、prefab、screen、widget 或 `playercontroller` 请求入口。
+`TUNING`, `STRINGS`, `skin_assets`, and `scrapbookdata` do not execute gameplay by themselves.
+Follow their consumers into a component, prefab, screen, widget, or `playercontroller` request.
 
-## `0x70004111` 目录索引 / README 载体 / 二级目录 / 链接校验
-
-以下入口先进入目录 README，再进入具体专题文件。
+## `0x70004111` Pages
 
 - [Frontend UI](0x7100-frontend-ui/README.md)
-- [Frontend 与输入](0x7100-frontend-ui/0x7101-frontend-input.md)
-- [Screens Widgets HUD](0x7100-frontend-ui/0x7102-screens-widgets-hud.md)
+- [Frontend and Input](0x7100-frontend-ui/0x7101-frontend-input.md)
+- [Screens, Widgets, and HUD](0x7100-frontend-ui/0x7102-screens-widgets-hud.md)
 - [Crafting UI](0x7100-frontend-ui/0x7103-crafting-ui.md)
-- [数据媒体与工具](0x7200-data-media-tools/README.md)
-- [Tuning 与 Recipes](0x7200-data-media-tools/0x7201-tuning-recipes.md)
-- [Localization Skins Scrapbook](0x7200-data-media-tools/0x7202-localization-skins-scrapbook.md)
-- [媒体 FX 与 Audio](0x7200-data-media-tools/0x7203-media-fx-audio.md)
-- [Tools Debug](0x7200-data-media-tools/0x7204-tools-debug.md)
+- [Data, Media, and Tools](0x7200-data-media-tools/README.md)
+- [Tuning and Recipes](0x7200-data-media-tools/0x7201-tuning-recipes.md)
+- [Localization, Skins, and Scrapbook](0x7200-data-media-tools/0x7202-localization-skins-scrapbook.md)
+- [Media, FX, and Audio](0x7200-data-media-tools/0x7203-media-fx-audio.md)
+- [Tools and Debugging](0x7200-data-media-tools/0x7204-tools-debug.md)
 
-## `0x70005100` 阅读与验证路线 / 从哪里开始读源码
+## `0x70005100` Verification
 
 ~~~bash
 rg -n "function Input:OnControl|function FrontEnd:OnControl|function FrontEnd:PushScreen" \
@@ -104,9 +103,9 @@ rg -n "Recipe2\\(|TranslateStringTable|function DebugSpawn|local fx =" \
   scripts/recipes.lua scripts/translator.lua scripts/util.lua scripts/fx.lua
 ~~~
 
-### `0x70005111` 最小闭环 / 抽样动作
+### `0x70005111` Minimal Traces
 
-抽样一条 `CONTROL_MAP`。
-从 `Input:OnControl` 追到 `PlayerHud:OnControl`，再追到 `Controls:ToggleMap`、`IsMapControlsEnabled` 和 `TheFrontEnd:PushScreen`。
-抽样一条制作按钮。
-从 `CraftingMenuDetails:_MakeBuildButton` 追到 `DoRecipeClick`、`replica.builder:MakeRecipeFromMenu` 和 `playercontroller:RemoteMakeRecipeFromMenu`。
+Trace one closed-map `CONTROL_MAP` path from `Input:OnControl` through `PlayerHud:OnControl` and `Controls:ToggleMap`.
+Continue through `IsMapControlsEnabled` to `TheFrontEnd:PushScreen`.
+Trace one non-placer remote crafting button from `CraftingMenuDetails:_MakeBuildButton` through `DoRecipeClick`.
+Continue through `replica.builder:MakeRecipeFromMenu` to `playercontroller:RemoteMakeRecipeFromMenu`.

@@ -1,121 +1,140 @@
 # `0x22050000` World Settings Runtime
 
-本页覆盖世界设置如何从 worldgen overrides 进入运行时组件。
+World-generation overrides enter through `worldsettings_overrides.lua` and `worldsettingsutil.lua`.
 
-它重点解释 `worldsettings_overrides.lua`、`worldsettingsutil.lua`、`worldsettings` 和 `worldsettingstimer`。
+The `worldsettings` and `worldsettingstimer` components hold runtime state.
 
-## `0x22051111` 本页定位 / 要回答的运行时问题 / Worldgen 选项如何变成运行时行为 / 验证点
+## `0x22051111` Purpose
 
-`gamelogic.lua` 加载 `worldsettings_overrides`。
+`gamelogic.lua` loads `worldsettings_overrides`.
 
-世界初始化时先应用 `WorldSettings_Overrides.Pre`。
+It applies `WorldSettings_Overrides.Pre` before spawning the world prefab.
 
-世界和实体加载后再应用 `WorldSettings_Overrides.Post`。
+It restores the world and network entities, then applies `WorldSettings_Overrides.Post`.
 
-部分设置通过 `WorldSettings_Overrides.Sync` 推送 `ms_setworldsetting` 事件。
+The remaining saved entities load afterward.
 
-`components/worldsettings.lua` 接收事件并记录当前 setting value。
+Some Post overrides push `ms_setworldsetting`.
 
-## `0x22052000` 源码锚点
+`components/worldsettings.lua` records the event through `WorldSettings:SetSetting`.
 
-| 文件 | 入口 | 用途 |
+Shard updates use `Shard_SyncWorldSettings` and the `SyncWorldSettings` RPC handler.
+
+## `0x22052000` Source Anchors
+
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/gamelogic.lua` | `require("worldsettings_overrides")` | 加载运行时世界设置覆盖表 |
-| `scripts/gamelogic.lua` | `WorldSettings_Overrides.Pre` | 世界 prefab 生成前应用覆盖 |
-| `scripts/gamelogic.lua` | `WorldSettings_Overrides.Post` | 世界与实体加载后应用覆盖 |
-| `scripts/worldsettings_overrides.lua` | `Pre` / `Post` / `Sync` | 定义世界设置覆盖阶段 |
-| `scripts/worldsettings_overrides.lua` | `ms_setworldsetting` | 同步设置到世界组件 |
-| `scripts/components/worldsettings.lua` | `WorldSettings:SetSetting` | 保存当前世界设置值 |
-| `scripts/worldsettingsutil.lua` | `WorldSettings_ChildSpawner_PreLoad` | 把 childspawner 计时迁到 worldsettingstimer |
-| `scripts/worldsettingsutil.lua` | `WorldSettings_Spawner_SpawnDelay` | 用 worldsettingstimer 驱动 spawner |
-| `scripts/worldsettingsutil.lua` | `WorldSettings_Pickable_RegenTime` | 用 worldsettingstimer 驱动 pickable 再生 |
-| `scripts/components/worldsettingstimer.lua` | `WorldSettingsTimer` | 保存、恢复和推进设置驱动 timer |
-| `scripts/components/worldsettingstimer.lua` | `LongUpdate` | 离线或长帧更新 timer |
+| `scripts/gamelogic.lua` | `require("worldsettings_overrides")` | Load runtime world-setting overrides |
+| `scripts/gamelogic.lua` | `WorldSettings_Overrides.Pre` | Apply overrides before the world prefab spawns |
+| `scripts/gamelogic.lua` | `WorldSettings_Overrides.Post` | Apply overrides before saved entities load |
+| `scripts/worldsettings_overrides.lua` | `Pre` / `Post` / `Sync` | Export load and shard-sync override tables |
+| `scripts/worldsettings_overrides.lua` | `ms_setworldsetting` | Synchronize a setting to the world component |
+| `scripts/shardnetworking.lua` | `Shard_SyncWorldSettings` | Send master overrides through a shard RPC |
+| `scripts/networkclientrpc.lua` | `SyncWorldSettings` | Apply a Sync override or fall back to Pre and Post |
+| `scripts/components/worldsettings.lua` | `WorldSettings:SetSetting` | Store the current value of a world setting |
+| `scripts/worldsettingsutil.lua` | `WorldSettings_ChildSpawner_PreLoad` | Migrate child-spawner timing |
+| `scripts/worldsettingsutil.lua` | `WorldSettings_Spawner_SpawnDelay` | Drive a spawner through `worldsettingstimer` |
+| `scripts/worldsettingsutil.lua` | `WorldSettings_Pickable_RegenTime` | Drive pickable regeneration |
+| `scripts/components/worldsettingstimer.lua` | `WorldSettingsTimer` | Persist setting-driven timers |
+| `scripts/components/worldsettingstimer.lua` | `LongUpdate` | Advance timers across offline time or long frames |
 
-## `0x22053000` 运行流程
+## `0x22053000` Runtime Flow
 
 ~~~mermaid
 flowchart TD
-    A["worldgen overrides"]
-    A --> B["gamelogic loads savedata"]
-    B --> C["WorldSettings_Overrides.Pre"]
-    C --> D["Spawn world prefab"]
-    D --> E["load entities and components"]
-    E --> F["WorldSettings_Overrides.Post"]
-    F --> G["WorldSettings_Overrides.Sync"]
-    G --> H["TheWorld:PushEvent ms_setworldsetting"]
-    H --> I["WorldSettings:SetSetting"]
-    F --> J["worldsettingsutil helpers"]
-    J --> K["worldsettingstimer timers"]
+    A["gamelogic loads savedata"]
+    A --> B["WorldSettings_Overrides.Pre"]
+    B --> C["spawn world prefab"]
+    C --> D["restore world and network persistence"]
+    D --> E["WorldSettings_Overrides.Post"]
+    E --> F["some Post overrides push ms_setworldsetting"]
+    F --> G["WorldSettings:SetSetting"]
+    E --> H["restore saved entities"]
+    H --> I["prefab OnPreLoad helpers"]
+    I --> J["worldsettingstimer migration"]
+    K["Shard_SyncWorldSettings"] --> L["SHARD_RPC SyncWorldSettings"]
+    L --> M["networkclientrpc handler"]
+    M --> N{"Sync override exists?"}
+    N -->|yes| O["WorldSettings_Overrides.Sync"]
+    N -->|no| P["matching Pre and Post overrides"]
 ~~~
 
-### `0x22053111` Pre 阶段 / 世界生成后、世界 Prefab 前 / 边界条件
+### `0x22053111` Pre Phase
 
-Pre 阶段发生在世界 prefab 生成之前。
+The Pre phase runs after world generation but before the world prefab spawns.
 
-它适合影响世界初始化需要读取的基础配置。
+It can change configuration needed during world initialization.
 
-阅读时从 `gamelogic.lua` 中遍历 `WorldSettings_Overrides.Pre` 的位置开始。
+Start at the loop over `WorldSettings_Overrides.Pre` in `gamelogic.lua`.
 
-### `0x22053211` Post 阶段 / 世界与实体加载后 / 边界条件
+### `0x22053211` Post Phase
 
-Post 阶段发生在世界和实体已经加载之后。
+The Post phase follows the world prefab and its world and shard-network persistence.
 
-它可以调用实体、组件和世界管理器。
+It runs before the saved entity loop.
 
-这也是很多 `worldsettingsutil.lua` helper 接管组件 timer 数据的阶段。
+It can use the world entity, its components, and world managers.
 
-### `0x22053311` Sync 阶段 / `ms_setworldsetting` / 边界条件
+Some Post overrides push `TheWorld:PushEvent("ms_setworldsetting", ...)`.
 
-Sync 阶段通过 `TheWorld:PushEvent("ms_setworldsetting", ...)` 写入运行时设置值。
+`WorldSettings:SetSetting(setting, value)` records the value, while gameplay effects remain in override helpers.
 
-`components/worldsettings.lua` 监听该事件。
+Prefab `OnPreLoad` functions call the timer-migration helpers later, while saved entities are restored.
 
-`WorldSettings:SetSetting(setting, value)` 只记录值，不直接执行所有具体玩法副作用。
+### `0x22053311` Shard RPC Sync
 
-具体副作用通常已经在 Pre 或 Post helper 中完成。
+`Shard_SyncWorldSettings` sends selected master overrides through `SHARD_RPC.SyncWorldSettings`.
 
-## `0x22054111` 结构细节 / `worldsettingstimer` / 统一 Timer 容器 / 需要核对的字段
+The `networkclientrpc.lua` handler calls `WorldSettings_Overrides.Sync[option]` when present.
 
-`WorldSettingsTimer:AddTimer` 保存 timer 名称、最大时间、启用状态、callback 和 long update handler。
+Otherwise, it applies matching Pre and Post overrides.
 
-`StartTimer`、`PauseTimer`、`ResumeTimer` 和 `StopTimer` 控制运行状态。
+The current Sync table is empty.
 
-`OnSave` 和 `OnLoad` 持久化 timer。
+## `0x22054111` `worldsettingstimer`
 
-`LongUpdate(dt)` 用于离线或长帧推进。
+`WorldSettingsTimer:AddTimer` stores a name, maximum duration, enabled state, callback, and long-update handler.
 
-## `0x22054211` 结构细节 / 组件计时迁移 / `worldsettingsutil.lua` / 需要核对的字段
+`StartTimer`, `PauseTimer`, `ResumeTimer`, and `StopTimer` control execution, while `OnSave` and `OnLoad` persist it.
 
-`WorldSettings_ChildSpawner_PreLoad` 把 `childspawner` 计时数据迁入 `worldsettingstimer`。
+`LongUpdate(dt)` advances timers across offline time or a long frame.
 
-`WorldSettings_Timer_PreLoad` 把 `timer` 组件数据迁入 `worldsettingstimer`。
+## `0x22054211` Timer Migration
 
-`WorldSettings_Spawner_PreLoad` 把 `spawner` 下一次生成时间迁入 `worldsettingstimer`。
+`WorldSettings_ChildSpawner_PreLoad` moves `childspawner` timing data into `worldsettingstimer`.
 
-`WorldSettings_Pickable_PreLoad` 把 `pickable` 再生时间迁入 `worldsettingstimer`。
+`WorldSettings_Timer_PreLoad` moves `timer` data.
 
-这些函数说明 world settings runtime 同时负责运行时设置和存档兼容数据的规整。
+`WorldSettings_Spawner_PreLoad` and `WorldSettings_Pickable_PreLoad` move `spawner` and `pickable` timing data.
 
-## `0x22055100` 阅读与验证路线 / 从哪里开始读源码
+The world-settings runtime therefore normalizes saved timer data as well as applying live settings.
+
+## `0x22055100` Verification
 
 ~~~bash
-rg -n "worldsettings_overrides|WorldSettings_Overrides\\.(Pre|Post|Sync)" \
+rg -n "worldsettings_overrides|WorldSettings_Overrides\\.(Pre|Post)" \
   scripts/gamelogic.lua
 
-rg -n "ms_setworldsetting|SetSetting|Pre|Post|Sync" \
+rg -n "Shard_SyncWorldSettings|SyncWorldSettings|WorldSettings_Overrides\\.Sync" \
+  scripts/shardnetworking.lua \
+  scripts/networkclientrpc.lua
+
+rg -n "ms_setworldsetting|SetSetting|applyoverrides_(pre|post|sync)" \
   scripts/worldsettings_overrides.lua \
   scripts/components/worldsettings.lua
 
 rg -n "WorldSettings_.*PreLoad|WorldSettings_.*Spawn|WorldSettings_.*Regen|worldsettingstimer" \
   scripts/worldsettingsutil.lua \
-  scripts/components/worldsettingstimer.lua
+  scripts/components/worldsettingstimer.lua \
+  scripts/prefabs
 ~~~
 
-### `0x22055111` 推荐顺序 / 最小闭环
+### `0x22055111` Next Read
 
-先读 `gamelogic.lua` 中 Pre 与 Post 的调用点。
+Read the Pre and Post call sites in `gamelogic.lua`.
 
-再读 `worldsettings_overrides.lua` 的具体覆盖表。
+Then inspect the override table in `worldsettings_overrides.lua`.
 
-最后读 `worldsettingsutil.lua` 和 `worldsettingstimer.lua`，确认 timer 如何迁移、保存和推进。
+Trace shard updates through `shardnetworking.lua` and `networkclientrpc.lua`.
+
+Finally, inspect timer migration and persistence in `worldsettingsutil.lua` and `worldsettingstimer.lua`.

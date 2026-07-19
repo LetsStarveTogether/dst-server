@@ -1,140 +1,136 @@
-# `0x42010000` Brain 运行时
+# `0x42010000` Brain Runtime
 
-Brain 运行时页说明实体如何绑定 Brain，Brain 如何构造 behaviour tree，以及 `BrainManager` 如何按 sleep time 调度更新。
+This page follows Brain binding, behaviour-tree construction, and sleep-based `BrainManager` scheduling.
+A Brain makes decisions and controls wake-up cadence, while a StateGraph handles action, animation, and event states.
 
-本页把 Brain 与 StateGraph 分开看。
-Brain 负责决策和唤醒节奏。
-StateGraph 负责动作、动画和事件状态。
+## `0x42011100` Purpose
 
-## `0x42011100` 本页定位 / 要回答的运行时问题
+The minimum lifecycle is `EntityScript:SetBrain`, `Brain:_Start_Internal`, `BrainManager:Update`, and `BT:Update`.
+First establish when the Brain is created, then follow how it pauses, sleeps, and wakes.
 
-Brain 的最小闭环是 `EntityScript:SetBrain`、`Brain:_Start_Internal`、`BrainManager:Update` 和 `BT:Update`。
-读这一页时先确认 Brain 何时被创建，再确认它何时被暂停、休眠或重新唤醒。
+### `0x42011110` Brain and StateGraph Roles
 
-### `0x42011110` Brain 与 SG 的分工
+`SetBrain` does not create a StateGraph, and `SetStateGraph` does not create a Brain.
+Master-sim prefab code usually binds both to the same entity as independent decision and state-machine systems.
 
-`SetBrain` 不会创建 StateGraph。
-`SetStateGraph` 也不会创建 Brain。
-Prefab 通常在 master sim 侧分别调用二者，让同一个实体同时拥有决策器和状态机。
+#### `0x42011111` Key Checks
 
-#### `0x42011111` 验证点
+- `EntityScript:SetBrain` saves `brainfn` in `scripts/entityscript.lua`.
+- It creates `self.brain` when the entity can run it.
+- `EntityScript:SetStateGraph` creates a `StateGraphInstance` through `LoadStateGraph`.
+- `Brain:OnUpdate` in `scripts/brain.lua` only calls `DoUpdate` and `bt:Update`.
+- World-state side effects continue through `behaviours/*.lua`, `locomotor`, `combat`, or an SG action handler.
 
-- `scripts/entityscript.lua` 中 `SetBrain` 保存 `brainfn`，并在可用时立即实例化 `self.brain`。
-- `scripts/entityscript.lua` 中 `SetStateGraph` 通过 `LoadStateGraph` 创建 `StateGraphInstance`。
-- `scripts/brain.lua` 中 `Brain:OnUpdate` 只调用 `DoUpdate` 和 `bt:Update`。
-- 具体动作是否改变世界状态，要继续追 `behaviours/*.lua`、`locomotor`、`combat` 或 SG 的 action handler。
+## `0x42012000` Source Anchors
 
-## `0x42012000` 源码锚点
-
-| 文件 | 入口 | 需要核对的事实 |
+| File | Entry | Purpose |
 | --- | --- | --- |
-| `scripts/entityscript.lua` | `EntityScript:SetBrain` | 保存 `brainfn`，按睡眠、limbo、停止标记决定是否创建 Brain。 |
-| `scripts/entityscript.lua` | `EntityScript:RestartBrain` | 清理 `_brainstopped` 原因后才调用 `brain:_Start_Internal()`。 |
-| `scripts/entityscript.lua` | `_DisableBrain_Internal` | 实体睡眠或离场时停止并丢弃当前 Brain 实例。 |
-| `scripts/entityscript.lua` | `_EnableBrain_Internal` | 实体醒来或回场时用 `brainfn()` 重新创建 Brain。 |
-| `scripts/brain.lua` | `Brain:_Start_Internal` | 调用 `OnStart` 构造 `BT`，再注册到 `BrainManager`。 |
-| `scripts/brain.lua` | `BrainWrangler:Update` | 更新 `updaters`，并按 `GetSleepTime()` 放入 `tickwaiters` 或 `hibernaters`。 |
-| `scripts/brain.lua` | `Brain:ForceUpdate` | 强制 `BT` 立即更新，并把 Brain 放回 `updaters`。 |
-| `scripts/brains/wilsonbrain.lua` | `WilsonBrain:OnStart` | 最小 Brain 样例，root 是 `PriorityNode`。 |
+| `scripts/entityscript.lua` | `EntityScript:SetBrain` | Saves `brainfn` and conditionally creates a Brain |
+| `scripts/entityscript.lua` | `EntityScript:RestartBrain` | Clears `_brainstopped` reasons before calling `brain:_Start_Internal()` |
+| `scripts/entityscript.lua` | `_DisableBrain_Internal` | Stops and discards the Brain while the entity sleeps or is absent |
+| `scripts/entityscript.lua` | `_EnableBrain_Internal` | Recreates the Brain with `brainfn()` when the entity returns |
+| `scripts/brain.lua` | `Brain:_Start_Internal` | Calls `OnStart`, builds the `BT`, and registers with `BrainManager` |
+| `scripts/brain.lua` | `BrainWrangler:Update` | Moves Brains among `updaters`, `tickwaiters`, and `hibernaters` |
+| `scripts/brain.lua` | `Brain:ForceUpdate` | Marks the `BT` for update and returns the Brain to `updaters` |
+| `scripts/brains/wilsonbrain.lua` | `WilsonBrain:OnStart` | Shows a small Brain rooted at `PriorityNode` |
 
-### `0x42012110` 主锚点 / `scripts/entityscript.lua`
+### `0x42012110` Binding Entry
 
-`SetBrain` 是绑定入口。
-它先记录 `self.brainfn = brainfn`。
-如果实体处于 `sleepstatepending`、`IsInLimbo()` 或 `IsAsleep()`，它只记录函数并设置 `_braindisabled`。
-如果允许启动，它调用 `brainfn()`，设置 `self.brain.inst = self`，再进入 `brain:_Start_Internal()`。
+`SetBrain` first stores `self.brainfn = brainfn`.
+When `sleepstatepending`, `IsInLimbo()`, or `IsAsleep()` is true, `SetBrain` sets `_braindisabled`.
+It stores the function without constructing a Brain.
+Otherwise it calls `brainfn()`, sets `self.brain.inst = self`, and enters `brain:_Start_Internal()`.
 
-#### `0x42012111` 搜索信号
+#### `0x42012111` Search Command
 
 ~~~bash
 rg -n "SetBrain|RestartBrain|StopBrain|_DisableBrain_Internal|_EnableBrain_Internal|SetStateGraph" \
   scripts/entityscript.lua
 ~~~
 
-## `0x42013000` 运行流程
+## `0x42013000` Runtime Flow
 
 ~~~mermaid
 flowchart TD
     A["Prefab master sim"]
     A --> B["EntityScript:SetBrain(brainfn)"]
-    B --> C{"实体可运行 Brain?"}
-    C -- "否" --> D["保存 brainfn 与 _braindisabled"]
-    C -- "是" --> E["brainfn() 创建 Brain"]
+    B --> C{"Can the entity run a Brain?"}
+    C -- "No" --> D["Save brainfn and _braindisabled"]
+    C -- "Yes" --> E["brainfn() creates a Brain"]
     E --> F["brain.inst = entity"]
     F --> G["Brain:_Start_Internal"]
-    G --> H["Brain:OnStart 构造 BT root"]
+    G --> H["Brain:OnStart builds the BT root"]
     H --> I["BrainManager:AddInstance"]
     I --> J["BrainWrangler:Update"]
     J --> K["Brain:OnUpdate"]
     K --> L["BT:Update"]
     L --> M{"BT:GetSleepTime()"}
-    M -- "nil" --> N["BrainManager:Hibernate"]
-    M -- "> GetTickTime()" --> O["BrainManager:Sleep 到 tickwaiters"]
-    M -- "0 或短间隔" --> P["保留在 updaters"]
+    M -- "nil" --> N["Hibernate"]
+    M -- "> GetTickTime()" --> O["Sleep in tickwaiters"]
+    M -- "0 or a short interval" --> P["Remain in updaters"]
 ~~~
 
-### `0x42013110` 启动阶段 / `SetBrain` 到 `_Start_Internal`
+### `0x42013110` Startup
 
-`SetBrain` 会先停止已有 Brain。
-这意味着重新绑定 Brain 不是叠加行为树，而是替换当前 Brain 实例。
-`_Start_Internal` 会跳过已经启动的 Brain，然后执行 `OnStart`。
+`SetBrain` stops any existing Brain before rebinding, so it replaces rather than layers behaviour trees.
+`_Start_Internal` skips an already-started Brain and otherwise calls `OnStart`.
 
-#### `0x42013111` 边界条件
+#### `0x42013111` Startup Conditions
 
-- `_brainstopped` 存在时，`SetBrain` 会创建 Brain，但不会启动它。
-- `_braindisabled` 存在时，`SetBrain` 不创建 Brain，直到 `_EnableBrain_Internal` 重新调用 `brainfn()`。
-- `Brain:Start` 是兼容入口，源码注释要求改用 `EntityScript:RestartBrain`。
+- With `_brainstopped` set, `SetBrain` creates the Brain but does not start it.
+- With `_braindisabled` set, `SetBrain` defers creation until `_EnableBrain_Internal` calls `brainfn()`.
+- `Brain:Start` is a compatibility entry point whose source comment directs callers to `EntityScript:RestartBrain`.
 
-### `0x42013210` 更新阶段 / `BrainWrangler:Update`
+### `0x42013210` Scheduling
 
-`BrainManager` 是 `BrainWrangler()` 的全局实例。
-它维护 `instances`、`updaters`、`tickwaiters` 和 `hibernaters`。
-每个 tick 会先把到期的 `tickwaiters[current_tick]` 放回 `updaters`，再复制一份安全更新列表。
+`BrainManager` is the global `BrainWrangler()` instance and owns `instances`, `updaters`, `tickwaiters`, and `hibernaters`.
+Each tick restores the current `tickwaiters[current_tick]` entries to `updaters`, then copies a safe update list.
 
-#### `0x42013211` 调度验证点
+#### `0x42013211` Scheduling Conditions
 
-- 只有 `k.inst.entity:IsValid()` 且 `not k.inst:IsAsleep()` 的 Brain 会执行 `k:OnUpdate()`。
-- `sleep_amount == nil` 时进入 `Hibernate`。
-- `sleep_amount > GetTickTime()` 时进入 `Sleep`。
-- `sleep_amount <= GetTickTime()` 时不移动列表，下一轮仍在 `updaters`。
+- A Brain runs `k:OnUpdate()` only when `k.inst.entity:IsValid()` and `not k.inst:IsAsleep()`.
+- `sleep_amount == nil` sends it to `Hibernate`.
+- `sleep_amount > GetTickTime()` sends it to `Sleep`.
+- `sleep_amount <= GetTickTime()` leaves it in `updaters` for the next tick.
 
-### `0x42013310` 停止与唤醒阶段 / `_Stop_Internal`、`Pause`、`Resume`
+### `0x42013310` Stop, Pause, and Resume
 
-`_Stop_Internal` 会调用 `OnStop`，停止 `BT`，并从 `BrainManager` 移除实例。
-`Pause` 不改变 `stopped`，但会把运行中的 Brain 从调度器移除。
-`Resume` 会在未停止时重新 `AddInstance`。
+`_Stop_Internal` calls `OnStop`, stops the `BT`, and removes the Brain from `BrainManager`.
+`Pause` removes a running Brain from the scheduler without changing `stopped`.
+`Resume` calls `AddInstance` when the Brain is not stopped.
 
-#### `0x42013311` 事件唤醒点
+#### `0x42013311` Wake-up Paths
 
-- `Brain:ForceUpdate` 会调用 `bt:ForceUpdate()` 并 `BrainManager:Wake(self)`。
-- `EventNode:OnEvent` 会在实体仍有 Brain 时调用 `self.inst.brain:ForceUpdate()`。
-- 实体从睡眠或 limbo 恢复时走 `_EnableBrain_Internal`，不是直接恢复已有 Brain 对象。
+- `Brain:ForceUpdate` calls `bt:ForceUpdate()` and `BrainManager:Wake(self)`.
+- `EventNode:OnEvent` calls `self.inst.brain:ForceUpdate()` while the entity still has a Brain.
+- Returning from sleep or limbo runs `_EnableBrain_Internal` and creates a new Brain instead of resuming the discarded object.
 
-## `0x42014110` 结构细节 / Brain 对象字段 / `Brain = Class(...)`
+`BT:Update` runs when `BrainManager` next schedules the Brain, not inside `Brain:ForceUpdate`.
 
-Brain 初始化字段包括 `inst`、`currentbehaviour`、`behaviourqueue`、`events`、`thinkperiod`、`paused` 和 `stopped`。
-更新路径主要依赖 `bt`，而不是 `behaviourqueue`。
+## `0x42014110` Brain Fields
 
-### `0x42014111` 字段核对
+`Brain = Class(...)` initializes `inst`, `currentbehaviour`, `behaviourqueue`, `events`, `thinkperiod`, `paused`, and `stopped`.
+The active update path relies on `bt`, not `behaviourqueue`.
 
-- `self.stopped` 初始为 `true`。
-- `self.paused` 初始为 `false`。
-- `self.bt` 由具体 Brain 的 `OnStart` 赋值。
+### `0x42014111` Field Defaults
 
-## `0x42014210` 结构细节 / Behaviour Tree 接口 / `Brain:OnUpdate`
+- `self.stopped` starts as `true`.
+- `self.paused` starts as `false`.
+- A concrete Brain assigns `self.bt` in `OnStart`.
 
-`Brain:OnUpdate` 先调用可选的 `DoUpdate`。
-之后如果存在 `self.bt`，就调用 `self.bt:Update()`。
-Brain 本身不解释 `PriorityNode` 或 `DoAction` 的语义，这些在 `behaviourtree.lua` 和 `behaviours/*.lua` 内完成。
+## `0x42014210` Behaviour-Tree Interface
 
-### `0x42014211` 不要混淆的边界
+`Brain:OnUpdate` calls optional `DoUpdate`, then calls `self.bt:Update()` when `self.bt` exists.
+`PriorityNode`, `DoAction`, and other node semantics live in `behaviourtree.lua` and `behaviours/*.lua`.
 
-- Brain 不等于 behaviour tree。
-- Brain 拥有 `BT` 实例。
-- `BT` 拥有 root node。
-- 具体 leaf node 可以返回状态，也可以直接调用组件方法。
+### `0x42014211` Ownership Boundaries
 
-## `0x42015100` 阅读与验证路线 / 从哪里开始读源码
+- A Brain is not a behaviour tree.
+- A Brain owns a `BT` instance.
+- A `BT` owns a root node.
+- A leaf can return status or call a component directly.
+
+## `0x42015100` Verification
 
 ~~~bash
 rg -n "SetBrain|RestartBrain|_Start_Internal|BrainWrangler:Update|Brain:OnUpdate|ForceUpdate" \
@@ -144,14 +140,12 @@ rg -n "SetBrain|RestartBrain|_Start_Internal|BrainWrangler:Update|Brain:OnUpdate
   scripts/brains/wilsonbrain.lua
 ~~~
 
-### `0x42015110` 推荐顺序
+### `0x42015110` Reading Order
 
-先读 `EntityScript:SetBrain`，确认 Brain 是否被创建。
-再读 `Brain:_Start_Internal`，确认 `OnStart` 和 `BrainManager:AddInstance` 的顺序。
-最后读 `BrainWrangler:Update`，确认 sleep、hibernate 和 force update 的差异。
+Read `EntityScript:SetBrain`, then `Brain:_Start_Internal`, and finally `BrainWrangler:Update`.
+This separates creation, startup, sleep, hibernation, and forced wake-up.
 
-#### `0x42015111` 最小闭环
+#### `0x42015111` Minimum Trace
 
-用 `scripts/brains/wilsonbrain.lua` 验证最小 Brain。
-它在 `OnStart` 中创建 `PriorityNode`，并把 `BT(self.inst, root)` 写入 `self.bt`。
-这条链路不需要先理解复杂 Boss AI。
+In `scripts/brains/wilsonbrain.lua`, `OnStart` creates a `PriorityNode` and assigns `BT(self.inst, root)` to `self.bt`.
+This is enough to verify the lifecycle without starting from a complex boss Brain.

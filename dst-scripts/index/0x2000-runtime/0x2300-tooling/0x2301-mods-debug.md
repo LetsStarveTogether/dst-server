@@ -1,132 +1,134 @@
-# `0x23010000` 模组与调试
+# `0x23010000` Mods and Debugging
 
-模组与调试页解释 mod 环境、post init 表、控制台命令和 debug 命令的边界。
+This page separates mod environments and post-init hooks from console and debug commands.
 
-本页不把调试命令当作 gameplay 主链路。
+Debug commands are tooling entry points, not part of the normal gameplay flow.
 
-## `0x23011111` 本页定位 / 要回答的运行时问题 / Mod 注入点在哪里保存 / 验证点
+## `0x23011111` Mod Injection
 
-`modutil.lua` 不直接改所有 prefab、component 或 stategraph。
+`modutil.lua` does not directly rewrite every prefab, component, or StateGraph.
 
-post-init Add API 会把函数登记到 `env.postinitfns`。
+Most post-init Add APIs register functions in `env.postinitfns`.
 
-部分 Add API 会直接修改全局注册表，例如 action、component action 或 tile 注册。
+Other APIs directly update registries for actions, component actions, or tiles.
 
-实际取出并调用这些函数的是 `ModManager:GetPostInitFns()` 的使用点。
+The runtime executes registered functions at call sites of `ModManager:GetPostInitFns()`.
 
-## `0x23011211` 本页定位 / 调试命令的边界 / Console 与 Debugcommands / 验证点
+## `0x23011211` Debug Boundary
 
-`consolecommands.lua` 提供 `c_*` 控制台入口。
+`consolecommands.lua` defines `c_*` console entries, and `debugcommands.lua` defines many `d_*` entries.
 
-`debugcommands.lua` 提供大量 `d_*` 调试入口。
+They often call `DebugSpawn`, `GetDebugEntity`, and `SetDebugEntity`, but ordinary runtime paths do not.
 
-两者经常调用 `DebugSpawn`、`GetDebugEntity` 和 `SetDebugEntity`，但不代表普通运行时会走这些路径。
+## `0x23012000` Source Anchors
 
-## `0x23012000` 源码锚点
-
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/main.lua` | `KnownModIndex:Load` | 启动时加载 mod 索引 |
-| `scripts/modindex.lua` | `KnownModIndex = ModIndex()` | 全局 mod 索引对象 |
-| `scripts/mods.lua` | `modutil.InsertPostInitFunctions` | 给 mod env 注入 Add 系列 API |
-| `scripts/mods.lua` | `ModManager:GetPostInitFns` | 运行时读取 post init 函数 |
-| `scripts/modutil.lua` | `AddPrefabPostInit` | 登记 prefab post init |
-| `scripts/modutil.lua` | `AddComponentPostInit` | 登记 component post init |
-| `scripts/modutil.lua` | `AddStategraphPostInit` | 登记 stategraph post init |
-| `scripts/debugtools.lua` | `debugstack` | 调试栈、表打印和 userdata instrumentation |
-| `scripts/knownerrors.lua` | `known_assert` | 把已知错误 key 映射到用户可见错误 |
-| `scripts/consolecommands.lua` | `c_spawn` | 控制台生成 prefab |
-| `scripts/debugcommands.lua` | `d_*` | 调试命令集合 |
-| `scripts/debughelpers.lua` | `debug.getinfo` | 调试辅助和 introspection |
+| `scripts/main.lua` | `KnownModIndex:Load` / `BeginStartupSequence` | Gate `ModSafeStartup` on mod-index startup |
+| `scripts/modindex.lua` | `KnownModIndex = ModIndex()` | Create the global mod-index object |
+| `scripts/mods.lua` | `ModWrangler:LoadMods` / `CreateEnvironment` | Select mods and create their environments |
+| `scripts/mods.lua` | `ModManager:GetPostInitFns` | Retrieve registered post-init functions |
+| `scripts/modutil.lua` | `InsertPostInitFunctions` / `AddPrefabPostInit` | Install APIs and register prefab hooks |
+| `scripts/modutil.lua` | `AddComponentPostInit` | Register a component post-init function |
+| `scripts/modutil.lua` | `AddStategraphPostInit` | Register a StateGraph post-init function |
+| `scripts/debugtools.lua` | `debugstack` / `dumptable` / `instrument_userdata` | Inspect runtime data |
+| `scripts/knownerrors.lua` | `known_assert` | Map a known error key to a user-visible error |
+| `scripts/consolecommands.lua` | `c_spawn` | Spawn a prefab from the console |
+| `scripts/debugcommands.lua` | `d_*` | Provide debug commands |
+| `scripts/debughelpers.lua` | `debug.getinfo` | Support introspection helpers |
 
-### `0x23012111` Mod 索引锚点 / `scripts/main.lua` / 搜索信号
+### `0x23012111` Mod Index Anchor
 
-搜索 `KnownModIndex:Load` 可以看到启动阶段先加载 mod 索引。
+In `main.lua`, the `KnownModIndex:Load` callback starts `BeginStartupSequence`, whose callback reaches `ModSafeStartup`.
 
-随后 `BeginStartupSequence` 继续推进启动。
+### `0x23012211` Post-Init Anchor
 
-### `0x23012211` Post Init 锚点 / `scripts/modutil.lua` / 搜索信号
+Find `env.postinitfns` to see which Add APIs register deferred functions.
 
-搜索 `env.postinitfns`。
+Do not assume that every Add API uses this table.
 
-post-init Add API 把函数插入这个表，而不是立刻执行。
+### `0x23012311` Debug Anchor
 
-不要把所有 Add API 都归入 `env.postinitfns`。
+Find `function c_spawn`; it calls `DebugSpawn(prefab)` and may call `SetDebugEntity(inst)`.
 
-### `0x23012311` 调试锚点 / `scripts/consolecommands.lua` / 搜索信号
-
-搜索 `function c_spawn`。
-
-它会调用 `DebugSpawn(prefab)`，并在需要时调用 `SetDebugEntity(inst)`。
-
-## `0x23013000` 运行流程
+## `0x23013000` Mod Hook Flow
 
 ~~~mermaid
 flowchart TD
     A["KnownModIndex:Load"]
-    A --> B["ModManager loads mod env"]
-    B --> C["InsertPostInitFunctions"]
-    C --> D["env.postinitfns"]
-    D --> E["ModManager:GetPostInitFns"]
-    E --> F["prefab / component / stategraph hook point"]
+    A --> B["BeginStartupSequence"]
+    B --> C["ModSafeStartup"]
+    C --> D["ModWrangler:LoadMods"]
+    D --> E["CreateEnvironment"]
+    E --> F["InsertPostInitFunctions"]
+    F --> G["env.postinitfns"]
+    G --> H["ModManager:GetPostInitFns"]
+    H --> I["prefab / component / StateGraph hook point"]
 ~~~
 
-### `0x23013111` Mod 环境阶段 / `InsertPostInitFunctions` / 边界条件
+### `0x23013111` Mod Environment
 
-`mods.lua` 创建 mod env 后调用 `modutil.InsertPostInitFunctions(env, isworldgen, isfrontend)`。
+`ModWrangler:LoadMods()` selects enabled mods and calls `CreateEnvironment()` for each one.
 
-所以同一个 API 集合会根据 worldgen 或 frontend 场景暴露不同能力。
+`CreateEnvironment()` calls `modutil.InsertPostInitFunctions(env, isworldgen, isfrontend)`.
 
-### `0x23013211` Hook 执行阶段 / `ModManager:GetPostInitFns` / 边界条件
+The `InsertPostInitFunctions` call receives the environment and its world-generation and frontend flags.
 
-`mainfunctions.lua` 在 prefab 加载和生成时读取 prefab post init。
+The available API set therefore varies between world-generation, frontend, and game contexts.
 
-`stategraph.lua` 在 stategraph 构造时读取 stategraph post init。
+### `0x23013211` Hook Execution
 
-`entityscript.lua` 的 `AddComponent` 在构造组件后读取 `ModManager:GetPostInitFns("ComponentPostInit", name)`。
+`mainfunctions.lua` retrieves prefab post-init functions during prefab load and creation.
 
-随后它按顺序调用这些 component post init。
+`stategraph.lua` retrieves StateGraph post-init functions during StateGraph construction.
 
-### `0x23013311` 调试执行阶段 / `DebugSpawn` / 边界条件
+After `entityscript.lua` constructs a component, `AddComponent` retrieves its post-init functions.
 
-`c_spawn` 和很多 `d_*` 命令会修改世界。
+It calls `ModManager:GetPostInitFns("ComponentPostInit", name)` and runs the results in order.
 
-这些入口是开发和控制台工具，不应作为普通玩家动作链路的证据。
+### `0x23013311` Debug Execution
 
-`consolecommands.lua` 会在普通启动阶段加载。
+`c_spawn` and many `d_*` commands mutate the world and should not be used as evidence for player action paths.
 
-`debugcommands.lua` 和 `debugkeys.lua` 只在 `CHEATS_ENABLED` 下加载。
+`consolecommands.lua` loads during normal startup.
 
-## `0x23014111` 结构细节 / `env.postinitfns` / 分桶表 / 需要核对的字段
+`debugcommands.lua` and `debugkeys.lua` load only when `CHEATS_ENABLED` is true.
 
-`PrefabPostInit`、`PrefabPostInitAny`、`ComponentPostInit` 和 `StategraphPostInit` 都是独立分桶。
+## `0x23014111` `env.postinitfns`
 
-worldgen、game、sim、shader、recipe、level、task set、task 和 room 也有独立 post-init 分桶。
+`PrefabPostInit`, `PrefabPostInitAny`, `ComponentPostInit`, and `StategraphPostInit` use separate buckets.
 
-指定名称的 post init 使用二级表保存。
+World-generation, game, simulation, shader, recipe, level, task-set, task, and room hooks also have separate buckets.
 
-any 类型 post init 使用数组保存。
+Named hooks use nested tables, while Any hooks use arrays.
 
-## `0x23014211` 结构细节 / `KnownModIndex` / 全局对象 / 需要核对的字段
+## `0x23014211` `KnownModIndex`
 
-`KnownModIndex = ModIndex()` 位于 `modindex.lua` 文件末尾。
+`KnownModIndex = ModIndex()` appears at the end of `modindex.lua`.
 
-`mods.lua` 通过它读取 mod info、启用状态、配置和兼容性。
+`mods.lua` uses it for mod metadata, enablement, configuration, and compatibility.
 
-## `0x23014311` 结构细节 / Debug Helper / Introspection 与已知错误 / 需要核对的字段
+## `0x23014311` Debug Helpers and Known Errors
 
-`debughelpers.lua` 主要包装 `debug.getinfo`、upvalue 和实体 debug string。
+`debughelpers.lua` wraps `debug.getinfo`, upvalues, and entity debug strings.
 
-`debugtools.lua` 提供 `debugstack`、`debugstack_oneline`、`dumptable` 和 `instrument_userdata`。
+`debugtools.lua` supplies `debugstack`, `debugstack_oneline`, `dumptable`, and `instrument_userdata`.
 
-`knownerrors.lua` 提供 `ERRORS` 表和 `known_assert`，用于把固定错误 key 转换成已知错误信息。
+`knownerrors.lua` supplies `ERRORS` and `known_assert` for stable error keys and messages.
 
-真正大量改变世界的调试入口集中在 `consolecommands.lua` 和 `debugcommands.lua`。
+World-mutating entries are concentrated in `consolecommands.lua` and `debugcommands.lua`.
 
-## `0x23015100` 阅读与验证路线 / 从哪里开始读源码
+## `0x23015100` Verification
 
 ~~~bash
-rg -n "KnownModIndex:Load|InsertPostInitFunctions|GetPostInitFns" \
+rg -n \
+  -e "KnownModIndex:Load" \
+  -e "BeginStartupSequence" \
+  -e "ModSafeStartup" \
+  -e "LoadMods" \
+  -e "CreateEnvironment" \
+  -e "InsertPostInitFunctions" \
+  -e "GetPostInitFns" \
   scripts/main.lua \
   scripts/mods.lua \
   scripts/modutil.lua \
@@ -153,10 +155,10 @@ rg -n "AddPrefabPostInit|AddComponentPostInit|AddStategraphPostInit|c_spawn|Debu
   scripts/debughelpers.lua
 ~~~
 
-### `0x23015111` 推荐顺序 / 最小闭环
+### `0x23015111` Next Read
 
-先读 `main.lua` 中 `KnownModIndex:Load`。
+Read `KnownModIndex:Load` in `main.lua`.
 
-再读 `mods.lua` 如何创建 mod env。
+Follow mod-environment creation in `mods.lua`, then inspect Add APIs in `modutil.lua`.
 
-最后读 `modutil.lua` 的 Add 系列 API 和 `ModManager:GetPostInitFns` 的调用点。
+Finish at their `ModManager:GetPostInitFns` consumers.

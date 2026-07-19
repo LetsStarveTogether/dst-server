@@ -1,149 +1,149 @@
-# `0x61020000` 生物与 Boss
+# `0x61020000` Creatures and Bosses
 
-生物与 Boss 都是 prefab 装配出来的实体。
-差别主要在组件参数、Brain 复杂度、StateGraph、阶段事件和掉落逻辑。
+Creatures and bosses are both entities assembled by prefabs.
+Their differences come from component parameters, Brain complexity, StateGraphs, phase events, variants, and loot logic.
 
-## `0x61021000` 本页定位
+## `0x61021000` Purpose
 
-本页用 `rabbit.lua` 和 `deerclops.lua` 对比普通生物与 Boss。
-目标是建立一套可复用的源码检查模板。
+This guide compares `rabbit.lua` with `deerclops.lua` to establish a reusable source-reading pattern.
 
-### `0x61021100` 要回答的运行时问题
+### `0x61021100` Comparison
 
-普通生物如何组合移动、生命、掉落和 AI。
-Boss 如何在相同组件基础上增加目标选择、阶段、特殊攻击和变体。
+Ordinary creatures combine movement, health, loot, and AI.
+Bosses extend the same systems with targeting, phases, special attacks, and variants.
 
-#### `0x61021110` 源码阅读目标
+#### `0x61021110` Reading Model
 
-确认 prefab 是组件和事件的装配层。
-确认行为决策在 Brain，动画状态在 StateGraph，数值变化在组件。
+Treat the prefab as the assembly layer.
+Behaviour decisions belong to the Brain, animation states to the StateGraph, and mutable values to components.
 
-##### `0x61021111` 验证点
+##### `0x61021111` Samples
 
-`rabbit.lua` 使用 `rabbitbrain` 与 `SGrabbit`。
-`deerclops.lua` 使用 `deerclopsbrain` 与 `SGdeerclops`。
-两者都通过 `health`、`combat`、`lootdropper` 等组件把实体接入通用系统。
+`rabbit.lua` uses `rabbitbrain` and `SGrabbit`.
+`deerclops.lua` uses `deerclopsbrain` and `SGdeerclops`.
+Both connect to shared systems through components such as `health`, `combat`, and `lootdropper`.
 
-## `0x61022000` 源码锚点
+## `0x61022000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/prefabs/rabbit.lua` | `Prefab("rabbit", fn, ...)` | 普通生物装配样例 |
-| `scripts/prefabs/deerclops.lua` | `Prefab("deerclops", normalfn, ...)` | Boss 装配样例 |
-| `scripts/prefabs/critters.lua` | `MakeCritter` | 宠物类生物装配样例 |
-| `scripts/stategraphs/SGcritter_common.lua` | `SGCritterStates` | 宠物通用状态工厂 |
-| `scripts/stategraphs/SGcritter_eets.lua` | `StateGraph("SGcritter_eets", ...)` | Eets 专用宠物状态图 |
-| `scripts/components/combat.lua` | `Combat:SetRetargetFunction` | 目标选择与受击处理 |
-| `scripts/components/health.lua` | `Health:SetMaxHealth` | 生命上限、死亡事件 |
-| `scripts/brains/deerclopsbrain.lua` | `Brain` | Boss 行为树 |
-| `scripts/standardcomponents.lua` | `MakeCharacterPhysics` | 通用物理、可燃、可冻结 helper |
+| `scripts/prefabs/rabbit.lua` | `Prefab("rabbit", fn, ...)` | Ordinary creature example |
+| `scripts/prefabs/deerclops.lua` | `Prefab("deerclops", normalfn, ...)` | Boss and variant example |
+| `scripts/prefabs/critters.lua` | `MakeCritter` | Pet creature factory |
+| `scripts/stategraphs/SGcritter_common.lua` | `SGCritterStates` | Shared pet state factory |
+| `scripts/stategraphs/SGcritter_eets.lua` | `StateGraph("SGcritter_eets", ...)` | Eets-specific pet states |
+| `scripts/components/combat.lua` | `Combat:SetRetargetFunction` | Targeting and hit handling |
+| `scripts/components/health.lua` | `Health:SetMaxHealth` | Maximum health and death events |
+| `scripts/brains/deerclopsbrain.lua` | `Brain` | Boss behaviour tree |
+| `scripts/standardcomponents.lua` | `MakeCharacterPhysics` | Shared physics, burning, and freezing helpers |
 
-### `0x61022110` 主锚点 / `scripts/prefabs/rabbit.lua`
+### `0x61022110` `scripts/prefabs/rabbit.lua`
 
-`rabbit.lua` 先设置物理、tags、locomotor、StateGraph 和 Brain。
-随后添加 `eater`、`inventoryitem`、`health`、`lootdropper` 和可选 `combat`。
+The `rabbit` prefab configures physics, tags, `locomotor`, its StateGraph, and its Brain.
+It then adds `eater`, `inventoryitem`, `health`, `lootdropper`, and an optional `combat` component.
 
-#### `0x61022111` 搜索信号
+#### `0x61022111` Search Terms
 
-搜索 `SetStateGraph("SGrabbit")`、`SetBrain(brain)`、`SetMaxHealth`、`LootSetupFunction` 和
-`AddComponent("combat")`。
+Search for `SetStateGraph("SGrabbit")`, `SetBrain(brain)`, and `SetMaxHealth`.
+Also search for `LootSetupFunction` and `AddComponent("combat")`.
 
-### `0x61022120` 主锚点 / `scripts/prefabs/deerclops.lua`
+### `0x61022120` `scripts/prefabs/deerclops.lua`
 
-`deerclops.lua` 在基础组件外增加 retarget、keep target、sanity aura、timer、knownlocations、变体和阶段逻辑。
-普通形态与 mutated 形态分别设置生命、伤害、攻击距离和掉落表。
+The `deerclops` prefab adds retargeting, target retention, timers, variants, and phase logic.
+Normal and mutated forms use different health, damage, range, and loot settings.
 
-#### `0x61022121` 搜索信号
+#### `0x61022121` Search Terms
 
-搜索 `RetargetFn`、`KeepTargetFn`、`SetStateGraph("SGdeerclops")`、`SetBrain(brain)`、`normalfn` 和
-`mutatedfn`。
+Search for `RetargetFn`, `KeepTargetFn`, `SetStateGraph("SGdeerclops")`, `SetBrain(brain)`, `normalfn`, and `mutatedfn`.
 
-### `0x61022130` 主锚点 / `scripts/components/combat.lua`
+### `0x61022130` `scripts/components/combat.lua`
 
-生物是否能攻击、攻击谁、受击后是否掉目标，都要回到 `combat` 组件核对。
-Boss 常通过 prefab 设置 `SetRetargetFunction`、`SetKeepTargetFunction` 和 `SetRange`。
+Use `combat` to verify whether a creature can attack, which targets are valid, and when it drops a target.
+Boss prefabs commonly set `SetRetargetFunction`, `SetKeepTargetFunction`, and `SetRange`.
 
-#### `0x61022131` 搜索信号
+#### `0x61022131` Search Terms
 
-搜索 `SetRetargetFunction`、`SetKeepTargetFunction`、`CanTarget`、`SuggestTarget` 和 `GetAttacked`。
+Search for `SetRetargetFunction`, `SetKeepTargetFunction`, `CanTarget`, `SuggestTarget`, and `GetAttacked`.
 
-### `0x61022140` 主锚点 / `scripts/standardcomponents.lua`
+### `0x61022140` `scripts/standardcomponents.lua`
 
-很多 prefab 通过标准 helper 复用物理、可燃、可冻结和腐败逻辑。
-读到 `MakeCharacterPhysics`、`MakeMediumBurnableCharacter` 或 `MakeLargeFreezableCharacter` 时要跳到这里确认副作用。
+`standardcomponents.lua` reuses physics, burning, freezing, and perish behaviour through prefab helpers.
+Inspect this file when a prefab calls `MakeCharacterPhysics` or a related helper.
+Examples include `MakeMediumBurnableCharacter` and `MakeLargeFreezableCharacter`.
 
-#### `0x61022141` 搜索信号
+#### `0x61022141` Search Terms
 
-搜索 `MakeCharacterPhysics`、`MakeGiantCharacterPhysics`、`Make.*BurnableCharacter` 和
-`Make.*FreezableCharacter`。
+Search for `MakeCharacterPhysics` and `MakeGiantCharacterPhysics`.
+Also search for `Make.*BurnableCharacter` and `Make.*FreezableCharacter`.
 
-## `0x61023000` 运行流程
+## `0x61023000` Runtime Flow
 
 ~~~mermaid
 flowchart TD
-    A["creature prefab"]
-    A --> B["基础 tags 和 physics"]
+    A["Creature prefab"]
+    A --> B["Base tags and physics"]
     B --> C["locomotor"]
     C --> D["StateGraph"]
     C --> E["Brain"]
-    D --> F["动画事件和状态标签"]
-    E --> G["目标选择和行为节点"]
+    D --> F["Animation events and state tags"]
+    E --> G["Targets and behaviour nodes"]
     G --> H["combat"]
     H --> I["health"]
-    I --> J["death 与 lootdropper"]
+    I --> J["death and lootdropper"]
 ~~~
 
-### `0x61023110` 普通生物链路 / `rabbit` 的最小装配
+### `0x61023110` Ordinary Creature: Rabbit
 
-`rabbit` 的复杂度主要来自普通组件组合。
-它有 `locomotor`、`SGrabbit`、`rabbitbrain`、`eater`、`health`、`lootdropper` 和可选 `combat`。
+Rabbit behaviour comes mostly from combining standard components.
+The prefab uses `locomotor`, `SGrabbit`, `rabbitbrain`, `eater`, `health`, `lootdropper`, and optional `combat`.
 
-#### `0x61023111` 边界条件
+#### `0x61023111` Context Boundary
 
-不要默认所有普通生物都有 combat。
-`rabbit.lua` 中 `combat` 是在非 cave context 条件下添加。
+Do not assume every ordinary creature has `combat`.
+`rabbit.lua` adds it outside the Quagmire game mode.
 
-### `0x61023210` Boss 链路 / `deerclops` 的扩展点
+### `0x61023210` Boss: Deerclops
 
-`deerclops` 明确设置目标函数和保持目标函数。
-它把 `health`、`combat`、`lootdropper`、`knownlocations`、`timer` 与 Brain/SG 连接起来。
+Deerclops defines explicit retarget and keep-target functions.
+It connects `health`, `combat`, `lootdropper`, `knownlocations`, and `timer` to its Brain and StateGraph.
 
-#### `0x61023211` 验证点
+#### `0x61023211` Variant Check
 
-`normalfn` 设置 `TUNING.DEERCLOPS_HEALTH` 和 `TUNING.DEERCLOPS_DAMAGE`。
-mutated 版本设置 `TUNING.MUTATED_DEERCLOPS_HEALTH` 和 planar 相关组件。
+`normalfn` uses `TUNING.DEERCLOPS_HEALTH` and `TUNING.DEERCLOPS_DAMAGE`.
+The mutated form uses `TUNING.MUTATED_DEERCLOPS_HEALTH` and planar components.
 
-### `0x61023220` 宠物链路 / `critter_eets` 行为
+### `0x61023220` Pet: Critter Eets
 
-`MakeCritter` 始终加载 emotes 和 traits 资源，并始终添加 `sleeper` 和 `crittertraits`。
-`critter_eets` 走通用宠物链路，不使用 `no_pet`、`no_emotes`、`no_traits`、`no_sleep` 或 `no_crafty_emote` 特判退出。
-`SGcritter_common.lua` 的 `oneat` 会把 food 传入 `eat` 状态，`AddEat` 可以用 food 决定后续 queue state。
-`SGcritter_eets.lua` 包含 pepper、onion、mushroom、cute、combat、hungry、nuzzle、pet 和 sleep/wake 相关表现。
+`MakeCritter` now always loads basic, emote, and trait assets and adds `sleeper` and `crittertraits`.
+`critter_eets` uses `skin_only`, `favoritefood`, and `allow_platform_hopping` while following that shared path.
+`SGcritter_common.lua` forwards `oneat` event data into the shared `eat` state.
+`SGcritter_eets.lua` uses `QueueStateAfterEat` to select pepper, onion, or mushroom emotes from the food prefab.
+It composes the remaining trait, combat, hungry, nuzzle, pet, sleep, and wake states from shared helpers.
 
-## `0x61024110` 结构细节 / Prefab 是装配层 / 组件、Brain 与 SG 的分工
+## `0x61024110` Assembly Responsibilities
 
-prefab 负责把组件挂到实体上，并设置初始参数。
-Brain 负责持续选择行为。
-StateGraph 负责状态、动画窗口和事件反应。
-组件负责真实状态变化。
+The prefab attaches components and sets initial parameters.
+The Brain continuously selects behaviour.
+The StateGraph owns states, animation windows, and event reactions.
+Components own mutable gameplay state.
 
-### `0x61024111` 需要核对的字段
+### `0x61024111` Fields to Check
 
-读生物时固定检查 `SetStateGraph`、`SetBrain`、`SetMaxHealth`、`SetDefaultDamage`、`SetRange`、
-`SetAttackPeriod` 和 `SetLootSetupFn`。
-如果 prefab 调用标准 helper，还要跳到 `standardcomponents.lua` 核对物理、燃烧、冻结和腐败副作用。
+Check `SetStateGraph`, `SetBrain`, `SetMaxHealth`, and `SetDefaultDamage`.
+Then check `SetRange`, `SetAttackPeriod`, and `SetLootSetupFn`.
+When the prefab calls a standard helper, inspect its physics, burning, freezing, and perish side effects.
 
-## `0x61024210` 结构细节 / 变体与阶段 / Boss 变体不是简单换皮
+## `0x61024210` Boss Variants
 
-`deerclops.lua` 同时返回普通和 mutated prefab。
-mutated 形态不仅改资源，还改生命、伤害、攻击范围、掉落设置和 planar 组件。
+`deerclops.lua` returns both normal and mutated prefabs.
+The mutated form changes more than assets: it also changes health, damage, range, loot, and planar components.
 
-### `0x61024211` 边界条件
+### `0x61024211` Variant Boundary
 
-只读普通 prefab 会漏掉变体调参。
-检查 Boss 时要搜索同一文件内所有 `Prefab(...)` 返回项。
+Search every `Prefab(...)` returned from a boss file.
+Reading only the normal prefab misses variant tuning.
 
-## `0x61025100` 阅读与验证路线 / 从哪里开始读源码
+## `0x61025100` Verification
 
 ~~~bash
 rg -n "SetStateGraph|SetBrain|SetMaxHealth|lootdropper|AddComponent\\(\"combat\"\\)" \
@@ -165,12 +165,12 @@ rg -n "MakeCritter|critter_eets|SGCritterStates\\.AddEat|QueueStateAfterEat|OnTr
   scripts/stategraphs/SGcritter_eets.lua
 ~~~
 
-### `0x61025110` 推荐顺序
+### `0x61025110` Reading Order
 
-先用 `rabbit.lua` 建立普通装配模板。
-再读 `deerclops.lua`，把目标函数、阶段逻辑和变体逐项标出。
+Use `rabbit.lua` to learn the ordinary assembly pattern.
+Then inspect `deerclops.lua` and mark its targeting functions, phase logic, and variants.
 
-#### `0x61025111` 最小闭环
+#### `0x61025111` Minimal Trace
 
-从 `deerclops.lua` 的 `RetargetFn` 开始。
-追到 `combat:SetTarget`、`combat:DoAttack`、目标 `combat:GetAttacked`、`health:DoDelta` 和掉落逻辑。
+Start at `RetargetFn` in `deerclops.lua`.
+Follow `combat:SetTarget`, `combat:DoAttack`, the target's `combat:GetAttacked`, `health:DoDelta`, and the loot path.

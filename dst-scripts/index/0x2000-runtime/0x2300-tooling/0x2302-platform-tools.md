@@ -1,141 +1,170 @@
-# `0x23020000` 平台工具
+# `0x23020000` Platform Tools
 
-平台工具页收束 `tools/` 脚本、用户命令和更新循环的工具性入口。
+This page covers the scripts under `tools/`, user commands, metrics, platform patches, and update-loop utility entries.
 
-这里的 `update.lua` 是帧更新循环，不是游戏下载更新器。
+`update.lua` is the frame-update loop, not a game updater.
 
-## `0x23021111` 本页定位 / 要回答的运行时问题 / 哪些 Lua 文件服务工具链 / 验证点
+## `0x23021111` Tool Scripts
 
-`scripts/tools/` 只包含 `generate_worldgenoverride.lua` 和 `getmissingstrings.lua`。
+`scripts/tools/` contains only `generate_worldgenoverride.lua` and `getmissingstrings.lua`.
 
-前者通过 `require 'tools/generate_worldgenoverride'` 在控制台执行，并直接写出 `worldgenoverride.lua`。
+The first runs through `require 'tools/generate_worldgenoverride'` and writes `worldgenoverride.lua`.
 
-后者执行 `TestStrings()`，生成缺失字符串报告。
+The second calls `TestStrings()` to produce a missing-string report.
 
-## `0x23021211` 本页定位 / 哪些入口仍会进入运行时 / 用户命令和更新循环 / 验证点
+## `0x23021211` Runtime Entries
 
-`usercommands.lua` 和 `builtinusercommands.lua` 是玩家或管理员命令系统。
+`usercommands.lua` and `builtinusercommands.lua` implement player and administrator commands.
 
-`update.lua` 是每帧循环入口，负责 component、stategraph、brain、frontend 等更新。
+`update.lua` drives component, StateGraph, Brain, frontend, and related per-frame work.
 
-## `0x23022000` 源码锚点
+## `0x23022000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/tools/generate_worldgenoverride.lua` | top level script | 生成 `worldgenoverride.lua` |
-| `scripts/tools/getmissingstrings.lua` | `TestStrings` | 检查角色和 prefab 缺失字符串 |
-| `scripts/usercommands.lua` | `AddUserCommand` | 注册用户命令 |
-| `scripts/usercommands.lua` | `RunUserCommand` | 执行解析后的用户命令 |
-| `scripts/builtinusercommands.lua` | `AddUserCommand` | 注册内置 `help`、`kick`、`rollback` 等命令 |
-| `scripts/components/worldvoter.lua` | `OnStartVote` | 世界投票启动、权限验证和失败日志 |
-| `scripts/update.lua` | `WallUpdate` | 墙钟更新、输入和前端更新 |
-| `scripts/update.lua` | `Update` | server 未暂停时的模拟更新 |
-| `scripts/update.lua` | `PostUpdate` | emitter 和 update looper 后处理 |
-| `scripts/stats.lua` | `GetClientMetricsData` | 给 C++ 和 Lua 统计系统提供客户端指标 |
-| `scripts/stats.lua` | `BuildContextTable` | 构造 tracking context |
-| `scripts/platformpostload.lua` | top level script | 平台后置补丁 |
+| `scripts/tools/generate_worldgenoverride.lua` | top-level script | Generate `worldgenoverride.lua` |
+| `scripts/tools/getmissingstrings.lua` | `TestStrings` | Write `MISSINGSTRINGS.lua` |
+| `scripts/usercommands.lua` | `AddUserCommand` | Register a user command |
+| `scripts/usercommands.lua` | `RunUserCommand` | Execute a named command with prepared parameters |
+| `scripts/builtinusercommands.lua` | `AddUserCommand` | Register `help`, `kick`, and `rollback` |
+| `scripts/components/worldvoter.lua` | `OnStartVote` | Start a vote, check permissions, and log failures |
+| `scripts/update.lua` | `WallUpdate` | Update wall-clock systems, input, and the frontend |
+| `scripts/update.lua` | `Update` | Update simulation while the server is unpaused |
+| `scripts/update.lua` | `PostUpdate` | Update emitters and post-update loopers |
+| `scripts/stats.lua` | `GetClientMetricsData` | Supply client metrics to C++ and Lua callers |
+| `scripts/stats.lua` | `BuildContextTable` | Build the tracking context |
+| `scripts/platformpostload.lua` | top-level script | Apply platform-specific post-load changes |
 
-### `0x23022111` 工具脚本锚点 / `generate_worldgenoverride.lua` / 搜索信号
+### `0x23022111` Generated Override Anchor
 
-这个文件没有名为 `generate` 的函数。
+`generate_worldgenoverride.lua` has no `generate` function.
 
-它在 top level 读取 `map/customize` 和 `map/levels`，拼接文本，最后用 `io.open` 写文件。
+Its top-level code reads `map/customize` and `map/levels`, builds text, and writes the result with `io.open`.
 
-### `0x23022211` 用户命令锚点 / `usercommands.lua` / 搜索信号
+### `0x23022211` User Command Anchor
 
-搜索 `AddUserCommand`、`RunUserCommand` 和 `RunTextUserCommand`。
+Find `AddUserCommand`, `RunUserCommand`, and `RunTextUserCommand`.
 
-命令会经过权限、投票、确认和 local/server 执行类型判断。
+Trace permission, vote, confirmation, and local-versus-server checks from those entries.
 
-### `0x23022311` 更新循环锚点 / `update.lua` / 搜索信号
+### `0x23022311` Update Anchor
 
-搜索 `WallUpdate`、`StaticUpdate`、`Update`、`LongUpdate` 和 `PostUpdate`。
+Find `WallUpdate`, `StaticUpdate`, `Update`, `LongUpdate`, and `PostUpdate`.
 
-这些函数属于运行时循环，应与下载更新或补丁系统区分。
+These are runtime-loop functions, not download or patch operations.
 
-## `0x23023000` 运行流程
+## `0x23023000` Tool and Command Flow
 
 ~~~mermaid
 flowchart TD
     A["tool script required from console"]
-    A --> B["top level Lua code runs"]
-    B --> C["writes generated file or report"]
+    A --> B["top-level Lua code runs"]
+    B --> C["write worldgenoverride.lua or MISSINGSTRINGS.lua"]
     D["user text command"]
     D --> E["RunTextUserCommand"]
-    E --> F["RunUserCommand"]
-    F --> G["localfn / serverfn / vote"]
+    E --> F["parseinput"]
+    F --> G["runcommand"]
+    H["named command and params"] --> I["RunUserCommand"]
+    I --> G
+    G --> J["localfn / serverfn / vote"]
 ~~~
 
-### `0x23023111` 工具脚本阶段 / `tools/` / 边界条件
+### `0x23023111` Tool Execution
 
-`generate_worldgenoverride.lua` 依赖当前 Lua 环境中的地图配置表。
+`generate_worldgenoverride.lua` reads map-configuration tables from the active Lua environment.
 
-它直接写当前工作目录下的 `worldgenoverride.lua`。
+It writes `worldgenoverride.lua` to the current working directory.
 
-`getmissingstrings.lua` 会加载 prefab 与角色 speech 数据，最后调用 `TestStrings()`。
+`getmissingstrings.lua` calls `TestStrings()` at top level.
 
-### `0x23023211` 用户命令阶段 / `builtinusercommands.lua` / 边界条件
+That function loads prefab and character speech data and writes `MISSINGSTRINGS.lua`.
 
-内置命令通过 `AddUserCommand` 注册。
+### `0x23023211` User Command Execution
 
-命令数据可包含 `localfn`、`serverfn`、权限函数、投票配置和参数定义。
+Built-in commands register through `AddUserCommand`.
 
-### `0x23023311` 更新阶段 / `update.lua` / 边界条件
+A command definition can include `localfn`, `serverfn`, permission checks, vote settings, and argument definitions.
 
-`WallUpdate` 即使 server 暂停也会处理部分 UI、音频和输入更新。
+`RunTextUserCommand` parses text.
 
-`Update` 在 server 暂停时断言不应被调用。
+`RunUserCommand` accepts a command name and parameter table.
 
-`SGManager` 和 `BrainManager` 的更新在 `Update` 中分频执行。
+Both call the local `runcommand` dispatcher.
 
-## `0x23024111` 结构细节 / `tools/` 清单 / 工具文件 / 需要核对的字段
+Commands with `COMMAND_RESULT.ALLOW` queue their permitted functions in `cmdqueue`.
 
-`tools/` 不是大型工具目录。
+`WallUpdate` drains it through `HandleUserCmdQueue`, while vote commands call `TheNet:StartVote`.
 
-`tools/` 下有 2 个 tracked Lua 文件。
+### `0x23023311` Frame Updates
 
-添加工具时应同步更新本页和 reference 清单。
+`WallUpdate` continues some UI, audio, and input work even while the server is paused.
 
-## `0x23024211` 结构细节 / 用户命令表 / 命令数据 / 需要核对的字段
+`Update` asserts that the server is not paused.
 
-`AddUserCommand(name, data)` 把命令登记到用户命令系统。
+It updates `SGManager` and `BrainManager` once for every unseen simulation tick.
 
-`AddModUserCommand(mod, name, data)` 给 mod 命令加命名空间。
+## `0x23024111` `tools/` Inventory
 
-`RemoveUserCommand(name)` 可移除命令。
+`scripts/tools/` contains two tracked Lua files, both implemented as top-level scripts.
 
-## `0x23024311` 结构细节 / 更新注册表 / 静态组件更新 / 需要核对的字段
+Update this page and the reference inventory if that directory changes.
 
-`RegisterStaticComponentUpdate` 和 `RegisterStaticComponentLongUpdate` 把类级更新函数登记到表里。
+## `0x23024211` User Command Table
 
-`Update` 和 `LongUpdate` 会遍历这些表。
+`AddUserCommand(name, data)` registers a command.
 
-## `0x23024411` 结构细节 / 统计支持 / `stats.lua` / 需要核对的字段
+`AddModUserCommand(mod, name, data)` namespaces a mod command, and `RemoveUserCommand(name)` removes one.
 
-`GetClientMetricsData` 是给 C++ 调用的全局函数。
+## `0x23024311` Update Registries
 
-`BuildContextTable` 会读取 `TheNet`、`TheWorld`、`KnownModIndex` 和 `Profile` 生成统计上下文。
+`RegisterStaticComponentUpdate` and `RegisterStaticComponentLongUpdate` register class-level functions.
 
-`SendTrackingStats` 是 `stats.lua` 内部局部函数，不作为外部调用锚点。
+`Update` and `LongUpdate` traverse those registries.
 
-## `0x23024511` 结构细节 / 平台后置补丁 / `platformpostload.lua` / 需要核对的字段
+## `0x23024411` Metrics
 
-`gamelogic.lua` 在加载内置用户命令后 require `platformpostload`。
+`GetClientMetricsData` is a global function available to C++.
 
-该文件按平台注入或移除用户命令，并调整部分投票规则。
+`BuildContextTable` reads `TheNet` and `TheWorld`.
 
-## `0x23024611` 结构细节 / 世界投票 / `worldvoter.lua` / 验证点
+It obtains local profile identifiers through `GetClientMetricsData`.
 
-用户命令可以进入投票路径，而不是立刻执行 `serverfn`。
+`BuildStartupContextTable` adds platform and branch data and checks `KnownModIndex` for enabled mods.
 
-`worldvoter.lua` 的 `OnStartVote` 会调用 `UserCommands.CanUserStartVote`。
+`SendTrackingStats` is local to `stats.lua` and is not an external call anchor.
 
-`worldvoter.lua` 的失败日志把 `starteruserid` 通过 `tostring` 输出，避免 nil 或非字符串导致日志路径再出错。
+## `0x23024511` Platform Post-Load
 
-## `0x23025100` 阅读与验证路线 / 从哪里开始读源码
+After loading built-in user commands, `gamelogic.lua` requires `platformpostload`.
+
+On `WIN32_RAIL`, top-level `platformpostload.lua` localizes existing command aliases.
+
+It also removes the `bug` command and replaces the `kick` vote rule.
+
+## `0x23024611` World Votes
+
+A user command can enter a vote instead of immediately running `serverfn`.
+
+`worldvoter.lua` calls `UserCommands.CanUserStartVote` from `OnStartVote`.
+
+Its failure log formats `starteruserid` with `tostring`, so a nil or non-string value cannot break the logging path.
+
+## `0x23025100` Verification
 
 ~~~bash
-rg -n "AddUserCommand|RunUserCommand|RunTextUserCommand|TestStrings|io.open|platformpostload" \
+rg -n \
+  -e "AddUserCommand" \
+  -e "RunUserCommand" \
+  -e "RunTextUserCommand" \
+  -e "parseinput" \
+  -e "runcommand" \
+  -e "HandleUserCmdQueue" \
+  -e "StartVote" \
+  -e "TestStrings" \
+  -e "MISSINGSTRINGS" \
+  -e "io.open" \
+  -e "platformpostload" \
+  -e "RailUserCommand" \
   scripts/tools \
   scripts/usercommands.lua \
   scripts/builtinusercommands.lua \
@@ -144,7 +173,15 @@ rg -n "AddUserCommand|RunUserCommand|RunTextUserCommand|TestStrings|io.open|plat
   scripts/stats.lua \
   scripts/gamelogic.lua \
   scripts/platformpostload.lua
-rg -n "WallUpdate|StaticUpdate|Update|LongUpdate|PostUpdate|GetClientMetricsData|BuildContextTable" \
+rg -n \
+  -e "WallUpdate" \
+  -e "StaticUpdate" \
+  -e "Update" \
+  -e "LongUpdate" \
+  -e "PostUpdate" \
+  -e "GetClientMetricsData" \
+  -e "BuildContextTable" \
+  -e "BuildStartupContextTable" \
   scripts/tools \
   scripts/usercommands.lua \
   scripts/builtinusercommands.lua \
@@ -152,10 +189,8 @@ rg -n "WallUpdate|StaticUpdate|Update|LongUpdate|PostUpdate|GetClientMetricsData
   scripts/stats.lua
 ~~~
 
-### `0x23025111` 推荐顺序 / 最小闭环
+### `0x23025111` Next Read
 
-先确认 `tools/` 下两个文件都是 top level 脚本式工具。
+Confirm that both files under `tools/` are top-level scripts.
 
-再读 `builtinusercommands.lua` 的一个内置命令。
-
-最后读 `update.lua`，把 `Update` 理解为帧循环而不是版本更新。
+Inspect one command in `builtinusercommands.lua`, then read `update.lua` as a frame loop.

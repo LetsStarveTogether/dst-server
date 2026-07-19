@@ -1,150 +1,154 @@
-# `0x61010000` 角色与技能树
+# `0x61010000` Characters and Skill Trees
 
-角色不是单个 prefab 的孤立定义。
-运行时要从 `prefabs/player_common.lua` 的通用装配读起，再回到具体角色文件和技能树数据。
+A player character combines shared code, character hooks, skill data, and controller components.
+Start with `prefabs/player_common.lua`, then inspect the character prefab and its skill tree.
 
-## `0x61011000` 本页定位
+## `0x61011000` Purpose
 
-本页解释玩家角色如何由通用骨架、角色差异、技能树和玩家控制组件合成。
-重点是区分 pristine 网络实体、客户端预测、mastersim 权威组件和技能激活回调。
+This guide shows how the player skeleton, character hooks, skill trees, and controls form one runtime entity.
+It separates pristine network setup, client prediction, master-simulation components, and skill activation callbacks.
 
-### `0x61011100` 要回答的运行时问题
+### `0x61011100` Assembly Question
 
-一个角色文件为什么通常只写 `common_postinit` 和 `master_postinit`。
-技能树为什么先是数据，再通过 `skilltreeupdater` 落到组件或事件。
+Character files usually specialize `common_postinit` and `master_postinit` instead of rebuilding the player.
+Skill data reaches components and events through `skilltreeupdater`.
 
-#### `0x61011110` 源码阅读目标
+#### `0x61011110` Reading Path
 
-读懂 `MakePlayerCharacter` 返回的 prefab 工厂。
-确认 `wilson.lua` 只传入角色差异，而不是重新实现玩家实体。
+Start with the prefab factory returned by `MakePlayerCharacter`.
+Then confirm that `wilson.lua` supplies character differences.
 
-##### `0x61011111` 验证点
+##### `0x61011111` Authority Facts
 
-`player_common.lua` 在 pristine 阶段加网络变量和优化标签。
-`TheWorld.ismastersim` 之后才添加权威 `combat`、`health`、`hunger`、`sanity` 和 `eater`。
-`skilltree_defs.lua` 通过 `BuildAllData` 动态加载 `prefabs/skilltree_*.lua`。
+`player_common.lua` adds network variables and optimization tags during pristine setup.
+The authoritative `combat`, `health`, `hunger`, and `sanity` components exist only when `TheWorld.ismastersim` is true.
+The master branch also adds `eater` when the game mode permits eating.
+`skilltree_defs.lua` uses `BuildAllData` to load `prefabs/skilltree_*.lua` dynamically.
 
-## `0x61012000` 源码锚点
+## `0x61012000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/prefabs/player_common.lua` | `MakePlayerCharacter` | 生成玩家 prefab 工厂 |
-| `scripts/prefabs/wilson.lua` | `MakePlayerCharacter("wilson", ...)` | 角色差异样例 |
-| `scripts/prefabs/skilltree_defs.lua` | `BuildAllData` | 汇总角色技能树定义 |
-| `scripts/components/skilltreeupdater.lua` | `SkillTreeUpdater:ActivateSkill` | 应用技能激活和网络同步 |
-| `scripts/components/playercontroller.lua` | `PlayerController:AttachClassified` | 玩家控制与 classified 数据连接 |
+| `scripts/prefabs/player_common.lua` | `MakePlayerCharacter` | Builds the player prefab factory |
+| `scripts/prefabs/wilson.lua` | `MakePlayerCharacter("wilson", ...)` | Shows character-specific hooks |
+| `scripts/prefabs/skilltree_defs.lua` | `BuildAllData` | Collects character skill definitions |
+| `scripts/skilltreedata.lua` | `SkillTreeData:ActivateSkill` / `ValidateCharacterData` | Stores and validates skill selections |
+| `scripts/components/skilltreeupdater.lua` | `SkillTreeUpdater:ActivateSkill` | Applies skills and synchronizes them |
+| `scripts/networkclientrpc.lua` | `SetSkillActivatedState` | Resolves skill RPC IDs |
 
-### `0x61012110` 主锚点 / `scripts/prefabs/player_common.lua`
+### `0x61012110` `scripts/prefabs/player_common.lua`
 
-这里是玩家实体的真实主体。
-`fn` 先创建网络实体，再在非 mastersim 直接返回客户端实体。
-mastersim 分支继续生成 `player_classified`，添加权威组件，并设置 `SGwilson`。
+This file contains the player entity's shared implementation.
+`fn` creates the network entity and returns early on non-master simulations.
+The master branch creates `player_classified`, adds authoritative components, and assigns `SGwilson`.
 
-#### `0x61012111` 搜索信号
+#### `0x61012111` Search Terms
 
-搜索 `MakePlayerCharacter`、`entity:SetPristine`、`TheWorld.ismastersim`、`player_classified` 和
-`SetStateGraph("SGwilson")`。
+Search for `MakePlayerCharacter`, `entity:SetPristine`, and `TheWorld.ismastersim`.
+Also search for `player_classified` and `SetStateGraph("SGwilson")`.
 
-### `0x61012120` 主锚点 / `scripts/prefabs/wilson.lua`
+### `0x61012120` `scripts/prefabs/wilson.lua`
 
-这个文件展示角色差异的标准形状。
-`common_postinit` 负责 tags、reticule、客户端可见行为。
-`master_postinit` 负责 starting inventory、beard、foodaffinity 和服务端事件。
+This file shows the standard shape of character-specific behaviour.
+`common_postinit` adds tags, a `reticule`, and client-visible behaviour.
+`master_postinit` adds starting inventory, `beard` behaviour, food affinity, and server events.
 
-#### `0x61012121` 搜索信号
+#### `0x61012121` Search Terms
 
-搜索 `common_postinit`、`master_postinit`、`skilltreeupdater:IsActivated` 和
-`MakePlayerCharacter("wilson"`。
+Search for `common_postinit`, `master_postinit`, `skilltreeupdater:IsActivated`, and `MakePlayerCharacter("wilson"`.
 
-### `0x61012130` 主锚点 / `scripts/prefabs/skilltree_defs.lua`
+### `0x61012130` `scripts/prefabs/skilltree_defs.lua`
 
-`BuildAllData` 遍历 `SKILLTREE_CHARACTERS`。
-它按角色名拼出 `require("prefabs/skilltree_" .. character)`，再写入 `SKILLTREE_DEFS`、`SKILLTREE_ORDERS`
-和 `CUSTOM_FUNCTIONS`。
+`BuildAllData` iterates over `SKILLTREE_CHARACTERS`.
+For each character, it calls `require("prefabs/skilltree_" .. character)`.
+It then fills `SKILLTREE_DEFS`, `SKILLTREE_ORDERS`, and `CUSTOM_FUNCTIONS`.
 
-#### `0x61012131` 搜索信号
+#### `0x61012131` Search Terms
 
-搜索 `SKILLTREE_CHARACTERS`、`BuildAllData`、`CreateSkillTreeFor` 和 `DEBUG_REBUILD`。
+Search for `SKILLTREE_CHARACTERS`, `BuildAllData`, `CreateSkillTreeFor`, and `DEBUG_REBUILD`.
 
-### `0x61012140` 主锚点 / `scripts/components/skilltreeupdater.lua`
+### `0x61012140` `scripts/components/skilltreeupdater.lua`
 
-`SkillTreeUpdater` 是技能数据进入角色运行时的组件。
-`ActivateSkill` 会区分 client、server 和 RPC 来源，然后调用 `ActivateSkill_Server` 中定义的 `onactivate`。
+`SkillTreeUpdater` delegates selection changes to `SkillTreeData`.
+After validation succeeds, `ActivateSkill` selects the client, server, or RPC branch.
+`ActivateSkill_Server` then invokes `onactivate`.
 
-#### `0x61012141` 搜索信号
+#### `0x61012141` Search Terms
 
-搜索 `ActivateSkill`、`ActivateSkill_Server`、`DeactivateSkill_Server`、`OnSave` 和 `SendFromSkillTreeBlob`。
+Search for `ActivateSkill`, `ValidateCharacterData`, `SetSkillActivatedState`, `OnSave`, and `SendFromSkillTreeBlob`.
 
-## `0x61013000` 运行流程
+## `0x61013000` Runtime Flow
 
 ~~~mermaid
 flowchart TD
-    A["角色 prefab 文件"]
+    A["Character prefab"]
     A --> B["require prefabs/player_common"]
     B --> C["MakePlayerCharacter(name, prefabs, assets, hooks)"]
-    C --> D["CreateEntity 和 pristine 网络状态"]
-    D --> E{"TheWorld.ismastersim"}
-    E -->|false| F["客户端实体与 playercontroller"]
-    E -->|true| G["player_classified 和权威组件"]
-    G --> H["common_postinit 与 master_postinit"]
-    H --> I["skilltreeupdater 应用技能"]
-    I --> J["SGwilson 和玩家组件消费结果"]
+    C --> D["CreateEntity and shared network state"]
+    D --> E["common_postinit"]
+    E --> F["entity:SetPristine"]
+    F --> G{"TheWorld.ismastersim"}
+    G -->|false| H["Client entity; local owner later adds playercontroller"]
+    G -->|true| I["player_classified and authoritative components"]
+    I --> J["master_postinit"]
+    J --> K["skilltreeupdater applies skills"]
+    K --> L["SGwilson and player components consume results"]
 ~~~
 
-### `0x61013110` 通用装配阶段 / Pristine 前后的职责
+### `0x61013110` Shared Assembly
 
-pristine 前后要分开读。
-pristine 前设置网络实体、基础 tags、net vars 和客户端可见函数。
-pristine 后的 mastersim 分支才添加会改变世界状态的组件。
+Before pristine setup, the factory configures networking, base tags, net variables, and client-visible functions.
+Only the post-pristine master branch adds components that can change world state.
 
-#### `0x61013111` 边界条件
+#### `0x61013111` Authority Boundary
 
-不要把客户端预测组件当成权威状态。
-例如 `playercontroller` 读写 `player_classified`，但生命、饥饿和战斗仍以 server 组件为准。
+Do not treat predicted client components as authoritative state.
+`playercontroller` exchanges data through `player_classified`, but server components own health, hunger, and combat.
 
-### `0x61013210` 角色差异阶段 / Common 与 Master Hook
+### `0x61013210` Character Hooks
 
-`common_postinit` 适合 tags、reticule、网络可见动作提示。
-`master_postinit` 适合 inventory、beard、listener、食物亲和和组件参数。
+Use `common_postinit` for tags, reticules, and network-visible action hints.
+Use `master_postinit` for inventory, beards, listeners, food affinity, and component parameters.
 
-#### `0x61013211` 验证点
+#### `0x61013211` Check
 
-在 `wilson.lua` 中能看到 `reticule` 出现在 common hook。
-`beard` 和 `foodaffinity` 出现在 master hook。
+In `wilson.lua`, the reticule is configured in the common hook.
+The beard and `foodaffinity` are configured in the master hook.
 
-### `0x61013310` 技能应用阶段 / 数据到组件
+### `0x61013310` Skill Application
 
-`skilltree_defs.lua` 只汇总技能数据。
-真正激活由 `skilltreeupdater.lua` 处理，并且需要考虑 RPC 与存档恢复。
+`skilltree_defs.lua` collects skill definitions.
+`skilltreedata.lua` validates and stores selections.
+`skilltreeupdater.lua` runs callbacks, RPC synchronization, and save restoration.
 
-#### `0x61013311` 边界条件
+#### `0x61013311` Consumption Boundary
 
-不要只读 `skilltree_wilson.lua`。
-必须回到 `skilltreeupdater:IsActivated` 的调用点，确认技能是否在组件、动作或 prefab hook 中被消费。
+Do not stop at `skilltree_wilson.lua`.
+Find calls to `skilltreeupdater:IsActivated` to see whether a component, action, or prefab hook consumes the skill.
 
-## `0x61014110` 结构细节 / 玩家实体的核心组件 / `player_common.lua` 中的权威组件簇
+## `0x61014110` Authoritative Player Components
 
-mastersim 分支添加 `locomotor`、`combat`、`inventory`、`health`、`hunger`、`sanity`、`builder` 和
-`eater`。
-这些组件构成玩家在世界中的基础能力。
+The master branch adds `locomotor`, `combat`, `inventory`, `health`, `hunger`, `sanity`, `builder`, and `eater`.
+Together they provide the player's basic world capabilities.
 
-### `0x61014111` 需要核对的字段
+### `0x61014111` Fields to Check
 
-`locomotor` 必须在 `SetStateGraph("SGwilson")` 之前构造。
-`combat` 设置 `TUNING.UNARMED_DAMAGE`、`TUNING.WILSON_ATTACK_PERIOD` 和默认攻击距离。
-`hunger` 设置最大值、消耗速率和饥饿伤害速率。
+`locomotor` must exist before `SetStateGraph("SGwilson")`.
+`combat` uses `TUNING.UNARMED_DAMAGE`, `TUNING.WILSON_ATTACK_PERIOD`, and the default attack range.
+`hunger` sets its maximum, depletion rate, and starvation damage rate.
 
-## `0x61014210` 结构细节 / 技能树的运行边界 / `skilltreeupdater` 的同步语义
+## `0x61014210` Skill Synchronization
 
-`ActivateSkill` 先更新 `skilltreedata`。
-server 侧触发 `onactivate` 并向 client 同步。
-client 侧在本地玩家上也可能执行激活逻辑以保持前端状态。
+`ActivateSkill` first calls `SkillTreeData:ActivateSkill`, which rejects invalid selections.
+For an accepted selection, the server invokes `onactivate` and synchronizes the client.
+The local player may also run client activation logic to keep frontend state current.
 
-### `0x61014211` 验证点
+### `0x61014211` Check
 
-检查技能效果时要确认它是 `onactivate` 直接改组件，还是通过后续 `IsActivated` 查询改变分支。
+Determine whether `onactivate` changes a component.
+Otherwise, look for later behaviour behind an `IsActivated` branch.
 
-## `0x61015100` 阅读与验证路线 / 从哪里开始读源码
+## `0x61015100` Verification
 
 ~~~bash
 rg -n "MakePlayerCharacter|entity:SetPristine|TheWorld\\.ismastersim|player_classified|SetStateGraph" \
@@ -153,19 +157,24 @@ rg -n "MakePlayerCharacter|entity:SetPristine|TheWorld\\.ismastersim|player_clas
 rg -n "common_postinit|master_postinit|skilltreeupdater:IsActivated|MakePlayerCharacter" \
   scripts/prefabs/wilson.lua
 
-rg -n "BuildAllData|SKILLTREE_CHARACTERS|CreateSkillTreeFor|ActivateSkill|SendFromSkillTreeBlob" \
+rg -n "BuildAllData|SKILLTREE_CHARACTERS|CreateSkillTreeFor|ActivateSkill|ValidateCharacterData" \
   scripts/prefabs/skilltree_defs.lua \
+  scripts/skilltreedata.lua \
   scripts/components/skilltreeupdater.lua
+
+rg -n "SetSkillActivatedState|SendFromSkillTreeBlob" \
+  scripts/components/skilltreeupdater.lua \
+  scripts/networkclientrpc.lua
 ~~~
 
-### `0x61015110` 推荐顺序
+### `0x61015110` Reading Order
 
-先读 `player_common.lua` 的 prefab 工厂。
-再读一个具体角色，例如 `wilson.lua`。
-最后用技能名回查 `skilltree_defs.lua`、角色技能树文件和 `skilltreeupdater.lua`。
+Read the prefab factory in `player_common.lua`.
+Then inspect one character, such as `wilson.lua`.
+Finally trace a skill through `skilltree_defs.lua`, its character skill file, `skilltreedata.lua`, and `skilltreeupdater.lua`.
 
-#### `0x61015111` 最小闭环
+#### `0x61015111` Minimal Trace
 
-用 `wilson_torch_7` 做样例。
-它在 `wilson.lua` 中通过 `skilltreeupdater:IsActivated` 改变右键特殊动作。
-这条链路能同时验证角色 hook、技能数据和玩家动作系统。
+Use `wilson_torch_7` as the sample.
+In `wilson.lua`, `skilltreeupdater:IsActivated` makes it affect a special right-click action.
+This trace covers the character hook, skill data, and player action system.

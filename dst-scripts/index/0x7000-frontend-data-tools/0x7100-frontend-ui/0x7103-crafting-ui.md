@@ -1,46 +1,49 @@
-# `0x71030000` 制作 UI
+# `0x71030000` Crafting UI
 
-制作 UI 的核心不是配方表本身，而是“配方注册、可见性 meta、展示、点击、replica 请求、server builder 执行”的链路。
-读这条链路时要特别区分普通物品制作、材料不足时的子材料制作，以及带 placer 的放置型制作。
+The crafting path starts at recipe registration and visibility metadata.
+It continues through display, click handling, replica requests, and authoritative builder execution.
+Keep direct crafting, automatic sub-ingredient crafting, and placer-based crafting separate while tracing it.
 
-## `0x71031111` 本页定位 / 要回答的运行时问题 / 点击制作按钮后发生什么 / 验证点
+## `0x71031111` Build Button
 
-`CraftingMenuDetails:_MakeBuildButton` 调用 `DoRecipeClick`。
-`DoRecipeClick` 通过 `owner.replica.builder` 判断已知配方、材料、buffered build 和 placer 分支。
+`CraftingMenuDetails:_MakeBuildButton` calls `DoRecipeClick`.
+`DoRecipeClick` uses `owner.replica.builder` to evaluate recipe knowledge, ingredients, and buffered builds.
+It also evaluates placer behaviour.
 
-## `0x71031211` 本页定位 / UI 与权威执行 / `builder_replica` 到 `builder` / 边界条件
+## `0x71031211` Authority Boundary
 
-`builder_replica.lua` 中的 `Builder:MakeRecipeFromMenu` 优先调用本地 `components.builder`。
-如果本地没有 server builder，则走 `components.playercontroller:RemoteMakeRecipeFromMenu`。
-带 `recipe.placer` 的配方不会在菜单点击时直接生成最终 prefab，而是先进入 `StartBuildPlacementMode`。
+`Builder:MakeRecipeFromMenu` in `builder_replica.lua` calls a local `components.builder` when available.
+Without a local server builder, it calls `components.playercontroller:RemoteMakeRecipeFromMenu`.
+A recipe with `recipe.placer` enters `StartBuildPlacementMode` instead of creating its final prefab on the menu click.
 
-## `0x71032000` 源码锚点
+## `0x71032000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/recipe.lua` | `Recipe2` | 构造配方并写入 `AllRecipes` |
-| `scripts/recipes.lua` | `Recipe2(...)` | 官方配方数据 |
-| `scripts/widgets/redux/craftingmenu_hud.lua` | `CraftingMenuHUD` | HUD 制作菜单开关 |
-| `scripts/widgets/redux/craftingmenu_widget.lua` | `CraftingMenuWidget` | 搜索、过滤、详情面板 |
-| `scripts/widgets/redux/craftingmenu_details.lua` | `_MakeBuildButton` | 制作按钮点击入口 |
-| `scripts/widgets/widgetutil.lua` | `DoRecipeClick` | 制作点击的共享决策函数 |
-| `scripts/components/builder_replica.lua` | `Builder:MakeRecipeFromMenu` | client 侧请求路径 |
-| `scripts/components/builder.lua` | `Builder:MakeRecipeFromMenu` | server 侧执行入口 |
-| `scripts/components/playercontroller.lua` | `StartBuildPlacementMode` | placer 预览和放置路径 |
-| `scripts/components/playercontroller.lua` | `RemoteMakeRecipeAtPoint` | 放置型制作的远端请求 |
+| `scripts/recipe.lua` | `Recipe2` | Builds recipes and writes `AllRecipes` |
+| `scripts/recipes.lua` | `Recipe2(...)` | Registers official recipes |
+| `scripts/widgets/redux/craftingmenu_hud.lua` | `CraftingMenuHUD` | Opens and closes the HUD crafting menu |
+| `scripts/widgets/redux/craftingmenu_widget.lua` | `CraftingMenuWidget` | Search, filters, and detail panels |
+| `scripts/widgets/redux/craftingmenu_details.lua` | `_MakeBuildButton` | Build-button click entry |
+| `scripts/widgets/widgetutil.lua` | `DoRecipeClick` | Shared crafting-click decision function |
+| `scripts/components/builder_replica.lua` | `Builder:MakeRecipeFromMenu` | Client request path |
+| `scripts/components/builder.lua` | `Builder:MakeRecipeFromMenu` | Server execution entry |
+| `scripts/components/playercontroller.lua` | `StartBuildPlacementMode` | Placer preview and placement |
+| `scripts/components/playercontroller.lua` | `RemoteMakeRecipeAtPoint` | Remote request for placed crafting |
+| `scripts/networkclientrpc.lua` | `MakeRecipeFromMenu` / `MakeRecipeAtPoint` | Validates RPC input and restores recipes from `rpc_id` |
 
-### `0x71032111` 主锚点 / `scripts/widgets/widgetutil.lua` / 搜索信号
+### `0x71032111` Decision Anchor
 
-先搜 `function DoRecipeClick`。
-这里能看到 `busy`、`buffered`、`knows`、`has_ingredients`、`recipe.placer`、`CanCraftIngredient` 和 `SetCraftingAutopaused`。
+Find `function DoRecipeClick` and inspect `busy`, `buffered`, `knows`, and `has_ingredients`.
+Then inspect `recipe.placer`, `CanCraftIngredient`, and `SetCraftingAutopaused`.
 
-### `0x71032211` UI 锚点 / `scripts/widgets/redux/craftingmenu_details.lua` / 验证点
+### `0x71032211` UI Anchor
 
-制作按钮的 `SetOnClick` 会读取 skin spinner，并先记录是否已经 buffered。
-非长按路径会调用 `DoRecipeClick(self.owner, self.data.recipe, skin)`。
-如果 `DoRecipeClick` 返回不保持打开，并且配置允许 buffered build 自动关闭，按钮会调用 `owner.HUD:CloseCrafting()`。
+The build button's `SetOnClick` reads the skin spinner and records whether the recipe is already buffered.
+The non-hold path calls `DoRecipeClick(self.owner, self.data.recipe, skin)`.
+If `DoRecipeClick` allows closure and buffered-build settings agree, it calls `owner.HUD:CloseCrafting()`.
 
-## `0x71033000` 运行流程
+## `0x71033000` Runtime Flow
 
 ~~~mermaid
 flowchart TD
@@ -48,59 +51,71 @@ flowchart TD
     A --> B["AllRecipes in recipe.lua"]
     B --> C["CraftingMenuHUD:RebuildRecipes"]
     C --> D["valid_recipes + meta.build_state"]
-    D --> E["CraftingMenuWidget filter/search/detail"]
+    D --> E["CraftingMenuWidget filter / search / details"]
     E --> F["CraftingMenuDetails build button"]
     F --> G["DoRecipeClick"]
     G --> H{"recipe.placer?"}
     H -->|no| I["replica.builder:MakeRecipeFromMenu"]
     H -->|yes| J["BufferBuild + StartBuildPlacementMode"]
-    I --> K{"server builder local?"}
+    I --> K{"local server builder?"}
     K -->|yes| L["components.builder:MakeRecipeFromMenu"]
     K -->|no| M["playercontroller:RemoteMakeRecipeFromMenu"]
     J --> N["MakeRecipeAtPoint / RemoteMakeRecipeAtPoint"]
 ~~~
 
-### `0x71033111` 数据注册阶段 / `Recipe2` / 验证点
+### `0x71033111` Recipe Registration
 
-`Recipe2` 继承 `Recipe`。
-`Recipe` 构造函数会把普通材料、角色材料和科技材料拆到不同字段。
-它最终把对象写入 `AllRecipes[name]`。
+`Recipe2` inherits from `Recipe`.
+The `Recipe` constructor separates ordinary, character, and technology ingredients.
+It then stores the object in `AllRecipes[name]`.
 
-### `0x71033211` UI 展示阶段 / `CraftingMenuHUD` / 验证点
+### `0x71033211` Recipe Presentation
 
-`CraftingMenuHUD:RebuildRecipes` 遍历 `AllRecipes`，并为每个可见配方写入 `valid_recipes[recipe.name].meta`。
-`meta.build_state` 会区分 `buffered`、`freecrafting`、`has_ingredients`、`no_ingredients`、`prototype`、`hint` 和 `hide`。
-`CraftingMenuWidget:OnUpdate` 只对搜索缓存分批处理，每轮最多验证 30 个 recipe，避免搜索时一次性扫完整表。
+`CraftingMenuHUD:RebuildRecipes` walks `AllRecipes` and writes metadata for visible recipes.
+The destination is `valid_recipes[recipe.name].meta`.
+`meta.build_state` includes `buffered`, `freecrafting`, `has_ingredients`, and `no_ingredients`.
+It also includes `prototype`, `hint`, and `hide`.
+`CraftingMenuWidget:OnUpdate` validates at most 30 uncached recipes per search update.
+This avoids scanning the full table at once.
 
-### `0x71033311` 执行阶段 / `DoRecipeClick` / 边界条件
+### `0x71033311` Crafting Execution
 
-普通物品可以直接走 `MakeRecipeFromMenu`。
-有 `recipe.placer` 的配方通常先 `BufferBuild`，再由 `playercontroller` 进入放置模式。
-如果材料不足，`DoRecipeClick` 会尝试 `CanCraftIngredient` 并让 server builder 先制作当前配方需要的子材料。
-如果配方还未解锁但当前科技可原型，成功制作后会触发研究机和解锁逻辑。
+Ordinary items may call `MakeRecipeFromMenu` directly.
+Recipes with `recipe.placer` usually call `BufferBuild` before `playercontroller` enters placement mode.
+When ingredients are missing, `DoRecipeClick` may call `CanCraftIngredient`.
+The server builder can then craft a required sub-ingredient first.
+When current technology can prototype an unknown recipe, a successful build triggers prototyper and unlock behaviour.
 
-## `0x71034111` 结构细节 / `CraftingMenuHUD` / 打开和关闭 / 需要核对的字段
+## `0x71034111` `CraftingMenuHUD` Lifecycle
 
-`CraftingMenuHUD:Open` 会设置 `TheFrontEnd.crafting_navigation_mode = true`。
-它会启用 UI root、刷新 help text、打开菜单动画，并调用 `SetCraftingAutopaused(true)`。
-`CraftingMenuHUD:Close` 会保存 `TheCraftingMenuProfile` 并关闭 crafting autopause。
-打开时如果传入搜索模式，会把焦点放到 `craftingmenu.search_box`。
-关闭时会禁用 `ui_root`、`craftingmenu` 和 `pinbar`。
+`CraftingMenuHUD:Open` sets `TheFrontEnd.crafting_navigation_mode = true` and enables the UI root.
+It refreshes help text, starts the opening animation, and calls `SetCraftingAutopaused(true)`.
+Search mode focuses `craftingmenu.search_box`.
+`CraftingMenuHUD:Close` saves `TheCraftingMenuProfile` and disables crafting autopause.
+It disables `ui_root`, `craftingmenu`, and `pinbar` during the closing animation.
+The animation callback re-enables `ui_root` and `pinbar`; `craftingmenu` remains disabled until the next `Open`.
 
-## `0x71034211` 结构细节 / `BuilderReplica` / 本地和远端分叉 / 需要核对的字段
+## `0x71034211` Builder Replica Branch
 
-如果实体有 `components.builder`，replica 直接转给本地 server builder。
-否则它通过 `components.playercontroller` 发送远端制作请求。
-同一个 replica 文件还提供 `MakeRecipeAtPoint`，供放置型制作在确定坐标后使用。
+The replica calls a local `components.builder` when present.
+Otherwise it sends a remote request through `components.playercontroller`.
+The same replica implements `MakeRecipeAtPoint` for placer recipes after coordinates are chosen.
 
-## `0x71034311` 结构细节 / `Builder` / `MakeRecipeFromMenu` / 边界条件
+## `0x71034311` Server Builder Checks
 
-server builder 会先检查 inventory 是否由自己打开，再检查材料、已知配方和可原型科技。
-普通制作成功路径最终进入 `Builder:MakeRecipe`。
-放置型制作要等 `Builder:MakeRecipeAtPoint` 看到 buffered build、合法坐标和 `CanDeployRecipeAtPoint` 后才生成最终结果。
-失败路径会停在材料、解锁、原型条件或部署坐标校验上。
+The server builder requires the player's inventory to be open before either build path.
+Non-placer menu builds first require ingredients.
+`Builder:MakeRecipeFromMenu` accepts `KnowsRecipe(recipe)`.
+It also accepts `CanLearn(recipe.name)` together with `CanPrototypeRecipe(...)`.
+Either branch then calls `Builder:MakeRecipe`.
+For placed builds, the RPC handler validates field types, platform-relative coordinates, range, and rotation.
+It resolves the recipe from `rpc_id` only after those checks pass.
+`Builder:MakeRecipeAtPoint` requires a placer recipe, a buffered build, and `CanDeployRecipeAtPoint`.
+It also requires `KnowsRecipe(recipe)`, unless `recipe.always_allow_buffered_placer` is true.
+It creates the placed result only after all checks pass.
+A failed branch-specific check stops the request.
 
-## `0x71035100` 阅读与验证路线 / 从哪里开始读源码
+## `0x71035100` Verification
 
 ~~~bash
 rg -n "Recipe2 = Class|AllRecipes\\[name\\]|function Recipe" \
@@ -110,6 +125,9 @@ rg -n "function DoRecipeClick|MakeRecipeFromMenu|BufferBuild|StartBuildPlacement
   scripts/widgets/widgetutil.lua scripts/components/builder_replica.lua \
   scripts/components/playercontroller.lua
 
+rg -n "MakeRecipeFromMenu =|MakeRecipeAtPoint =|IsPointInRange|IsRotationValid|rpc_id" \
+  scripts/networkclientrpc.lua
+
 rg -n "_MakeBuildButton|function CraftingMenuHUD:Open|function CraftingMenuHUD:RebuildRecipes" \
   scripts/widgets/redux/craftingmenu_details.lua \
   scripts/widgets/redux/craftingmenu_hud.lua
@@ -118,10 +136,8 @@ rg -n "function CraftingMenuWidget:OnUpdate" \
   scripts/widgets/redux/craftingmenu_widget.lua
 ~~~
 
-### `0x71035111` 推荐顺序 / 最小闭环
+### `0x71035111` Minimal Traces
 
-抽样 `lighter` 这种没有 placer 的配方。
-确认点击后走 `MakeRecipeFromMenu`。
-再抽样一个有 `placer` 的建筑配方。
-确认它先走 `BufferBuild` 和 `StartBuildPlacementMode`，而不是立刻生成最终 prefab。
-继续追到放置确认后的 `MakeRecipeAtPoint` 或 `RemoteMakeRecipeAtPoint`，再回到 server builder 的 `MakeRecipeAtPoint`。
+Trace a non-placer recipe such as `lighter` and confirm that its click reaches `MakeRecipeFromMenu`.
+Then trace a building recipe with a `placer` through `BufferBuild` and `StartBuildPlacementMode`.
+Continue through `MakeRecipeAtPoint` or `RemoteMakeRecipeAtPoint` to the server builder's `MakeRecipeAtPoint`.

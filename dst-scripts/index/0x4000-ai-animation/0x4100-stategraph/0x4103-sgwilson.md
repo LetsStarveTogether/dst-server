@@ -1,93 +1,90 @@
 # `0x41030000` SGwilson
 
-SGwilson 是玩家表现层的核心样例。
-它同时展示服务端权威动作、客户端预测状态、动作失败回退和大量专用状态。
+SGwilson is the main player-presentation example.
+It covers authoritative actions, client prediction, failure recovery, and specialized states.
 
-## `0x41031111` 本页定位 / 要回答的运行时问题 / 源码阅读目标 / 验证点
+## `0x41031111` Purpose
 
-目标是从玩家动作抽样追踪到 `ActionHandler`、目标状态、timeline 和 `PerformBufferedAction`。
-不要先通读整份 `SGwilson.lua`。
+Trace one player action from its `ActionHandler` through the target state, timeline, and `PerformBufferedAction` call.
+Avoid reading all of `SGwilson.lua` in file order.
 
-## `0x41031121` 本页定位 / 要回答的运行时问题 / 服务端与客户端分工 / 验证点
+## `0x41031121` Server and Client Roles
 
-`scripts/stategraphs/SGwilson.lua` 返回 `StateGraph("wilson", ...)`。
-`scripts/stategraphs/SGwilson_client.lua` 返回 `StateGraph("wilson_client", ...)`。
-客户端状态通过 `server_states` 说明可接受的服务端状态集合。
+`scripts/stategraphs/SGwilson.lua` returns `StateGraph("wilson", ...)`.
+`scripts/stategraphs/SGwilson_client.lua` returns `StateGraph("wilson_client", ...)`.
+`server_states` declares the accepted authoritative states.
 
-## `0x41032000` 源码锚点
+## `0x41032000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Purpose |
 | --- | --- | --- |
-| `scripts/stategraphs/SGwilson.lua` | `local actionhandlers` | 玩家服务端动作到状态的映射 |
-| `scripts/stategraphs/SGwilson.lua` | `name = "doshortaction"` | 常见短动作执行状态 |
-| `scripts/stategraphs/SGwilson.lua` | `name = "attack"` | 常见战斗动作执行状态 |
-| `scripts/stategraphs/SGwilson.lua` | `CommonStates.AddHopStates` | 玩家划船跳跃复用状态 |
-| `scripts/stategraphs/SGwilson_client.lua` | `server_states` | 客户端预测状态匹配表 |
-| `scripts/actions.lua` | `ACTIONS` | 动作常量来源 |
+| `scripts/stategraphs/SGwilson.lua` | `local actionhandlers` | Maps server player actions to states |
+| `scripts/stategraphs/SGwilson.lua` | `name = "doshortaction"` | Executes common short actions |
+| `scripts/stategraphs/SGwilson.lua` | `name = "attack"` | Executes common combat actions |
+| `scripts/stategraphs/SGwilson.lua` | `CommonStates.AddHopStates` | Reuses player boat-jump states |
+| `scripts/stategraphs/SGwilson_client.lua` | `server_states` | Matches predicted states to server states |
+| `scripts/actions.lua` | `ACTIONS` | Defines action constants |
 
-### `0x41032111` 主锚点 / `scripts/stategraphs/SGwilson.lua` / 搜索信号
+### `0x41032111` Server Search Path
 
-先搜 `ActionHandler(ACTIONS.PICKUP`、`ActionHandler(ACTIONS.CHOP` 或 `ActionHandler(ACTIONS.ATTACK`。
-然后搜对应状态名，例如 `name = "doshortaction"`、`name = "chop"` 或 `name = "attack"`。
+Search `scripts/stategraphs/SGwilson.lua` for `ActionHandler(ACTIONS.PICKUP`, `ActionHandler(ACTIONS.CHOP`, or `ActionHandler(ACTIONS.ATTACK`.
+Then open the returned state, such as `name = "doshortaction"`, `name = "chop"`, or `name = "attack"`.
 
-### `0x41032121` 主锚点 / `scripts/stategraphs/SGwilson_client.lua` / 搜索信号
+### `0x41032121` Client Search Path
 
-搜同一个 `ACTIONS.*` 和同名状态。
-再确认客户端状态里是否声明了 `server_states` 或调用 `PerformPreviewBufferedAction()`。
+Search `scripts/stategraphs/SGwilson_client.lua` for the same `ACTIONS.*` value and state name.
+Then inspect `server_states` and `PerformPreviewBufferedAction()`.
 
-## `0x41033000` 运行流程
+## `0x41033000` Action Flow
 
 ~~~mermaid
 flowchart TD
     A["BufferedAction: ACTIONS.PICKUP / CHOP / ATTACK"]
-    A --> B["SGwilson actionhandler"]
-    B --> C["目标 State"]
-    C --> D["onenter 缓存 action 或 target"]
+    A --> B["SGwilson action handler"]
+    B --> C["Target State"]
+    C --> D["onenter stores action or target"]
     D --> E["timeline / timeout / animover"]
     E --> F["PerformBufferedAction"]
-    F --> G["组件或 prefab 侧副作用"]
-    A --> H["SGwilson_client actionhandler"]
-    H --> I["预测 State"]
+    F --> G["Component or prefab side effect"]
+    A --> H["SGwilson_client action handler"]
+    H --> I["Predicted State"]
     I --> J["PerformPreviewBufferedAction"]
-    J --> K["server_states 匹配服务端纠正"]
+    J --> K["server_states reconciles the server result"]
 ~~~
 
-### `0x41033111` 短动作链路 / `ACTIONS.PICKUP` 到 `doshortaction` / 边界条件
+### `0x41033111` Short Actions
 
-服务端 `SGwilson.lua` 中 `ACTIONS.PICKUP` 会根据物品、骑乘、忙碌状态等条件选择不同目标状态。
-进入短动作状态后，真实副作用通常由 timeline 中的 `inst:PerformBufferedAction()` 触发。
+The server handler for `ACTIONS.PICKUP` branches on riding state and target tags such as `heavy` and `minigameitem`.
+In a short-action state, a timeline entry usually calls `inst:PerformBufferedAction()` at the action frame.
 
-### `0x41033211` 工作动作链路 / `ACTIONS.CHOP` 到 `chop_start` / `chop` / 边界条件
+### `0x41033211` Work Actions
 
-`CHOP` 不是简单的一帧动作。
-服务端状态会使用 `chop_start` 和 `chop` 等状态表达起手、循环和工作帧。
-客户端 `SGwilson_client.lua` 对应状态用 `server_states = { "chop_start", "chop" }` 匹配服务端。
+`ACTIONS.CHOP` spans states such as `chop_start` and `chop` to model startup, looping, and work frames.
+The corresponding client state uses `server_states = { "chop_start", "chop" }`.
 
-### `0x41033311` 攻击动作链路 / `ACTIONS.ATTACK` 到 `attack` / 边界条件
+### `0x41033311` Attacks
 
-攻击状态会缓存目标、处理武器类型和特殊攻击分支。
-阅读时不要只搜第一个 `PerformBufferedAction`。
-应同时核对 `combat:StartAttack()`、timeline 中的动作帧和失败回退。
+The `attack` state stores its target and branches on weapon type and special attacks.
+Inspect `combat:StartAttack()`, the timeline action frame, and failure recovery.
+Do not stop at the first `PerformBufferedAction` match.
 
-## `0x41034111` 结构细节 / ActionHandler 规模 / `local actionhandlers` / 需要核对的字段
+## `0x41034111` Action Handler Table
 
-`SGwilson.lua` 的 actionhandlers 是玩家动作入口总表。
-表项可以返回字符串状态，也可以用函数检查装备、目标、骑乘、船和平台条件。
-这正是 SGwilson 不能按文件顺序线性阅读的原因。
+`local actionhandlers` is the main server-side player-action index.
+Each entry can return a state name directly or compute one from equipment, target, riding, boat, and platform conditions.
 
-## `0x41034211` 结构细节 / 状态内副作用 / `timeline` 与 `PerformBufferedAction` / 需要核对的字段
+## `0x41034211` State Side Effects
 
-SGwilson 的真实动作通常不在 actionhandler 里执行。
-actionhandler 只选择状态。
-状态内的 `onenter`、`timeline`、`ontimeout` 或 event handler 再决定何时调用 `PerformBufferedAction`。
+An action handler normally selects a state rather than executing the action.
+The state's `onenter`, `timeline`, `ontimeout`, or event handler decides when to call `PerformBufferedAction`.
 
-## `0x41034311` 结构细节 / 客户端预测 / `server_states` / 需要核对的字段
+## `0x41034311` Client Prediction
 
-客户端状态的 `server_states` 用于判断当前预测状态是否能接受服务端状态。
-`forward_server_states = true` 表示状态切换时继续沿用前一组服务端匹配状态。
-这和 `stategraph.lua` 中 `StateGraphInstance:ServerStateMatches`、`GoToState` 的客户端分支对应。
+`server_states` declares which server states can validate the current predicted state.
+`forward_server_states = true` carries the previous matching set across a transition.
+These fields feed the client branches of `StateGraphInstance:ServerStateMatches` and `GoToState` in `stategraph.lua`.
 
-## `0x41035100` 阅读与验证路线 / 从哪里开始读源码
+## `0x41035100` Verification
 
 ~~~bash
 rg -n "ActionHandler\\(ACTIONS\\.(PICKUP|CHOP|ATTACK)|PerformBufferedAction|server_states" \
@@ -99,15 +96,12 @@ rg -n "name = \\\"(doshortaction|chop_start|chop|attack)\\\"" \
   scripts/stategraphs/SGwilson_client.lua
 ~~~
 
-### `0x41035111` 推荐顺序 / 最小闭环
+### `0x41035111` Minimum Trace
 
-先选一个动作，例如 `ACTIONS.PICKUP`。
-在服务端找 actionhandler 返回的状态名。
-再跳到状态定义，找 `PerformBufferedAction` 的实际帧。
-最后在客户端文件找同动作的预测状态和 `server_states`。
+Choose `ACTIONS.PICKUP` and follow its server handler to the target action frame.
+Then find the client prediction state and its `server_states`.
 
-### `0x41035112` 推荐顺序 / 失败路径
+### `0x41035112` Failure Path
 
-继续搜 `actionfailed`。
-很多状态会在动作失败时回到 `idle` 或进入专门回退状态。
-这能验证文档中的流程图没有把成功路径误写成唯一路径。
+Search for `actionfailed` to find states that return to `idle` or enter a dedicated recovery state.
+This confirms that the successful flow is not the only path.

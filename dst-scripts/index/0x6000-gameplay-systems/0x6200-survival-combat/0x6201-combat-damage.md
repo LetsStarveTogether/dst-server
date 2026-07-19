@@ -1,182 +1,185 @@
-# `0x62010000` 战斗与伤害
+# `0x62010000` Combat and Damage
 
-战斗链路要把动作、移动、StateGraph、武器、combat 和 health 分开读。
-扣血只发生在 `Health:DoDelta`，但能否命中由更早的动作和距离条件决定。
+Read actions, movement, StateGraphs, weapons, `combat`, and `health` as separate stages.
+Normal combat damage reaches health through `Health:DoDelta`.
+Earlier action and range checks decide whether an attack lands.
 
-## `0x62011000` 本页定位
+## `0x62011000` Purpose
 
-本页解释一次攻击从输入动作到生命变化的最小闭环。
-重点是避免把 `ACTIONS.ATTACK`、SG 攻击动画和真实伤害结算混为一谈。
+This guide traces one attack from input to health loss.
+It separates `ACTIONS.ATTACK`, attack animation states, and authoritative damage resolution.
 
-### `0x62011100` 要回答的运行时问题
+### `0x62011100` Attack Boundaries
 
-攻击动作在哪里被声明。
-角色如何移动到攻击距离。
-动画窗口何时调用 combat。
-武器伤害、护甲吸收、特殊伤害和死亡事件在哪里结算。
+The attack action, movement, animation, `combat`, and `health` each own a separate stage.
 
-#### `0x62011110` 源码阅读目标
+#### `0x62011110` Reading Path
 
-确认 `ACTIONS.ATTACK.fn` 可以直接调用 `Combat:DoAttack`。
-确认玩家 SG 是常见动画路径，不是所有伤害的唯一入口。
+Confirm that `ACTIONS.ATTACK.fn` can call `Combat:DoAttack` directly.
+Treat the player StateGraph as a common animation path, not the only damage entry point.
 
-##### `0x62011111` 验证点
+##### `0x62011111` Damage Facts
 
-`Combat:DoAttack` 计算 weapon、projectile、AOE、反伤和命中。
-目标的 `Combat:GetAttacked` 再处理护甲、闪避、伤害类型和 `Health:DoDelta`。
-`Health:SetVal` 在生命归零时推送 `entity_death` 和 `death`。
+`Combat:DoAttack` resolves the weapon, projectile, AOE, reflected damage, and hit.
+The target's `Combat:GetAttacked` handles armor, dodge, damage types, and `Health:DoDelta`.
+When health reaches zero, `Health:SetVal` pushes `entity_death` and `death`.
 
-## `0x62012000` 源码锚点
+## `0x62012000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/actions.lua` | `ACTIONS.ATTACK.fn` | 攻击动作执行入口 |
-| `scripts/components/locomotor.lua` | `LocoMotor:PushAction` | 追向目标与抵达后推送动作 |
-| `scripts/stategraphs/SGwilson.lua` | `ActionHandler(ACTIONS.ATTACK, ...)` | 玩家攻击状态选择 |
-| `scripts/components/combat.lua` | `Combat:DoAttack` | 攻击执行和伤害计算 |
-| `scripts/components/combat.lua` | `Combat:GetAttacked` | 目标受击和防御处理 |
-| `scripts/components/health.lua` | `Health:DoDelta` | 生命变化与死亡事件 |
-| `scripts/components/weapon.lua` | `Weapon:GetDamage` | 武器伤害与特殊伤害 |
-| `scripts/standardcomponents.lua` | `DoFireDamage` | 通用火焰和状态 helper 的伤害入口 |
-| `scripts/stategraphs/SGknight.lua` | `DoJoustAoe` | 骑士冲锋 AOE 与坐骑目标记录 |
-| `scripts/prefabs/ruinsnightmare_horn_attack.lua` | `OnUpdate` | 梦魇 horn attack AOE 目标记录 |
+| `scripts/actions.lua` | `ACTIONS.ATTACK.fn` | Executes the attack action |
+| `scripts/components/locomotor.lua` | `LocoMotor:PushAction` | Moves into range and resumes the action |
+| `scripts/stategraphs/SGwilson.lua` | `ActionHandler(ACTIONS.ATTACK, ...)` | Selects player attack states |
+| `scripts/entityscript.lua` | `EntityScript:PerformBufferedAction` | Executes an action at StateGraph timing |
+| `scripts/bufferedaction.lua` | `BufferedAction:Do` | Calls the selected action function |
+| `scripts/components/combat.lua` | `Combat:DoAttack` | Executes an attack and calculates damage |
+| `scripts/components/combat.lua` | `Combat:GetAttacked` | Applies target defenses and damage |
+| `scripts/components/health.lua` | `Health:DoDelta` / `Health:DoFireDamage` | Changes health and emits death events |
+| `scripts/components/weapon.lua` | `Weapon:GetDamage` | Supplies weapon and special damage |
+| `scripts/components/propagator.lua` | `Health:DoFireDamage` call | Applies fire-spread damage |
+| `scripts/stategraphs/SGknight.lua` | `DoJoustAoe` | Tracks joust AOE targets and mounts |
+| `scripts/prefabs/ruinsnightmare_horn_attack.lua` | `OnUpdate` | Tracks horn attack AOE targets |
 
-### `0x62012110` 主锚点 / `scripts/actions.lua`
+### `0x62012110` `scripts/actions.lua`
 
-`ACTIONS.ATTACK.fn` 先检查若干 SG 状态标签。
-普通路径会调用 `act.doer.components.combat:DoAttack(act.target)` 并返回成功。
+`ACTIONS.ATTACK.fn` first checks relevant StateGraph tags.
+The normal path calls `act.doer.components.combat:DoAttack(act.target)` and reports success.
 
-#### `0x62012111` 搜索信号
+#### `0x62012111` Search Terms
 
-搜索 `ACTIONS.ATTACK.fn`、`propattack`、`thrusting`、`helmsplitting` 和 `DoAttack`。
+Search for `ACTIONS.ATTACK.fn`, `propattack`, `thrusting`, `helmsplitting`, and `DoAttack`.
 
-### `0x62012120` 主锚点 / `scripts/components/locomotor.lua`
+### `0x62012120` `scripts/components/locomotor.lua`
 
-攻击动作可能先进入 `LocoMotor:PushAction`。
-如果距离不足，locomotor 会用 `GoToEntity` 接近目标，再在抵达后推送 buffered action。
+An attack may first enter `LocoMotor:PushAction`.
+When the target is too far away, the locomotor uses `GoToEntity` and pushes the buffered action after arrival.
 
-#### `0x62012121` 搜索信号
+#### `0x62012121` Search Terms
 
-搜索 `PushAction`、`GoToEntity`、`PushBufferedAction`、`PreviewBufferedAction` 和 `in_cooldown`。
+Search for `PushAction`, `GoToEntity`, `PushBufferedAction`, `PreviewBufferedAction`, and `in_cooldown`.
 
-### `0x62012130` 主锚点 / `scripts/stategraphs/SGwilson.lua`
+### `0x62012130` `scripts/stategraphs/SGwilson.lua`
 
-玩家攻击动作处理器会根据武器和状态选择 `attack`、`slingshot_shoot`、`blowdart`、`throw` 等状态。
-这些状态负责动画窗口和本地连击体验。
+The player's attack handler selects a state from the weapon and actor state.
+Options include `attack`, `slingshot_shoot`, `blowdart`, and `throw`.
+These states control animation timing and local combo behaviour.
 
-#### `0x62012131` 搜索信号
+#### `0x62012131` Search Terms
 
-搜索 `ActionHandler(ACTIONS.ATTACK`、`abouttoattack`、`slingshot_shoot`、`blowdart` 和 `throw`。
+Search for `ActionHandler(ACTIONS.ATTACK`, `abouttoattack`, `slingshot_shoot`, `blowdart`, and `throw`.
 
-### `0x62012140` 主锚点 / `scripts/components/combat.lua`
+### `0x62012140` `scripts/components/combat.lua`
 
-`DoAttack` 决定武器、projectile、电击 stimuli、AOE、反伤和目标受击。
-目标组件的 `GetAttacked` 才处理防御、护甲、闪避、planar 和特殊伤害。
+`combat.lua` uses `DoAttack` to resolve weapons, projectiles, stimuli, AOE, reflected damage, and the hit.
+The target's `GetAttacked` then resolves defense, armor, dodge, planar damage, and special damage.
 
-#### `0x62012141` 搜索信号
+#### `0x62012141` Search Terms
 
-搜索 `DoAttack`、`CalcDamage`、`CalcReflectedDamage`、`GetAttacked`、`onattackother` 和 `onhitother`。
+Search for `DoAttack`, `CalcDamage`, `CalcReflectedDamage`, `GetAttacked`, `onattackother`, and `onhitother`.
 
-### `0x62012150` 主锚点 / `scripts/components/health.lua`
+### `0x62012150` `scripts/components/health.lua`
 
-`Health:DoDelta` 是生命变化入口。
-`Health:SetVal` 判断死亡，并推送 world 级 `entity_death` 与实体级 `death`。
+`Health:DoDelta` is the normal combat-delta entry point, not the only health writer.
+`Health:SetVal` assigns the value and pushes the world-level `entity_death` and entity-level `death` events.
+`Health:SetCurrentHealth` and `Health:SetMaxHealth` also write current health directly.
 
-#### `0x62012151` 搜索信号
+#### `0x62012151` Search Terms
 
-搜索 `DoDelta`、`SetVal`、`entity_death`、`death`、`healthdelta` 和 `CanFadeOut`。
+Search for `DoDelta`, `SetVal`, `entity_death`, `death`, `healthdelta`, and `CanFadeOut`.
 
-### `0x62012160` 主锚点 / `scripts/standardcomponents.lua`
+### `0x62012160` Direct Fire Damage
 
-非武器伤害也可能从标准 helper 进入组件。
-例如通用燃烧逻辑会调用 `health:DoFireDamage`，而不是经过 `ACTIONS.ATTACK`。
+`Health:DoFireDamage` is a direct non-weapon health entry point.
+Callers such as `components/burnable.lua` and `components/propagator.lua` bypass `ACTIONS.ATTACK` and `Combat:DoAttack`.
 
-#### `0x62012161` 搜索信号
+#### `0x62012161` Search Terms
 
-搜索 `DoFireDamage`、`DropTarget`、`perishable` 和 `farming_manager`。
+Search for `DoFireDamage`, `SMOTHER_DAMAGE`, and `heatoutput`.
 
-## `0x62013000` 运行流程
+## `0x62013000` Runtime Flow
 
 ~~~mermaid
 flowchart TD
     A["ACTIONS.ATTACK"]
-    A --> B{"距离足够"}
-    B -->|否| C["LocoMotor:GoToEntity"]
+    A --> B{"In range?"}
+    B -->|no| C["LocoMotor:GoToEntity"]
     C --> D["PushBufferedAction"]
-    B -->|是| D
+    B -->|yes| D
     D --> E["SGwilson attack state"]
-    E --> F["ACTIONS.ATTACK.fn"]
+    E --> M["EntityScript:PerformBufferedAction"]
+    M --> N["BufferedAction:Do"]
+    N --> F["ACTIONS.ATTACK.fn"]
     F --> G["Combat:DoAttack"]
     G --> H["Weapon:GetDamage / projectile / AOE"]
-    H --> I["target Combat:GetAttacked"]
-    I --> J["armor / dodge / damage type / planar"]
+    H --> I["Target Combat:GetAttacked"]
+    I --> J["Armor / dodge / damage type / planar"]
     J --> K["Health:DoDelta"]
     K --> L["healthdelta / death / entity_death"]
 ~~~
 
-### `0x62013110` 动作到移动 / 距离和抵达
+### `0x62013110` Action and Movement
 
-攻击不一定立即执行。
-当 action 需要接近目标时，`locomotor` 保存 buffered action 并移动到可执行距离。
+Attacks do not always execute immediately.
+When proximity is required, `locomotor` stores the buffered action and moves within execution range.
 
-#### `0x62013111` 边界条件
+#### `0x62013111` Failure Boundary
 
-校验攻击失败时先看距离、目标有效性和 cooldown。
-不要直接跳到 `Health:DoDelta`。
+Check range, target validity, and cooldown before investigating `Health:DoDelta`.
 
-### `0x62013210` SG 到 Combat / 动画窗口
+### `0x62013210` StateGraph and Combat
 
-玩家常通过 SG 状态进入攻击动画。
-状态标签影响本地预测、连击、远程武器和特殊攻击分支。
+Player attacks commonly enter an animation state through the StateGraph.
+State tags affect prediction, combos, ranged weapons, and special attack branches.
 
-#### `0x62013211` 边界条件
+#### `0x62013211` Entry-Point Boundary
 
-非玩家实体或 projectile 也可能调用 `Combat:DoAttack` 或 `Combat:GetAttacked`。
-因此 SG 不是战斗结算的唯一入口。
+Non-player entities and projectiles can call `Combat:DoAttack` or `Combat:GetAttacked` directly.
+The StateGraph is therefore not the only path into damage resolution.
 
-### `0x62013310` Combat 到 Health / 攻击方和受击方分工
+### `0x62013310` Attacker and Target Responsibilities
 
-攻击方的 `DoAttack` 计算基础伤害并调用目标 `combat:GetAttacked`。
-受击方的 `GetAttacked` 执行防御、护甲、闪避和特殊伤害结算。
-最后由 `health:DoDelta` 改变生命。
+The attacker's `DoAttack` calculates outgoing damage and calls the target's `combat:GetAttacked`.
+`GetAttacked` resolves defense, armor, dodge, and special damage.
+`health:DoDelta` applies the final health change.
 
-#### `0x62013311` 验证点
+#### `0x62013311` Checks
 
-`GetAttacked` 调用 `health:DoDelta(-damage, ...)`。
-`DoDelta` 推送 `healthdelta`。
-`SetVal` 在死亡时推送 `entity_death` 和 `death`。
+`GetAttacked` calls `health:DoDelta(-damage, ...)`.
+`DoDelta` pushes `healthdelta`.
+`SetVal` pushes `entity_death` and `death` when the target dies.
 
-### `0x62013410` AOE 目标记录 / 坐骑与重复命中
+### `0x62013410` AOE Target Tracking
 
-部分 AOE 会先把已命中的实体写入 `targets` 表，避免一轮扫描重复处理。
-`SGknight.lua` 的 joust AOE 和 `ruinsnightmare_horn_attack.lua` 都依赖坐骑目标记录变量。
-读这类逻辑时要同时看 rider mount 分支和普通目标分支，确认写入的是实际命中实体或其 mount。
+Some AOE attacks store hit entities in a `targets` table to prevent duplicate hits during one scan.
+The joust AOE in `SGknight.lua` and `ruinsnightmare_horn_attack.lua` also track mounted targets.
+Check both rider and ordinary target branches to confirm whether the table stores the hit entity or its mount.
 
-## `0x62014110` 结构细节 / 武器与伤害 / `weapon.lua` 的伤害接口
+## `0x62014110` Weapon Damage
 
-`Weapon:SetDamage` 写入武器基础伤害。
-`Weapon:GetDamage` 会考虑函数型伤害、`damagetypebonus` 和特殊伤害表。
-`Weapon:OnAttack` 是命中后的武器回调。
+`weapon.lua` uses `Weapon:SetDamage` to store base damage.
+`Weapon:GetDamage` supports function-based damage, `damagetypebonus`, and special damage tables.
+`Weapon:OnAttack` runs the weapon's post-hit callback.
 
-### `0x62014111` 需要核对的字段
+### `0x62014111` Samples
 
-用 `spear.lua` 验证固定伤害。
-用 `hambat.lua` 验证 `SetOnAttack(UpdateDamage)`。
-用 `slingshotammo.lua` 验证 projectile 与特殊弹药分支。
+Use `spear.lua` for fixed damage.
+Use `hambat.lua` for `SetOnAttack(UpdateDamage)`.
+Use `slingshotammo.lua` for projectile and special-ammunition branches.
 
-## `0x62014210` 结构细节 / 死亡与掉落边界 / Health 只负责生命和死亡事件
+## `0x62014210` Death and Loot Boundary
 
-`health.lua` 不直接决定所有掉落。
-掉落通常由 prefab 或 `lootdropper` 监听死亡相关状态和事件。
-`LootDropper:ClearChanceLoot()` 提供清空 chance loot 的 helper。
-`houndbone.lua` 用 `bonetype` 保存骨头外观，并在类型变化时重建 chance loot。
+`health.lua` does not decide all loot.
+Prefabs or `lootdropper` usually react to death state or events.
+`LootDropper:ClearChanceLoot()` clears chance loot.
+`houndbone.lua` stores its appearance in `bonetype` and rebuilds chance loot when that type changes.
 
-### `0x62014211` 边界条件
+### `0x62014211` Check
 
-如果要解释战利品，必须跳到具体 prefab 的 `lootdropper` 设置。
-不要把 `Health:SetVal` 误写成掉落执行点。
+To explain a drop, inspect the prefab's `lootdropper` setup.
+`Health:SetVal` emits death state and events; it is not the loot execution point.
 
-## `0x62015100` 阅读与验证路线 / 从哪里开始读源码
+## `0x62015100` Verification
 
 ~~~bash
 rg -n "ACTIONS\\.ATTACK\\.fn|DoAttack|propattack|thrusting|helmsplitting" \
@@ -187,6 +190,10 @@ rg -n "PushAction|GoToEntity|PushBufferedAction|PreviewBufferedAction|in_cooldow
 
 rg -n "ActionHandler\\(ACTIONS\\.ATTACK|slingshot_shoot|blowdart|throw|abouttoattack" \
   scripts/stategraphs/SGwilson.lua
+
+rg -n "PerformBufferedAction|BufferedAction:Do|self\\.action\\.fn" \
+  scripts/entityscript.lua \
+  scripts/bufferedaction.lua
 
 rg -n "DoAttack|CalcDamage|GetAttacked|CalcReflectedDamage|onhitother|onattackother" \
   scripts/components/combat.lua
@@ -200,8 +207,12 @@ rg -n "SetDamage|GetDamage|OnAttack|LaunchProjectile" \
 rg -n "DoDelta|SetVal|entity_death|healthdelta|death" \
   scripts/components/health.lua
 
-rg -n "DoFireDamage|DropTarget|perishable|farming_manager|ClearChanceLoot|bonetype" \
-  scripts/standardcomponents.lua \
+rg -n "DoFireDamage|SMOTHER_DAMAGE|heatoutput" \
+  scripts/components/health.lua \
+  scripts/components/burnable.lua \
+  scripts/components/propagator.lua
+
+rg -n "ClearChanceLoot|bonetype" \
   scripts/components/lootdropper.lua \
   scripts/prefabs/houndbone.lua
 
@@ -210,15 +221,13 @@ rg -n "DoJoustAoe|ruinsnightmare_horn_attack|components\\.rider|targets\\[" \
   scripts/prefabs/ruinsnightmare_horn_attack.lua
 ~~~
 
-### `0x62015110` 推荐顺序
+### `0x62015110` Reading Order
 
-先读 `ACTIONS.ATTACK.fn`。
-再读 `SGwilson.lua` 的攻击 ActionHandler。
-然后转到 `combat.lua` 的 `DoAttack` 与 `GetAttacked`。
-最后用 `health.lua` 验证生命变化和死亡事件。
+Read the `SGwilson.lua` action handler and follow its state to `EntityScript:PerformBufferedAction` and `BufferedAction:Do`.
+Continue through `ACTIONS.ATTACK.fn`, `Combat:DoAttack`, and `Combat:GetAttacked`.
+Finish in `health.lua` to verify the health change and death events.
 
-#### `0x62015111` 最小闭环
+#### `0x62015111` Minimal Trace
 
-用普通矛攻击作为样例。
-从 `spear.lua` 的 `SetDamage` 追到 `Combat:CalcDamage`，再追到目标 `Combat:GetAttacked` 和
-`Health:DoDelta`。
+Use a spear attack.
+Follow `SetDamage` in `spear.lua` through `Combat:CalcDamage`, the target's `Combat:GetAttacked`, and `Health:DoDelta`.

@@ -1,23 +1,16 @@
-# `0x43000000` 追踪样例
+# `0x43000000` Tracing Examples
 
-本目录承载 AI、StateGraph、Brain 和行为树跨层追踪样例的目录语义。
+This directory traces AI across prefabs, Brains, behaviour trees, StateGraphs, and components.
 
-目录级语义由本 README 承载，独立专题文件只承载具体问题、链路或清单。
+## `0x43001111` Scope
 
-## `0x43001111` 目录职责 / 文档边界 / 目录载体 / 验证点
+Use the worked examples to identify each layer's responsibility and choose the next source file from the active node type.
 
-本 README 只说明目录定位、子页面边界和推荐入口。
+## `0x43002111` Pages
 
-具体源码行为进入本目录下的独立专题文件。
+- [AI Tracing Examples](0x4301-ai-examples.md)
 
-不要让第一个独立文件替代目录 README。
+## `0x43003111` Reading Order
 
-## `0x43002111` 子页面索引 / 推荐顺序 / 从目录到专题 / 链接校验
-
-- [AI Examples](0x4301-ai-examples.md)
-
-## `0x43003111` 阅读入口 / 最小路径 / 先定位再展开 / 抽样动作
-
-优先进入 `0x4301-ai-examples.md`，再按页面索引顺序展开。
-
-如果要查完整清单，回到 `0x8000-reference/README.md`。
+Start with `0x4301-ai-examples.md`.
+Use `0x8000-reference/README.md` for exhaustive reference lists.

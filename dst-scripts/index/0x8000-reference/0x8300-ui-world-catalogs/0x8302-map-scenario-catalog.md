@@ -1,12 +1,12 @@
-# `0x83020000` Map 与 Scenario 目录
+# `0x83020000` Map and Scenario Catalog
 
-本页集中 worldgen map 与 scenario 文件清单。
+This page inventories world-generation map and scenario files.
 
-Map 目录收录 444 个 Lua 文件。
+The Map directory contains 444 Lua files.
 
-Scenario 目录收录 50 个 Lua 文件。
+The Scenario directory contains 50 Lua files.
 
-## `0x83021111` Map 文件 / 清单入口 / 机器可读块 / 验证点
+## `0x83021111` Map Files
 
 - `scripts/map/archive_worldgen.lua`
 - `scripts/map/blockersets.lua`
@@ -453,7 +453,7 @@ Scenario 目录收录 50 个 Lua 文件。
 - `scripts/map/traps.lua`
 - `scripts/map/waterlog_worldgen.lua`
 
-## `0x83022111` Scenario 文件 / 清单入口 / 机器可读块 / 验证点
+## `0x83022111` Scenario Files
 
 - `scripts/scenarios/archive_cookpot.lua`
 - `scripts/scenarios/camera_maxwellthrone.lua`

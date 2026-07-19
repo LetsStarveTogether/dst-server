@@ -1,39 +1,44 @@
-# `0x21030000` 调度器
+# `0x21030000` Scheduler
 
-调度器页解释两类入口。
-`EntityScript:DoTaskInTime()` 与 `DoPeriodicTask()` 进入 `attime` 定时回调表。
-`StartThread()` 进入 coroutine task 表，并在 `Scheduler:Run()` 中 resume。
+`EntityScript:DoTaskInTime()` and `DoPeriodicTask()` create entries in `attime`.
 
-## `0x21031111` 本页定位 / 要回答的运行时问题 / 源码阅读目标 / 验证点
+`StartThread()` creates coroutine tasks resumed by `Scheduler:Run()`.
 
-目标是把定时回调和 coroutine 休眠分开。
-`ExecuteInTime()` 不会创建 coroutine。
-它通过 `ExecutePeriodic(..., limit = 1)` 写入 `attime[wakeuptick]`，并在 `Scheduler:OnTick()` 中直接执行回调。
+## `0x21031111` Purpose
 
-## `0x21032000` 源码锚点
+Timed callbacks and sleeping coroutines use different scheduler paths.
 
-| 文件 | 入口 | 用途 |
+`ExecuteInTime()` does not create a coroutine.
+
+It calls `ExecutePeriodic(..., limit = 1)` and stores the callback in `attime[wakeuptick]`.
+
+`Scheduler:OnTick()` executes that callback directly.
+
+## `0x21032000` Source Anchors
+
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/entityscript.lua` | `EntityScript:DoTaskInTime` | 普通实体延迟回调入口 |
-| `scripts/entityscript.lua` | `EntityScript:DoPeriodicTask` | 普通实体周期回调入口 |
-| `scripts/entityscript.lua` | `EntityScript:DoStaticTaskInTime` | 静态实体延迟回调入口 |
-| `scripts/entityscript.lua` | `EntityScript:DoStaticPeriodicTask` | 静态实体周期回调入口 |
-| `scripts/scheduler.lua` | `Scheduler:ExecuteInTime` | 把单次回调转换为 limit 为 1 的 periodic |
-| `scripts/scheduler.lua` | `Scheduler:ExecutePeriodic` | 计算 wake tick 并写入 `attime` |
-| `scripts/scheduler.lua` | `Scheduler:OnTick` | 执行到期 `attime` 回调并唤醒 sleep coroutine |
-| `scripts/scheduler.lua` | `Scheduler:Run` | resume `running` coroutine task |
-| `scripts/scheduler.lua` | `Sleep` | coroutine 内部按 tick 休眠 |
-| `scripts/scheduler.lua` | `RunScheduler` | 普通 scheduler 每 tick 外部入口 |
-| `scripts/scheduler.lua` | `RunStaticScheduler` | 静态 scheduler 每 tick 外部入口 |
-| `scripts/update.lua` | `Update` | 调用 `RunScheduler(i)` 的主循环位置 |
-| `scripts/update.lua` | `StaticUpdate` | 调用 `RunStaticScheduler(i)` 的主循环位置 |
+| `scripts/entityscript.lua` | `EntityScript:DoTaskInTime` | Schedule a normal one-shot entity callback |
+| `scripts/entityscript.lua` | `EntityScript:DoPeriodicTask` | Schedule a normal periodic entity callback |
+| `scripts/entityscript.lua` | `EntityScript:DoStaticTaskInTime` | Schedule a static one-shot entity callback |
+| `scripts/entityscript.lua` | `EntityScript:DoStaticPeriodicTask` | Schedule a static periodic entity callback |
+| `scripts/scheduler.lua` | `Scheduler:ExecuteInTime` | Create a periodic callback with `limit = 1` |
+| `scripts/scheduler.lua` | `Scheduler:ExecutePeriodic` | Calculate the wake tick and populate `attime` |
+| `scripts/scheduler.lua` | `Scheduler:OnTick` | Run due callbacks and wake sleeping coroutines |
+| `scripts/scheduler.lua` | `Scheduler:Run` | Resume coroutine tasks in `running` |
+| `scripts/scheduler.lua` | `Sleep` / `Yield` | Suspend or yield the current coroutine |
+| `scripts/scheduler.lua` | `RunScheduler` | Drive the normal scheduler each tick |
+| `scripts/scheduler.lua` | `RunStaticScheduler` | Drive the static scheduler each static tick |
+| `scripts/update.lua` | `Update` | Call `RunScheduler(i)` |
+| `scripts/update.lua` | `StaticUpdate` | Call `RunStaticScheduler(i)` |
 
-### `0x21032111` 主锚点 / `scripts/entityscript.lua` / 搜索信号
+### `0x21032111` Primary Search
 
-先搜索 `DoTaskInTime`，确认普通实体任务写入 `scheduler`。
-再搜索 `DoStaticTaskInTime`，确认静态实体任务写入 `staticScheduler`。
+Find `DoTaskInTime` to confirm that normal tasks use `scheduler`.
 
-## `0x21033000` 运行流程
+Then find `DoStaticTaskInTime` to confirm that static tasks use `staticScheduler`.
+
+## `0x21033000` Runtime Flow
 
 ~~~mermaid
 flowchart TD
@@ -50,41 +55,52 @@ flowchart TD
     L --> M{"yield type"}
     M --> N["HIBERNATE to hibernating"]
     M --> O["SLEEP to waitingfortick"]
-    M --> P["dead or error removed"]
-    Q["StaticUpdate"] --> R["RunStaticScheduler(i)"]
+    M --> P["plain yield remains running"]
+    M --> Q["remove dead or failed task"]
+    R["StaticUpdate"] --> S["RunStaticScheduler(i)"]
 ~~~
 
-### `0x21033111` 流程分段 / 定时回调路径 / 边界条件
+### `0x21033111` Timed Callbacks
 
-`DoTaskInTime()` 和 `DoPeriodicTask()` 返回 `Periodic` 对象，并记录在 `inst.pendingtasks`。
-到期时 `Scheduler:OnTick()` 直接调用 `k.fn(...)`。
-这条路径不经过 `Scheduler:Run()`。
+`DoTaskInTime()` and `DoPeriodicTask()` return `Periodic` objects stored in `inst.pendingtasks`.
 
-### `0x21033121` 流程分段 / Coroutine Task 路径 / 边界条件
+When due, `Scheduler:OnTick()` calls `k.fn(...)` directly without going through `Scheduler:Run()`.
 
-`StartThread()` 和 `StartStaticThread()` 用 `Scheduler:AddTask()` 创建 `Task` 和 coroutine。
-`Scheduler:Run()` resume `running` 表中的 coroutine。
-如果 coroutine `Sleep(time)`，它会 yield `SLEEP` 和目标 tick，并被放入 `waitingfortick`。
+### `0x21033121` Coroutine Tasks
 
-### `0x21033131` 流程分段 / 普通 Scheduler 与静态 Scheduler / 边界条件
+`StartThread()` and `StartStaticThread()` call `Scheduler:AddTask()` to create a `Task` and coroutine.
 
-`scheduler = Scheduler()` 使用 `GetTick()` 和 `GetTime()`。
-`staticScheduler = Scheduler(true)` 使用 `GetStaticTick()` 和 `GetStaticTime()`。
-两者都用 `GetTickTime()` 把秒数换成 wake tick。
+`Scheduler:Run()` resumes tasks in `running`.
 
-## `0x21034111` 结构细节 / 数据结构与生命周期 / `Scheduler` 表结构 / 需要核对的字段
+`Sleep(time)` yields `SLEEP` and a target tick only when that tick is in the future.
 
-`Scheduler` 包含 `tasks`、`running`、`waitingfortick`、`waking`、`hibernating` 和 `attime`。
-`attime` 存放 `Periodic` 定时回调。
-`running`、`waitingfortick`、`waking`、`hibernating` 存放 coroutine `Task`。
+Otherwise, it performs a plain yield.
 
-## `0x21034121` 结构细节 / 数据结构与生命周期 / `Periodic` 生命周期 / 需要核对的字段
+`Yield()` also performs a plain yield, leaving the task in `running` for the next `Scheduler:Run()`.
 
-`Periodic:Cancel()` 会清理 list、`fn`、`arg` 和 `nexttick`，并调用 `onfinish`。
-实体任务通过 `task_finish` 从 `inst.pendingtasks` 移除。
-单次延迟任务靠 `limit = 1` 在第一次执行后 `Cleanup()`。
+### `0x21033131` Normal and Static Schedulers
 
-## `0x21035100` 阅读与验证路线 / 从哪里开始读源码
+`scheduler = Scheduler()` uses `GetTick()` and `GetTime()`.
+
+`staticScheduler = Scheduler(true)` uses `GetStaticTick()` and `GetStaticTime()`.
+
+Both use `GetTickTime()` to convert seconds to wake ticks.
+
+## `0x21034111` Scheduler Tables
+
+`Scheduler` owns `tasks`, `running`, `waitingfortick`, `waking`, `hibernating`, and `attime`.
+
+`attime` holds `Periodic` callbacks, while the other execution tables hold coroutine `Task` objects.
+
+## `0x21034121` `Periodic` Lifecycle
+
+`Periodic:Cancel()` removes the callback from its list, clears `fn`, `arg`, and `nexttick`, and calls `onfinish`.
+
+Entity tasks use `task_finish` to leave `inst.pendingtasks`.
+
+One-shot tasks call `Cleanup()` after their first run because `limit = 1`.
+
+## `0x21035100` Verification
 
 ~~~bash
 rg -n \
@@ -97,6 +113,7 @@ rg -n \
   -e "Scheduler:Run" \
   -e "StartThread" \
   -e "Sleep" \
+  -e "Yield" \
   -e "RunScheduler" \
   -e "RunStaticScheduler" \
   scripts/entityscript.lua \
@@ -104,8 +121,10 @@ rg -n \
   scripts/update.lua
 ~~~
 
-### `0x21035111` 推荐顺序 / 最小闭环
+### `0x21035111` Next Read
 
-先追 `EntityScript:DoTaskInTime()` 到 `Scheduler:OnTick()` 的定时回调路径。
-再追 `StartThread()`、`Sleep()`、`Scheduler:Run()` 的 coroutine 路径。
-最后用 `update.lua` 确认普通 scheduler 与静态 scheduler 分别由哪个 tick 入口驱动。
+Trace `EntityScript:DoTaskInTime()` to `Scheduler:OnTick()`.
+
+Then trace `StartThread()`, `Sleep()`, `Yield()`, and `Scheduler:Run()`.
+
+Finally, confirm the normal and static entry points in `update.lua`.

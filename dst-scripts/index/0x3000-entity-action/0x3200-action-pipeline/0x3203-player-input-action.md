@@ -1,49 +1,51 @@
-# `0x32030000` Player Input 到 Action
+# `0x32030000` Player Input to Action
 
-本页按 `input.lua -> playercontroller.lua -> playeractionpicker.lua -> componentactions.lua -> bufferedaction.lua
--> stategraph/action fn` 写完整链路。
-它用鼠标输入作为主线，同时标出客户端预测和 server 权威执行的分叉。
+The path starts at `input.lua`, then enters `playercontroller.lua` and `playeractionpicker.lua`.
+It continues through `componentactions.lua`, `bufferedaction.lua`, and the stategraph or action function.
+Mouse input is the main path, with branches for client prediction and server-authoritative execution.
 
-## `0x32031111` 本页定位 / 要回答的运行时问题 / 玩家点击后发生什么 / 验证点
+## `0x32031111` Purpose
 
-目标是验收从鼠标目标、候选动作、`BufferedAction`、RPC/preview 到服务端 `ACTIONS.*.fn` 的关键链路。
+Trace a click through target selection, candidates, `BufferedAction`, and RPC or preview.
+Finish at the server `ACTIONS.*.fn`.
 
-## `0x32031211` 本页定位 / 输入层与动作层的边界 / 输入不直接执行组件副作用 / 边界条件
+## `0x32031211` Input Boundary
 
-`input.lua` 提供鼠标位置、HUD 下实体、世界下实体和控制状态。
-`PlayerController` 才把这些状态转成 `LMBaction`、`RMBaction`、RPC 或 locomotor preview。
-组件副作用仍由服务端动作执行链路完成。
+`input.lua` provides the mouse position, HUD and world entities under the cursor, and control state.
+`PlayerController` turns that state into `LMBaction`, `RMBaction`, RPCs, or locomotor preview.
+Component side effects still occur through the server-authoritative action path.
 
-## `0x32032000` 源码锚点
+## `0x32032000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Purpose |
 | --- | --- | --- |
-| `scripts/input.lua` | `TheInput:GetWorldPosition` | 鼠标世界坐标来源 |
-| `scripts/input.lua` | `TheInput:GetWorldEntityUnderMouse` | 鼠标实体目标来源 |
-| `scripts/input.lua` | `TheInput:GetHUDEntityUnderMouse` | HUD 阻挡判断 |
-| `scripts/components/playercontroller.lua` | `PlayerController:OnUpdate` | 缓存 `LMBaction` 和 `RMBaction` |
-| `scripts/components/playercontroller.lua` | `PlayerController:OnLeftClick` | 左键点击提交 |
-| `scripts/components/playercontroller.lua` | `PlayerController:OnRightClick` | 右键点击提交 |
-| `scripts/components/playercontroller.lua` | `PlayerController:DoAction` | 本地、非预测客户端、预测客户端三路提交 |
-| `scripts/components/playeractionpicker.lua` | `DoGetMouseActions` | 计算左键和右键候选 |
-| `scripts/componentactions.lua` | `EntityScript:CollectActions` | 按 action type 收集候选 |
-| `scripts/bufferedaction.lua` | `BufferedAction` | 动作上下文对象 |
-| `scripts/entityscript.lua` | `EntityScript:PushBufferedAction` | 权威动作提交入口 |
-| `scripts/stategraphs/SGwilson.lua` | `ActionHandler(ACTIONS.*)` | 服务端玩家动作状态映射 |
-| `scripts/stategraphs/SGwilson_client.lua` | `ActionHandler(ACTIONS.*)` | 客户端预测动作状态映射 |
+| `scripts/input.lua` | `TheInput:GetWorldPosition` | Read the mouse world position. |
+| `scripts/input.lua` | `TheInput:GetWorldEntityUnderMouse` | Read the entity under the mouse. |
+| `scripts/input.lua` | `TheInput:GetHUDEntityUnderMouse` | Detect HUD blocking. |
+| `scripts/components/playercontroller.lua` | `PlayerController:OnUpdate` | Cache `LMBaction` and `RMBaction`. |
+| `scripts/components/playercontroller.lua` | `PlayerController:OnLeftClick` | Submit a left click. |
+| `scripts/components/playercontroller.lua` | `PlayerController:OnRightClick` | Submit a right click. |
+| `scripts/components/playercontroller.lua` | `PlayerController:DoAction` | Choose the submission path. |
+| `scripts/components/playercontroller.lua` | `PlayerController:OnRemoteControllerActionButtonPoint` | Rebuild a controller point action on the server. |
+| `scripts/components/playeractionpicker.lua` | `DoGetMouseActions` | Calculate left- and right-click candidates. |
+| `scripts/componentactions.lua` | `EntityScript:CollectActions` | Collect candidates by action type. |
+| `scripts/bufferedaction.lua` | `BufferedAction` | Store action context. |
+| `scripts/entityscript.lua` | `EntityScript:PushBufferedAction` | Enter authoritative action execution. |
+| `scripts/stategraphs/SGwilson.lua` | `ActionHandler(ACTIONS.*)` | Map server player actions to states. |
+| `scripts/stategraphs/SGwilson_client.lua` | `ActionHandler(ACTIONS.*)` | Map predicted client actions to states. |
 
-### `0x32032111` 主锚点 / `scripts/components/playercontroller.lua` / 搜索信号
+### `0x32032111` PlayerController Anchor
 
-先找 `LMBaction` 和 `RMBaction`。
-它们在 `OnUpdate` 中由 `playeractionpicker:DoGetMouseActions()` 刷新，点击时由
-`GetLeftMouseAction()` 和 `GetRightMouseAction()` 读取。
+Find `LMBaction` and `RMBaction`.
+`OnUpdate` refreshes them through `playeractionpicker:DoGetMouseActions()`.
+Click handlers read them through `GetLeftMouseAction()` and `GetRightMouseAction()`.
 
-### `0x32032121` 主锚点 / `scripts/input.lua` / 搜索信号
+### `0x32032121` Input Anchor
 
-再找 `GetWorldPosition`、`GetWorldEntityUnderMouse` 和 `GetHUDEntityUnderMouse`。
-这些函数解释为什么 UI 上的点击不会直接进入世界动作链路。
+Find `GetWorldPosition`, `GetWorldEntityUnderMouse`, and `GetHUDEntityUnderMouse`.
+They explain why a click over UI does not enter the world action path.
 
-## `0x32033000` 运行流程
+## `0x32033000` Input and Execution Flow
 
 ~~~mermaid
 flowchart TD
@@ -54,12 +56,12 @@ flowchart TD
     D --> E{"OnLeftClick / OnRightClick"}
     E --> F["GetLeftMouseAction / GetRightMouseAction"]
     F --> G["PlayerController:DoAction"]
-    G --> H{"运行端"}
+    G --> H{"Execution side"}
     H -->|mastersim| I["locomotor:PushAction"]
     H -->|client without locomotor| J["non_preview_cb -> RPC"]
     H -->|predicting client| K["locomotor:PreviewAction + preview_cb -> RPC"]
     I --> L["EntityScript:PushBufferedAction"]
-    J --> M["server OnRemote* rebuild action"]
+    J --> M["server OnRemote* rebuilds action"]
     K --> M
     M --> L
     L --> N["SGwilson / SGwilson_client ActionHandler"]
@@ -68,100 +70,100 @@ flowchart TD
     P --> Q["ACTIONS.*.fn / component side effect"]
 ~~~
 
-### `0x32033111` 缓存分段 / `PlayerController:OnUpdate` / 验证点
+### `0x32033111` Action Cache
 
-非手柄模式下，`OnUpdate` 会把 `DoGetMouseActions()` 的结果写入 `self.LMBaction` 和 `self.RMBaction`。
-手柄模式会清空鼠标动作并转去 `UpdateControllerTargets(dt)`。
+Outside controller mode, `OnUpdate` stores `DoGetMouseActions()` results in `self.LMBaction` and `self.RMBaction`.
+Controller mode clears mouse actions and calls `UpdateControllerTargets(dt)`.
 
-### `0x32033121` 缓存分段 / `DoGetMouseActions` / 验证点
+### `0x32033121` Mouse Target Resolution
 
-`DoGetMouseActions` 会在没有显式 position 时读取 `TheInput:GetWorldPosition()` 和
-`TheInput:GetWorldEntityUnderMouse()`。
-如果 HUD 下有实体，它会提前返回。
-AOE targeting 时，position 会来自 reticule，而不是普通鼠标世界点。
+Without a position, `DoGetMouseActions` reads `TheInput:GetWorldPosition()`.
+It also reads `TheInput:GetWorldEntityUnderMouse()`.
+It returns early when an entity is under the HUD.
+During AOE targeting, the reticule supplies the position instead of the ordinary mouse world point.
 
-### `0x32033211` 点击分段 / `OnLeftClick` / 验证点
+### `0x32033211` Left Click
 
-左键先处理拖拽、放置、AOE 复施、双击动作和地图目标。
-常规路径读取 `GetLeftMouseAction()`。
-如果没有左键动作，它会构造 `BufferedAction(self.inst, nil, ACTIONS.WALKTO, nil, position)`。
+Left click first handles dragging, placement, repeated AOE use, double-click actions, and map targets.
+The ordinary path reads `GetLeftMouseAction()`.
+When no left-click action exists, it creates `BufferedAction(self.inst, nil, ACTIONS.WALKTO, nil, position)`.
 
-### `0x32033221` 点击分段 / `OnRightClick` / 验证点
+### `0x32033221` Right Click
 
-右键会先关闭放置或 AOE targeting。
-常规路径读取 `GetRightMouseAction()`。
-没有右键动作时，它可能归还 active item、尝试 AOE targeting 或只发送空 `RPC.RightClick`。
+Right click first cancels placement or AOE targeting.
+The ordinary path reads `GetRightMouseAction()`.
+Without a right-click action, it may return the active item, begin AOE targeting, or send an empty `RPC.RightClick`.
 
-### `0x32033311` 提交分段 / `PlayerController:DoAction` / 验证点
+### `0x32033311` `PlayerController:DoAction`
 
-`DoAction` 大多数路径会先检查 `buffaction`、目标有效性、忙碌状态和重复动作。
-非预测客户端没有 locomotor、存在 `non_preview_cb` 且没有 `pre_action_cb` 时，会先发送 RPC。
-然后处理攻击 retarget、高亮、自动装备和 hold action。
-`ismastersim` 时走 `locomotor:PushAction(buffaction, true)`。
-没有 locomotor 的非预测客户端通过 `non_preview_cb` 发送 RPC。
-有 locomotor 且可移动时走 `locomotor:PreviewAction(buffaction, true)`。
+On a non-predicting client without a locomotor, `DoAction` may call `non_preview_cb` before local validation.
+This early call occurs when the action has no `pre_action_cb`.
+It then validates the action objects, busy state, and duplicate actions.
+On that same path, when `pre_action_cb` exists, it and `non_preview_cb` run later, after validation and automatic equipment.
+The function then handles attack retargeting, highlighting, automatic equipment, and held actions.
+The master simulation calls `locomotor:PushAction(buffaction, true)`.
+A non-predicting client without a locomotor sends through `non_preview_cb`.
+A movable predicting client calls `locomotor:PreviewAction(buffaction, true)`.
 
-### `0x32033321` 提交分段 / 非鼠标入口 / 验证点
+### `0x32033321` Other Input Paths
 
-鼠标只是本页主线，不是玩家动作的唯一入口。
+Mouse input is not the only action source.
+`PlayerController:DoActionButton` handles the action button.
+Controller attack and controller action paths also create a `BufferedAction` or send an RPC.
+Inventory tile and map action paths do the same.
+These paths converge on `DoAction`, `locomotor:PreviewAction`, `OnRemote*`, or `RemoteBufferedAction`.
+The boat cannon branch in `OnRemoteControllerActionButtonPoint` passes the player explicitly.
+The call is `GetCannonAimActions(self.inst, position, false)`.
+The golf charging branch calls `GetGolfAimActions(position, false)`.
+When tracing controller cannon use, verify the picker signature instead of assuming the mouse arguments.
 
-`PlayerController:DoActionButton` 覆盖 action button。
+### `0x32033331` RPC and Prediction
 
-controller attack、controller action、inventory tile action 和 map action 也会构造 `BufferedAction` 或远端 RPC。
+Client click paths assign `preview_cb` or `non_preview_cb` to `act`.
+These callbacks send `RPC.LeftClick`, `RPC.RightClick`, `RPC.ActionButton`, and related messages.
+Server `OnRemote*` handlers rebuild the action from the action code, target, position, and mod name.
 
-这些入口最终仍回到 `DoAction`、`locomotor:PreviewAction`、`OnRemote*` 或 `RemoteBufferedAction`。
-`OnRemoteControllerActionButtonPoint` 的 boat cannon 分支会把玩家实例显式传给 action picker。
-具体调用是 `GetCannonAimActions(self.inst, position, false)`。
-读手柄炮击时要确认 action picker 的参数签名，而不是套用鼠标路径。
+## `0x32034111` Input Sources
 
-### `0x32033331` 提交分段 / RPC 与预测 / 验证点
+`TheInput:GetHUDEntityUnderMouse()` is the final UI filter before entering world actions.
+`TheInput:GetWorldEntityUnderMouse()` provides an entity target.
+`TheInput:GetWorldPosition()` or `TheSim:ProjectScreenPos` provides a point.
 
-客户端点击路径会为 `act` 填入 `preview_cb` 或 `non_preview_cb`。
-这些回调发送 `RPC.LeftClick`、`RPC.RightClick`、`RPC.ActionButton` 等消息。
-服务端 `OnRemote*` 路径会根据 action code、target、position 和 mod 名重建对应动作。
+## `0x32034211` Candidate Cache
 
-## `0x32034111` 结构细节 / 输入来源 / 鼠标目标与 HUD 阻挡 / 需要核对的字段
+`GetLeftMouseAction()` only returns `self.LMBaction`.
+`GetRightMouseAction()` only returns `self.RMBaction`.
+`PlayerActionPicker:DoGetMouseActions()` performs the actual candidate calculation.
 
-`TheInput:GetHUDEntityUnderMouse()` 是输入链路进入世界前的重要过滤点。
-`TheInput:GetWorldEntityUnderMouse()` 提供实体目标。
-`TheInput:GetWorldPosition()` 或 `TheSim:ProjectScreenPos` 提供点位。
+## `0x32034311` Server Authority
 
-## `0x32034211` 结构细节 / 候选动作缓存 / `LMBaction` 与 `RMBaction` / 需要核对的字段
+The local authoritative path normally advances through `locomotor:PushAction`.
+Server RPC handlers converge on the same kind of authoritative execution.
+The final checkpoints are `EntityScript:PushBufferedAction`, `StateGraphInstance:StartAction`, and `BufferedAction:Do`.
 
-`GetLeftMouseAction()` 只是返回 `self.LMBaction`。
-`GetRightMouseAction()` 只是返回 `self.RMBaction`。
-真正复杂的候选计算在 `PlayerActionPicker:DoGetMouseActions()`。
-
-## `0x32034311` 结构细节 / 服务端权威执行 / `PushAction` 到 `BufferedAction:Do` / 需要核对的字段
-
-本地权威端通常经 `locomotor:PushAction` 推进到实体动作。
-服务端接收 RPC 后也会走同一类权威动作执行路径。
-最终验证点仍是 `EntityScript:PushBufferedAction`、`StateGraphInstance:StartAction` 和
-`BufferedAction:Do`。
-
-## `0x32035100` 阅读与验证路线 / 从哪里开始读源码
+## `0x32035100` Verification
 
 ~~~bash
 rg -n "LMBaction|RMBaction|DoGetMouseActions|GetLeftMouseAction|GetRightMouseAction" \
   scripts/components/playercontroller.lua
-rg -n "OnLeftClick|OnRightClick|function PlayerController:DoAction" \
-  scripts/components/playercontroller.lua
-rg -n "OnRemoteControllerActionButtonPoint|GetCannonAimActions|BOAT_CANNON_SHOOT" \
+rg -n "OnLeftClick|OnRightClick|function PlayerController:DoAction" scripts/components/playercontroller.lua
+rg -n "OnRemoteControllerActionButtonPoint|GetCannonAimActions|GetGolfAimActions" \
   scripts/components/playercontroller.lua \
   scripts/components/playeractionpicker.lua
-rg -n "GetWorldPosition|GetWorldEntityUnderMouse|GetHUDEntityUnderMouse|IsControlPressed" \
-  scripts/input.lua
+rg -n "GetWorldPosition|GetWorldEntityUnderMouse|GetHUDEntityUnderMouse|IsControlPressed" scripts/input.lua
 rg -n "GetLeftClickActions|GetRightClickActions|GetSceneActions|GetUseItemActions|GetPointActions|CollectActions" \
-  scripts/components/playeractionpicker.lua scripts/componentactions.lua
+  scripts/components/playeractionpicker.lua \
+  scripts/componentactions.lua
 rg -n "PushBufferedAction|PerformBufferedAction|BufferedAction:Do|StateGraphInstance:StartAction" \
-  scripts/entityscript.lua scripts/bufferedaction.lua scripts/stategraph.lua
-rg -n "ActionHandler\\(ACTIONS\\." \
-  scripts/stategraphs/SGwilson.lua scripts/stategraphs/SGwilson_client.lua
+  scripts/entityscript.lua \
+  scripts/bufferedaction.lua \
+  scripts/stategraph.lua
+rg -n "ActionHandler\\(ACTIONS\\." scripts/stategraphs/SGwilson.lua scripts/stategraphs/SGwilson_client.lua
 ~~~
 
-### `0x32035111` 推荐顺序 / 最小闭环
+### `0x32035111` Minimal Trace
 
-先读 `PlayerController:OnUpdate`，确认 `LMBaction/RMBaction` 何时刷新。
-再读 `OnLeftClick` 或 `OnRightClick`，确认点击如何提交。
-然后读 `DoAction`，区分 mastersim、非预测客户端和预测客户端。
-最后回到 `PushBufferedAction` 与 `BufferedAction:Do` 验证最终副作用。
+Read `PlayerController:OnUpdate` to see when `LMBaction` and `RMBaction` refresh.
+Follow `OnLeftClick` or `OnRightClick` into submission.
+Use `DoAction` to distinguish master simulation, non-predicting client, and predicting client paths.
+Finish at `PushBufferedAction` and `BufferedAction:Do`.

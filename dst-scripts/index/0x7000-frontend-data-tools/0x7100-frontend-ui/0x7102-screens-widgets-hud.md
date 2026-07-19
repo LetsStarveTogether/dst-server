@@ -1,97 +1,100 @@
-# `0x71020000` Screen Widget HUD
+# `0x71020000` Screens, Widgets, and HUD
 
-Screen、Widget 和 HUD 是 DST Lua 前端的三层结构。
-Screen 管页面生命周期，Widget 管树、焦点和输入递归，PlayerHud 把游戏内控件集中到 `Controls`。
+Screens own page lifecycle.
+Widgets own the UI tree and focus recursion.
+`PlayerHud` groups in-game controls under `Controls`.
 
-## `0x71021111` 本页定位 / 要回答的运行时问题 / 一个 UI 控件如何接收输入 / 验证点
+## `0x71021111` Focused Input
 
-输入先到 `FrontEnd:OnControl`。
-然后进入顶部 screen 的 `OnControl`。
-`Widget:OnControl` 只会递归给带 `focus` 的子 widget。
+Input reaches the top screen through `FrontEnd:OnControl`.
+`Widget:OnControl` then recurses only into child widgets whose `focus` flag is set.
 
-## `0x71021211` 本页定位 / HUD 如何挂到 Screen 栈 / `PlayerHud` 与 `Controls` / 边界条件
+## `0x71021211` HUD as a Screen
 
-`PlayerHud` 是 `Screen` 子类。
-它不只是显示状态条，也负责协调 map、chat、crafting、wardrobe、scrapbook 等 screen 的打开和关闭。
+`PlayerHud` inherits from `Screen`.
+It presents status and coordinates map, chat, crafting, wardrobe, and Scrapbook screens.
 
-## `0x71022000` 源码锚点
+## `0x71022000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/widgets/screen.lua` | `Screen` | 继承 `Widget` 的页面基类 |
-| `scripts/widgets/screen.lua` | `Screen:OnBecomeActive` | 设置 UI root 并恢复焦点 |
-| `scripts/widgets/widget.lua` | `Widget:AddChild` | 建立 UI 树 |
-| `scripts/widgets/widget.lua` | `Widget:OnControl` | 焦点子树递归处理输入 |
-| `scripts/widgets/widget.lua` | `Widget:SetFocus` | 焦点流转入口 |
-| `scripts/screens/playerhud.lua` | `PlayerHud` | 游戏内 HUD screen |
-| `scripts/widgets/controls.lua` | `Controls` | HUD widget 聚合根 |
-| `scripts/widgets/controls.lua` | `Controls:ToggleMap` | map screen 打开和关闭 |
-| `scripts/components/playercontroller.lua` | `PlayerController:IsMapControlsEnabled` | 地图 screen 是否允许被 HUD 打开 |
+| `scripts/widgets/screen.lua` | `Screen` | Page base class derived from `Widget` |
+| `scripts/widgets/screen.lua` | `Screen:OnBecomeActive` | Sets the UI root and restores focus |
+| `scripts/widgets/widget.lua` | `Widget:AddChild` | Builds the UI tree |
+| `scripts/widgets/widget.lua` | `Widget:OnControl` | Handles input through the focused subtree |
+| `scripts/widgets/widget.lua` | `Widget:SetFocus` | Changes focus |
+| `scripts/screens/playerhud.lua` | `PlayerHud` | In-game HUD screen |
+| `scripts/widgets/controls.lua` | `Controls` | Root HUD widget collection |
+| `scripts/widgets/controls.lua` | `Controls:ToggleMap` | Opens or closes the map screen |
+| `scripts/components/playercontroller.lua` | `PlayerController:IsMapControlsEnabled` | Gates map opening |
 
-### `0x71022111` 主锚点 / `scripts/widgets/widget.lua` / 搜索信号
+### `0x71022111` Widget Anchor
 
-先搜 `function Widget:OnControl`。
-如果没有看到 `if not self.focus then return false end`，就不要判断具体控件会收到输入。
+Find `function Widget:OnControl` and verify the focus guard, focused-child loop, and `parent_scroll_list` fallback.
+Only then determine which widget receives input.
 
-### `0x71022211` HUD 锚点 / `scripts/screens/playerhud.lua` / 验证点
+### `0x71022211` HUD Anchor
 
-`PlayerHud:CreateOverlays` 创建 overlay。
-`PlayerHud` 构造后会把 `Controls(self.owner)` 加入 `self.root`。
+`PlayerHud:CreateOverlays` creates overlays.
+The `PlayerHud` constructor adds `Controls(self.owner)` to `self.root`.
 
-## `0x71023000` 运行流程
+## `0x71023000` Runtime Flow
 
 ~~~mermaid
 flowchart TD
-    A["FrontEnd screenstack top"]
+    A["top of FrontEnd screenstack"]
     A --> B["Screen:OnControl"]
     B --> C["Widget:OnControl"]
-    C --> D{"child has focus?"}
-    D -->|yes| E["child:OnControl"]
-    D -->|no| F["return false"]
-    A --> G["PlayerHud when in-game HUD is active"]
+    C --> D{"focused child consumes?"}
+    D -->|yes| E["return true"]
+    D -->|no| J{"scroll control and parent_scroll_list?"}
+    J -->|yes| K["delegate to parent list"]
+    J -->|no| F["return false"]
+    A --> G["PlayerHud when the in-game HUD is active"]
     G --> H["Controls"]
     H --> I["MapScreen / crafting menu / inventory / toast"]
 ~~~
 
-### `0x71023111` Widget 输入递归 / `Widget:OnControl` / 边界条件
+### `0x71023111` Widget Recursion
 
-Widget 不会向所有子节点广播 control。
-只有 `v.focus` 为真且子节点返回 `true` 时，控制才被消费。
+Widgets do not broadcast controls to every child.
+Only focused children receive recursive `OnControl` calls.
+If none consumes a scroll control, the widget may delegate it to `parent_scroll_list`; otherwise it returns `false`.
 
-### `0x71023211` Screen 生命周期 / `Screen:OnBecomeActive` / 验证点
+### `0x71023211` Screen Activation
 
-Screen 重新激活时会调用 `TheSim:SetUIRoot(self.inst.entity)`。
-如果有 `last_focus` 并且实体仍有效，会恢复保存的焦点。
-否则会尝试 `default_focus`。
+`Screen:OnBecomeActive` calls `TheSim:SetUIRoot(self.inst.entity)`.
+It restores a valid `last_focus`, otherwise it tries `default_focus`.
 
-### `0x71023311` HUD 控件集合 / `Controls` / 验证点
+### `0x71023311` HUD Controls
 
-`Controls` 构造函数会创建 action hint、toast、状态显示、背包和 map/crafting 相关根节点。
-`Controls:ToggleMap` 根据 `quagmire` game mode、`no_minimap` 和 `IsMapControlsEnabled()` 决定打开 `MapScreen` 或 `QuagmireRecipeBookScreen`。
-`Controls:OnUpdate` 会在手持带 `golfclub_reticule` 的物品时移动 `playeractionhint`。
-这个偏移把提示放到玩家背后，避免遮挡高尔夫 reticule 目标。
+The `Controls` constructor creates action hints, toasts, status displays, inventory, and map and crafting roots.
+`Controls:ToggleMap` checks the `quagmire` game mode, `no_minimap`, and `IsMapControlsEnabled()`.
+`MapScreen` or `QuagmireRecipeBookScreen` opens only after those checks.
+`Controls:OnUpdate` moves `playeractionhint` behind the player when an item has `golfclub_reticule`.
+This keeps the hint clear of the target.
 
-## `0x71024111` 结构细节 / UI 树 / `Widget:AddChild` / 需要核对的字段
+## `0x71024111` UI Tree
 
-`AddChild` 把子 widget 放入父节点并维护层级关系。
-后续位置、缩放、显示、更新和输入都依赖这棵树。
+`Widget:AddChild` records parent-child hierarchy used by position, scale, visibility, updates, and input.
 
-## `0x71024211` 结构细节 / HUD 打开 Screen / `Controls:ToggleMap` / 需要核对的字段
+## `0x71024211` Opening the Map
 
-地图不是 `Controls` 自己绘制的一个普通子 widget。
-它会通过 `TheFrontEnd:PushScreen(MapScreen(self.owner))` 进入前端 screen 栈。
+The map is not a regular child drawn by `Controls`.
+`Controls:ToggleMap` adds it to the frontend stack through `TheFrontEnd:PushScreen(MapScreen(self.owner))`.
 
-## `0x71024311` 结构细节 / HUD 展示与 Gameplay 的边界 / `PlayerHud:OnControl` / 边界条件
+## `0x71024311` Gameplay Boundary
 
-`PlayerHud:IsCraftingBlockingGameplay` 标记为 deprecated，函数体直接返回 `false`。
-HUD 是否吞掉输入要看 `PlayerHud:OnControl`、screen 栈和 `playercontroller:ShouldPlayerHUDControlBeIgnored`。
-但 HUD 不应该被当作 server 权威状态来源。
-遇到 gameplay 结果要继续追 component 或 RPC。
+`PlayerHud:IsCraftingBlockingGameplay` is deprecated and always returns `false`.
+Input consumption depends on `PlayerHud:OnControl` and the screen stack.
+`PlayerController:ShouldPlayerHUDControlBeIgnored` runs before HUD shortcuts.
+It lets higher-priority mapped controller actions win.
+The HUD is not authoritative server state, so gameplay outcomes must be traced to a component or RPC.
 
-## `0x71025100` 阅读与验证路线 / 从哪里开始读源码
+## `0x71025100` Verification
 
 ~~~bash
-rg -n "function Widget:AddChild|function Widget:OnControl|function Widget:SetFocus" \
+rg -n "function Widget:AddChild|function Widget:OnControl|function Widget:SetFocus|parent_scroll_list" \
   scripts/widgets/widget.lua
 
 rg -n "function Screen:OnBecomeActive|function Screen:SetDefaultFocus" \
@@ -107,9 +110,8 @@ rg -n "function PlayerController:IsMapControlsEnabled" \
   scripts/components/playercontroller.lua
 ~~~
 
-### `0x71025111` 推荐顺序 / 最小闭环
+### `0x71025111` Minimal Trace
 
-从一个 `CONTROL_MAP` 开始。
-确认 `PlayerHud:OnControl` 触发 `self.controls:ToggleMap()`。
-再确认 `Controls:ToggleMap` 先检查 game mode、`no_minimap` 和 `IsMapControlsEnabled()`。
-最终路径才会对 `TheFrontEnd` 调用 `PushScreen` 或 `PopScreen`。
+Start with `CONTROL_MAP` and confirm that `PlayerHud:OnControl` calls `self.controls:ToggleMap()`.
+Verify the game-mode, `no_minimap`, and `IsMapControlsEnabled()` checks.
+Only then inspect the final `TheFrontEnd:PushScreen` or `TheFrontEnd:PopScreen` call.

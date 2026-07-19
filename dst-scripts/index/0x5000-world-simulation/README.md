@@ -1,62 +1,62 @@
-# `0x50000000` 世界模拟
+# `0x50000000` World Simulation
 
-本区按 worldgen、Level/Task/Room/Layout、天气季节、洞穴海洋组织。
+This section separates world generation from runtime world state.
 
-目录级语义由本 README 承载，独立专题文件只解释具体运行链路。
+## `0x50001111` Scope
 
-## `0x50001111` 区域定位 / 阅读问题 / 运行时入口 / 验证点
+Read worldgen first to see how presets become saved maps.
 
-读者要把生成阶段和运行阶段分开阅读。
+Then read world state to see how the loaded world evolves.
 
-## `0x50002000` 源码锚点
+## `0x50002000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry point | Purpose |
 | --- | --- | --- |
-| `scripts/worldgen_main.lua` | `GenerateNew` | 世界生成入口 |
-| `scripts/map/levels.lua` | `AddWorldGenLevel` | 注册 worldgen preset |
-| `scripts/map/level.lua` | `Level` | 包装 preset 并选择 task set |
-| `scripts/map/storygen.lua` | `Story:GenerateNodesFromTasks` | 构造拓扑 graph |
-| `scripts/map/forest_map.lua` | `Generate` | WorldSim 烘焙与实体表写入 |
-| `scripts/components/worldstate.lua` | `WorldState` | 运行时世界状态 |
+| `scripts/worldgen_main.lua` | `GenerateNew` | Starts world generation |
+| `scripts/map/levels.lua` | `AddWorldGenLevel` | Registers worldgen presets |
+| `scripts/map/level.lua` | `Level` | Wraps a preset and selects a task set |
+| `scripts/map/storygen.lua` | `Story:GenerateNodesFromTasks` | Builds the topology graph |
+| `scripts/map/forest_map.lua` | `Generate` | Bakes `WorldSim` output and writes entities |
+| `scripts/components/worldstate.lua` | `SetVariable` | Projects runtime events into world state |
 
-### `0x50002111` 入口选择 / `scripts/worldgen_main.lua` / 搜索信号
+### `0x50002111` Primary Entry
 
-用 `GenerateNew` 判断本区域从哪个运行时对象开始。
+Start at `GenerateNew` to trace the dedicated worldgen path before runtime world components exist.
 
-## `0x50003000` 运行关系图
+## `0x50003000` Data Flow
 
 ~~~mermaid
 flowchart TD
-    A["worldgen params"]
+    A["worldgen parameters"]
     A --> B["worldgen_main.GenerateNew"]
     B --> C["Level(level_data)"]
     C --> D["Task / Room"]
     D --> E["storygen graph"]
     E --> F["forest_map + WorldSim"]
     F --> G["savedata.map / savedata.ents"]
-    G --> H["runtime worldstate"]
+    G --> H["save load + world prefab assembly"]
+    H --> I["runtime worldstate"]
 ~~~
 
-### `0x50003111` 导航原则 / 专题入口 / 本区不放穷举清单
+### `0x50003111` Navigation Rule
 
-本区索引只放运行关系和源码入口，完整文件目录统一进入 `0x8000-reference`。
+This index covers relationships and entry points; use `0x8000-reference` for exhaustive file lists.
 
-## `0x50004111` 目录索引 / README 载体 / 二级目录 / 链接校验
+## `0x50004111` Pages
 
-以下入口先进入目录 README，再进入具体专题文件。
+- [World Generation](0x5100-worldgen/README.md)
+- [Worldgen Entry](0x5100-worldgen/0x5101-worldgen-main.md)
+- [Levels, Tasks, and Rooms](0x5100-worldgen/0x5102-levels-tasks-rooms.md)
+- [Layouts and Set Pieces](0x5100-worldgen/0x5103-layouts.md)
+- [Forest Map Output](0x5100-worldgen/0x5104-forest-map-output.md)
+- [World State](0x5200-world-state/README.md)
+- [Weather and Seasons](0x5200-world-state/0x5201-weather-seasons.md)
+- [Caves, Ocean, and Ruins](0x5200-world-state/0x5202-caves-ocean-ruins.md)
 
-- [世界生成](0x5100-worldgen/README.md)
-- [Worldgen Main](0x5100-worldgen/0x5101-worldgen-main.md)
-- [Levels Tasks Rooms](0x5100-worldgen/0x5102-levels-tasks-rooms.md)
-- [Layouts](0x5100-worldgen/0x5103-layouts.md)
-- [世界状态](0x5200-world-state/README.md)
-- [天气与季节](0x5200-world-state/0x5201-weather-seasons.md)
-- [洞穴海洋与遗迹](0x5200-world-state/0x5202-caves-ocean-ruins.md)
-
-## `0x50005100` 阅读与验证路线 / 从哪里开始读源码
+## `0x50005100` Verification
 
 ~~~bash
-rg -n "GenerateNew|AddWorldGenLevel|function Level:ChooseTasks|GenerateNodesFromTasks|function Generate|WorldState" \
+rg -n "GenerateNew|AddWorldGenLevel|function Level:ChooseTasks|GenerateNodesFromTasks|function Generate|SetVariable" \
   scripts/worldgen_main.lua \
   scripts/map/levels.lua \
   scripts/map/level.lua \
@@ -65,6 +65,8 @@ rg -n "GenerateNew|AddWorldGenLevel|function Level:ChooseTasks|GenerateNodesFrom
   scripts/components/worldstate.lua
 ~~~
 
-### `0x50005111` 最小闭环 / 抽样动作
+### `0x50005111` Minimum Trace
 
-抽样从 `GenerateNew` 追到 `GenerateNodesFromTasks` 和 `Room` 内容。
+Trace `GenerateNew` through `GenerateNodesFromTasks` and `forest_map.Generate`.
+
+Treat save loading as the boundary before runtime `worldstate` projection.

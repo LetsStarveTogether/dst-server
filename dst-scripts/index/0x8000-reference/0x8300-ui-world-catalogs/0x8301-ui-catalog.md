@@ -1,12 +1,12 @@
-# `0x83010000` UI 目录
+# `0x83010000` UI Catalog
 
-本页集中 Screen 与 Widget 文件清单。
+This page inventories Screen and Widget files.
 
-Screen 目录收录 135 个 Lua 文件。
+The Screen directory contains 135 Lua files.
 
-Widget 目录收录 272 个 Lua 文件。
+The Widget directory contains 272 Lua files.
 
-## `0x83011111` Screen 文件 / 清单入口 / 机器可读块 / 验证点
+## `0x83011111` Screen Files
 
 - `scripts/screens/DebugMenuScreen.lua`
 - `scripts/screens/bigpopupdialog.lua`
@@ -144,7 +144,7 @@ Widget 目录收录 272 个 Lua 文件。
 - `scripts/screens/wardrobepopup.lua`
 - `scripts/screens/worldgenscreen.lua`
 
-## `0x83012111` Widget 文件 / 清单入口 / 机器可读块 / 验证点
+## `0x83012111` Widget Files
 
 - `scripts/widgets/animbutton.lua`
 - `scripts/widgets/animspinner.lua`

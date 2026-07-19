@@ -1,25 +1,21 @@
-# `0x21000000` 启动循环
+# `0x21000000` Boot and Main Loop
 
-本目录承载启动序列、主循环和 scheduler 的目录语义。
+This directory covers startup, per-tick updates, and task scheduling.
 
-目录级语义由本 README 承载，独立专题文件只承载具体问题、链路或清单。
+## `0x21001111` Scope
 
-## `0x21001111` 目录职责 / 文档边界 / 目录载体 / 验证点
+Use these pages to trace the Lua-visible runtime from engine startup through world activation and recurring updates.
 
-本 README 只说明目录定位、子页面边界和推荐入口。
+## `0x21002111` Pages
 
-具体源码行为进入本目录下的独立专题文件。
+- [Boot Sequence](0x2101-boot-sequence.md)
+- [Main Loop](0x2102-main-loop.md)
+- [Scheduler](0x2103-scheduler.md)
 
-不要让第一个独立文件替代目录 README。
+## `0x21003111` Reading Order
 
-## `0x21002111` 子页面索引 / 推荐顺序 / 从目录到专题 / 链接校验
+Start with `0x2101-boot-sequence.md`, then continue to `0x2102-main-loop.md`.
 
-- [启动序列](0x2101-boot-sequence.md)
-- [主循环](0x2102-main-loop.md)
-- [调度器](0x2103-scheduler.md)
+Open the scheduler page when tracing delayed callbacks or coroutines.
 
-## `0x21003111` 阅读入口 / 最小路径 / 先定位再展开 / 抽样动作
-
-优先进入 `0x2101-boot-sequence.md`，再按页面索引顺序展开。
-
-如果要查完整清单，回到 `0x8000-reference/README.md`。
+For exhaustive inventories, see [Reference](../../0x8000-reference/README.md).

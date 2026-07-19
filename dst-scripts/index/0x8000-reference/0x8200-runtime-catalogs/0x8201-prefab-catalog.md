@@ -1,11 +1,10 @@
-# `0x82010000` Prefab 目录
+# `0x82010000` Prefab Catalog
 
-Prefab 目录收录 1594 个 Lua 文件。
+The Prefab directory contains 1,594 Lua files.
 
-## `0x82011111` Prefab 文件 / 清单入口 / 机器可读块 / 验证点
+## `0x82011111` Prefab Files
 
-专题页只引用代表性 Prefab。
-完整清单在此维护。
+System pages cite representative Prefabs; this page keeps the complete inventory.
 
 - `scripts/prefabs/abigail.lua`
 - `scripts/prefabs/abigail_attack_fx.lua`

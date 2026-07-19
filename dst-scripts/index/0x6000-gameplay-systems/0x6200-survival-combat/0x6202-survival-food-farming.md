@@ -1,122 +1,122 @@
-# `0x62020000` 生存食物与农场
+# `0x62020000` Survival, Food, and Farming
 
-生存页要分成食用、饥饿衰减、腐败修正和农场种植几条链路。
-食物不会直接流向农场管理器，农场也不是食用动作的后续步骤。
+Treat eating, hunger depletion, spoilage modifiers, item temperature, and farming as separate runtime paths.
+Food does not flow into the farming manager, and farming is not a continuation of the eat action.
 
-## `0x62021000` 本页定位
+## `0x62021000` Purpose
 
-本页解释玩家吃东西如何改变 `health`、`hunger` 和 `sanity`。
-同时解释农场从种子部署到土壤、植物压力和营养循环的源码入口。
+This guide traces how eating changes `health`, `hunger`, and `sanity`.
+It also traces seeds through soil, plant stress, tending, and world-level nutrient cycles.
 
-### `0x62021100` 要回答的运行时问题
+### `0x62021100` Separate Paths
 
-吃东西时数值来自哪里。
-腐败如何影响食物效果。
-饥饿值何时反过来扣生命。
-农场种子如何变成作物，并如何读取世界级 farming manager。
+Food values, spoilage, starvation, and farming enter through separate components.
 
-#### `0x62021110` 源码阅读目标
+#### `0x62021110` Reading Paths
 
-把 `ACTIONS.EAT`、`Eater:Eat`、`Edible:Get*`、`Hunger:DoDelta` 和 `Health:DoDelta` 串起来。
-把 `PLANTSOIL`、`farmplantable`、`farm_plants` 和 `farming_manager` 串起来。
+Connect `ACTIONS.EAT`, `Eater:Eat`, `Edible:Get*`, `Hunger:DoDelta`, and `Health:DoDelta`.
+Separately connect `PLANTSOIL`, `farmplantable`, `farm_plants`, and `farming_manager`.
 
-##### `0x62021111` 验证点
+##### `0x62021111` Key Facts
 
-`ACTIONS.EAT.fn` 调用 `eater:Eat`。
-`Eater:Eat` 同时计算 health、hunger、sanity 三类 delta。
-`Perishable:IsStale` 和 `Perishable:IsSpoiled` 会被 `Edible:Get*` 读取。
-农场营养通过 `FarmingManager:CycleNutrientsAtPoint` 更新。
+`ACTIONS.EAT.fn` calls `eater:Eat`.
+`Eater:Eat` calculates health, hunger, and sanity deltas.
+`Edible:Get*` reads `Perishable:IsStale` and `Perishable:IsSpoiled`.
+`FarmingManager:CycleNutrientsAtPoint` updates farm nutrients.
 
-## `0x62022000` 源码锚点
+## `0x62022000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/actions.lua` | `ACTIONS.EAT.fn` | 食用动作入口 |
-| `scripts/components/eater.lua` | `Eater:Eat` | 吃东西并分发数值变化 |
-| `scripts/components/edible.lua` | `Edible:GetHunger` | 食物数值与腐败修正 |
-| `scripts/components/perishable.lua` | `Perishable:IsSpoiled` | 腐败阶段判定 |
-| `scripts/components/inventoryitemtemperature.lua` | `UpdateTemperature` | 背包物品温度趋近与隔热修正 |
-| `scripts/components/inventoryitem.lua` | `EnableTemperature` | 物品温度组件的外层入口 |
-| `scripts/components/hunger.lua` | `Hunger:DoDec` | 饥饿衰减与饥饿伤害 |
-| `scripts/components/sanity.lua` | `Sanity:DoDelta` | 食物理智变化与持续理智速率 |
-| `scripts/prefabs/desiccant.lua` | `OnUpdateExternallyControlled` | 干燥剂温度与吸湿状态连接 |
-| `scripts/components/farmplantable.lua` | `FarmPlantable:Plant` | 种子种入土壤 |
-| `scripts/components/farmplanttendable.lua` | `FarmPlantTendable:TendTo` | 作物照料状态 |
-| `scripts/prefabs/farm_plants.lua` | `MakePlant` | 作物 prefab 与压力系统 |
-| `scripts/components/farming_manager.lua` | `CycleNutrientsAtPoint` | 世界级土壤营养循环 |
-| `scripts/standardcomponents.lua` | `AddTileNutrients` | 通用农场营养 helper |
+| `scripts/actions.lua` | `ACTIONS.EAT.fn` | Starts eating |
+| `scripts/components/eater.lua` | `Eater:Eat` | Validates food and distributes deltas |
+| `scripts/components/edible.lua` | `Edible:GetHunger` | Calculates food values and spoilage effects |
+| `scripts/components/perishable.lua` | `Perishable:IsSpoiled` | Reports spoilage stages |
+| `scripts/components/inventoryitemtemperature.lua` | `UpdateTemperature` | Updates item temperature |
+| `scripts/components/inventoryitem.lua` | `EnableTemperature` | Enables the temperature component |
+| `scripts/standardcomponents.lua` | `MakeFumaroleTool` | Configures insulated fumarole tools |
+| `scripts/prefabs/trap_fumarole.lua` | `OnTemperatureDelta` | Recomputes the trap's heat modifier |
+| `scripts/components/hunger.lua` | `Hunger:DoDec` | Depletes hunger and applies starvation damage |
+| `scripts/components/sanity.lua` | `Sanity:DoDelta` | Applies food and continuous sanity changes |
+| `scripts/prefabs/desiccant.lua` | `OnUpdateExternallyControlled` | Connects temperature to absorbed moisture |
+| `scripts/components/farmplantable.lua` | `FarmPlantable:Plant` | Plants a seed in soil |
+| `scripts/components/farmplanttendable.lua` | `FarmPlantTendable:TendTo` | Updates tending state |
+| `scripts/prefabs/farm_plants.lua` | `MakePlant` | Builds crop prefabs and stress systems |
+| `scripts/components/farming_manager.lua` | `CycleNutrientsAtPoint` | Cycles world-level soil nutrients |
+| `scripts/standardcomponents.lua` | `MakeDeployableFertilizer` | Connects fertilizer deployment to soil nutrients |
 
-### `0x62022110` 主锚点 / `scripts/actions.lua`
+### `0x62022110` `scripts/actions.lua`
 
-`ACTIONS.EAT.fn` 从 `act.target` 或 `act.invobject` 取对象。
-如果对象有 `edible` 且 doer 有 `eater`，就调用 `act.doer.components.eater:Eat(obj, act.doer)`。
+`ACTIONS.EAT.fn` selects `act.target` or `act.invobject`.
+When the object has `edible` and the actor has `eater`, it calls `act.doer.components.eater:Eat(obj, act.doer)`.
 
-#### `0x62022111` 搜索信号
+#### `0x62022111` Search Terms
 
-搜索 `ACTIONS.EAT.fn`、`components.edible`、`components.eater` 和 `souleater`。
+Search for `ACTIONS.EAT.fn`, `components.edible`, `components.eater`, and `souleater`.
 
-### `0x62022120` 主锚点 / `scripts/components/eater.lua`
+### `0x62022120` `scripts/components/eater.lua`
 
-`Eater:Eat` 先用 `PrefersToEat` 校验饮食规则。
-随后读取 `Edible:GetHealth`、`Edible:GetHunger` 和 `Edible:GetSanity`，并调用对应组件的 `DoDelta`。
+`Eater:Eat` validates diet rules with `PrefersToEat`.
+It reads `Edible:GetHealth`, `Edible:GetHunger`, and `Edible:GetSanity`.
+Each value is applied through the matching component.
 
-#### `0x62022121` 搜索信号
+#### `0x62022121` Search Terms
 
-搜索 `Eater:Eat`、`PrefersToEat`、`foodmemory`、`custom_stats_mod_fn`、`oneat` 和 `OnEaten`。
+Search for `Eater:Eat`, `PrefersToEat`, `foodmemory`, `custom_stats_mod_fn`, `oneat`, and `OnEaten`.
 
-### `0x62022130` 主锚点 / `scripts/components/edible.lua`
+### `0x62022130` `scripts/components/edible.lua`
 
-`Edible:GetSanity`、`Edible:GetHunger` 和 `Edible:GetHealth` 负责把基础食物数值转换成实际效果。
-这里会考虑腐败、spice、foodaffinity 和自定义 getter。
+`Edible:GetSanity`, `Edible:GetHunger`, and `Edible:GetHealth` convert base food values into actual effects.
+They account for spoilage, spices, `foodaffinity`, and custom getters.
 
-#### `0x62022131` 搜索信号
+#### `0x62022131` Search Terms
 
-搜索 `GetSanity`、`GetHunger`、`GetHealth`、`IsStale`、`IsSpoiled` 和 `foodaffinity`。
+Search for `GetSanity`, `GetHunger`, `GetHealth`, `IsStale`, `IsSpoiled`, and `foodaffinity`.
 
-### `0x62022140` 主锚点 / `scripts/components/hunger.lua`
+### `0x62022140` `scripts/components/hunger.lua`
 
-`Hunger:DoDelta` 只改饥饿当前值。
-`Hunger:DoDec` 才负责随时间消耗饥饿，并在饥饿为零时调用 `health:DoDelta(..., "hunger")`。
+`Hunger:DoDelta` changes only the current hunger value.
+`Hunger:DoDec` performs timed depletion and calls `health:DoDelta(..., "hunger")` when hunger is zero.
 
-#### `0x62022141` 搜索信号
+#### `0x62022141` Search Terms
 
-搜索 `DoDelta`、`DoDec`、`hungerrate`、`hurtrate` 和 `overridestarvefn`。
+Search for `DoDelta`, `DoDec`, `hungerrate`, `hurtrate`, and `overridestarvefn`.
 
-### `0x62022150` 主锚点 / `scripts/components/sanity.lua`
+### `0x62022150` `scripts/components/sanity.lua`
 
-食物可以通过 `Eater:Eat` 调用 `sanity:DoDelta`。
-理智组件自身还在 `Sanity:Recalc` 中汇总装备、潮湿、光照、光环、幽灵和外部 modifier。
+Eating can call `sanity:DoDelta` through `Eater:Eat`.
+`Sanity:Recalc` also combines equipment, wetness, light, auras, ghosts, and external modifiers.
 
-#### `0x62022151` 搜索信号
+#### `0x62022151` Search Terms
 
-搜索 `Sanity:DoDelta`、`Sanity:Recalc`、`dapperness`、`sanityaura` 和 `externalmodifiers`。
+Search for `Sanity:DoDelta`, `Sanity:Recalc`, `dapperness`, `sanityaura`, and `externalmodifiers`.
 
-### `0x62022160` 主锚点 / `scripts/components/farmplantable.lua`
+### `0x62022160` `scripts/components/farmplantable.lua`
 
-`FarmPlantable:Plant` 要求目标有 `soil` tag。
-它生成作物 prefab，设置位置，推送 `on_planted`，再移除种子。
+`FarmPlantable:Plant` requires a target with the `soil` tag.
+It spawns the crop prefab, positions it, pushes `on_planted`, and removes the seed.
 
-#### `0x62022161` 搜索信号
+#### `0x62022161` Search Terms
 
-搜索 `FarmPlantable:Plant`、`HasTag("soil")`、`SpawnPrefab` 和 `on_planted`。
+Search for `FarmPlantable:Plant`, `HasTag("soil")`, `SpawnPrefab`, and `on_planted`.
 
-### `0x62022170` 主锚点 / `scripts/components/farmplanttendable.lua`
+### `0x62022170` `scripts/components/farmplanttendable.lua`
 
-`FarmPlantTendable:TendTo` 只有在 `tendable` 为真且 `ontendtofn` 成功时才清除可照料状态。
-`farm_plants.lua` 在成长阶段切换时用 `SetTendable(stage_data.tendable)` 更新这个状态。
+`FarmPlantTendable:TendTo` clears its tendable state only when `tendable` is true and `ontendtofn` succeeds.
+`farm_plants.lua` calls `SetTendable(stage_data.tendable)` when growth stages change.
 
-#### `0x62022171` 搜索信号
+#### `0x62022171` Search Terms
 
-搜索 `FarmPlantTendable:TendTo`、`SetTendable`、`ontendtofn` 和 `tendable_farmplant`。
+Search for `FarmPlantTendable:TendTo`, `SetTendable`, `ontendtofn`, and `tendable_farmplant`.
 
-## `0x62023000` 运行流程
+## `0x62023000` Runtime Flows
 
 ~~~mermaid
 flowchart TD
     A["ACTIONS.EAT"]
     A --> B["Eater:Eat"]
-    B --> C["Edible:GetHealth/GetHunger/GetSanity"]
-    C --> D["Perishable stale/spoiled 修正"]
+    B --> C["Edible:GetHealth / GetHunger / GetSanity"]
+    C --> D["Perishable stale / spoiled modifiers"]
     C --> E["foodaffinity / foodmemory / spice"]
     E --> F["Health:DoDelta"]
     E --> G["Hunger:DoDelta"]
@@ -128,74 +128,75 @@ flowchart TD
     L --> M["FarmingManager:CycleNutrientsAtPoint"]
 ~~~
 
-### `0x62023110` 食用链路 / 数值结算顺序
+### `0x62023110` Eating
 
-`Eater:Eat` 先计算三类 delta。
-`custom_stats_mod_fn` 可以在写入组件前统一调整。
-最后分别调用 `health`、`hunger` 和 `sanity` 的 `DoDelta`。
+`Eater:Eat` first computes three deltas.
+`custom_stats_mod_fn` may adjust them together before `health`, `hunger`, and `sanity` receive their `DoDelta` calls.
 
-#### `0x62023111` 边界条件
+#### `0x62023111` Ownership Boundary
 
-不能把 `edible` 当作直接改状态的组件。
-`edible` 只提供数值和 `OnEaten` 回调，真正状态写入由 eater 调组件完成。
+`edible` does not directly change actor state.
+It supplies values and an `OnEaten` callback; `eater` writes through the actor's components.
 
-### `0x62023210` 饥饿伤害链路 / Hunger 与 Health 的连接
+### `0x62023210` Starvation Damage
 
-`Hunger:DoDec` 在饥饿值大于零时扣 hunger。
-当 hunger 为零且没有 `ignore_damage` 时，它调用 `health:DoDelta(-hurtrate * dt, true, "hunger")`。
+`Hunger:DoDec` reduces positive hunger.
+When hunger is zero and `ignore_damage` is false, it calls `health:DoDelta(-hurtrate * dt, true, "hunger")`.
 
-#### `0x62023211` 验证点
+#### `0x62023211` Check
 
-饥饿造成的生命损失原因是 `"hunger"`。
-这条链路不经过 `Eater:Eat`。
+Starvation health loss uses the cause `"hunger"`.
+This path does not pass through `Eater:Eat`.
 
-### `0x62023310` 农场链路 / 种子到植物
+### `0x62023310` Seed to Crop
 
-`ACTIONS.PLANTSOIL.fn` 会调用 `seed.components.farmplantable:Plant(act.target, act.doer)`。
-`FarmPlantable:Plant` 创建 plant，并把种子 prefab 作为 `on_planted` 事件数据传给植物。
+`ACTIONS.PLANTSOIL.fn` calls `seed.components.farmplantable:Plant(act.target, act.doer)`.
+`FarmPlantable:Plant` creates the crop and passes the seed prefab to its `on_planted` event.
 
-#### `0x62023311` 边界条件
+#### `0x62023311` Stress Boundary
 
-农场作物的压力不是一个单独字段。
-`farm_plants.lua` 同时挂 `farmplantstress`、`farmsoildrinker` 和 `farmplanttendable`。
+Crop stress is not one field.
+`farm_plants.lua` attaches `farmplantstress`, `farmsoildrinker`, and `farmplanttendable`.
 
-### `0x62023410` 物品温度链路 / 干燥剂与外部热源
+### `0x62023410` Held-Item Temperature and Desiccant
 
-`inventoryitemtemperature.lua` 把目标温度计算拆成 `GetTargetDeltaTemperature()` 和 `GetTargetTemperature()`。
-`DoDelta()` 与 `UpdateTemperature()` 会按 inherent winter/summer insulation 缩放升温和降温速率。
-外部 heater 会写入 `externalheaterpower`，fumarole 工具和 trap 会用它调整 `fumaroletool_mod` 温度 modifier。
-`desiccant.lua` 启用物品温度后，用 `DESSICANT_MIN_TEMPERATURE`、`DESSICANT_THRESHOLD_TEMPERATURE` 和 owner 湿度决定是否由系统控制含水量。
-owner 不干时，过热的干燥剂会被压回 `DESICCANT_HELD_TEMPERATURE`。
+`inventoryitemtemperature.lua` separates `GetTargetDeltaTemperature()` from `GetTargetTemperature()`.
+`DoDelta()` and `UpdateTemperature()` scale heating and cooling with inherent winter and summer insulation.
+Nearby exothermic heaters accumulate `externalheaterpower`.
+Fumarole tools and traps use it to adjust the `fumaroletool_mod` temperature modifier.
+`desiccant.lua` uses `DESSICANT_MIN_TEMPERATURE` and `DESSICANT_THRESHOLD_TEMPERATURE`.
+Together with owner wetness, they determine whether the system controls moisture.
+When the owner is not dry, an overheated desiccant is clamped to `DESICCANT_HELD_TEMPERATURE`.
 
-## `0x62024110` 结构细节 / 食物数据结构 / Edible、Perishable 与 Eater 的分工
+## `0x62024110` Food Component Responsibilities
 
-`edible` 保存食物类型和基础数值。
-`perishable` 保存新鲜度、腐败阶段和腐败事件。
-`eater` 保存角色饮食规则和吸收倍率。
-`sanity` 接收食物带来的一次性 delta，也负责装备、光照和光环带来的持续变化。
-`gelblob_storage.lua` 会记录物品进入 storage 前是否正在 perishing，并在取出时只恢复原本正在腐败的物品。
+`edible` stores food types and base values.
+`perishable` stores freshness, spoilage stages, and spoilage events.
+`eater` stores diet rules and absorption multipliers.
+`sanity` receives one-time food deltas and calculates continuous equipment, light, and aura effects.
+`gelblob_storage.lua` remembers whether an item was perishing before storage and resumes only those items when removed.
 
-### `0x62024111` 需要核对的字段
+### `0x62024111` Fields to Check
 
-检查 `healthabsorption`、`hungerabsorption`、`sanityabsorption`。
-检查 `degrades_with_spoilage`、`stale_hunger`、`spoiled_hunger`。
-检查 `foodmemory` 是否改变重复食用倍率。
+Check `healthabsorption`, `hungerabsorption`, and `sanityabsorption`.
+Check `degrades_with_spoilage`, `stale_hunger`, and `spoiled_hunger`.
+Check whether `foodmemory` changes the multiplier for repeated foods.
 
-## `0x62024210` 结构细节 / 农场数据结构 / Plant Def 与世界 Manager
+## `0x62024210` Farm Definitions and World State
 
-`farm_plant_defs.lua` 定义作物数据。
-`farm_plants.lua` 读取 plant def 并创建每种植物 prefab。
-`farming_manager.lua` 维护 tile 上的营养和湿度。
-`farmplanttendable` 保存作物是否可照料。
-`standardcomponents.lua` 提供会调用 `farming_manager:AddTileNutrients` 的通用 helper。
+`farm_plant_defs.lua` defines crops.
+`farm_plants.lua` creates each crop prefab from its definition.
+`farming_manager.lua` stores tile nutrients and moisture.
+`farmplanttendable` stores whether a crop can be tended.
+`MakeDeployableFertilizer` wires `fertilizer_ondeploy` to `farming_manager:AddTileNutrients`.
 
-### `0x62024211` 验证点
+### `0x62024211` Nutrient Check
 
-`CycleNutrientsAtPoint` 先把世界坐标转成 tile 坐标。
-如果没有 farming overlay，它会返回 soil depleted。
-如果 `test_only` 为真，它只返回是否 depleted。
+`CycleNutrientsAtPoint` converts world coordinates to tile coordinates.
+Without a farming overlay, it reports depleted soil.
+With `test_only`, it reports depletion without changing nutrients.
 
-## `0x62025100` 阅读与验证路线 / 从哪里开始读源码
+## `0x62025100` Verification
 
 ~~~bash
 rg -n "ACTIONS\\.EAT\\.fn|ACTIONS\\.PLANTSOIL\\.fn|farmplantable:Plant" \
@@ -234,14 +235,14 @@ rg -n "GetTargetDeltaTemperature|GetInsulation|externalheaterpower|SetNoWetTempe
   scripts/tuning.lua
 ~~~
 
-### `0x62025110` 推荐顺序
+### `0x62025110` Reading Order
 
-先沿 `ACTIONS.EAT.fn` 验证一次食用。
-再沿 `Hunger:DoDec` 验证饥饿伤害。
-最后沿 `ACTIONS.PLANTSOIL.fn` 验证种子、土壤、作物和世界管理器。
+Trace one meal from `ACTIONS.EAT.fn`.
+Trace starvation from `Hunger:DoDec`.
+Then trace a seed from `ACTIONS.PLANTSOIL.fn` through soil, the crop, and the world manager.
 
-#### `0x62025111` 最小闭环
+#### `0x62025111` Minimal Traces
 
-食物样例用任意带 `edible` 的食物。
-农场样例用带 `farmplantable` 的种子和 `farm_soil`。
-每条链路都要落到一个组件状态变化或事件推送。
+Use any prefab with `edible` for the food trace.
+Use a seed with `farmplantable` and `farm_soil` for the farm trace.
+Each trace should end at a component state change or emitted event.

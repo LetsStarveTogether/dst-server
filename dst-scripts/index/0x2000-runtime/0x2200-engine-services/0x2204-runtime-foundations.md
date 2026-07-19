@@ -1,34 +1,30 @@
-# `0x22040000` 运行时基础设施
+# `0x22040000` Runtime Foundations
 
-本页覆盖启动早期加载的 Lua 基础设施。
+`class.lua`, `json.lua`, and `constants.lua` establish shared Lua contracts early in startup.
 
-它解释 `class.lua`、`json.lua` 和 `constants.lua` 如何成为后续系统的共享契约。
+## `0x22041111` Purpose
 
-## `0x22041111` 本页定位 / 要回答的运行时问题 / 为什么这些文件不是普通工具函数 / 验证点
+`main.lua` loads `json`, `constants`, and `class` before most gameplay, UI, prefab, and world-generation modules.
 
-`main.lua` 在启动早期加载 `json`、`constants` 和 `class`。
+They define the common language layer and enums rather than private helpers for one system.
 
-这些文件先于大部分 gameplay、UI、prefab 和 worldgen 模块进入运行时。
+## `0x22042000` Source Anchors
 
-因此它们定义的是基础语言层和共享枚举，不是某个玩法系统的私有 helper。
-
-## `0x22042000` 源码锚点
-
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/main.lua` | `require("json")` | 早期加载 JSON 编解码 |
-| `scripts/main.lua` | `require("constants")` | 早期加载共享枚举和数值契约 |
-| `scripts/main.lua` | `require("class")` | 早期加载 `Class` 构造器 |
-| `scripts/class.lua` | `Class` | 构造类、继承链、property 和实例 metatable |
-| `scripts/class.lua` | `ClassRegistry` | 记录类继承关系并支持清理 |
-| `scripts/json.lua` | `json.encode` / `json.decode` | 非标准 JSON 编解码入口 |
-| `scripts/json.lua` | `json.encode_compliant` | 标准 JSON 编码入口 |
-| `scripts/constants.lua` | `RESET_ACTION` | reset 分流枚举 |
-| `scripts/constants.lua` | `SAVELOAD` | 存读档状态枚举 |
-| `scripts/constants.lua` | `REMOTESHARDSTATE` / `SHARDID` | shard 状态与身份枚举 |
-| `scripts/constants.lua` | `SHARDTRANSACTIONTYPES` | 跨 shard transaction 类型 |
+| `scripts/main.lua` | `require("json")` | Load JSON encoding and decoding early |
+| `scripts/main.lua` | `require("constants")` | Load shared enums and numeric contracts early |
+| `scripts/main.lua` | `require("class")` | Load the `Class` constructor early |
+| `scripts/class.lua` | `Class` | Build classes, inheritance, properties, and instance metatables |
+| `scripts/class.lua` | `ClassRegistry` | Retain inherited members for hot-reload cleanup |
+| `scripts/json.lua` | `json.encode` / `json.decode` | Encode and decode the runtime's non-standard JSON form |
+| `scripts/json.lua` | `json.encode_compliant` | Encode standards-compliant JSON |
+| `scripts/constants.lua` | `RESET_ACTION` | Select reset paths |
+| `scripts/constants.lua` | `SAVELOAD` | Represent save and load states |
+| `scripts/constants.lua` | `REMOTESHARDSTATE` / `SHARDID` | Represent shard state and identity |
+| `scripts/constants.lua` | `SHARDTRANSACTIONTYPES` | Identify cross-shard transaction types |
 
-## `0x22043000` 运行流程
+## `0x22043000` Startup Role
 
 ~~~mermaid
 flowchart TD
@@ -43,45 +39,41 @@ flowchart TD
     F --> I["gamelogic / networking / shard paths"]
 ~~~
 
-### `0x22043111` `Class` 基础层 / 构造与继承 / 边界条件
+### `0x22043111` `Class`
 
-`Class(base, _ctor, props)` 会构造 metatable、实例 `__index` 和可选 property setter。
+`Class(base, _ctor, props)` creates a callable class table and uses it as each instance's metatable.
 
-它也会把继承关系写入 `ClassRegistry`。
+With `props`, it installs property-aware `__index` and `__newindex` handlers.
 
-`__tostring`、`__call` 和只读 property 语义都在这里形成。
+`makereadonly`, `addsetter`, and `removesetter` manage properties.
 
-不要把组件、widget 或 manager 的 `Class(...)` 当作普通 table 工厂。
+`ClassRegistry` retains inherited members for hot reload.
 
-### `0x22043211` JSON 基础层 / 编码口径 / 边界条件
+A component, widget, or manager created with `Class(...)` is therefore more than a table factory.
 
-`json.encode` 是源码常用入口。
+### `0x22043211` JSON
 
-`json.encode_compliant` 才是显式标准 JSON 编码入口。
+`json.encode` is the common runtime encoder, while `json.encode_compliant` explicitly produces standard JSON.
 
-`json.decode` 与 `json.null` 共同处理反序列化和空值表达。
+`json.decode` and `json.null` handle decoding and null values.
 
-阅读存档、配置、服务器数据和外部文本工具时，应先确认调用的是哪一种编码口径。
+Confirm the chosen encoding path when reading save, configuration, server-data, or external-text tools.
 
-### `0x22043311` 常量基础层 / 共享枚举 / 边界条件
+### `0x22043311` Constants
 
-`constants.lua` 不是只给一个系统使用。
+`RESET_ACTION` controls reset routing in `gamelogic.lua`, and `SAVELOAD` represents persistence states.
 
-`RESET_ACTION` 影响 `gamelogic.lua` 的 reset 分流。
+`REMOTESHARDSTATE`, `SHARDID`, and `SHARDTRANSACTIONTYPES` shape shard-network behaviour.
 
-`SAVELOAD` 影响存读档状态表达。
+Changes to these enums can affect runtime, networking, and world-state code together.
 
-`REMOTESHARDSTATE`、`SHARDID` 和 `SHARDTRANSACTIONTYPES` 影响 shard 网络路径。
-
-如果这些枚举改动，文档应同步核对运行时、网络和世界状态专题。
-
-## `0x22044100` 阅读与验证路线 / 从哪里开始读源码
+## `0x22044100` Verification
 
 ~~~bash
 rg -n "require\\(\"json\"\\)|require\\(\"constants\"\\)|require\\(\"class\"\\)" \
   scripts/main.lua
 
-rg -n "function Class|ClassRegistry|property" \
+rg -n "function Class|ClassRegistry|makereadonly|addsetter|removesetter" \
   scripts/class.lua
 
 rg -n "json\\.encode|json\\.decode|encode_compliant|null" \
@@ -91,10 +83,8 @@ rg -n "RESET_ACTION|SAVELOAD|REMOTESHARDSTATE|SHARDID|SHARDTRANSACTIONTYPES" \
   scripts/constants.lua
 ~~~
 
-### `0x22044111` 推荐顺序 / 最小闭环
+### `0x22044111` Next Read
 
-先读 `main.lua` 的加载顺序。
+Confirm the load order in `main.lua`, then inspect object construction in `class.lua`.
 
-再读 `class.lua`，确认 `Class` 如何定义后续对象。
-
-最后按问题域回到 `json.lua` 或 `constants.lua`。
+Open `json.lua` or `constants.lua` for the active problem domain.

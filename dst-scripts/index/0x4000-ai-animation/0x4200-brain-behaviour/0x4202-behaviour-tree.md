@@ -1,159 +1,153 @@
 # `0x42020000` Behaviour Tree
 
-Behaviour Tree 页解释 `BT:Update` 的三段更新、节点状态机、组合节点和常用 leaf behaviour。
+This page explains the three phases of `BT:Update`, node status, composite nodes, and common leaf behaviours.
+A behaviour tree can create a `BufferedAction` for `locomotor` or call `combat`, `locomotor`, and entity events directly.
 
-这里的关键结论是：behaviour tree 不只是“返回动作意图”。
-有些节点会创建 `BufferedAction` 并交给 `locomotor`。
-有些节点会直接调用 `combat`、`locomotor` 或实体事件。
+## `0x42021100` Purpose
 
-## `0x42021100` 本页定位 / 要回答的运行时问题
+A Brain's `OnStart` usually creates a root node and wraps it with `BT(self.inst, root)`.
+Each Brain update runs `Visit`, `SaveStatus`, and `Step` in that order.
 
-一个 Brain 的 `OnStart` 通常创建 root node，再用 `BT(self.inst, root)` 包装。
-每次 Brain 更新时，`BT:Update` 依次执行 `Visit`、`SaveStatus` 和 `Step`。
+### `0x42021110` Status Values
 
-### `0x42021110` 状态常量
+`scripts/behaviourtree.lua` defines the string statuses `SUCCESS`, `FAILED`, `READY`, and `RUNNING`.
 
-`scripts/behaviourtree.lua` 定义四个字符串状态。
-它们是 `SUCCESS`、`FAILED`、`READY` 和 `RUNNING`。
+#### `0x42021111` Update Phases
 
-#### `0x42021111` 验证点
+- `Visit` chooses the node's status for the current tick.
+- `SaveStatus` copies `status` into `lastresult`.
+- `Step` resets a non-`RUNNING` node or advances its active subtree.
+- `GetTreeSleepTime` returns the minimum sleep time among running nodes.
 
-- `Visit` 决定本次 tick 状态。
-- `SaveStatus` 把 `status` 保存到 `lastresult`。
-- `Step` 在非 `RUNNING` 时重置节点，或推进仍在运行的子树。
-- `GetTreeSleepTime` 从正在运行的节点中取最小 sleep time。
+## `0x42022000` Source Anchors
 
-## `0x42022000` 源码锚点
-
-| 文件 | 入口 | 需要核对的事实 |
+| File | Entry | Purpose |
 | --- | --- | --- |
-| `scripts/behaviourtree.lua` | `BT:Update` | 顺序是 `Visit()`、`SaveStatus()`、`Step()`。 |
-| `scripts/behaviourtree.lua` | `PriorityNode:Visit` | 到期后重新评估子节点，并保留成功或运行中的最高优先级节点。 |
-| `scripts/behaviourtree.lua` | `SequenceNode:Visit` | 子节点失败或运行时立即返回。 |
-| `scripts/behaviourtree.lua` | `ParallelNode:Visit` | 任一子节点失败则整体失败，全部完成则成功。 |
-| `scripts/behaviourtree.lua` | `EventNode:OnEvent` | 设置 `triggered`，强制 Brain 更新，并清掉父级 `PriorityNode.lasttime`。 |
-| `scripts/behaviours/doaction.lua` | `DoAction:Visit` | 获取 `BufferedAction`，注册成功失败回调，再 `PushAction`。 |
-| `scripts/behaviours/chaseandattack.lua` | `ChaseAndAttack:Visit` | 直接驱动 `combat` 和 `locomotor`。 |
-| `scripts/behaviours/runaway.lua` | `RunAway:Visit` | 查找威胁，驱动逃跑移动，并设置 sleep。 |
+| `scripts/behaviourtree.lua` | `BT:Update` | Runs `Visit()`, `SaveStatus()`, then `Step()` |
+| `scripts/behaviourtree.lua` | `PriorityNode:Visit` | Selects the highest-priority successful or running child |
+| `scripts/behaviourtree.lua` | `SequenceNode:Visit` | Stops at the first failed or running child |
+| `scripts/behaviourtree.lua` | `ParallelNode:Visit` | Fails on any failure and succeeds when all children finish |
+| `scripts/behaviourtree.lua` | `EventNode:OnEvent` | Triggers the node, wakes the Brain, and resets parent priority timing |
+| `scripts/behaviours/doaction.lua` | `DoAction:Visit` | Gets a `BufferedAction`, installs callbacks, and calls `PushAction` |
+| `scripts/behaviours/chaseandattack.lua` | `ChaseAndAttack:Visit` | Drives `combat` and `locomotor` directly |
+| `scripts/behaviours/runaway.lua` | `RunAway:Visit` | Finds a threat, moves away, and sets a sleep time |
 
-### `0x42022110` 主锚点 / `scripts/behaviourtree.lua`
+### `0x42022110` Base Node
 
-`BehaviourNode` 是基类。
-默认 `Visit` 会失败，所以具体节点必须覆写它。
-节点树的 sleep time 由正在 `RUNNING` 的节点贡献。
+`BehaviourNode` is the base class, and its default `Visit` fails so concrete nodes must override it.
+`GetTreeSleepTime` recurses into `RUNNING` children and also uses the current node's own sleep time.
+A `RUNNING` leaf can therefore contribute sleep time without descendants.
 
-#### `0x42022111` 搜索信号
+#### `0x42022111` Search Command
 
 ~~~bash
 rg -n "BT:Update|BehaviourNode|PriorityNode|SequenceNode|ParallelNode|EventNode|WhileNode|GetTreeSleepTime" \
   scripts/behaviourtree.lua
 ~~~
 
-## `0x42023000` 运行流程
+## `0x42023000` Update Flow
 
 ~~~mermaid
 flowchart TD
     A["Brain:OnUpdate"]
     A --> B["BT:Update"]
     B --> C["root:Visit"]
-    C --> D{"node status"}
-    D -- "SUCCESS/FAILED" --> E["SaveStatus 后 Step 重置"]
-    D -- "RUNNING" --> F["保留运行子树"]
-    F --> G["leaf node Sleep 或 period"]
+    C --> D{"Node status"}
+    D -- "SUCCESS / FAILED" --> E["SaveStatus, then Step resets"]
+    D -- "RUNNING" --> F["Keep the running subtree"]
+    F --> G["Leaf Sleep or period"]
     E --> H["BT:GetSleepTime"]
     G --> H
-    H --> I["BrainManager 调度下一次更新"]
+    H --> I["BrainManager schedules the next update"]
     C --> J["DoAction / ChaseAndAttack / RunAway"]
-    J --> K["locomotor、combat、BufferedAction 或实体事件"]
+    J --> K["locomotor / combat / BufferedAction / entity event"]
 ~~~
 
-### `0x42023110` 组合节点 / `PriorityNode`
+### `0x42023110` PriorityNode
 
-`PriorityNode` 有 `period`。
-到期时它从前到后访问子节点。
-子节点返回 `SUCCESS` 或 `RUNNING` 后，当前索引会被记录为 `self.idx`。
-未到期时，它只继续访问当前正在运行的子节点。
+After its `period` expires, `PriorityNode` visits children in order.
+It stores the first `SUCCESS` or `RUNNING` child index in `self.idx`.
+Before the next evaluation time, it visits only the currently running child.
 
-#### `0x42023111` 边界条件
+#### `0x42023111` Priority Conditions
 
-- `period = 0` 的 Brain 每轮都可重新评估。
-- `EventNode` 可以清掉父级 `PriorityNode.lasttime`，让高优先级事件立即被评估。
-- `PriorityNode:GetSleepTime` 在 `RUNNING` 时返回下一次评估间隔。
+- A Brain with `period = 0` can reevaluate every update.
+- `EventNode` can clear its parent `PriorityNode.lasttime` for high-priority reevaluation on the next Brain update.
+- A running `PriorityNode:GetSleepTime` returns the next reevaluation interval.
 
-### `0x42023210` 顺序与并行节点 / `SequenceNode`、`SelectorNode`、`ParallelNode`
+### `0x42023210` Sequence, Selector, and Parallel Nodes
 
-`SequenceNode` 在子节点 `FAILED` 或 `RUNNING` 时返回对应状态。
-`SelectorNode` 在子节点 `SUCCESS` 或 `RUNNING` 时返回对应状态。
-`ParallelNode` 会访问多个子节点，任一失败则失败，全部完成则成功，否则继续运行。
+`SequenceNode` stops on `FAILED` or `RUNNING`, while `SelectorNode` stops on `SUCCESS` or `RUNNING`.
+`ParallelNode` visits multiple children, fails when any child fails, succeeds when all finish, and otherwise remains running.
 
-#### `0x42023211` `WhileNode` 的真实结构
+#### `0x42023211` WhileNode Structure
 
-`WhileNode(cond, name, node)` 不是独立类。
-它返回一个 `ParallelNode`，子节点是 `ConditionNode(cond, name)` 和业务节点。
-因此条件每次更新都会重新检查，条件失败会中断业务节点。
+`WhileNode(cond, name, node)` returns a `ParallelNode`.
+It contains `ConditionNode(cond, name)` and the work node instead of defining a separate class.
+The condition is therefore checked on every update and interrupts the work node when it fails.
 
-### `0x42023310` 叶子节点 / `DoAction`
+### `0x42023310` DoAction
 
-`DoAction` 的 `getactionfn` 返回 `BufferedAction` 或 `nil`。
-有 action 时，它注册失败和成功回调，调用 `self.inst.components.locomotor:PushAction(action, shouldrun)`，并把自身设为 `RUNNING`。
-之后它根据回调、超时或 action 失效改成 `SUCCESS` 或 `FAILED`。
+`DoAction.getactionfn` returns a `BufferedAction` or `nil`.
+For an action, `DoAction:Visit` registers success and failure callbacks.
+It calls `self.inst.components.locomotor:PushAction(action, shouldrun)` and becomes `RUNNING`.
+Later callbacks, timeout, or action invalidation set `SUCCESS` or `FAILED`.
 
-#### `0x42023311` 行为边界
+#### `0x42023311` DoAction Boundary
 
-- `DoAction` 不直接调用 `PerformBufferedAction`。
-- `PerformBufferedAction` 通常在 SG 的 action state 中执行。
-- `DoAction` 需要实体有 `locomotor`。
+- `DoAction` does not call `PerformBufferedAction` directly.
+- The SG action state usually calls `PerformBufferedAction`.
+- `DoAction` requires `locomotor` on the entity.
 
-### `0x42023320` 叶子节点 / `ChaseAndAttack`
+### `0x42023320` ChaseAndAttack
 
-`ChaseAndAttack` 不是 `BufferedAction` 包装器。
-它通过 `combat:ValidateTarget()`、`combat:TryAttack()`、`locomotor:GoToPoint()` 和 `locomotor:Stop()` 驱动战斗。
-成功、失败和追击超时都在该节点内判断。
+`ChaseAndAttack` is not a `BufferedAction` wrapper.
+It calls `combat:ValidateTarget()`, `combat:TryAttack()`, and `locomotor:GoToPoint()`.
+It also calls `locomotor:Stop()` and decides whether to succeed, fail, or keep pursuing.
 
-#### `0x42023321` 行为边界
+#### `0x42023321` Chase Conditions
 
-- 攻击目标死亡时返回 `SUCCESS`。
-- 目标无效、放弃距离或追击时间超限时返回 `FAILED`。
-- 仍在追击时调用 `self:Sleep(.125)`。
+- A dead target produces `SUCCESS`.
+- An invalid target, excessive distance, or pursuit timeout produces `FAILED`.
+- Continued pursuit calls `self:Sleep(.125)`.
 
-### `0x42023330` 叶子节点 / `RunAway`
+### `0x42023330` RunAway
 
-`RunAway` 查找威胁实体。
-找到后它直接通过 `locomotor:RunInDirection()`、`WalkInDirection()` 或 `homeseeker:GoHome(true)` 逃离。
-到安全距离后返回 `SUCCESS`。
+`RunAway` finds a threat and either calls `homeseeker:GoHome(true)` or escapes through `locomotor:RunInDirection()` or `WalkInDirection()`.
+The directional branch returns `SUCCESS` after reaching a safe distance.
 
-#### `0x42023331` 行为边界
+#### `0x42023331` Escape Conditions
 
-- 找不到威胁时返回 `FAILED`。
-- 威胁无效时停止移动并返回 `FAILED`。
-- 仍在逃跑时调用 `self:Sleep(.25)`。
+- No threat produces `FAILED`.
+- An invalid threat stops movement and produces `FAILED`.
+- Continued escape calls `self:Sleep(.25)`.
 
-## `0x42024110` 结构细节 / Sleep Time / 从节点到 BrainManager
+## `0x42024110` Sleep-Time Propagation
 
-`BT:GetSleepTime` 会调用 root 的 `GetTreeSleepTime`。
-如果 `BT.forceupdate` 为真，`GetSleepTime` 直接返回 `0`。
-`GetTreeSleepTime` 只向正在 `RUNNING` 的子节点递归。
-没有 sleep time 时返回 `nil`，BrainManager 会把该 Brain 放入 `hibernaters`。
+`BT:GetSleepTime` delegates to the root's `GetTreeSleepTime`, unless `BT.forceupdate` makes it return `0`.
+`GetTreeSleepTime` recurses only through `RUNNING` children.
+When no sleep time exists, it returns `nil` and `BrainManager` moves the Brain to `hibernaters`.
 
-### `0x42024111` 需要核对的字段
+### `0x42024111` Sleep Fields
 
-- `BehaviourNode:Sleep(t)` 写入 `nextupdatetime`。
-- `BT:ForceUpdate()` 会让下一轮 sleep time 变成 `0`。
-- leaf `RUNNING` 且非 `ConditionNode` 时，`GetSleepTime` 返回剩余时间。
-- `PriorityNode:GetSleepTime` 由 `period` 和 `lasttime` 决定。
+- `BehaviourNode:Sleep(t)` sets `nextupdatetime`.
+- `BT:ForceUpdate()` makes the next sleep time `0`.
+- A running non-`ConditionNode` leaf returns its remaining sleep time.
+- `PriorityNode:GetSleepTime` uses `period` and `lasttime`.
 
-## `0x42024210` 结构细节 / 事件节点 / `EventNode`
+## `0x42024210` EventNode
 
-`EventNode` 在构造时监听实体事件。
-事件触发后，它设置 `triggered` 和 `data`，调用 `brain:ForceUpdate()`，并让父级 `PriorityNode` 重新评估。
+`EventNode` listens to an entity event from construction time.
+On an event, it stores `triggered` and `data`, then calls `brain:ForceUpdate()`.
+It also forces its parent `PriorityNode` to reevaluate.
 
-### `0x42024211` 验证动作
+### `0x42024211` Event Check
 
-用 `rabbitbrain.lua` 的 `"gohome"` 事件验证。
-`prefabs/rabbit.lua` 被攻击时会向附近兔子 `PushEvent("gohome")`。
-`EventNode(self.inst, "gohome", DoAction(...))` 会因此立即尝试回家动作。
+Use the `"gohome"` event in `rabbitbrain.lua`.
+`prefabs/rabbit.lua` pushes `PushEvent("gohome")` to nearby rabbits.
+`EventNode(self.inst, "gohome", DoAction(...))` then tries the return-home action on the next Brain update.
 
-## `0x42025100` 阅读与验证路线 / 从哪里开始读源码
+## `0x42025100` Verification
 
 ~~~bash
 rg -n "DoAction:Visit|ChaseAndAttack:Visit|RunAway:Visit|Sleep\\(|PushAction|TryAttack|RunInDirection" \
@@ -163,14 +157,12 @@ rg -n "DoAction:Visit|ChaseAndAttack:Visit|RunAway:Visit|Sleep\\(|PushAction|Try
   scripts/behaviours/runaway.lua
 ~~~
 
-### `0x42025110` 推荐顺序
+### `0x42025110` Reading Order
 
-先读 `BT:Update`。
-再读 `PriorityNode:Visit`。
-最后任选一个 leaf behaviour，看它是创建 `BufferedAction`，还是直接驱动组件。
+Read `BT:Update`, then `PriorityNode:Visit`, then one leaf.
+Check whether the leaf creates a `BufferedAction` or drives components directly.
 
-#### `0x42025111` 最小闭环
+#### `0x42025111` Minimum Trace
 
-用 `DoAction` 追 `BufferedAction` 链路。
-用 `ChaseAndAttack` 追直接组件链路。
-这两条路径能覆盖 Behaviour Tree 最容易混淆的两类副作用。
+Use `DoAction` for the `BufferedAction` path and `ChaseAndAttack` for the direct-component path.
+Together they cover the two commonly confused side-effect models.

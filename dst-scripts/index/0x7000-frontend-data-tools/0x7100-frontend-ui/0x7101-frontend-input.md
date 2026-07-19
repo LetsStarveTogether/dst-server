@@ -1,100 +1,103 @@
-# `0x71010000` Frontend 与输入
+# `0x71010000` Frontend and Input
 
-本页解释输入进入 Lua 后，为什么会先被前端 screen 栈尝试消费。
-它也说明 HUD 如何在 screen 体系中处理地图、聊天、暂停和制作入口。
+Control input reaches the frontend screen stack before `Input.oncontrol` handlers.
+The active HUD screen then handles shortcuts for maps, chat, pause, and crafting.
 
-## `0x71011111` 本页定位 / 要回答的运行时问题 / 输入先到哪里 / 验证点
+## `0x71011111` Input Dispatch
 
-`Input:OnControl` 位于 `scripts/input.lua`。
-它先调用 `TheFrontEnd:OnControl(control, digitalvalue)`。
-只有前端没有消费输入时，才继续触发 `self.oncontrol:HandleEvent(...)`。
+`Input:OnControl` lives in `scripts/input.lua` and first calls `TheFrontEnd:OnControl(control, digitalvalue)`.
+It calls `self.oncontrol:HandleEvent(...)` only when the frontend does not consume the input.
 
-## `0x71011211` 本页定位 / 前端能消费什么 / Screen 栈与 Debug 快捷键 / 边界条件
+## `0x71011211` Frontend Handling
 
-`FrontEnd:OnControl` 会把 `CONTROL_PRIMARY` 映射为 `CONTROL_ACCEPT` 给顶部 screen。
-它也处理 `CONTROL_OPEN_DEBUG_CONSOLE`、`CONTROL_OPEN_DEBUG_MENU`、console log 和 debug render 切换。
+`FrontEnd:OnControl` maps `CONTROL_PRIMARY` to `CONTROL_ACCEPT` for the top screen.
+It also handles `CONTROL_OPEN_DEBUG_CONSOLE`, `CONTROL_OPEN_DEBUG_MENU`, console logging, and debug-render toggles.
 
-## `0x71012000` 源码锚点
+## `0x71012000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/input.lua` | `Input:OnControl` | 设备输入进入 Lua 的分发点 |
-| `scripts/frontend.lua` | `FrontEnd:OnControl` | 顶部 screen 的控制消费点 |
-| `scripts/frontend.lua` | `FrontEnd:PushScreen` | screen 入栈、聚焦和激活 |
-| `scripts/frontend.lua` | `FrontEnd:PopScreen` | screen 出栈、销毁和恢复焦点 |
-| `scripts/widgets/screen.lua` | `Screen:OnBecomeActive` | 设置 UI root 并恢复焦点 |
-| `scripts/widgets/widget.lua` | `Widget:OnControl` | 只向有焦点的子 widget 递归 |
-| `scripts/screens/playerhud.lua` | `PlayerHud:OnControl` | 游戏内 HUD 快捷键入口 |
-| `scripts/components/playercontroller.lua` | `PlayerController:ShouldPlayerHUDControlBeIgnored` | HUD 输入是否应直接吞掉 |
+| `scripts/input.lua` | `Input:OnControl` | Dispatches device input into Lua |
+| `scripts/input.lua` | `Input:OnMouseButton` | Calls the frontend, then dispatches mouse-button handlers |
+| `scripts/frontend.lua` | `FrontEnd:OnControl` | Lets the top screen consume controls |
+| `scripts/frontend.lua` | `TheInput:AddKeyHandler` | Routes raw-key callbacks into the frontend |
+| `scripts/frontend.lua` | `FrontEnd:PushScreen` | Pushes, focuses, and activates a screen |
+| `scripts/frontend.lua` | `FrontEnd:PopScreen` | Removes a screen and restores focus |
+| `scripts/widgets/screen.lua` | `Screen:OnBecomeActive` | Sets the UI root and restores focus |
+| `scripts/widgets/widget.lua` | `Widget:OnControl` | Recurses only through focused child widgets |
+| `scripts/screens/playerhud.lua` | `PlayerHud:OnControl` | Handles in-game HUD shortcuts |
+| `scripts/components/playercontroller.lua` | `PlayerController:ShouldPlayerHUDControlBeIgnored` | HUD input gate |
 
-### `0x71012111` 主锚点 / `scripts/input.lua` / 搜索信号
+### `0x71012111` Primary Anchor
 
-先搜 `function Input:OnControl`。
-然后确认 `not TheFrontEnd:OnControl(...)` 这个分叉。
+Find `function Input:OnControl`, then inspect the `not TheFrontEnd:OnControl(...)` branch.
 
-### `0x71012211` 前端栈锚点 / `scripts/frontend.lua` / 验证点
+### `0x71012211` Screen Stack
 
-`FrontEnd:PushScreen` 会把 screen 加入 `self.screenstack`。
-它会调用原顶部 screen 的 `OnBecomeInactive`，再调用目标 screen 的 `OnBecomeActive`。
-入栈后还会执行一次 `FrontEnd:Update(0)`，让目标 screen 立即刷新焦点和布局。
+`FrontEnd:PushScreen` appends to `self.screenstack`, deactivates the previous top screen, and activates the new one.
+It then runs `FrontEnd:Update(0)` so focus and layout update immediately.
 
-## `0x71013000` 运行流程
+## `0x71013000` Runtime Flow
 
 ~~~mermaid
 flowchart TD
     A["engine control callback"]
     A --> B["TheInput:OnControl"]
-    B --> C{"TheFrontEnd:OnControl consumed?"}
-    C -->|yes| D["top Screen / focused Widget handled it"]
+    B --> C{"TheFrontEnd:OnControl consumed input?"}
+    C -->|yes| D["top Screen / focused Widget"]
     C -->|no| E["Input oncontrol handlers"]
-    D --> F["PlayerHud:OnControl when HUD is active screen"]
+    D --> F["PlayerHud:OnControl when HUD is active"]
     F --> G["pause / map / chat / crafting shortcuts"]
     F --> I["playercontroller ignore check"]
     G --> H["TheFrontEnd:PushScreen or HUD state change"]
 ~~~
 
-### `0x71013111` 输入分段 / `Input:OnControl` / 边界条件
+### `0x71013111` Input Gate
 
-鼠标 primary 和 secondary control 会受 `self.mouse_enabled` 限制。
-如果前端消费成功，`Input.oncontrol` 事件不会被调用。
+`self.mouse_enabled` gates primary and secondary controls before frontend dispatch, but other controls still proceed.
+When the frontend consumes input, `Input.oncontrol` does not receive it.
 
-### `0x71013211` 前端分段 / `FrontEnd:OnControl` / 验证点
+### `0x71013211` Frontend Gate
 
-顶部 screen 的 `OnControl` 返回 `true` 时，前端会阻止后续输入派发。
-这类问题通常表现为 HUD、弹窗或文本框截断了 gameplay 操作。
-如果 `FrontEnd:IsControlsDisabled()` 为真，前端会返回 `false`，但不会让顶部 screen 消费输入。
-文本输入框还有 `textProcessorWidget` 分支，鼠标点击其它位置时会先退出强制文本输入。
+When the top screen's `OnControl` returns `true`, the frontend stops further dispatch.
+HUDs, dialogs, and text fields can therefore block gameplay controls.
+When `FrontEnd:IsControlsDisabled()` is true, the frontend returns `false` without letting the top screen consume input.
+The `textProcessorWidget` branch ends forced text processing when the mouse clicks elsewhere.
 
-### `0x71013311` HUD 分段 / `PlayerHud:OnControl` / 验证点
+### `0x71013311` HUD Shortcuts
 
-`PlayerHud:OnControl` 会处理 `CONTROL_PAUSE`、`CONTROL_MAP`、聊天开关和制作 pin 翻页。
-它还会调用 `playercontroller:ShouldPlayerHUDControlBeIgnored` 判断某些输入是否应被 HUD 吞掉。
-地图按键只在 `CONTROL_MAP` 松开时触发 `Controls:ToggleMap`。
-制作入口在 `CONTROL_OPEN_CRAFTING` 按下时打开或关闭 `CraftingMenuHUD`。
+`PlayerHud:OnControl` handles `CONTROL_PAUSE`, `CONTROL_MAP`, chat toggles, and crafting pin pagination.
+It also asks `playercontroller:ShouldPlayerHUDControlBeIgnored` whether the HUD should swallow an input.
+`CONTROL_MAP` calls `Controls:ToggleMap` on release.
+`CONTROL_OPEN_CRAFTING` opens or closes `CraftingMenuHUD` on press.
 
-## `0x71014111` 结构细节 / `FrontEnd` 结构 / `screenstack` / 需要核对的字段
+## `0x71014111` `FrontEnd` State
 
-`screenstack` 是 screen 生命周期的核心。
-`PushScreen` 会 `AddChild`、`MoveToFront`、设置默认焦点，并执行一次 `Update(0)`。
-`PopScreen` 会 `OnBecomeInactive`、`OnDestroy`、`RemoveChild`，再恢复栈顶 screen。
-如果被弹出的不是栈顶 screen，`PopScreen(screen)` 会从 `screenstack` 中移除指定 screen。
+`screenstack` owns screen lifecycle.
+`PushScreen` calls `AddChild`, `MoveToFront`, assigns default focus, and runs `Update(0)`.
+`PopScreen` calls `OnBecomeInactive`, `OnDestroy`, and `RemoveChild`, then restores the new top screen.
+`PopScreen(screen)` can also remove a non-top screen from `screenstack`.
 
-## `0x71014211` 结构细节 / `Input` 结构 / 事件分发器 / 需要核对的字段
+## `0x71014211` `Input` Events
 
-`Input` 内部维护 `oncontrol`、`onmousebutton`、`onkeydown` 等事件集合。
-这些事件不是前端 screen 栈的一部分。
-它们只在前端没有消费或对应输入路径允许时继续派发。
+`Input` maintains event sets such as `oncontrol`, `onmousebutton`, and `onkeydown` outside the frontend screen stack.
+Only `oncontrol` is suppressed by a `true` result from `FrontEnd:OnControl`.
+`Input:OnMouseButton` ignores the result from `FrontEnd:OnMouseButton`.
+`Input:OnRawKey` always dispatches `onkey` plus `onkeydown` or `onkeyup`.
 
-## `0x71014311` 结构细节 / `PlayerHud` 结构 / HUD 是 Screen / 需要核对的字段
+## `0x71014311` `PlayerHud` Structure
 
-`PlayerHud` 继承自 `Screen`。
-它把 `Controls(self.owner)` 加到 `self.root`，再由 `Controls` 聚合背包、状态、地图、制作菜单和 toast。
+`PlayerHud` inherits from `Screen` and adds `Controls(self.owner)` to `self.root`.
+`Controls` then groups inventory, status, map, crafting menu, and toast widgets.
 
-## `0x71015100` 阅读与验证路线 / 从哪里开始读源码
+## `0x71015100` Verification
 
 ~~~bash
 rg -n "function Input:OnControl|not TheFrontEnd:OnControl|self.oncontrol:HandleEvent" \
   scripts/input.lua
+
+rg -n "function Input:OnMouseButton|function Input:OnRawKey|AddKeyHandler" \
+  scripts/input.lua scripts/frontend.lua
 
 rg -n "function FrontEnd:OnControl|function FrontEnd:PushScreen|function FrontEnd:PopScreen" \
   scripts/frontend.lua
@@ -103,9 +106,8 @@ rg -n "function PlayerHud:OnControl|ShouldPlayerHUDControlBeIgnored|CONTROL_MAP|
   scripts/screens/playerhud.lua scripts/components/playercontroller.lua
 ~~~
 
-### `0x71015111` 推荐顺序 / 最小闭环
+### `0x71015111` Minimal Trace
 
-先追 `CONTROL_MAP`。
-预期路径是 `Input:OnControl`、`FrontEnd:OnControl`、`PlayerHud:OnControl`、`Controls:ToggleMap`。
-如果地图 screen 已打开，最终应看到 `TheFrontEnd:PopScreen`。
-如果地图 screen 未打开，并且 `IsMapControlsEnabled()` 与 game mode 条件允许，最终应看到 `TheFrontEnd:PushScreen(MapScreen(self.owner))`。
+Trace `CONTROL_MAP` through `Input:OnControl`, `FrontEnd:OnControl`, `PlayerHud:OnControl`, and `Controls:ToggleMap`.
+An open map should end at `TheFrontEnd:PopScreen`.
+A closed map reaches `TheFrontEnd:PushScreen(MapScreen(self.owner))` only when map controls and the game mode allow it.

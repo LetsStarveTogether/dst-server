@@ -1,83 +1,83 @@
-# `0x40000000` AI 与动画
+# `0x40000000` AI and Animation
 
-本区说明实体如何把意图交给 StateGraph，把长期选择交给 Brain，再由 behaviour tree 产出下一步动作。
+A Brain makes longer-term choices, while a StateGraph handles immediate intent and presentation.
+Within the Brain, the behaviour tree chooses the next action.
 
-目录级语义由本 README 承载，独立专题文件只解释具体运行链路。
+## `0x40001111` StateGraph Runtime
 
-## `0x40001111` 区域定位 / 先分清两条运行链 / `StateGraph` 负责短时表现 / 验证点
+`StateGraph` controls short-lived presentation and action execution.
+Start with `StateGraphInstance:StartAction` in `scripts/stategraph.lua`.
+Then read `GoToState` and `UpdateState` to trace transitions, timelines, timeouts, and per-state events.
 
-在 `scripts/stategraph.lua` 中确认 `StateGraphInstance:StartAction`、`GoToState` 和 `UpdateState`。
-它们处理动作入口、状态切换、timeline、timeout 和 per-state event。
+## `0x40001121` Brain Runtime
 
-## `0x40001121` 区域定位 / 先分清两条运行链 / `Brain` 负责长期选择 / 验证点
+`Brain` controls longer-term decisions outside the StateGraph.
+Start with `BrainManager`, `BT`, and `OnUpdate` in `scripts/brain.lua` and `scripts/behaviourtree.lua`.
+A Brain usually produces intent that a StateGraph or component consumes rather than playing an animation directly.
 
-在 `scripts/brain.lua` 和 `scripts/behaviourtree.lua` 中确认 Brain 调度 behaviour node。
-Brain 不直接播放动画，而是推动实体产生可被 StateGraph 消化的意图。
+## `0x40002000` Source Anchors
 
-## `0x40002000` 源码锚点
-
-| 文件 | 入口 | 用途 |
+| File | Entry | Purpose |
 | --- | --- | --- |
-| `scripts/stategraph.lua` | `SGManager` | 管理 SG 实例更新、休眠和事件队列 |
-| `scripts/stategraph.lua` | `StateGraphInstance` | 绑定实体的状态机实例 |
-| `scripts/stategraphs/commonstates.lua` | `CommonStates.Add*` | 向 `states` 表追加通用状态 |
-| `scripts/stategraphs/SGwilson.lua` | `StateGraph("wilson")` | 玩家服务端 StateGraph |
-| `scripts/stategraphs/SGwilson_client.lua` | `StateGraph("wilson_client")` | 玩家客户端预测 StateGraph |
-| `scripts/brain.lua` | `BrainManager` | Brain 更新入口 |
-| `scripts/behaviourtree.lua` | `PriorityNode` | 行为树选择节点 |
+| `scripts/stategraph.lua` | `SGManager` | Updates SG instances, sleep states, and event queues |
+| `scripts/stategraph.lua` | `StateGraphInstance` | Binds a state machine instance to an entity |
+| `scripts/stategraphs/commonstates.lua` | `CommonStates.Add*` | Appends reusable states to a `states` table |
+| `scripts/stategraphs/SGwilson.lua` | `StateGraph("wilson")` | Defines the authoritative player StateGraph |
+| `scripts/stategraphs/SGwilson_client.lua` | `StateGraph("wilson_client")` | Defines the predicted client player StateGraph |
+| `scripts/brain.lua` | `BrainManager` | Schedules Brain updates |
+| `scripts/behaviourtree.lua` | `PriorityNode` | Selects behaviour-tree branches |
+| `scripts/update.lua` | `Update` | Calls `SGManager` before `BrainManager` on each simulation tick |
 
-### `0x40002111` 入口选择 / `scripts/stategraph.lua` / 搜索信号
+### `0x40002111` StateGraph Search Path
 
-先搜 `StateGraphInstance:StartAction` 和 `StateGraphInstance:UpdateState`。
-这两个函数能把动作入口和动画帧副作用连起来。
+Search for `StateGraphInstance:StartAction` and `StateGraphInstance:UpdateState`.
+Together they connect an action entry to its animation-frame effects.
 
-### `0x40002121` 入口选择 / `scripts/brain.lua` / 搜索信号
+### `0x40002121` Brain Search Path
 
-再搜 `BrainManager`、`BT` 和 `OnUpdate`。
-这一步用于确认 AI 决策如何在 StateGraph 之外运行。
+Search for `BrainManager`, `BT`, and `OnUpdate` to see how AI decisions run outside the StateGraph.
 
-## `0x40003000` 运行关系图
+## `0x40003000` Runtime Relationship
 
 ~~~mermaid
 flowchart TD
-    A["Prefab 设置 sgname 与 brainname"]
+    A["Prefab calls SetStateGraph and SetBrain"]
     A --> B["StateGraphInstance"]
     A --> C["Brain"]
-    C --> D["BehaviourNode 选择意图"]
-    D --> E["BufferedAction / PushEvent / direct component call"]
+    C --> D["BehaviourNode selects intent"]
+    D --> E["BufferedAction / PushEvent"]
+    D --> I["direct component call"]
     E --> B
-    E --> I["combat / locomotor / homeseeker 等组件"]
+    I --> J["combat / locomotor / homeseeker components"]
     B --> F["State.onenter"]
     F --> G["timeline / timeout / events"]
-    G --> H["PerformBufferedAction 或 GoToState"]
+    G --> H["PerformBufferedAction or GoToState"]
 ~~~
 
-### `0x40003111` 导航原则 / 先读表现层，再读决策层 / 边界条件
+### `0x40003111` Decision and Presentation Boundaries
 
-`StateGraph` 可以没有 Brain，例如许多物件或简单生物。
-有 Brain 的实体常把 `BufferedAction` 交给 SG。
-部分 behaviour leaf 也会直接驱动 `combat`、`locomotor`、`homeseeker` 等组件。
+Many objects and simple creatures have a `StateGraph` without a Brain.
+Entities with a Brain often pass a `BufferedAction` to their SG.
+Some behaviour leaves instead drive `combat`, `locomotor`, or `homeseeker` directly.
 
-### `0x40003121` 导航原则 / 先读服务端，再读客户端预测 / 边界条件
+### `0x40003121` Server and Client StateGraphs
 
-`SGwilson.lua` 是权威状态。
-`SGwilson_client.lua` 用 `server_states` 和 `forward_server_states` 描述哪些客户端状态可匹配服务端状态。
+`SGwilson.lua` defines authoritative states.
+`SGwilson_client.lua` declares predicted-to-server matches with `server_states` and `forward_server_states`.
 
-## `0x40004111` 目录索引 / README 载体 / 二级目录 / 链接校验
-
-以下入口先进入目录 README，再进入具体专题文件。
+## `0x40004111` Pages
 
 - [StateGraph](0x4100-stategraph/README.md)
 - [StateGraph Runtime](0x4100-stategraph/0x4101-stategraph-runtime.md)
 - [CommonStates](0x4100-stategraph/0x4102-commonstates.md)
-- [SGWilson](0x4100-stategraph/0x4103-sgwilson.md)
-- [Brain 与 Behaviour](0x4200-brain-behaviour/README.md)
+- [SGwilson](0x4100-stategraph/0x4103-sgwilson.md)
+- [Brain and Behaviour](0x4200-brain-behaviour/README.md)
 - [Brain Runtime](0x4200-brain-behaviour/0x4201-brain-runtime.md)
 - [Behaviour Tree](0x4200-brain-behaviour/0x4202-behaviour-tree.md)
-- [追踪样例](0x4300-tracing/README.md)
-- [AI Examples](0x4300-tracing/0x4301-ai-examples.md)
+- [Tracing Examples](0x4300-tracing/README.md)
+- [AI Tracing Examples](0x4300-tracing/0x4301-ai-examples.md)
 
-## `0x40005100` 阅读与验证路线 / 从哪里开始读源码
+## `0x40005100` Verification
 
 ~~~bash
 rg -n "StateGraphInstance:StartAction|StateGraphInstance:UpdateState|BrainManager|PriorityNode" \
@@ -86,12 +86,12 @@ rg -n "StateGraphInstance:StartAction|StateGraphInstance:UpdateState|BrainManage
   scripts/behaviourtree.lua
 ~~~
 
-### `0x40005111` 最小闭环 / 抽样动作
+### `0x40005111` Action Loop
 
-从 `scripts/stategraphs/SGrabbit.lua` 的 `ActionHandler(ACTIONS.EAT, "eat")` 开始。
-再读 `eat` 状态里的 `SetTimeout`、`ontimeout` 和 `PerformBufferedAction`。
+Start with `ActionHandler(ACTIONS.EAT, "eat")` in `scripts/stategraphs/SGrabbit.lua`.
+Then inspect `SetTimeout`, `ontimeout`, and `PerformBufferedAction` in the `eat` state.
 
-### `0x40005112` 最小闭环 / 抽样 AI
+### `0x40005112` AI Loop
 
-从 rabbit prefab 追到 rabbit brain，再回到 `SGrabbit`。
-这样能验证 Brain 选择意图，StateGraph 执行表现的边界。
+Trace the rabbit prefab to its Brain, then back to `SGrabbit`.
+This shows the Brain choosing intent and the StateGraph executing it.

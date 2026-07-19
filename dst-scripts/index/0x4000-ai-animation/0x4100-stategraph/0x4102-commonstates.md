@@ -1,89 +1,87 @@
 # `0x41020000` CommonStates
 
-CommonStates 页解释 `stategraphs/commonstates.lua` 如何用 helper 向具体 SG 的 `states` 表追加通用状态。
-它不是运行时调度器，而是状态定义工厂。
+`scripts/stategraphs/commonstates.lua` appends reusable definitions to a concrete graph's `states` table.
+It is a state factory, not a runtime scheduler.
 
-## `0x41021111` 本页定位 / 要回答的运行时问题 / 源码阅读目标 / 验证点
+## `0x41021111` Purpose
 
-目标是看懂为什么许多生物 SG 很短。
-例如 `SGrabbit.lua` 手写 `idle`、`eat`、`hop`、`run`，再用 CommonStates 追加 sleep、frozen、corpse 等状态。
+CommonStates keeps creature graphs short by supplying shared states such as sleep, frozen, and corpse states.
+For example, `SGrabbit.lua` defines `idle`, `eat`, `hop`, and `run` locally, then appends shared states.
 
-## `0x41021121` 本页定位 / 要回答的运行时问题 / 生成边界 / 验证点
+## `0x41021121` Boundary
 
-CommonStates helper 大多只修改传入的 `states` 表。
-事件入口常来自同文件的 `CommonHandlers.On*`，实际跳转仍通过 `inst.sg:GoToState(...)`。
+Most CommonStates helpers only mutate the supplied `states` table.
+Event entry points often come from `CommonHandlers.On*`, while transitions still use `inst.sg:GoToState(...)`.
 
-## `0x41022000` 源码锚点
+## `0x41022000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Purpose |
 | --- | --- | --- |
-| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddIdle` | 追加 idle 状态和循环 timeout |
-| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddRunStates` | 追加 `run_start`、`run`、`run_stop` |
-| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddSleepStates` | 追加 `sleep`、`sleeping`、`wake` |
-| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddFrozenStates` | 追加 `frozen` 与 `thaw` |
-| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddCombatStates` | 追加 `hit`、`attack`、`death` |
-| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddInitState` | 追加默认入口 `init` |
-| `scripts/stategraphs/SGrabbit.lua` | `CommonStates.Add*` | 简单生物使用样例 |
+| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddIdle` | Adds idle and its looping timeout |
+| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddRunStates` | Adds `run_start`, `run`, and `run_stop` |
+| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddSleepStates` | Adds `sleep`, `sleeping`, and `wake` |
+| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddFrozenStates` | Adds `frozen` and `thaw` |
+| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddCombatStates` | Adds `hit`, `attack`, and `death` |
+| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddInitState` | Adds the default `init` entry state |
+| `scripts/stategraphs/SGrabbit.lua` | `CommonStates.Add*` | Shows the helpers in a small creature graph |
 
-### `0x41022111` 主锚点 / `scripts/stategraphs/commonstates.lua` / 搜索信号
+### `0x41022111` Helper Anchors
 
-先搜 `CommonStates.AddRunStates` 和 `CommonStates.AddCombatStates`。
-它们覆盖移动和战斗两类最常见复用模式。
+Search for `CommonStates.AddRunStates` and `CommonStates.AddCombatStates` to inspect the common movement and combat patterns.
 
-### `0x41022121` 主锚点 / `scripts/stategraphs/SGrabbit.lua` / 搜索信号
+### `0x41022121` Consumer Anchor
 
-搜 `CommonStates.AddSleepStates`、`AddFrozenStates` 和 `AddInitState`。
-这能确认 helper 是在文件末尾把通用状态追加进同一个 `states` 表。
+Search `scripts/stategraphs/SGrabbit.lua` for `CommonStates.AddSleepStates` and `AddFrozenStates`.
+Also find `AddInitState` to see all helpers append to the same `states` table.
 
-## `0x41023000` 运行流程
+## `0x41023000` Construction Flow
 
 ~~~mermaid
 flowchart TD
-    A["具体 SG 创建 states 表"]
-    A --> B["手写专属 State"]
-    B --> C["CommonStates.Add* helper"]
+    A["Concrete SG creates a states table"]
+    A --> B["Define graph-specific State objects"]
+    B --> C["Call CommonStates.Add* helpers"]
     C --> D["table.insert(states, State{...})"]
     D --> E["return StateGraph(name, states, events, defaultstate, actionhandlers)"]
-    E --> F["StateGraph 构造器重建 states 索引"]
-    F --> G["运行时 GoToState 使用 state.name"]
+    E --> F["StateGraph constructor indexes states"]
+    F --> G["GoToState resolves state.name at runtime"]
 ~~~
 
-### `0x41023111` 生成阶段 / `table.insert(states, State{...})` / 边界条件
+### `0x41023111` Definition Phase
 
-CommonStates 不创建新的 `StateGraphInstance`。
-它只在 `StateGraph(...)` 调用前追加状态对象。
-因此同名状态会在 `StateGraph` 构造器按 `v.name` 重建索引时决定最终结果。
+CommonStates never creates a `StateGraphInstance`.
+It appends states before `StateGraph(...)` runs.
+The constructor indexes them by `v.name`, which selects the final value for duplicate names.
 
-### `0x41023211` 事件阶段 / `CommonHandlers.On*` / 边界条件
+### `0x41023211` Event Phase
 
-`CommonHandlers.OnSleep()`、`OnFreeze()` 等返回 `EventHandler`。
-具体 SG 把这些 handler 放入全局 `events` 表，运行时由 `StateGraphInstance:HandleEvent` 后备处理。
+`CommonHandlers.OnSleep()` and `OnFreeze()` return `EventHandler` objects.
+The concrete SG puts them in its global `events` table, where `StateGraphInstance:HandleEvent` can reach them as fallbacks.
 
-### `0x41023311` 时间阶段 / Helper 内的 Timeout 与 Timeline / 边界条件
+### `0x41023311` Timed States
 
-`AddIdle` 在未 push 动画时用当前动画长度设置 timeout。
-`AddSimpleActionState` 默认用 `TimeEvent(time, performbufferedaction)` 执行动作。
-`AddShortAction` 使用 `SetTimeout`，但源码里状态名写成字符串 `"name"`，阅读时要注意这个写法细节。
+`AddIdle` uses the current animation length as its timeout when it does not push an animation.
+`AddSimpleActionState` defaults to `TimeEvent(time, performbufferedaction)`.
 
-## `0x41024111` 结构细节 / 移动状态 / `CommonStates.AddRunStates` / 需要核对的字段
+## `0x41024111` Movement States
 
-`AddRunStates` 追加 `run_start`、`run`、`run_stop`。
-`run_start` 的 `animover` 进入 `run`。
-`run` 在 `onenter` 调用 `locomotor:RunForward()`，并用动画长度设置 timeout。
-`run_stop` 停止移动，等 `animqueueover` 回到 idle。
+`CommonStates.AddRunStates` adds `run_start`, `run`, and `run_stop`.
+`animover` moves `run_start` into `run`.
+Its `onenter` calls `locomotor:RunForward()` and sets a timeout from the animation length.
+`run_stop` stops movement and returns to idle after `animqueueover`.
 
-## `0x41024211` 结构细节 / 战斗状态 / `CommonStates.AddCombatStates` / 需要核对的字段
+## `0x41024211` Combat States
 
-`AddCombatStates` 追加 `hit`、`attack`、`death`。
-`attack` 的 `onenter` 调用 `components.combat:StartAttack()`。
-它把 target 缓存在 `inst.sg.statemem.target`，供 timeline 中的真实攻击使用。
+`CommonStates.AddCombatStates` adds `hit`, `attack`, and `death`.
+`attack.onenter` calls `components.combat:StartAttack()`.
+It saves the target in `inst.sg.statemem.target` for the timeline's attack.
 
-## `0x41024311` 结构细节 / 入口状态 / `CommonStates.AddInitState` / 需要核对的字段
+## `0x41024311` Entry State
 
-`AddInitState` 追加名为 `init` 的状态。
-该状态进入后立刻根据 `inst.is_corpse` 跳到 `corpse_idle` 或默认状态。
+`CommonStates.AddInitState` adds `init`.
+It enters `corpse_idle` when `inst.is_corpse` is set and otherwise enters the default state.
 
-## `0x41025100` 阅读与验证路线 / 从哪里开始读源码
+## `0x41025100` Verification
 
 ~~~bash
 rg -n "CommonStates.AddRunStates|CommonStates.AddCombatStates|CommonStates.AddInitState|CommonHandlers.On" \
@@ -91,13 +89,11 @@ rg -n "CommonStates.AddRunStates|CommonStates.AddCombatStates|CommonStates.AddIn
   scripts/stategraphs/SGrabbit.lua
 ~~~
 
-### `0x41025111` 推荐顺序 / 最小闭环
+### `0x41025111` Minimum Trace
 
-先读 `SGrabbit.lua` 文件末尾的 CommonStates 调用。
-再回到 `commonstates.lua` 找对应 helper。
-最后确认 helper 追加的状态名是否会被 `return StateGraph("rabbit", states, events, "init", actionhandlers)` 使用。
+Read the CommonStates calls at the end of `SGrabbit.lua`, then open the matching helpers.
+`return StateGraph("rabbit", states, events, "init", actionhandlers)` consumes their state names.
 
-### `0x41025112` 推荐顺序 / 抽样验证
+### `0x41025112` Sample Check
 
-用 rabbit 的 `OnFreeze()` 追到 `CommonHandlers.OnFreeze()`。
-再确认 `AddFrozenStates` 是否向 `states` 表追加了 `frozen` 和 `thaw`。
+Trace rabbit's `OnFreeze()` to `CommonHandlers.OnFreeze()`, then confirm that `AddFrozenStates` adds `frozen` and `thaw`.

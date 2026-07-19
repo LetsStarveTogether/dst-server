@@ -1,58 +1,39 @@
-# `0x33000000` Prefab 装配
+# `0x33000000` Prefab Assembly
 
-本目录解释 prefab 从声明、注册、生成到网络投影的运行契约。
+This section follows prefabs from declaration and registration through spawning and network projection.
+Complete `scripts/prefabs/` catalogs remain in `0x8000-reference`.
 
-它不复制 `scripts/prefabs/` 的完整清单。
+## `0x33001111` Scope
 
-完整清单统一进入 `0x8000-reference`。
+Use this section for registration, spawning, and network projection boundaries.
 
-## `0x33001111` 目录职责 / 文档边界 / 目录载体 / 验证点
+## `0x33001121` Catalog Boundaries
 
-本 README 只说明目录定位、子页面边界和推荐入口。
+`0x8201-prefab-catalog.md` covers every file under `scripts/prefabs/`.
+`0x8202-component-catalog.md` covers every `scripts/components/*_replica.lua` file.
+This section keeps only runtime paths, key source anchors, and important boundaries.
 
-具体源码行为进入本目录下的独立专题文件。
+## `0x33002111` Pages
 
-不要让第一个独立文件替代目录 README。
+- [Prefab Assembly Contract](0x3301-prefab-contract.md)
+- [Replicas and Classifieds](0x3302-replica-classified.md)
 
-## `0x33001121` 目录职责 / 文档边界 / 覆盖口径 / 验证点
+## `0x33003111` Reading Order
 
-`scripts/prefabs/` 的全量文件覆盖由 `0x8201-prefab-catalog.md` 承担。
+Read `0x3301-prefab-contract.md` to connect `Prefab`, `LoadPrefabFile`, `RegisterPrefabsImpl`, and `SpawnPrefabFromSim`.
+Then read `0x3302-replica-classified.md` to connect replica and classified files.
+Follow their netvars and `Network:SetClassifiedTarget` visibility.
+Use `0x8000-reference/README.md` for complete paths.
 
-`scripts/components/*_replica.lua` 的全量文件覆盖由 `0x8202-component-catalog.md` 承担。
+## `0x33004111` Confirmed Layout
 
-本目录只维护运行链路、关键源码锚点和容易误读的边界。
+There is no `scripts/replica` directory.
+Built-in replica files are in `scripts/components/*_replica.lua`.
+Classified files are in `scripts/prefabs/*_classified.lua`.
+Prefab helpers are in `scripts/prefabutil.lua` and `scripts/standardcomponents.lua`.
 
-## `0x33002111` 子页面索引 / 推荐顺序 / 从声明到网络投影 / 链接校验
+## `0x33004121` Confirmed Counts
 
-- [Prefab 装配契约](0x3301-prefab-contract.md)
-- [Replica 与 Classified](0x3302-replica-classified.md)
-
-## `0x33003111` 阅读入口 / 最小路径 / 先定位再展开 / 抽样动作
-
-先读 `0x3301-prefab-contract.md`。
-
-确认 `Prefab` 对象、`LoadPrefabFile`、`RegisterPrefabsImpl` 和 `SpawnPrefabFromSim` 的闭环。
-
-再读 `0x3302-replica-classified.md`。
-
-确认 `components/*_replica.lua`、`prefabs/*_classified.lua`、netvars 和 `Network:SetClassifiedTarget` 的关系。
-
-如果要查完整路径，回到 `0x8000-reference/README.md`。
-
-## `0x33004111` 核对结论 / 与源码一致的事实 / 目录布局 / 验证点
-
-源码没有 scripts/replica 目录。
-
-内建 replica 文件位于 `scripts/components/*_replica.lua`。
-
-classified 文件位于 `scripts/prefabs/*_classified.lua`。
-
-prefab helper 位于 `scripts/prefabutil.lua` 和 `scripts/standardcomponents.lua`。
-
-## `0x33004121` 核对结论 / 与源码一致的事实 / 数量口径 / 验证点
-
-`entityreplica.lua` 列出 19 个内建可复制组件。
-
-`scripts/components` 有 19 个 tracked `_replica.lua` 文件。
-
-`scripts/prefabs` 有 15 个 tracked `_classified.lua` 文件。
+`entityreplica.lua` lists 19 built-in replicatable components.
+`scripts/components` contains 19 tracked `_replica.lua` files.
+`scripts/prefabs` contains 15 tracked `_classified.lua` files.

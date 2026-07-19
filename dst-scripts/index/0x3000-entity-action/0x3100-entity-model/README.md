@@ -1,25 +1,18 @@
-# `0x31000000` 实体模型
+# `0x31000000` Entity Model
 
-本目录承载实体、组件生命周期、标签和事件的目录语义。
+This section covers entities, component lifecycles, tags, and events.
 
-目录级语义由本 README 承载，独立专题文件只承载具体问题、链路或清单。
+## `0x31001111` Scope
 
-## `0x31001111` 目录职责 / 文档边界 / 目录载体 / 验证点
+Use this section for shared entity lifecycle mechanics rather than feature-specific component behaviour.
 
-本 README 只说明目录定位、子页面边界和推荐入口。
-
-具体源码行为进入本目录下的独立专题文件。
-
-不要让第一个独立文件替代目录 README。
-
-## `0x31002111` 子页面索引 / 推荐顺序 / 从目录到专题 / 链接校验
+## `0x31002111` Pages
 
 - [EntityScript](0x3101-entityscript.md)
-- [组件生命周期](0x3102-component-lifecycle.md)
-- [标签与事件](0x3103-tags-events.md)
+- [Component Lifecycle](0x3102-component-lifecycle.md)
+- [Tags and Events](0x3103-tags-events.md)
 
-## `0x31003111` 阅读入口 / 最小路径 / 先定位再展开 / 抽样动作
+## `0x31003111` Reading Order
 
-优先进入 `0x3101-entityscript.md`，再按页面索引顺序展开。
-
-如果要查完整清单，回到 `0x8000-reference/README.md`。
+Start with `0x3101-entityscript.md`, then follow the page order above.
+Use `0x8000-reference/README.md` for complete catalogs.

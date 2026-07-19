@@ -1,10 +1,10 @@
-# `0x82020000` Component 目录
+# `0x82020000` Component Catalog
 
-Component 目录收录 821 个 Lua 文件。
+The Component directory contains 821 Lua files.
 
-## `0x82021111` Component 文件 / 清单入口 / 机器可读块 / 验证点
+## `0x82021111` Component Files
 
-component 模块、client/control 辅助组件、visual helper 和 `_replica` 投影文件在同一清单中保留原始路径。
+The inventory keeps original paths for component modules, helpers, visual helpers, and `_replica` projections.
 
 - `scripts/components/abysspillargroup.lua`
 - `scripts/components/acidbatwavemanager.lua`

@@ -1,24 +1,20 @@
-# `0x23000000` 工具与调试
+# `0x23000000` Tooling and Debugging
 
-本目录承载 mod、debug 和平台工具的目录语义。
+This directory covers mod hooks, debug commands, user commands, and platform utilities.
 
-目录级语义由本 README 承载，独立专题文件只承载具体问题、链路或清单。
+## `0x23001111` Scope
 
-## `0x23001111` 目录职责 / 文档边界 / 目录载体 / 验证点
+Use these pages to distinguish development and integration tools from normal gameplay paths.
 
-本 README 只说明目录定位、子页面边界和推荐入口。
+## `0x23002111` Pages
 
-具体源码行为进入本目录下的独立专题文件。
+- [Mods and Debugging](0x2301-mods-debug.md)
+- [Platform Tools](0x2302-platform-tools.md)
 
-不要让第一个独立文件替代目录 README。
+## `0x23003111` Reading Order
 
-## `0x23002111` 子页面索引 / 推荐顺序 / 从目录到专题 / 链接校验
+Start with `0x2301-mods-debug.md` for mod injection and debug boundaries.
 
-- [模组与调试](0x2301-mods-debug.md)
-- [平台工具](0x2302-platform-tools.md)
+Then open the platform page for scripts, user commands, metrics, and update-loop utilities.
 
-## `0x23003111` 阅读入口 / 最小路径 / 先定位再展开 / 抽样动作
-
-优先进入 `0x2301-mods-debug.md`，再按页面索引顺序展开。
-
-如果要查完整清单，回到 `0x8000-reference/README.md`。
+For exhaustive inventories, see [Reference](../../0x8000-reference/README.md).

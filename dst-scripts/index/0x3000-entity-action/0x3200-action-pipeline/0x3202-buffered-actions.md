@@ -1,59 +1,59 @@
 # `0x32020000` BufferedAction
 
-BufferedAction 页解释一个候选动作如何变成可排队、可预测、可失败的动作对象。
-核心边界是：`BufferedAction` 保存动作上下文，`EntityScript` 安排动作生命周期，StateGraph 决定动画状态，
-`BufferedAction:Do` 才调用 `ACTIONS.*.fn`。
+`BufferedAction` turns a candidate into an action that can be queued, predicted, and failed.
+It stores context while `EntityScript` manages its lifecycle.
+The StateGraph selects animation state, and `BufferedAction:Do` calls `ACTIONS.*.fn`.
 
-## `0x32021111` 本页定位 / 要回答的运行时问题 / 候选动作如何被提交 / 验证点
+## `0x32021111` Purpose
 
-目标是把 `BufferedAction(...)`、`EntityScript:PushBufferedAction`、`StateGraphInstance:StartAction`、
-`EntityScript:PerformBufferedAction` 和 `BufferedAction:Do` 串成一条可复查链路。
+Connect `BufferedAction(...)` to `EntityScript:PushBufferedAction` and `StateGraphInstance:StartAction`.
+Then trace `EntityScript:PerformBufferedAction` into `BufferedAction:Do`.
 
-## `0x32021211` 本页定位 / 与 `pre_action_cb` 的边界 / 回调不在 `BufferedAction:Do` 中触发 / 验证点
+## `0x32021211` `pre_action_cb` Boundary
 
-`BufferedAction:Do` 只检查 `IsValid()`，然后调用 `self.action.fn(self)`。
-`ACTIONS.*.pre_action_cb` 通常在 `PlayerController:DoAction` 或其他动作发起路径中先触发。
-不要把 `pre_action_cb` 写成 `BufferedAction:Do` 的一部分。
+`BufferedAction:Do` only checks `IsValid()` and calls `self.action.fn(self)`.
+`ACTIONS.*.pre_action_cb` normally runs earlier in `PlayerController:DoAction` or another submission path.
+It is not part of `BufferedAction:Do`.
 
-## `0x32022000` 源码锚点
+## `0x32022000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Purpose |
 | --- | --- | --- |
-| `scripts/bufferedaction.lua` | `BufferedAction` | 保存 doer、target、action、invobject、pos、recipe、distance 等上下文 |
-| `scripts/bufferedaction.lua` | `BufferedAction:IsValid` | 执行前验证 doer、target、invobject、pos、validfn |
-| `scripts/bufferedaction.lua` | `BufferedAction:Do` | 调用 `action.fn` 并分派 success/fail 回调 |
-| `scripts/entityscript.lua` | `EntityScript:PushBufferedAction` | 接收动作并决定 WALKTO、instant 或 SG 路径 |
-| `scripts/entityscript.lua` | `EntityScript:PerformBufferedAction` | 面向目标、推送 `performaction`、调用 `bufferedaction:Do` |
-| `scripts/entityscript.lua` | `EntityScript:GetBufferedAction` | 返回实体或 locomotor 当前动作 |
-| `scripts/stategraph.lua` | `StateGraphInstance:StartAction` | 用 `sg.actionhandlers[action]` 选择状态或直接执行 |
-| `scripts/stategraphs/SGwilson.lua` | `ActionHandler(ACTIONS.*)` | 服务端玩家动作到状态的映射 |
-| `scripts/stategraphs/SGwilson_client.lua` | `ActionHandler(ACTIONS.*)` | 客户端预测动作到状态的映射 |
+| `scripts/bufferedaction.lua` | `BufferedAction` | Store action context. |
+| `scripts/bufferedaction.lua` | `BufferedAction:IsValid` | Validate context before execution. |
+| `scripts/bufferedaction.lua` | `BufferedAction:Do` | Call `action.fn` and dispatch success or failure callbacks. |
+| `scripts/entityscript.lua` | `EntityScript:PushBufferedAction` | Choose the WALKTO, instant, SG, or failure path. |
+| `scripts/entityscript.lua` | `EntityScript:PerformBufferedAction` | Face, emit, and execute. |
+| `scripts/entityscript.lua` | `EntityScript:GetBufferedAction` | Return the entity or locomotor action. |
+| `scripts/stategraph.lua` | `StateGraphInstance:StartAction` | Select a state or execute. |
+| `scripts/stategraphs/SGwilson.lua` | `ActionHandler(ACTIONS.*)` | Map server player actions to states. |
+| `scripts/stategraphs/SGwilson_client.lua` | `ActionHandler(ACTIONS.*)` | Map predicted client actions to states. |
 
-### `0x32022111` 主锚点 / `scripts/entityscript.lua` / 搜索信号
+### `0x32022111` Submission Anchor
 
-先找 `PushBufferedAction`。
-它是判断动作进入 WALKTO、instant、StateGraph 或失败路径的最短入口。
+Start with `PushBufferedAction`.
+It is the shortest place to see whether an action takes the WALKTO, instant, StateGraph, or failure path.
 
-### `0x32022121` 主锚点 / `scripts/bufferedaction.lua` / 搜索信号
+### `0x32022121` Execution Anchor
 
-再找 `BufferedAction:Do` 和 `BufferedAction:IsValid`。
-这里能确认最终副作用不是在候选收集阶段发生的。
+Then inspect `BufferedAction:Do` and `BufferedAction:IsValid`.
+They confirm that candidate collection does not produce the final side effect.
 
-## `0x32023000` 运行流程
+## `0x32023000` Execution Flow
 
 ~~~mermaid
 flowchart TD
-    A["PlayerActionPicker / PlayerController 生成 BufferedAction"]
+    A["PlayerActionPicker / PlayerController creates BufferedAction"]
     A --> B["EntityScript:PushBufferedAction"]
     B --> C{"TestForStart / IsValid"}
-    C -->|失败| D["PushEvent actionfailed"]
+    C -->|fail| D["PushEvent actionfailed"]
     C -->|WALKTO| E["PushEvent performaction + Succeed"]
     C -->|instant| F["PushEvent performaction + BufferedAction:Do"]
-    C -->|普通动作| G["StateGraphInstance:StartAction"]
-    C -->|无 SG| R["PushEvent startaction"]
-    G -->|有 deststate| H["GoToState 动画状态"]
-    G -->|无 deststate| I["EntityScript:PerformBufferedAction"]
-    H --> J["状态帧或事件调用 PerformBufferedAction"]
+    C -->|ordinary action| G["StateGraphInstance:StartAction"]
+    C -->|no SG| R["PushEvent startaction"]
+    G -->|deststate| H["GoToState animation state"]
+    G -->|no deststate| I["EntityScript:PerformBufferedAction"]
+    H --> J["State frame or event calls PerformBufferedAction"]
     I --> K["BufferedAction:Do"]
     J --> K
     K --> L["ACTIONS.*.fn"]
@@ -62,106 +62,111 @@ flowchart TD
     M -->|false| O["Fail"]
 ~~~
 
-### `0x32023111` 提交分段 / `PushBufferedAction` / 验证点
+### `0x32023111` Initial Submission
 
-`PushBufferedAction` 会先消除重复动作，并让已有的 `self.bufferedaction` 失败。
-然后用 `bufferedaction:TestForStart()` 做执行前验证。
-`TestForStart` 指向 `BufferedAction:IsValid`。
-如果这里失败，函数只推送 `actionfailed` 并返回。
-它不会调用 `bufferedaction:Fail()`。
+`PushBufferedAction` ignores a matching submission and keeps the current `self.bufferedaction`.
 
-### `0x32023121` 提交分段 / WALKTO 与 Instant / 验证点
+For a different submission, it fails and clears the current action.
+It then calls `bufferedaction:TestForStart()`, which points to `BufferedAction:IsValid`.
+When this check fails, it only emits `actionfailed` and returns without calling `bufferedaction:Fail()`.
 
-`ACTIONS.WALKTO` 是特殊路径。
-它推送 `performaction` 后直接 `Succeed()`，不会调用 `BufferedAction:Do`。
-`action.instant` 或 `bufferedaction.options.instant` 会推送 `performaction`，再立即调用 `bufferedaction:Do()`。
+### `0x32023121` WALKTO and Instant Actions
 
-### `0x32023131` 提交分段 / StateGraph 路径 / 验证点
+`ACTIONS.WALKTO` emits `performaction` and calls `Succeed()` without calling `BufferedAction:Do`.
+An `action.instant` or `bufferedaction.options.instant` action emits `performaction`.
+It then calls `bufferedaction:Do()` immediately.
 
-普通动作会进入 `self.sg:StartAction(bufferedaction)`。
-如果匹配到 `actionhandlers[action]` 且有 `deststate`，SG 会 `GoToState`。
-如果 handler 没有 `deststate`，SG 会直接调用 `inst:PerformBufferedAction()`。
-如果没有可用 handler，`PushBufferedAction` 会推送 `performaction`，再让动作失败。
-如果实体没有 `self.sg`，`PushBufferedAction` 只推送 `startaction`。
-它不会在这一分支直接执行 `BufferedAction:Do()`。
+### `0x32023131` StateGraph Path
 
-### `0x32023211` 执行分段 / `PerformBufferedAction` / 验证点
+Ordinary actions enter `self.sg:StartAction(bufferedaction)`.
+A matching `actionhandlers[action]` with `deststate` enters that state through `GoToState`.
+A matching handler without `deststate` calls `inst:PerformBufferedAction()` directly.
+When no handler is available, `PushBufferedAction` emits `performaction` and fails the action.
+When the entity has no `self.sg`, `PushBufferedAction` only emits `startaction` and does not call `BufferedAction:Do()`.
 
-`PerformBufferedAction` 会在调用 `bufferedaction:Do()` 前推送 `performaction`。
-它会暂存局部变量 `bufferedaction`，因为 `Do()` 期间仍可能读取 `inst.bufferedaction`。
+### `0x32023211` `PerformBufferedAction`
 
-### `0x32023221` 执行分段 / `BufferedAction:Do` / 验证点
+`PerformBufferedAction` faces the target and emits `performaction` before calling `bufferedaction:Do()`.
+It keeps a local `bufferedaction` reference because code inside `Do()` can still inspect `inst.bufferedaction`.
 
-`Do()` 的顺序是 `IsValid()`、`action.fn(self)`、记录 `reason`、成功时 `OnUsedAsItem` 和 `Succeed()`、
-失败时 `Fail()`。
-`EntityScript:PerformBufferedAction` 在失败后还会推送 `actionfailed`。
+### `0x32023221` `BufferedAction:Do`
 
-### `0x32023231` 执行分段 / 失败路径矩阵 / 边界条件
+`Do()` calls `IsValid()`, then `action.fn(self)`, and records the failure `reason`.
+Success runs `OnUsedAsItem` and `Succeed()`.
+Failure runs `Fail()`.
+After a failed call, `EntityScript:PerformBufferedAction` also emits `actionfailed`.
 
-不是所有 `BufferedAction:Do()` 失败都会触发 `actionfailed`。
+### `0x32023231` Failure Matrix
 
-| 失败位置 | 事件与回调 |
+Not every failed `BufferedAction:Do()` emits `actionfailed`.
+
+| Failure point | Event and callback behaviour |
 | --- | --- |
-| `PushBufferedAction` 的 `TestForStart()` 失败 | 只推送 `actionfailed`，然后直接返回。 |
-| `instant` 分支中 `Do()` 返回 false | 已推送 `performaction`，`Do()` 内部 `Fail()`，不由这一层额外推 `actionfailed`。 |
-| SG 状态调用 `PerformBufferedAction()` 后 `Do()` 返回 false | `Do()` 内部 `Fail()`，随后 `PerformBufferedAction` 推送 `actionfailed` 并再次调用已清空回调的 `Fail()`。 |
-| 没有可用 SG action handler | 推送 `performaction`，然后 `Fail()`。 |
+| `TestForStart()` inside `PushBufferedAction` | Emit only `actionfailed`, then return. |
+| Instant `Do()` returns false | `performaction` fired; `Do()` calls `Fail()` without another `actionfailed`. |
+| SG `PerformBufferedAction()` returns false | The caller emits `actionfailed`, then revisits `Fail()`. |
+| No usable SG action handler | Emit `performaction`, then call `Fail()`. |
 
-## `0x32024111` 结构细节 / `BufferedAction` 字段 / 上下文字段 / 需要核对的字段
+## `0x32024111` Stored Context
 
-构造函数保存 `doer`、`target`、`initialtargetowner`、`action`、`invobject`、`doerownsobject`、`pos`、
-`rotation`、`recipe`、`distance`、`arrivedist`、`forced`、`autoequipped`、`skin`、`onsuccess`、`onfail` 和 `options`。
-`pos` 会包装为 `DynamicPosition`。
+Core fields are `doer`, `target`, `initialtargetowner`, `action`, `invobject`, and `doerownsobject`.
+Position fields are `pos`, `rotation`, `distance`, and `arrivedist`.
+Other fields are `recipe`, `forced`, `autoequipped`, `skin`, `onsuccess`, `onfail`, and `options`.
+It wraps `pos` as a `DynamicPosition`.
 
-## `0x32024121` 结构细节 / `BufferedAction` 字段 / `IsValid` 校验字段 / 需要核对的字段
+## `0x32024121` Execution-Time Validation
 
-`BufferedAction:IsValid` 不只检查 doer 和 target 是否有效。
-`initialtargetowner` 用来防止目标所属容器变化。
-`doerownsobject` 要求物品仍由 doer 持有。
-`autoequipped` 要求 active item 为空。
-`pos.walkable_platform` 必须仍有效。
-`self.validfn` 会参与校验。
-master sim 上的 `action.validfn` 也会参与校验。
+`BufferedAction:IsValid` checks more than whether the doer and target still exist.
+`initialtargetowner` prevents execution after the target changes containers.
+`doerownsobject` requires the item to remain owned by the doer.
+`autoequipped` requires an empty active-item slot.
+`pos.walkable_platform` must remain valid.
+`self.validfn` participates in validation.
+On the master simulation, `action.validfn` also participates.
 
-## `0x32024211` 结构细节 / Success/fail 回调 / `AddSuccessAction` 与 `AddFailAction` / 需要核对的字段
+## `0x32024211` Success and Failure Callbacks
 
-`Succeed()` 遍历 `onsuccess` 后清空 `onsuccess` 和 `onfail`。
-`Fail()` 遍历 `onfail` 后同样清空两个表。
-动作失败可能既在 `BufferedAction:Do` 内部触发 `Fail()`，也在 `PerformBufferedAction` 失败分支再次处理
-`actionfailed` 事件。
+`Succeed()` runs `onsuccess` and clears both `onsuccess` and `onfail`.
+`Fail()` runs `onfail` and also clears both tables.
+`AddSuccessAction` and `AddFailAction` populate these callback lists.
+A failed `BufferedAction:Do` can call `Fail()` before `PerformBufferedAction` emits `actionfailed`.
+The latter then revisits an already-cleared callback list.
 
-## `0x32024311` 结构细节 / 客户端预测 / `PreviewAction` 与 `PerformPreviewBufferedAction` / 需要核对的字段
+## `0x32024311` Client Prediction
 
-预测客户端通常经 `PlayerController:DoAction` 进入 `locomotor:PreviewAction`。
-`EntityScript:PreviewBufferedAction` 会先特殊处理 `ACTIONS.WALKTO`。
-`bufferedaction.options.instant` 或 `action.instant` 会直接进入 `PerformPreviewBufferedAction`。
-有 SG 时，预览会先尝试 `sg:PreviewAction(bufferedaction)`。
-没有可用 handler 且不是 instant 时，`StateGraphInstance:PreviewAction` 会进入 `previewaction` 状态。
-这里的 `previewaction` 是 SG 状态名，不是实体事件名。
-`EntityScript:PerformPreviewBufferedAction` 会调用 `playercontroller:RemoteBufferedAction` 并标记
-`ispreviewing`。
-`RemoteBufferedAction` 执行的是 `buffaction.preview_cb()`。
-`StateGraphInstance:StartAction` 在预测场景中还可能快进动画帧。
+A predicting client usually enters through `PlayerController:DoAction` and `locomotor:PreviewAction`.
+`EntityScript:PreviewBufferedAction` handles `ACTIONS.WALKTO` specially.
+`bufferedaction.options.instant` or `action.instant` enters `PerformPreviewBufferedAction` directly.
+With an SG, preview first tries `sg:PreviewAction(bufferedaction)`.
+With an action-handler table, a missing handler for a non-instant action enters `previewaction`.
 
-## `0x32025100` 阅读与验证路线 / 从哪里开始读源码
+A failed handler condition or nil destination returns without that fallback.
+That name is an SG state, not an entity event.
+`EntityScript:PerformPreviewBufferedAction` calls `playercontroller:RemoteBufferedAction` and sets `ispreviewing`.
+`RemoteBufferedAction` runs `buffaction.preview_cb()`.
+`StateGraphInstance:StartAction` can also fast-forward animation frames during prediction.
+
+## `0x32025100` Verification
 
 ~~~bash
-rg -n "function EntityScript:PushBufferedAction|function EntityScript:PerformBufferedAction" \
-  scripts/entityscript.lua
-rg -n "function EntityScript:GetBufferedAction" \
-  scripts/entityscript.lua
+rg -n "function EntityScript:PushBufferedAction|function EntityScript:PerformBufferedAction" scripts/entityscript.lua
+rg -n "function EntityScript:GetBufferedAction" scripts/entityscript.lua
 rg -n "function BufferedAction:Do|function BufferedAction:IsValid|AddFailAction|AddSuccessAction|Succeed|Fail" \
   scripts/bufferedaction.lua
 rg -n "function StateGraphInstance:StartAction|actionhandlers|PerformPreviewBufferedAction" \
-  scripts/stategraph.lua scripts/entityscript.lua
+  scripts/stategraph.lua \
+  scripts/entityscript.lua
 rg -n "PreviewBufferedAction|RemoteBufferedAction|PreviewAction" \
-  scripts/entityscript.lua scripts/stategraph.lua scripts/components/playercontroller.lua
+  scripts/entityscript.lua \
+  scripts/stategraph.lua \
+  scripts/components/playercontroller.lua
 rg -n "ActionHandler\\(ACTIONS\\.(CHOP|ATTACK|DEPLOY|PICKUP|WALKTO)" \
-  scripts/stategraphs/SGwilson.lua scripts/stategraphs/SGwilson_client.lua
+  scripts/stategraphs/SGwilson.lua \
+  scripts/stategraphs/SGwilson_client.lua
 ~~~
 
-### `0x32025111` 推荐顺序 / 最小闭环
+### `0x32025111` Minimal Trace
 
-先从 `PushBufferedAction` 判断分支。
-再读 `StartAction` 看 SG 是否接管。
-最后读 `PerformBufferedAction` 和 `BufferedAction:Do`，确认哪个 `ACTIONS.*.fn` 真正产生副作用。
+Classify the branch in `PushBufferedAction`.
+Read `StartAction` to see whether the SG takes control.
+Finish with `PerformBufferedAction` and `BufferedAction:Do` to identify the `ACTIONS.*.fn` that causes the side effect.

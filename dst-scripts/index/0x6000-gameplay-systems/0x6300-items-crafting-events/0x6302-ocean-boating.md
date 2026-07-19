@@ -1,53 +1,53 @@
-# `0x63020000` 海洋与船
+# `0x63020000` Ocean and Boating
 
-海洋与船页把船看成可移动平台、物理实体和配件集合。
-不要把船当作普通地面，也不要只从 `boat.lua` 的 prefab 名称阅读。
+A boat is a moving platform, a physics entity, and a collection of attachments.
+Do not treat it as ordinary ground or limit the trace to the `boat.lua` prefab.
 
-## `0x63021111` 本页定位 / 要回答的运行时问题 / 船如何承载玩家和物品 / 验证点
+## `0x63021111` Purpose
 
-核心链路是 `boat.lua` 装配 `walkableplatform` 与 `boatphysics`。
-`walkableplatform` 维护玩家和物品是否在平台上。
-`boatphysics` 维护速度、转向、桅杆推力、锚和其他拖拽源。
-玩家自身通过 `walkableplatformplayer` 检测上船和下船。
+`boat.lua` assembles `walkableplatform` and `boatphysics`.
+`walkableplatform` tracks players and items on the platform.
+`boatphysics` combines velocity, steering, mast force, anchors, and other drag sources.
+Players detect boarding and departure through `walkableplatformplayer`.
 
-## `0x63021211` 本页定位 / 与世界模拟页的边界 / 本页只追实体和组件 / 不展开 Map/ocean 生成
+## `0x63021211` World-Simulation Boundary
 
-海洋 tile、世界生成和洞穴/海面布局在 `0x500000` 区域解释。
-本页只解释玩家已经在运行时世界中和船、海洋配件、海洋制作物交互时的 Lua 链路。
+The `0x50000000` section covers ocean tiles and world generation.
+This guide starts with an existing runtime world and follows player, boat, attachment, and crafting interactions.
 
-## `0x63022000` 源码锚点
+## `0x63022000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry | Role |
 | --- | --- | --- |
-| `scripts/recipes.lua` | `boat_item` / `anchor_item` | 海洋物品配方 |
-| `scripts/prefabs/boat.lua` | `create_common_pre` / `create_master_pst` | 船体装配 |
-| `scripts/components/walkableplatform.lua` | `SetEntitiesOnPlatform` | 平台承载关系 |
-| `scripts/components/walkableplatformplayer.lua` | `TestForPlatform` | 玩家上下平台 |
-| `scripts/entityscript.lua` | `GetCurrentPlatform` | 实体所属平台 |
-| `scripts/components/boatphysics.lua` | `BoatPhysics` | 船速、转向和阻力 |
-| `scripts/components/boatcrew.lua` | `RemoveMember` | 船员集合、pirate ship 数据和 sleep 清理 |
-| `scripts/components/boatleak.lua` | `SetState` | 船体漏水修补状态 |
-| `scripts/components/mast.lua` | `SetBoat` / `CalcMaxVelocity` | 桅杆推力 |
-| `scripts/components/anchor.lua` | `SetBoat` | 锚绑定船 |
-| `scripts/components/boatdrag.lua` | `drag` / `sailforcemodifier` | 拖拽源参数 |
-| `scripts/prefabs/anchor.lua` | `SGanchor` | 锚 prefab 与状态机 |
-| `scripts/prefabs/mast.lua` | `mast` component | 桅杆 prefab 与升级件 |
+| `scripts/recipes.lua` | `boat_item` / `anchor_item` | Declares ocean recipes |
+| `scripts/prefabs/boat.lua` | `create_common_pre` / `create_master_pst` | Assembles boat bodies |
+| `scripts/components/walkableplatform.lua` | `SetEntitiesOnPlatform` | Tracks platform occupants |
+| `scripts/components/walkableplatformplayer.lua` | `TestForPlatform` | Detects player boarding and departure |
+| `scripts/entityscript.lua` | `GetCurrentPlatform` | Reports an entity's platform |
+| `scripts/components/boatphysics.lua` | `BoatPhysics` | Controls speed, steering, and drag |
+| `scripts/components/boatcrew.lua` | `RemoveMember` | Cleans up crews and pirate ship data |
+| `scripts/components/boatleak.lua` | `SetState` | Manages leak repair states |
+| `scripts/components/mast.lua` | `SetBoat` / `CalcSailForce` / `CalcMaxVelocity` | Adds mast force |
+| `scripts/components/anchor.lua` | `SetBoat` | Binds an anchor to a boat |
+| `scripts/components/boatdrag.lua` | `drag` / `sailforcemodifier` | Supplies drag parameters |
+| `scripts/prefabs/anchor.lua` | `SGanchor` | Assembles the anchor and its StateGraph |
+| `scripts/prefabs/mast.lua` | `mast` component | Assembles masts and upgrades |
 
-### `0x63022111` 船体锚点 / `scripts/prefabs/boat.lua` / 搜索信号
+### `0x63022111` Boat Assembly
 
-`create_common_pre` 添加 network、physics、`walkableplatform`、`healthsyncer`、`waterphysics`、
-`reticule` 和 `boatringdata`。
-`create_master_pst` 在 master sim 上添加 `hull`、`repairable`、`boatring`、`hullhealth`、
-`boatphysics`、`boatdrifter`、`health` 和 `SGboat`。
+`create_common_pre` adds networking, physics, `walkableplatform`, and `healthsyncer`.
+It also adds `waterphysics`, `reticule`, and `boatringdata`.
+On the master simulation, `create_master_pst` adds `hull`, `repairable`, `boatring`, and `hullhealth`.
+It also adds `boatphysics`, `boatdrifter`, `health`, and `SGboat`.
 
-### `0x63022211` 平台锚点 / `walkableplatform` 与 `walkableplatformplayer` / 搜索信号
+### `0x63022211` Platform Tracking
 
-`WalkablePlatform:SetEntitiesOnPlatform` 周期性扫描平台半径内实体，并调用
-`EntityScript:AddPlatformFollower`。
-`WalkablePlatformPlayer:TestForPlatform` 在 server 侧用 `inst:GetCurrentPlatform()`，在 client 侧用
-`TheWorld.Map:GetPlatformAtPoint(...)`。
+`WalkablePlatform:SetEntitiesOnPlatform` scans the platform radius.
+It attaches each match through `EntityScript:AddPlatformFollower` (`AddPlatformFollower`).
+On the server, `WalkablePlatformPlayer:TestForPlatform` uses `inst:GetCurrentPlatform()`.
+On the client, it uses `TheWorld.Map:GetPlatformAtPoint(...)`.
 
-## `0x63023000` 运行流程
+## `0x63023000` Runtime Flow
 
 ~~~mermaid
 flowchart TD
@@ -64,54 +64,58 @@ flowchart TD
     I --> J
 ~~~
 
-### `0x63023111` 船体生成 / 从制作产物到 Prefab / 边界条件
+### `0x63023111` Crafting to Boat Prefab
 
-`recipes.lua` 中 `boat_item`、`boat_grass_item`、`anchor_item`、`mast_item` 等仍走普通制作链。
-制作产物进入世界后，deploy kit 或 prefab 自己负责把实际 boat、anchor、mast 放到目标点。
-因此海洋物品要同时核对 recipe、deploy kit 和最终 prefab。
+`boat_item`, `boat_grass_item`, `anchor_item`, and `mast_item` use the normal crafting path.
+After the product enters the world, its deploy kit or prefab creates the final boat, anchor, or mast.
+Inspect the recipe, deploy kit, and final prefab together.
 
-### `0x63023211` 平台承载 / `AddPlatformFollower` / 边界条件
+### `0x63023211` Platform Coordinates
 
-`EntityScript:GetCurrentPlatform` 在 master sim 上读 `self.platform`，在 client 上读引擎层
-`entity:GetPlatform()`。
-保存位置时，`EntityScript:GetSaveRecord` 会把平台相对坐标和 `walkableplatform:GetUID()` 写入记录。
-所以船上实体的保存、移动和下船都不能按普通 world position 简化。
+On the master simulation, `EntityScript:GetCurrentPlatform` reads `self.platform`.
+On the client, it reads the engine-level `entity:GetPlatform()`.
+`EntityScript:GetSaveRecord` stores platform-relative coordinates and `walkableplatform:GetUID()`.
+Saving, movement, and departure for boat occupants cannot use ordinary world positions alone.
 
-### `0x63023311` 船体运动 / `BoatPhysics` / 验证点
+### `0x63023311` Boat Motion
 
-`BoatPhysics` 维护 `velocity_x`、`velocity_z`、`masts`、`magnets` 和 `boatdraginstances`。
-`ApplyRowForce` 处理划船力。
-`GetMaxVelocity` 汇总桅杆和磁力源。
-`GetBoatDrag` 与 `GetTotalAnchorDrag` 汇总锚和拖拽组件。
-`SetHalting` 是 `walkableplatform` 在坏位置或障碍场景下使用的安全刹车，不是通用玩法接口。
+`BoatPhysics` stores `velocity_x`, `velocity_z`, `masts`, `magnets`, and `boatdraginstances`.
+`ApplyRowForce` applies rowing force.
+`GetMaxVelocity` combines mast and magnet sources.
+`GetBoatDrag` and `GetTotalAnchorDrag` combine anchors and other drag components.
+`walkableplatform` uses `SetHalting` as an emergency brake for invalid positions or obstacles.
+It is not a general gameplay API.
 
-### `0x63023321` 船员与修补 / Boatcrew 与 BoatLeak / 验证点
+### `0x63023321` Crew and Leak Repair
 
-`Boatcrew:RemoveMember` 在最后一个成员离开时会从 `piratespawner` 移除 ship data。
-它也会从船实体移除 `vanish_on_sleep` 与 `boatcrew`。
-`boatleak.lua` 的 `repaired_tape` 状态会使用 Winona tape 修补音效。
+When the last member leaves, `Boatcrew:RemoveMember` removes ship data from `piratespawner`.
+It also removes `vanish_on_sleep` and `boatcrew` from the boat.
+The `repaired_tape` state in `boatleak.lua` uses the Winona tape repair sound.
 
-## `0x63024111` 结构细节 / 锚和桅杆 / 配件如何影响船 / 需要核对的函数
+## `0x63024111` Masts and Anchors
 
-`components/mast.lua` 的 `Mast:SetBoat` 会在原船上 `RemoveMast`，再在目标船上 `AddMast`。
-`Mast:CalcMaxVelocity` 和 `Mast:GetCurrentSailForce` 决定对 `BoatPhysics` 的速度贡献。
-`components/anchor.lua` 会用 `inst:GetCurrentPlatform()` 找到船。
-`prefabs/anchor.lua` 添加 `anchor`、`boatdrag` 和 `SGanchor`，其中 `boatdrag` 负责拖拽、最大速度修正和帆力修正。
+In `components/mast.lua`, `Mast:SetBoat` calls `RemoveMast` on the old boat and `AddMast` on the new boat.
+`Mast:CalcMaxVelocity` and `Mast:CalcSailForce` determine the mast's contribution to `BoatPhysics`.
+`components/anchor.lua` finds its boat through `inst:GetCurrentPlatform()`.
+`prefabs/anchor.lua` adds `anchor`, `boatdrag`, and `SGanchor`.
+`boatdrag` supplies drag, maximum-speed modifiers, and sail-force modifiers.
 
-## `0x63024211` 结构细节 / 平台玩家 / `player_common.lua` / 需要核对的组件
+## `0x63024211` Player Platform State
 
-玩家在 `scripts/prefabs/player_common.lua` 中添加 `walkableplatformplayer`。
-上船时 `GetOnPlatform` 会设置 `Transform:SetIsOnPlatform(true)`，并把玩家注册到
-`platform.components.walkableplatform:AddPlayerOnPlatform`。
-离船时 `GetOffPlatform` 会移除玩家、停止船镜头和音乐检测，并清空 `self.platform`。
+`scripts/prefabs/player_common.lua` adds `walkableplatformplayer` before pristine setup.
+Its lifecycle methods live in `scripts/components/walkableplatformplayer.lua`.
+`GetOnPlatform` calls `Transform:SetIsOnPlatform(true)`.
+It registers the player through `platform.components.walkableplatform:AddPlayerOnPlatform`.
+`GetOffPlatform` unregisters the player, stops boat camera and music checks, and clears `self.platform`.
 
-## `0x63024311` 结构细节 / 禁止船上建造 / `NoBoats_testfn` / 搜索信号
+## `0x63024311` Building Restrictions
 
-`scripts/recipes.lua` 的 `NoBoats_testfn` 会检查目标点是否在船或不可用平台上。
-部分 scaffold、Winters Feast table、deconstruction recipe 会使用它。
-这说明“海洋限制”并不只在 boat 组件里，还会进入 recipe placement test。
+`NoBoats_testfn` lives in `scripts/recipes.lua` (`recipes.lua`).
+It rejects every point on a platform.
+Some scaffolds, Winters Feast tables, and deconstruction recipes use it.
+Ocean restrictions therefore also enter through recipe placement tests.
 
-## `0x63025100` 阅读与验证路线 / 从哪里开始读源码
+## `0x63025100` Verification
 
 ~~~bash
 rg -n "boat_item|anchor_item|mast_item|NoBoats_testfn" \
@@ -125,7 +129,7 @@ rg -n "SetEntitiesOnPlatform|AddEntityToPlatform|GetOnPlatform|TestForPlatform|G
   scripts/components/walkableplatformplayer.lua \
   scripts/entityscript.lua
 
-rg -n "AddMast|RemoveMast|AddBoatDrag|ApplyRowForce|GetMaxVelocity|SetHalting" \
+rg -n "AddMast|RemoveMast|CalcSailForce|AddBoatDrag|ApplyRowForce|GetMaxVelocity|SetHalting" \
   scripts/components/boatphysics.lua \
   scripts/components/mast.lua \
   scripts/components/anchor.lua \
@@ -136,8 +140,8 @@ rg -n "RemoveMember|RemoveShipData|repaired_tape|ChangeToRepaired" \
   scripts/components/boatleak.lua
 ~~~
 
-### `0x63025111` 推荐顺序 / 最小闭环
+### `0x63025111` Reading Order
 
-先从 `scripts/prefabs/boat.lua` 看船体装配。
-再读 `walkableplatform` 和 `walkableplatformplayer`，确认玩家和物品如何挂到平台。
-最后读 `boatphysics`、`mast`、`anchor` 与 `boatdrag`，确认配件如何改变速度和刹车状态。
+Start with boat assembly in `scripts/prefabs/boat.lua`.
+Read `walkableplatform` and `walkableplatformplayer` to trace player and item attachment.
+Finish with `boatphysics`, `mast`, `anchor`, and `boatdrag` to see how attachments change speed and braking.

@@ -1,10 +1,10 @@
-# `0x81020000` 根文件清单
+# `0x81020000` Root File Inventory
 
-本页只列 `scripts` 根目录 Lua 文件和主入口。
+This page inventories tracked files in the `scripts` root and highlights the primary runtime entry points.
 
-## `0x81021111` 根 Lua 文件 / 清单入口 / 机器可读块 / 验证点
+## `0x81021111` Root Lua Files
 
-根目录 Lua 文件共 218 个。
+The root contains 218 Lua files.
 
 - `scripts/achievements.lua`
 - `scripts/actions.lua`
@@ -225,17 +225,18 @@
 - `scripts/yotb_costumes.lua`
 - `scripts/yotb_sewing.lua`
 
-## `0x81022111` 主入口文件 / 清单入口 / 机器可读块 / 验证点
+## `0x81022111` Primary Entry Points
 
-以下文件是阅读运行时的第一组入口。
+Start a runtime trace with these files.
 
 - `scripts/main.lua`
 - `scripts/mainfunctions.lua`
 - `scripts/gamelogic.lua`
+- `scripts/update.lua`
 - `scripts/scheduler.lua`
 
-## `0x81023111` 根非 Lua 文件 / 清单入口 / 机器可读块 / 验证点
+## `0x81023111` Root Non-Lua Files
 
-根目录非 Lua 跟踪文件只有一个。
+The root contains one tracked non-Lua file.
 
 - `scripts/controller.vdf`

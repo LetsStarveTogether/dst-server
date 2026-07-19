@@ -1,59 +1,59 @@
-# `0x10050000` 维护规则
+# `0x10050000` Maintenance Rules
 
-维护规则约束新增页面必须先说明运行链路，再放源码锚点，最后才放清单。
+Verify source anchors first, explain the smallest useful runtime path, and keep large inventories in the reference section.
 
-## `0x10051111` 本页定位 / 要回答的运行时问题 / 源码阅读目标 / 验证点
+## `0x10051111` Purpose
 
-维护者要优先核对源码事实、文档边界和 reference 清单的一致性。
+Keep source facts, topic boundaries, and the reference inventory consistent.
 
-维护文档时只改索引 Markdown，不能为了让文档成立去改 `scripts` Lua。
+Documentation changes must remain in the index Markdown and must not modify `scripts` Lua to make a claim true.
 
-BBC 编码、标题层级和源码路径应保持简单、可读、可追踪。
+Keep BBC codes, heading levels, and source paths simple, readable, and traceable.
 
-## `0x10052000` 源码锚点
+## `0x10052000` Source Anchors
 
-| 文件 | 入口 | 用途 |
+| File | Entry point | Purpose |
 | --- | --- | --- |
-| `scripts/mainfunctions.lua` | `SaveGame` | 存档链路可审计 |
-| `scripts/worldgen_main.lua` | `CheckMapSaveData` | 生成结果可校验 |
-| `scripts/entityscript.lua` | `GetPersistData` | 实体状态可追踪 |
-| `scripts/entityreplica.lua` | `ReplicateEntity` | client replica 可追踪 |
+| `scripts/mainfunctions.lua` | `SaveGame` | Audits the save path |
+| `scripts/worldgen_main.lua` | `CheckMapSaveData` | Validates generated map data |
+| `scripts/entityscript.lua` | `GetPersistData` | Traces entity persistence |
+| `scripts/entityreplica.lua` | `ReplicateEntity` | Traces client replicas |
 
-### `0x10052111` 主锚点 / `scripts/mainfunctions.lua` / 搜索信号
+### `0x10052111` Source Checks
 
-先在 `scripts/mainfunctions.lua` 搜索 `SaveGame`。
+Find `SaveGame` in `scripts/mainfunctions.lua` first.
 
-如果维护的是世界生成页面，再搜索 `CheckMapSaveData`。
+For world-generation pages, also inspect `CheckMapSaveData`.
 
-如果维护的是实体或网络页面，再搜索 `GetPersistData`、`ReplicateEntity` 或 `ReplicateComponent`。
+For entity or networking pages, inspect `GetPersistData`, `ReplicateEntity`, or `ReplicateComponent`.
 
-## `0x10053000` 运行流程
+## `0x10053000` Documentation Workflow
 
-~~~mermaid
-flowchart TD
-    A["改文档"]
-    A --> B["核对源码锚点"]
-    B --> C["收敛专题边界"]
-    C --> D["抽样关键链路"]
-~~~
+1. Locate each claimed path and symbol in the current `scripts` snapshot.
+2. Trace enough callers and callees to establish the execution boundary.
+3. Edit only the smallest relevant topic or reference page.
+4. Run scoped Markdown, path, source-query, and diff checks.
 
-### `0x10053111` 流程分段 / 入口到副作用 / 边界条件
+### `0x10053111` Content Boundaries
 
-- 专题页解释运行关系，不承载大型完整目录。
-- reference 页承载完整文件清单和目录型索引。
-- 新增源码锚点必须真实存在于 `scripts`。
-- 标题中的 BBC 编码必须保持 code span，不能裸写。
+- Topic pages explain runtime relationships and do not contain large complete inventories.
+- Reference pages contain complete file inventories and directory indexes.
+- Every new source anchor must exist under `scripts`.
+- Snapshot pages must name the source commit and define their counting scope.
+- Every BBC code in a heading must remain inside a code span.
 
-## `0x10054111` 结构细节 / 数据结构与生命周期 / 具体 Lua 结构 / 需要核对的字段
+## `0x10054111` Page Requirements
 
-- 非 reference 专题页必须有清晰的 H2 起始结构，并按内容需要继续使用 H3/H4。
-- 不为凑齐 H5 创建没有正文的中间标题。
-- 源码路径必须指向真实文件。
-- 完整覆盖清单只维护在 `0x8000-reference`。
-- 每个非 reference 专题页至少保留源码锚点表、Mermaid 流程图和 `rg` 查询块。
-- `rg` 查询块应优先搜索函数名、类名、表名或状态机名。
+- Start each non-reference topic with a clear H2 and add H3 or H4 only when the content needs them.
+- Do not create empty intermediate headings merely to fill H5.
+- Every literal source path must point to a real file.
+- Maintain complete coverage inventories only in `0x8000-reference`.
+- Use a table or diagram only when it makes a relationship easier to verify.
+- Include a runnable source query when a page depends on specific symbols or file counts.
 
-## `0x10055100` 阅读路线 / 从哪里开始读源码
+## `0x10055100` Verification
+
+Run this source check from `dst-scripts`.
 
 ~~~bash
 rg -n "SaveGame|CheckMapSaveData|GetPersistData|ReplicateEntity" \
@@ -63,6 +63,6 @@ rg -n "SaveGame|CheckMapSaveData|GetPersistData|ReplicateEntity" \
   scripts/entityreplica.lua
 ~~~
 
-### `0x10055111` 推荐顺序 / 最小闭环
+### `0x10055111` Next Step
 
-先从源码锚点确认事实，再回到专题边界清理重复叙述。
+Confirm source anchors before removing repeated prose or tightening the topic boundary.

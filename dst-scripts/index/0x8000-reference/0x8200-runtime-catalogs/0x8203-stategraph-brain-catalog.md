@@ -1,16 +1,14 @@
-# `0x82030000` StateGraph Brain Behaviour 目录
+# `0x82030000` StateGraph, Brain, and Behaviour Catalog
 
-本页集中 AI 和动画相关完整文件清单。
+This page inventories StateGraph, Brain, and Behaviour files.
 
-StateGraph 目录收录 261 个 Lua 文件。
+The StateGraph directory contains 261 Lua files.
 
-Brain 目录收录 191 个 Lua 文件。
+The Brain directory contains 191 Lua files.
 
-Behaviour 目录收录 29 个 Lua 文件。
+The Behaviour directory contains 29 Lua files.
 
-## `0x82031111` StateGraph 文件 / 清单入口 / 机器可读块 / 验证点
-
-StateGraph 目录收录 261 个 Lua 文件。
+## `0x82031111` StateGraph Files
 
 - `scripts/stategraphs/SGBeefalo.lua`
 - `scripts/stategraphs/SGLeif.lua`
@@ -274,9 +272,7 @@ StateGraph 目录收录 261 个 Lua 文件。
 - `scripts/stategraphs/SGyotb_stage.lua`
 - `scripts/stategraphs/commonstates.lua`
 
-## `0x82032111` Brain 文件 / 清单入口 / 机器可读块 / 验证点
-
-Brain 目录收录 191 个 Lua 文件。
+## `0x82032111` Brain Files
 
 - `scripts/brains/abigailbrain.lua`
 - `scripts/brains/alterguardian_phase1brain.lua`
@@ -470,9 +466,7 @@ Brain 目录收录 191 个 Lua 文件。
 - `scripts/brains/wx78_shadowdrone_debufferbrain.lua`
 - `scripts/brains/wx78_shadowdrone_harvesterbrain.lua`
 
-## `0x82033111` Behaviour 文件 / 清单入口 / 机器可读块 / 验证点
-
-Behaviour 目录收录 29 个 Lua 文件。
+## `0x82033111` Behaviour Files
 
 - `scripts/behaviours/approach.lua`
 - `scripts/behaviours/attackwall.lua`

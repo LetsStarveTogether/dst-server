@@ -1,16 +1,16 @@
-# `0x81010000` 完整文件清单
+# `0x81010000` Complete File Inventory
 
-本页列出 `git ls-files --recurse-submodules scripts` 返回的全部 4045 个路径。
+This page lists all 4,045 paths returned by `git ls-files --recurse-submodules scripts`.
 
-## `0x81011111` 审计口径 / 命令来源 / `git ls-files` / 验证点
+## `0x81011111` Inventory Source
 
-清单块必须与命令输出逐行一致。
+The inventory block must match the command output line for line.
 
 ~~~bash
 git ls-files --recurse-submodules scripts
 ~~~
 
-## `0x81012111` 完整清单 / 机器可读块 / `scripts` 路径 / 完整清单
+## `0x81012111` Complete Inventory
 
 <!-- scripts-file-inventory:start -->
 - `scripts/.github/workflows/update.yml`
