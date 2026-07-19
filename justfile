@@ -32,3 +32,4 @@ clean:
     fd -I -t d -F __pycache__ -x rm -rf
     rm -rf dist/ .pytest_cache/
     uv run ruff clean
+    uv run rumdl clean
