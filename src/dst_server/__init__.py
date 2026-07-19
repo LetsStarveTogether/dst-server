@@ -41,6 +41,7 @@ from .models import (
 )
 from .mods import prepare_mods, update_server_mods, workshop_mod_ids
 from .process import Server
+from .steamcmd import SteamCMD
 
 __all__ = [
     "Age",
@@ -75,6 +76,7 @@ __all__ = [
     "ShardConfig",
     "ShardStatus",
     "Stat",
+    "SteamCMD",
     "TelemetrySettings",
     "Temperature",
     "UnknownServerEvent",

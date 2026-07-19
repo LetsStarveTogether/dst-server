@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from time import time_ns
+from unittest.mock import Mock
 
 import pytest
 
@@ -126,13 +127,13 @@ async def test_otlp_pipeline_exports_traces_metrics_and_logs(
     span_exporter = InMemorySpanExporter()
     log_exporter = InMemoryLogRecordExporter()
     metric_reader = InMemoryMetricReader()
-    monkeypatch.setattr(otel, "OTLPSpanExporter", lambda **_kwargs: span_exporter)
-    monkeypatch.setattr(otel, "OTLPLogExporter", lambda **_kwargs: log_exporter)
+    monkeypatch.setattr(otel, "OTLPSpanExporter", Mock(return_value=span_exporter))
+    monkeypatch.setattr(otel, "OTLPLogExporter", Mock(return_value=log_exporter))
     monkeypatch.setattr(otel, "OTLPMetricExporter", object)
     monkeypatch.setattr(
         otel,
         "PeriodicExportingMetricReader",
-        lambda _exporter: metric_reader,
+        Mock(return_value=metric_reader),
     )
     pipeline = otel.configure_otlp(
         service_instance_id="dst-test-instance",

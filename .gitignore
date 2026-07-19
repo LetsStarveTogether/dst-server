@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.rumdl_cache/
 .venv/
 dist/
 ref/

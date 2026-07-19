@@ -17,7 +17,8 @@ results = os.fdopen(4, "w", buffering=1)
 events = os.fdopen(5, "w", buffering=1)
 events.write("DST_SessionId|TEST\n")
 
-def stop(_signum, _frame):
+def stop(signum, frame):
+    del signum, frame
     events.write("DST_Shutdown\nDST_Saved|session/TEST/1\nDST_Stopping\n")
 
 signal.signal(signal.SIGTERM, stop)

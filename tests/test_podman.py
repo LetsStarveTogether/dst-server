@@ -20,8 +20,8 @@ pytestmark = pytest.mark.skipif(
     reason="set DST_SERVER_PODMAN_TEST=1 to run the local image smoke test",
 )
 
-_CONTAINER_NAME = "dst-server-sdk-test"
-_GAME = "/install/bin64/dontstarve_dedicated_server_nullrenderer_x64"
+CONTAINER_NAME = "dst-server-sdk-test"
+GAME_EXECUTABLE = "/install/bin64/dontstarve_dedicated_server_nullrenderer_x64"
 
 
 async def test_existing_image_with_real_save(tmp_path: Path) -> None:
@@ -36,7 +36,7 @@ async def test_existing_image_with_real_save(tmp_path: Path) -> None:
         "run",
         "--rm",
         "--name",
-        _CONTAINER_NAME,
+        CONTAINER_NAME,
         "--preserve-fds=3",
         "--network",
         "none",
@@ -47,7 +47,7 @@ async def test_existing_image_with_real_save(tmp_path: Path) -> None:
         "--volume",
         f"{host_lua}:/dst-server-lua:ro",
         "--entrypoint",
-        _GAME,
+        GAME_EXECUTABLE,
         image,
     ]
     wrapper.write_text(
@@ -123,7 +123,7 @@ async def test_existing_image_with_real_save(tmp_path: Path) -> None:
             "--time",
             "0",
             "--ignore",
-            _CONTAINER_NAME,
+            CONTAINER_NAME,
         )
         assert await cleanup.wait() == 0
         if started and server.returncode is None:

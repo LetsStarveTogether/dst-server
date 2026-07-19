@@ -22,14 +22,14 @@ from .protocol import open_pipe_reader, open_pipe_writer, open_protocol_pipes
 from .server_events import ServerEventStream
 from .validation import number
 
-FD_WRAPPER = Path(__file__).with_name("_fd_wrapper.py")
+FD_WRAPPER = Path(__file__).with_name("fd_wrapper.py")
 SUBPROCESS_STREAM_LIMIT = 1024 * 1024
 logger = Logger(__name__)
 
 type LogHandler = Callable[[str], None]
 
 
-class Server:
+class Server:  # ruff:ignore[too-many-public-methods]
     def __init__(
         self,
         args: ServerArgs,
@@ -100,7 +100,7 @@ class Server:
     async def start(self) -> None:
         with self.instrumentation.operation("start", self.session_id) as span:
             try:
-                await self._start_process()
+                await self.start_process()
             except BaseException:
                 self.instrumentation.set_process_up(False)
                 raise
@@ -108,7 +108,7 @@ class Server:
             if self.session_id is not None:
                 span.set_attribute("dst.session.id", self.session_id)
 
-    async def _start_process(self) -> None:
+    async def start_process(self) -> None:
         if self.child is not None:
             msg = "DST server process objects are single-use"
             raise RuntimeError(msg)
@@ -163,7 +163,7 @@ class Server:
             msg = "DST server stdout pipe is unavailable"
             raise RuntimeError(msg)
         self.log_task = asyncio.create_task(
-            self._pump_logs(stdout),
+            self.pump_logs(stdout),
             name=f"dst-logs-{self.args.shard}",
         )
         try:
@@ -173,8 +173,8 @@ class Server:
             if self.process.returncode is None:
                 self.process.kill()
             await self.process.wait()
-            self._cancel_tasks()
-            await self._finish()
+            self.cancel_tasks()
+            await self.finish()
             raise
 
     async def execute(self, command: str) -> str:
@@ -267,7 +267,7 @@ class Server:
         with self.instrumentation.operation("wait", self.session_id) as span:
             process = self.process
             returncode = await process.wait()
-            await self._finish()
+            await self.finish()
             self.instrumentation.set_process_up(False)
             span.set_attribute("process.exit.code", returncode)
             logger.info(
@@ -278,7 +278,7 @@ class Server:
             )
             return returncode
 
-    async def _pump_logs(self, reader: asyncio.StreamReader) -> None:
+    async def pump_logs(self, reader: asyncio.StreamReader) -> None:
         try:
             while raw_line := await reader.readline():
                 observed_timestamp_ns = time_ns()
@@ -292,7 +292,7 @@ class Server:
         finally:
             self.game_events.close()
 
-    async def _finish(self) -> None:
+    async def finish(self) -> None:
         async with self.finish_lock:
             if self.closed:
                 return
@@ -320,7 +320,7 @@ class Server:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _cancel_tasks(self) -> None:
+    def cancel_tasks(self) -> None:
         driver_task = self.driver.task
         self.driver.close()
         for task in (
