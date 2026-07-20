@@ -12,7 +12,7 @@ from tempfile import TemporaryDirectory
 WORKSHOP_ID = re.compile(r"\bworkshop-(\d+)\b")
 
 
-def prepare_mods(install_path: Path, cluster_path: Path) -> tuple[int, ...]:
+def prepare(install_path: Path, cluster_path: Path) -> tuple[int, ...]:
     mods_path = cluster_path / "mods"
     ugc_path = mods_path / "ugc"
     mods_path.mkdir(parents=True, exist_ok=True)
@@ -31,7 +31,7 @@ def prepare_mods(install_path: Path, cluster_path: Path) -> tuple[int, ...]:
             install_mods.unlink()
         install_mods.symlink_to(mods_path, target_is_directory=True)
 
-    mod_ids = workshop_mod_ids(
+    mod_ids = workshop_ids(
         path / "modoverrides.lua"
         for path in cluster_path.iterdir()
         if path.is_dir() and path.name != "mods"
@@ -44,7 +44,7 @@ def prepare_mods(install_path: Path, cluster_path: Path) -> tuple[int, ...]:
     return mod_ids
 
 
-def workshop_mod_ids(paths: Iterable[Path]) -> tuple[int, ...]:
+def workshop_ids(paths: Iterable[Path]) -> tuple[int, ...]:
     ids = {
         int(match)
         for path in paths
@@ -54,7 +54,7 @@ def workshop_mod_ids(paths: Iterable[Path]) -> tuple[int, ...]:
     return tuple(sorted(ids))
 
 
-async def update_server_mods(
+async def update(
     executable: Path,
     ugc_directory: Path,
     *,
@@ -128,7 +128,7 @@ def free_udp_ports(count: int) -> tuple[int, ...]:
 
 
 __all__ = [
-    "prepare_mods",
-    "update_server_mods",
-    "workshop_mod_ids",
+    "prepare",
+    "update",
+    "workshop_ids",
 ]

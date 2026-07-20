@@ -9,7 +9,7 @@
 
 镜像地址：`quay.io/wh2099/dst-server`
 
-镜像会启动一个 DST 集群中的全部分片，保留常用的 console FIFO，并可通过 OpenTelemetry 导出经过校验的游戏事件。
+镜像会启动一个 DST 集群中的全部分片，并保留常用的 console FIFO。
 
 ## 快速开始
 
@@ -62,14 +62,9 @@ echo 'c_save()' > "${HOME}/Cluster_1/Caves/console"
 
 ## 启动过程
 
-[`entrypoint.py`](entrypoint.py) 会验证集群、准备权限文件和 Mod，并统一更新一次创意工坊内容。
-随后，它会发现全部分片，并通过 `-cloudserver` 模式为每个分片启动一个 `Server`。
-
-`DST_SKIP_MOD_UPDATE=1` 可以跳过这次创意工坊更新。
-
-`DST_INSTALL_PATH` 和 `DST_CLUSTER_PATH` 可在开发和测试时覆盖 `/install` 和 `/cluster`。
-
-设置任意 `OTEL_EXPORTER_OTLP_*_ENDPOINT` 环境变量后，入口程序会配置官方 OpenTelemetry Pipeline 并导出经过校验的游戏事件。
+[`entrypoint.sh`](entrypoint.sh) 会验证集群、准备权限文件和 Mod，并统一更新一次创意工坊内容。
+随后，它会发现全部分片、创建 console FIFO，并启动各个分片进程。
+镜像使用上文所示的固定 `/install` 和 `/cluster` 路径。
 
 ## Python SDK
 
@@ -78,11 +73,11 @@ echo 'c_save()' > "${HOME}/Cluster_1/Caves/console"
 ```python
 import asyncio
 
-from dst_server import Server, ServerArgs
+from dst_server import Server, ServerConfig
 
 
 async def main() -> None:
-    async with Server(ServerArgs(shard="Master")) as server:
+    async with Server(ServerConfig(shard="Master")) as server:
         world = await server.game.world.state()
         players = await server.game.players.list()
         await server.game.world.announce(

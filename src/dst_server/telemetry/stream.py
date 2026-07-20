@@ -6,14 +6,14 @@ import secrets
 from logbook import Logger
 from pydantic import ValidationError
 
-from .events import (
-    GAME_EVENT_ADAPTER,
-    ObservedGameEvent,
-    PlayerActionEvent,
-    PlayerShardEnteredEvent,
-    PlayerShardLeftEvent,
+from dst_server.events import GAME_EVENT_ADAPTER, ObservedGameEvent
+from dst_server.events.player import (
+    ActionEvent,
+    ShardEnteredEvent,
+    ShardLeftEvent,
 )
-from .instrumentation import Instrumentation
+
+from .recorder import Recorder
 
 QUEUE_SIZE = 1024
 MAX_LINE_BYTES = 64 * 1024
@@ -21,9 +21,9 @@ PREFIX = "DST_OTEL|"
 logger = Logger(__name__)
 
 
-class GameEventStream:
-    def __init__(self, instrumentation: Instrumentation) -> None:
-        self.instrumentation = instrumentation
+class EventStream:
+    def __init__(self, recorder: Recorder) -> None:
+        self.recorder = recorder
         self.nonce = secrets.token_urlsafe(24)
         self.queue: asyncio.Queue[ObservedGameEvent | None] = asyncio.Queue(
             maxsize=QUEUE_SIZE
@@ -37,7 +37,7 @@ class GameEventStream:
             return None
         event = await self.queue.get()
         if event is not None:
-            self.instrumentation.change_queue_size(-1)
+            self.recorder.change_queue_size(-1)
         return event
 
     def accept(self, line: str, observed_timestamp_ns: int) -> bool:
@@ -58,12 +58,12 @@ class GameEventStream:
             self.reject("nonce", "discard DST game event with an invalid nonce")
             return True
 
-        if isinstance(event, PlayerShardEnteredEvent):
-            self.instrumentation.set_player_count(self.instrumentation.player_count + 1)
-        elif isinstance(event, PlayerShardLeftEvent):
-            self.instrumentation.set_player_count(self.instrumentation.player_count - 1)
-        if isinstance(event, PlayerActionEvent):
-            self.instrumentation.record_action(
+        if isinstance(event, ShardEnteredEvent):
+            self.recorder.set_player_count(self.recorder.player_count + 1)
+        elif isinstance(event, ShardLeftEvent):
+            self.recorder.set_player_count(self.recorder.player_count - 1)
+        if isinstance(event, ActionEvent):
+            self.recorder.record_action(
                 event.data.action_id,
                 event.data.success,
             )
@@ -76,33 +76,33 @@ class GameEventStream:
             )
         except asyncio.QueueFull:
             self.dropped += 1
-            self.instrumentation.record_event(
+            self.recorder.record_event(
                 "dropped",
                 event_name=event.event,
                 reason="queue_full",
             )
         else:
-            self.instrumentation.change_queue_size(1)
-            self.instrumentation.record_event("accepted", event_name=event.event)
+            self.recorder.change_queue_size(1)
+            self.recorder.record_event("accepted", event_name=event.event)
         return True
 
     def reject(self, reason: str, message: str) -> None:
         self.invalid += 1
-        self.instrumentation.record_event("invalid", reason=reason)
+        self.recorder.record_event("invalid", reason=reason)
         logger.warning(message)
 
     def close(self) -> None:
         if self.eof:
             return
         self.eof = True
-        self.instrumentation.set_process_up(False)
-        self.instrumentation.set_player_count(0)
+        self.recorder.set_process_up(False)
+        self.recorder.set_player_count(0)
         if self.queue.full():
             _ = self.queue.get_nowait()
-            self.instrumentation.change_queue_size(-1)
+            self.recorder.change_queue_size(-1)
             self.dropped += 1
-            self.instrumentation.record_event("dropped", reason="stream_closed")
+            self.recorder.record_event("dropped", reason="stream_closed")
         self.queue.put_nowait(None)
 
 
-__all__ = ["GameEventStream"]
+__all__ = ["EventStream"]

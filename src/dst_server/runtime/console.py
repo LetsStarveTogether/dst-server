@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 from time import time_ns
 
-from .game_events import GameEventStream
-from .protocol import LuaBusyError
+from dst_server.telemetry.stream import EventStream
 
 COMMAND_DONE = "DST_RemoteCommandDone"
 LUA_BUSY = "DST_LuaBusy"
 LUA_BUSY_RETRY_DELAY = 0.1
+
+
+class LuaBusyError(Exception):
+    pass
 
 
 class Console:
@@ -16,7 +19,7 @@ class Console:
         self,
         writer: asyncio.StreamWriter,
         reader: asyncio.StreamReader,
-        game_events: GameEventStream,
+        game_events: EventStream,
     ) -> None:
         self.writer = writer
         self.reader = reader
@@ -79,4 +82,4 @@ class Console:
         await asyncio.gather(self.writer.wait_closed(), return_exceptions=True)
 
 
-__all__ = ["Console"]
+__all__ = ["Console", "LuaBusyError"]

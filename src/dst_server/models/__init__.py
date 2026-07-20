@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .entity import Entity, Position
 from .player import (
     Age,
     Container,
@@ -15,7 +16,6 @@ from .player import (
     Vitals,
 )
 from .server import Mod, Room, Runtime, ShardStatus, World
-from .value import Entity, Position
 
 __all__ = [
     "Age",

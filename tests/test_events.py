@@ -3,12 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from dst_server import ServerSavedEvent, UnknownServerEvent
-from dst_server.events import (
-    GAME_EVENT_ADAPTER,
-    WorldStateChangedEvent,
-    parse_server_event,
-)
+from dst_server.events import GAME_EVENT_ADAPTER, player, server, world
 
 
 def test_game_event_schema_is_strict() -> None:
@@ -25,7 +20,7 @@ def test_game_event_schema_is_strict() -> None:
 
     event = GAME_EVENT_ADAPTER.validate_python(data, strict=True)
 
-    assert isinstance(event, WorldStateChangedEvent)
+    assert isinstance(event, world.StateChangedEvent)
     assert event.data.value == 2
     with pytest.raises(ValidationError, match="extra_forbidden"):
         GAME_EVENT_ADAPTER.validate_python(data | {"unexpected": True}, strict=True)
@@ -68,11 +63,46 @@ def test_coordinate_migration_without_portal_is_valid() -> None:
     assert event.data.destination.z == 4
 
 
-def test_fd5_server_events_are_typed_without_losing_unknown_lines() -> None:
-    saved = parse_server_event("DST_Saved|session/TEST/26")
+def test_combat_received_without_resolved_damage_is_valid() -> None:
+    event = GAME_EVENT_ADAPTER.validate_json(
+        """{
+            "v": 1,
+            "nonce": "0123456789abcdef",
+            "seq": 1,
+            "event": "dst.player.combat_received",
+            "tick": 10,
+            "monotonic_ms": 20,
+            "cycle": 2,
+            "data": {
+                "player": {
+                    "prefab": "wilson",
+                    "guid": 42,
+                    "userid": "KU_TEST",
+                    "position": null
+                },
+                "damage": 0,
+                "weapon": null,
+                "stimuli": null,
+                "special_damage": [],
+                "caused_by_action_sequence": null,
+                "attacker": null,
+                "damage_resolved": null,
+                "original_damage": null,
+                "redirected": null
+            }
+        }""",
+        strict=True,
+    )
 
-    assert isinstance(saved, ServerSavedEvent)
+    assert isinstance(event, player.CombatReceivedEvent)
+    assert event.data.damage_resolved is None
+
+
+def test_fd5_server_events_are_typed_without_losing_unknown_lines() -> None:
+    saved = server.parse_event("DST_Saved|session/TEST/26")
+
+    assert isinstance(saved, server.SavedEvent)
     assert saved.snapshot == 26
-    unknown = parse_server_event("DST_Stats|players=2")
-    assert isinstance(unknown, UnknownServerEvent)
+    unknown = server.parse_event("DST_Stats|players=2")
+    assert isinstance(unknown, server.UnknownEvent)
     assert unknown.line == "DST_Stats|players=2"

@@ -63,3 +63,6 @@ jobs:
 
       - name: Test
         run: uv run --locked --all-extras pytest
+
+      - name: Build distributions
+        run: uv build

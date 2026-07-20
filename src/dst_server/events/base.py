@@ -5,60 +5,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from dst_server.models import Position
-from dst_server.schema import FrozenModel, Identifier, NonNegativeInt, PositiveInt
-
-type TelemetryProfile = Literal["off", "critical", "history"]
-
-DEFAULT_ACTIONS = (
-    "ACTIVATE",
-    "ADDFUEL",
-    "ATTACK",
-    "BUILD",
-    "CASTAOE",
-    "CASTSPELL",
-    "CHOP",
-    "CONSTRUCT",
-    "COOK",
-    "DEPLOY",
-    "DIG",
-    "EXTINGUISH",
-    "FERTILIZE",
-    "FISH",
-    "FISH_OCEAN",
-    "GIVE",
-    "GIVETOPLAYER",
-    "HAMMER",
-    "HARVEST",
-    "HEAL",
-    "LIGHT",
-    "MIGRATE",
-    "MINE",
-    "MURDER",
-    "PICK",
-    "PICKUP",
-    "PLANT",
-    "REPAIR",
-    "REVIVE_CORPSE",
-    "TELEPORT",
-    "UNLOCK",
-    "UPGRADE",
-)
-
-
-class TelemetrySettings(FrozenModel):
-    profile: TelemetryProfile = "history"
-    actions: tuple[Identifier, ...] = DEFAULT_ACTIONS
-
-
-class DriverHealth(FrozenModel):
-    protocol: Literal[1]
-    installed: bool
-    profile: TelemetryProfile
-    events_emitted: NonNegativeInt
-    errors: NonNegativeInt
-    players: NonNegativeInt
-    action_hook: bool
-    shard_hook: bool
+from dst_server.models.base import FrozenModel, Identifier, NonNegativeInt, PositiveInt
 
 
 class EntityRef(FrozenModel):
@@ -95,13 +42,9 @@ class EventRecord[DataT](FrozenModel):
 
 
 __all__ = [
-    "DEFAULT_ACTIONS",
     "CausedData",
-    "DriverHealth",
     "EntityRef",
     "EventRecord",
     "ItemRef",
     "PlayerData",
-    "TelemetryProfile",
-    "TelemetrySettings",
 ]

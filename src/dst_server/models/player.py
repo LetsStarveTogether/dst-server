@@ -4,7 +4,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from dst_server.schema import (
+from dst_server.models.base import (
     FiniteFloat,
     FrozenModel,
     Identifier,
@@ -15,7 +15,7 @@ from dst_server.schema import (
     PositiveInt,
 )
 
-from .value import Entity, Position
+from .entity import Entity, Position
 
 
 class Stat(FrozenModel):

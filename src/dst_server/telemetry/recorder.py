@@ -14,7 +14,7 @@ OPERATION_DURATION = METER.create_histogram(
     unit="s",
     description="Duration of DST server SDK operations.",
 )
-SERVER_COUNT = METER.create_up_down_counter(
+PROCESS_COUNT = METER.create_up_down_counter(
     "dst.server.process.count",
     unit="{process}",
     description="Managed DST server processes currently running.",
@@ -41,7 +41,7 @@ TELEMETRY_QUEUE_SIZE = METER.create_up_down_counter(
 )
 
 
-class Instrumentation:
+class Recorder:
     def __init__(self, cluster: str, shard: str) -> None:
         self.base_attributes = {
             "dst.cluster.name": cluster,
@@ -88,7 +88,7 @@ class Instrumentation:
         if self.process_up == value:
             return
         self.process_up = value
-        SERVER_COUNT.add(1 if value else -1, self.base_attributes)
+        PROCESS_COUNT.add(1 if value else -1, self.base_attributes)
 
     def record_event(
         self,
@@ -115,4 +115,4 @@ class Instrumentation:
         TELEMETRY_QUEUE_SIZE.add(value, self.base_attributes)
 
 
-__all__ = ["Instrumentation"]
+__all__ = ["Recorder"]

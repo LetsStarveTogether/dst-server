@@ -59,11 +59,13 @@
 
 Klei 的公开参数表没有列出它，但 Klei 开发者在论坛中说明了接口和基本协议。
 
-本项目始终启用该参数，具体机制见 [`-cloudserver` 双向通信](cloudserver-ipc.md)。
+Python SDK 的 `ServerConfig` 始终启用该参数，具体机制见 [`-cloudserver` 双向通信](cloudserver-ipc.md)。
 
-## 本项目实际使用的参数
+容器的 `entrypoint.sh` 当前不使用该模式。
 
-`ServerArgs` 生成的命令大致如下：
+## Python SDK 实际使用的参数
+
+`ServerConfig` 生成的命令大致如下：
 
 ```shell
 dontstarve_dedicated_server_nullrenderer_x64 \
@@ -77,7 +79,7 @@ dontstarve_dedicated_server_nullrenderer_x64 \
   -cloudserver
 ```
 
-入口程序会先单独更新一次 Mod，再为每个分片启动一个服务端进程，所以分片进程本身使用 `-skip_update_server_mods`。
+`dst_server.cluster.service` 会先单独更新一次 Mod，再为每个分片启动一个服务端进程，所以分片进程本身使用 `-skip_update_server_mods`。
 
 ## 参考资料
 

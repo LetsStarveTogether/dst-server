@@ -6,75 +6,75 @@ from typing import Annotated
 from pydantic import Field, TypeAdapter
 
 from .player import (
-    PlayerActionEvent,
-    PlayerAteEvent,
-    PlayerCombatBlockedEvent,
-    PlayerCombatHitEvent,
-    PlayerCombatReceivedEvent,
-    PlayerConditionChangedEvent,
-    PlayerCraftedEvent,
-    PlayerDeployedEvent,
-    PlayerDisconnectedEvent,
-    PlayerDroppedEvent,
-    PlayerEquippedEvent,
-    PlayerFinishedWorkEvent,
-    PlayerFishedEvent,
-    PlayerGhostedEvent,
-    PlayerHarvestedEvent,
-    PlayerHoundWarningEvent,
-    PlayerIncidentEvent,
-    PlayerMigrationStartedEvent,
-    PlayerPickedEvent,
-    PlayerPlantedEvent,
-    PlayerRevivedEvent,
-    PlayerShardEnteredEvent,
-    PlayerShardLeftEvent,
-    PlayerSkillChangedEvent,
-    PlayerSpawnedEvent,
-    PlayerUnequippedEvent,
+    ActionEvent,
+    AteEvent,
+    CombatBlockedEvent,
+    CombatHitEvent,
+    CombatReceivedEvent,
+    ConditionChangedEvent,
+    CraftedEvent,
+    DeployedEvent,
+    DisconnectedEvent,
+    DroppedEvent,
+    EquippedEvent,
+    FinishedWorkEvent,
+    FishedEvent,
+    GhostedEvent,
+    HarvestedEvent,
+    HoundWarningEvent,
+    IncidentEvent,
+    MigrationStartedEvent,
+    PickedEvent,
+    PlantedEvent,
+    RevivedEvent,
+    ShardEnteredEvent,
+    ShardLeftEvent,
+    SkillChangedEvent,
+    SpawnedEvent,
+    UnequippedEvent,
 )
 from .world import (
     EntityDeathEvent,
+    RiftChangedEvent,
+    RiftUnlockedEvent,
     ShardBossDefeatedEvent,
     ShardConnectionChangedEvent,
-    WorldRiftChangedEvent,
-    WorldRiftUnlockedEvent,
-    WorldStateChangedEvent,
+    StateChangedEvent,
 )
 
 type GameEvent = Annotated[
-    PlayerShardEnteredEvent
-    | PlayerShardLeftEvent
-    | PlayerDisconnectedEvent
-    | PlayerMigrationStartedEvent
-    | PlayerSpawnedEvent
-    | PlayerGhostedEvent
-    | PlayerRevivedEvent
+    ShardEnteredEvent
+    | ShardLeftEvent
+    | DisconnectedEvent
+    | MigrationStartedEvent
+    | SpawnedEvent
+    | GhostedEvent
+    | RevivedEvent
     | EntityDeathEvent
-    | PlayerActionEvent
-    | PlayerCombatHitEvent
-    | PlayerCombatReceivedEvent
-    | PlayerCombatBlockedEvent
-    | WorldStateChangedEvent
+    | ActionEvent
+    | CombatHitEvent
+    | CombatReceivedEvent
+    | CombatBlockedEvent
+    | StateChangedEvent
     | ShardBossDefeatedEvent
     | ShardConnectionChangedEvent
-    | PlayerCraftedEvent
-    | PlayerAteEvent
-    | PlayerPickedEvent
-    | PlayerHarvestedEvent
-    | PlayerFinishedWorkEvent
-    | PlayerDeployedEvent
-    | PlayerEquippedEvent
-    | PlayerUnequippedEvent
-    | PlayerDroppedEvent
-    | PlayerConditionChangedEvent
-    | PlayerIncidentEvent
-    | PlayerFishedEvent
-    | PlayerPlantedEvent
-    | PlayerSkillChangedEvent
-    | PlayerHoundWarningEvent
-    | WorldRiftUnlockedEvent
-    | WorldRiftChangedEvent,
+    | CraftedEvent
+    | AteEvent
+    | PickedEvent
+    | HarvestedEvent
+    | FinishedWorkEvent
+    | DeployedEvent
+    | EquippedEvent
+    | UnequippedEvent
+    | DroppedEvent
+    | ConditionChangedEvent
+    | IncidentEvent
+    | FishedEvent
+    | PlantedEvent
+    | SkillChangedEvent
+    | HoundWarningEvent
+    | RiftUnlockedEvent
+    | RiftChangedEvent,
     Field(discriminator="event"),
 ]
 

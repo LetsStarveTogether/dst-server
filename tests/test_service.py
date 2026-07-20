@@ -4,7 +4,7 @@ import asyncio
 import time
 from pathlib import Path
 
-from dst_server.runner import run
+from dst_server.cluster.service import run
 
 FAKE_SERVER = r"""#!/usr/bin/env python3
 import json
@@ -68,7 +68,7 @@ def wait_for(path: Path) -> None:
     raise TimeoutError(path)
 
 
-async def test_python_entrypoint_runs_shards_and_console(tmp_path: Path) -> None:
+async def test_service_runs_shards_and_console(tmp_path: Path) -> None:
     install = tmp_path / "install"
     cluster = tmp_path / "cluster"
     markers = tmp_path / "markers"

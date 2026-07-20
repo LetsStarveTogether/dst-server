@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 from pydantic import JsonValue
 
 from dst_server.models import Mod, Room, Runtime, ShardStatus, World
-from dst_server.validation import item_count
 
 from .rpc import (
     BOOL_RESPONSE,
@@ -16,6 +15,7 @@ from .rpc import (
     SHARDS_RESPONSE,
     WORLD_RESPONSE,
 )
+from .validation import item_count
 
 if TYPE_CHECKING:
     from .client import GameClient
@@ -27,7 +27,7 @@ class WorldClient:
 
     async def room(self) -> Room:
         room = await self.game.request("get_room", {}, ROOM_RESPONSE)
-        self.game.instrumentation.set_player_count(room.player_count)
+        self.game.recorder.set_player_count(room.player_count)
         return room
 
     async def state(self) -> World:
@@ -42,7 +42,7 @@ class WorldClient:
     async def shards(self) -> tuple[ShardStatus, ...]:
         return await self.game.request(
             "get_shards",
-            {"current_name": self.game.args.shard},
+            {"current_name": self.game.shard},
             SHARDS_RESPONSE,
         )
 

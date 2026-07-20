@@ -5,28 +5,21 @@ from collections.abc import Awaitable, Callable
 
 from logbook import Logger
 
-from .events import (
-    ServerEvent,
-    ServerReadyEvent,
-    ServerSavedEvent,
-    ServerSessionEvent,
-    ServerStoppingEvent,
-    parse_server_event,
-)
+from dst_server.events import server
 
 logger = Logger(__name__)
 
 
-class ServerEventStream:
+class Lifecycle:
     def __init__(self) -> None:
-        self.queue: asyncio.Queue[ServerEvent | None] = asyncio.Queue()
+        self.queue: asyncio.Queue[server.Event | None] = asyncio.Queue()
         self.eof = False
         self.ready = False
         self.ready_or_eof = asyncio.Event()
         self.stopping = asyncio.Event()
         self.saved = asyncio.Event()
         self.save_count = 0
-        self.last_saved: ServerSavedEvent | None = None
+        self.last_saved: server.SavedEvent | None = None
         self.session_id: str | None = None
         self.session_generation = 0
 
@@ -37,7 +30,7 @@ class ServerEventStream:
     ) -> None:
         try:
             while line := await reader.readline():
-                event = parse_server_event(line.decode(errors="replace").rstrip("\r\n"))
+                event = server.parse_event(line.decode(errors="replace").rstrip("\r\n"))
                 if __debug__:
                     logger.debug("DST server event : {event}", event=event)
                 self.handle(event, on_session)
@@ -48,21 +41,21 @@ class ServerEventStream:
 
     def handle(
         self,
-        event: ServerEvent,
+        event: server.Event,
         on_session: Callable[[int], None],
     ) -> None:
-        if isinstance(event, (ServerReadyEvent, ServerSessionEvent)):
+        if isinstance(event, (server.ReadyEvent, server.SessionEvent)):
             self.ready = True
             self.ready_or_eof.set()
-        if isinstance(event, ServerSessionEvent):
+        if isinstance(event, server.SessionEvent):
             self.session_id = event.session_id
             self.session_generation += 1
             on_session(self.session_generation)
-        if isinstance(event, ServerSavedEvent):
+        if isinstance(event, server.SavedEvent):
             self.last_saved = event
             self.save_count += 1
             self.saved.set()
-        if isinstance(event, ServerStoppingEvent):
+        if isinstance(event, server.StoppingEvent):
             self.stopping.set()
         self.queue.put_nowait(event)
 
@@ -72,7 +65,7 @@ class ServerEventStream:
             msg = "DST event stream closed before the server became ready"
             raise EOFError(msg)
 
-    async def read(self) -> ServerEvent | None:
+    async def read(self) -> server.Event | None:
         if self.eof and self.queue.empty():
             return None
         return await self.queue.get()
@@ -81,7 +74,7 @@ class ServerEventStream:
         self,
         request: Callable[[], Awaitable[None]],
         completion_timeout: float,
-    ) -> ServerSavedEvent:
+    ) -> server.SavedEvent:
         save_count = self.save_count
         await request()
         async with asyncio.timeout(completion_timeout):
@@ -95,4 +88,4 @@ class ServerEventStream:
         return self.last_saved
 
 
-__all__ = ["ServerEventStream"]
+__all__ = ["Lifecycle"]

@@ -7,13 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from dst_server import Server, ServerArgs, TelemetrySettings
-from dst_server.events import (
-    EntityDeathEvent,
-    PlayerCombatReceivedEvent,
-    PlayerConditionChangedEvent,
-    PlayerShardEnteredEvent,
-)
+from dst_server.events import player, world
+from dst_server.runtime import Server, ServerConfig
+from dst_server.telemetry import TelemetrySettings
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("DST_SERVER_PODMAN_TEST") != "1",
@@ -29,7 +25,7 @@ async def test_existing_image_with_real_save(tmp_path: Path) -> None:
         os.environ.get("DST_SERVER_GAME_DATA", "/srv/lst-bot/ref/game-data-example")
     )
     image = os.environ.get("DST_SERVER_IMAGE", "quay.io/wh2099/dst-server")
-    host_lua = ServerArgs(shard="unused").lua_directory
+    host_lua = ServerConfig(shard="unused").lua_directory
     wrapper = tmp_path / "podman-dst-server"
     command = [
         "podman",
@@ -56,14 +52,14 @@ async def test_existing_image_with_real_save(tmp_path: Path) -> None:
     )
     wrapper.chmod(0o755)
     server = Server(
-        ServerArgs(
+        ServerConfig(
             shard="forest",
             executable=wrapper,
             persistent_storage_root=Path("/"),
             conf_dir="/",
             cluster="cluster",
             ugc_directory=Path("/cluster/mods/ugc"),
-            extra=("-skip_update_server_mods", "-offline"),
+            extra_args=("-skip_update_server_mods", "-offline"),
             lua_directory=Path("/dst-server-lua"),
             telemetry=TelemetrySettings(profile="history"),
             monitor_parent_process=False,
@@ -103,16 +99,16 @@ async def test_existing_image_with_real_save(tmp_path: Path) -> None:
             assert (await server.game.get_health()).events_emitted >= 4
             assert server.telemetry_invalid == 0
             expected = {
-                EntityDeathEvent,
-                PlayerCombatReceivedEvent,
-                PlayerConditionChangedEvent,
-                PlayerShardEnteredEvent,
+                player.CombatReceivedEvent,
+                player.ConditionChangedEvent,
+                player.ShardEnteredEvent,
+                world.EntityDeathEvent,
             }
             while expected:
                 observed = await asyncio.wait_for(server.read_game_event(), 10)
                 assert observed is not None
                 expected.discard(type(observed.record))
-                if isinstance(observed.record, EntityDeathEvent):
+                if isinstance(observed.record, world.EntityDeathEvent):
                     assert observed.record.data.victim.prefab == "rabbit"
             await server.stop(grace_period=5)
     finally:

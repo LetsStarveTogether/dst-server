@@ -4,7 +4,13 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from dst_server.schema import FrozenModel, Identifier, Name, NonNegativeInt, PositiveInt
+from dst_server.models.base import (
+    FrozenModel,
+    Identifier,
+    Name,
+    NonNegativeInt,
+    PositiveInt,
+)
 
 from .base import EntityRef, EventRecord
 
@@ -18,32 +24,32 @@ class EntityDeathData(FrozenModel):
     caused_by_action_sequence: PositiveInt | None
 
 
-class CycleWorldState(FrozenModel):
+class CycleState(FrozenModel):
     name: Literal["cycles"]
     value: NonNegativeInt
 
 
-class PhaseWorldState(FrozenModel):
+class PhaseState(FrozenModel):
     name: Literal["phase", "cavephase"]
     value: Literal["day", "dusk", "night"]
 
 
-class SeasonWorldState(FrozenModel):
+class SeasonState(FrozenModel):
     name: Literal["season"]
     value: Literal["autumn", "winter", "spring", "summer"]
 
 
-class MoonWorldState(FrozenModel):
+class MoonState(FrozenModel):
     name: Literal["moonphase", "cavemoonphase"]
     value: Literal["new", "quarter", "half", "threequarter", "full"]
 
 
-class NightmareWorldState(FrozenModel):
+class NightmareState(FrozenModel):
     name: Literal["nightmarephase"]
     value: Literal["none", "calm", "warn", "wild", "dawn"]
 
 
-class BooleanWorldState(FrozenModel):
+class BooleanState(FrozenModel):
     name: Literal[
         "israining",
         "issnowing",
@@ -53,13 +59,8 @@ class BooleanWorldState(FrozenModel):
     value: bool
 
 
-type WorldStateData = Annotated[
-    CycleWorldState
-    | PhaseWorldState
-    | SeasonWorldState
-    | MoonWorldState
-    | NightmareWorldState
-    | BooleanWorldState,
+type StateData = Annotated[
+    CycleState | PhaseState | SeasonState | MoonState | NightmareState | BooleanState,
     Field(discriminator="name"),
 ]
 
@@ -76,11 +77,11 @@ class ShardConnectionData(FrozenModel):
     tags: tuple[Identifier, ...]
 
 
-class WorldRiftUnlockedData(FrozenModel):
+class RiftUnlockedData(FrozenModel):
     kind: Literal["lunar", "shadow"]
 
 
-class WorldRiftChangedData(FrozenModel):
+class RiftChangedData(FrozenModel):
     rift: EntityRef
     active: bool
 
@@ -89,7 +90,7 @@ class EntityDeathEvent(EventRecord[EntityDeathData]):
     event: Literal["dst.entity.death"]
 
 
-class WorldStateChangedEvent(EventRecord[WorldStateData]):
+class StateChangedEvent(EventRecord[StateData]):
     event: Literal["dst.world.state_changed"]
 
 
@@ -101,20 +102,31 @@ class ShardConnectionChangedEvent(EventRecord[ShardConnectionData]):
     event: Literal["dst.shard.connection_changed"]
 
 
-class WorldRiftUnlockedEvent(EventRecord[WorldRiftUnlockedData]):
+class RiftUnlockedEvent(EventRecord[RiftUnlockedData]):
     event: Literal["dst.world.rift_unlocked"]
 
 
-class WorldRiftChangedEvent(EventRecord[WorldRiftChangedData]):
+class RiftChangedEvent(EventRecord[RiftChangedData]):
     event: Literal["dst.world.rift_changed"]
 
 
 __all__ = [
+    "BooleanState",
+    "CycleState",
+    "EntityDeathData",
     "EntityDeathEvent",
+    "MoonState",
+    "NightmareState",
+    "PhaseState",
+    "RiftChangedData",
+    "RiftChangedEvent",
+    "RiftUnlockedData",
+    "RiftUnlockedEvent",
+    "SeasonState",
+    "ShardBossDefeatedData",
     "ShardBossDefeatedEvent",
     "ShardConnectionChangedEvent",
-    "WorldRiftChangedEvent",
-    "WorldRiftUnlockedEvent",
-    "WorldStateChangedEvent",
-    "WorldStateData",
+    "ShardConnectionData",
+    "StateChangedEvent",
+    "StateData",
 ]

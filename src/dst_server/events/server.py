@@ -4,76 +4,76 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from dst_server.schema import FrozenModel, Identifier, NonNegativeInt
+from dst_server.models.base import FrozenModel, Identifier, NonNegativeInt
 
 
-class ServerReadyEvent(FrozenModel):
+class ReadyEvent(FrozenModel):
     event: Literal["ready"] = "ready"
     detail: Annotated[str, Field(max_length=4096)]
 
 
-class ServerSessionEvent(FrozenModel):
+class SessionEvent(FrozenModel):
     event: Literal["session"] = "session"
     session_id: Identifier
 
 
-class ServerSavedEvent(FrozenModel):
+class SavedEvent(FrozenModel):
     event: Literal["saved"] = "saved"
     path: Annotated[str, Field(max_length=4096)]
     snapshot: NonNegativeInt | None
 
 
-class ServerStoppingEvent(FrozenModel):
+class StoppingEvent(FrozenModel):
     event: Literal["stopping"] = "stopping"
 
 
-class ServerShutdownEvent(FrozenModel):
+class ShutdownEvent(FrozenModel):
     event: Literal["shutdown"] = "shutdown"
 
 
-class UnknownServerEvent(FrozenModel):
+class UnknownEvent(FrozenModel):
     event: Literal["unknown"] = "unknown"
     line: Annotated[str, Field(max_length=1024 * 1024)]
 
 
-type ServerEvent = (
-    ServerReadyEvent
-    | ServerSessionEvent
-    | ServerSavedEvent
-    | ServerStoppingEvent
-    | ServerShutdownEvent
-    | UnknownServerEvent
+type Event = (
+    ReadyEvent
+    | SessionEvent
+    | SavedEvent
+    | StoppingEvent
+    | ShutdownEvent
+    | UnknownEvent
 )
 
 
-def parse_server_event(line: str) -> ServerEvent:
+def parse_event(line: str) -> Event:
     if line == "DST_Master_Ready" or line.startswith("DST_Master_Ready|"):
-        return ServerReadyEvent(detail=line.partition("|")[2])
+        return ReadyEvent(detail=line.partition("|")[2])
     if line.startswith("DST_SessionId|"):
         session_id = line.removeprefix("DST_SessionId|")
         if session_id:
-            return ServerSessionEvent(session_id=session_id)
+            return SessionEvent(session_id=session_id)
     if line == "DST_Saved" or line.startswith("DST_Saved|"):
         path = line.partition("|")[2]
         tail = path.rsplit("/", 1)[-1]
-        return ServerSavedEvent(
+        return SavedEvent(
             path=path,
             snapshot=int(tail) if tail.isdigit() else None,
         )
     if line == "DST_Stopping":
-        return ServerStoppingEvent()
+        return StoppingEvent()
     if line == "DST_Shutdown":
-        return ServerShutdownEvent()
-    return UnknownServerEvent(line=line)
+        return ShutdownEvent()
+    return UnknownEvent(line=line)
 
 
 __all__ = [
-    "ServerEvent",
-    "ServerReadyEvent",
-    "ServerSavedEvent",
-    "ServerSessionEvent",
-    "ServerShutdownEvent",
-    "ServerStoppingEvent",
-    "UnknownServerEvent",
-    "parse_server_event",
+    "Event",
+    "ReadyEvent",
+    "SavedEvent",
+    "SessionEvent",
+    "ShutdownEvent",
+    "StoppingEvent",
+    "UnknownEvent",
+    "parse_event",
 ]

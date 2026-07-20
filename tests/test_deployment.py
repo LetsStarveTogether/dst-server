@@ -6,15 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from dst_server import (
-    discover_shards,
-    ensure_fifo,
-    prepare_cluster,
-    prepare_mods,
-    update_server_mods,
-    workshop_mod_ids,
-)
-from dst_server.runner import prepare_servers
+import dst_server.cluster as cluster_api
+from dst_server.cluster import console, mods, service
 
 
 def write_shard(path: Path, *, is_master: bool, name: str) -> None:
@@ -45,9 +38,9 @@ def test_cluster_and_mod_files_are_prepared(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    prepare_cluster(cluster)
-    mod_ids = prepare_mods(install, cluster)
-    shards = discover_shards(cluster)
+    cluster_api.prepare(cluster)
+    mod_ids = mods.prepare(install, cluster)
+    shards = cluster_api.discover(cluster)
 
     assert mod_ids == (7, 42)
     assert install_mods.is_symlink()
@@ -57,8 +50,8 @@ def test_cluster_and_mod_files_are_prepared(tmp_path: Path) -> None:
         encoding="utf-8"
     ) == 'ServerModSetup("7")\nServerModSetup("42")\n'
     assert {shard.name for shard in shards} == {"forest", "cave"}
-    assert next(shard for shard in shards if shard.config.is_master).console_path == (
-        cluster / "console"
+    assert (
+        next(shard for shard in shards if shard.master).console == cluster / "console"
     )
     assert all(
         (cluster / name).is_file()
@@ -66,7 +59,7 @@ def test_cluster_and_mod_files_are_prepared(tmp_path: Path) -> None:
     )
 
 
-def test_prepare_cluster_preserves_existing_permission_files(tmp_path: Path) -> None:
+def test_prepare_preserves_existing_permission_files(tmp_path: Path) -> None:
     for name in ("cluster.ini", "cluster_token.txt"):
         (tmp_path / name).touch()
     paths = tuple(
@@ -76,7 +69,7 @@ def test_prepare_cluster_preserves_existing_permission_files(tmp_path: Path) -> 
         path.touch()
         os.utime(path, ns=(0, 0))
 
-    prepare_cluster(tmp_path)
+    cluster_api.prepare(tmp_path)
 
     assert all(path.stat().st_mtime_ns == 0 for path in paths)
 
@@ -86,27 +79,27 @@ def test_discovery_requires_one_master(tmp_path: Path) -> None:
     write_shard(tmp_path / "two", is_master=False, name="Two")
 
     with pytest.raises(ValueError, match="exactly one master"):
-        discover_shards(tmp_path)
+        cluster_api.discover(tmp_path)
 
 
 def test_workshop_parser_ignores_missing_files_and_sorts(tmp_path: Path) -> None:
     first = tmp_path / "one.lua"
     first.write_text("workshop-10 workshop-2 workshop-10", encoding="utf-8")
 
-    assert workshop_mod_ids((first, tmp_path / "missing.lua")) == (2, 10)
+    assert mods.workshop_ids((first, tmp_path / "missing.lua")) == (2, 10)
 
 
-def test_ensure_fifo_replaces_regular_file(tmp_path: Path) -> None:
+def test_console_ensure_replaces_regular_file(tmp_path: Path) -> None:
     path = tmp_path / "console"
     path.touch()
 
-    ensure_fifo(path)
-    ensure_fifo(path)
+    console.ensure(path)
+    console.ensure(path)
 
     assert stat.S_ISFIFO(path.stat().st_mode)
 
 
-async def test_prepare_servers_skips_updater_without_mods(tmp_path: Path) -> None:
+async def test_service_prepare_skips_updater_without_mods(tmp_path: Path) -> None:
     install = tmp_path / "install"
     executable = install / "bin64" / "dontstarve_dedicated_server_nullrenderer_x64"
     executable.parent.mkdir(parents=True)
@@ -120,7 +113,7 @@ async def test_prepare_servers_skips_updater_without_mods(tmp_path: Path) -> Non
     write_shard(shard, is_master=True, name="Forest")
     (shard / "modoverrides.lua").write_text("return {}", encoding="utf-8")
 
-    shards, servers = await prepare_servers(install, cluster, update_mods=True)
+    shards, servers = await service.prepare(install, cluster, update_mods=True)
 
     assert len(shards) == len(servers) == 1
 
@@ -139,7 +132,7 @@ async def test_mod_updater_uses_isolated_config_ports_and_proxy(tmp_path: Path) 
     ugc.mkdir()
     lines: list[str] = []
 
-    await update_server_mods(
+    await mods.update(
         executable,
         ugc,
         proxy_url="socks5://127.0.0.1:1080",

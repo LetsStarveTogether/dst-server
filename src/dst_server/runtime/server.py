@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import sys
 from collections.abc import Callable
@@ -11,18 +12,19 @@ from typing import Self
 
 from logbook import Logger
 
-from .arguments import ServerArgs
-from .console import Console
-from .driver import DriverManager
-from .events import DriverHealth, ObservedGameEvent, ServerEvent, ServerSavedEvent
-from .game import GameClient
-from .game_events import GameEventStream
-from .instrumentation import Instrumentation
-from .protocol import open_pipe_reader, open_pipe_writer, open_protocol_pipes
-from .server_events import ServerEventStream
-from .validation import number
+from dst_server.events import ObservedGameEvent
+from dst_server.events import server as server_events
+from dst_server.game import DriverHealth, GameClient
+from dst_server.telemetry.recorder import Recorder
+from dst_server.telemetry.stream import EventStream
 
-FD_WRAPPER = Path(__file__).with_name("fd_wrapper.py")
+from .config import ServerConfig
+from .console import Console
+from .driver import Driver
+from .fds import open_pipes, open_reader, open_writer
+from .lifecycle import Lifecycle
+
+FD_LAUNCHER = Path(__file__).with_name("fds.py")
 SUBPROCESS_STREAM_LIMIT = 1024 * 1024
 logger = Logger(__name__)
 
@@ -32,30 +34,32 @@ type LogHandler = Callable[[str], None]
 class Server:  # ruff:ignore[too-many-public-methods]
     def __init__(
         self,
-        args: ServerArgs,
+        config: ServerConfig,
         *,
         log_handler: LogHandler | None = None,
     ) -> None:
-        self.args = args
+        self.config = config
         self.log_handler = log_handler
         self.child: asyncio.subprocess.Process | None = None
         self.console: Console | None = None
         self.read_transports: tuple[asyncio.ReadTransport, ...] = ()
         self.finish_lock = asyncio.Lock()
-        self.server_events = ServerEventStream()
-        self.event_task: asyncio.Task[None] | None = None
+        self.lifecycle = Lifecycle()
+        self.lifecycle_task: asyncio.Task[None] | None = None
         self.log_task: asyncio.Task[None] | None = None
         self.closed = False
-        self.instrumentation = Instrumentation(args.cluster, args.shard)
-        self.game_events = GameEventStream(self.instrumentation)
+        self.recorder = Recorder(config.cluster, config.shard)
+        self.game_events = EventStream(self.recorder)
         self.game = GameClient(
-            args,
-            self.execute,
-            self.instrumentation,
-            lambda: self.session_id,
-            self.game_events.nonce,
+            shard=config.shard,
+            lua_directory=config.lua_directory,
+            telemetry=config.telemetry,
+            execute=self.execute,
+            recorder=self.recorder,
+            session_id=lambda: self.session_id,
+            nonce=self.game_events.nonce,
         )
-        self.driver = DriverManager(self.install_driver, args.cluster, args.shard)
+        self.driver = Driver(self.install_driver, config.cluster, config.shard)
 
     @property
     def process(self) -> asyncio.subprocess.Process:
@@ -70,7 +74,7 @@ class Server:  # ruff:ignore[too-many-public-methods]
 
     @property
     def session_id(self) -> str | None:
-        return self.server_events.session_id
+        return self.lifecycle.session_id
 
     @property
     def driver_health(self) -> DriverHealth:
@@ -98,11 +102,11 @@ class Server:  # ruff:ignore[too-many-public-methods]
         await self.stop()
 
     async def start(self) -> None:
-        with self.instrumentation.operation("start", self.session_id) as span:
+        with self.recorder.operation("start", self.session_id) as span:
             try:
                 await self.start_process()
             except BaseException:
-                self.instrumentation.set_process_up(False)
+                self.recorder.set_process_up(False)
                 raise
             span.set_attribute("process.pid", self.process.pid)
             if self.session_id is not None:
@@ -113,35 +117,35 @@ class Server:  # ruff:ignore[too-many-public-methods]
             msg = "DST server process objects are single-use"
             raise RuntimeError(msg)
 
-        parent_fds, server_fds = open_protocol_pipes()
-        parent_pid = os.getpid() if self.args.monitor_parent_process else None
-        command = self.args.command(monitor_parent_process=parent_pid)
+        parent_fds, server_fds = open_pipes()
+        parent_pid = os.getpid() if self.config.monitor_parent_process else None
+        command = self.config.command(monitor_parent_process=parent_pid)
         transports: list[asyncio.BaseTransport] = []
         try:  # ruff:ignore[too-many-statements-in-try-clause]
-            command_writer = await open_pipe_writer(parent_fds.pop(0))
+            command_writer = await open_writer(parent_fds.pop(0))
             transports.append(command_writer.transport)
-            result_reader, result_transport = await open_pipe_reader(parent_fds.pop(0))
+            result_reader, result_transport = await open_reader(parent_fds.pop(0))
             transports.append(result_transport)
-            event_reader, event_transport = await open_pipe_reader(parent_fds.pop(0))
+            event_reader, event_transport = await open_reader(parent_fds.pop(0))
             transports.append(event_transport)
             logger.info(
                 "start DST server: {cluster}/{shard}",
-                cluster=self.args.cluster,
-                shard=self.args.shard,
+                cluster=self.config.cluster,
+                shard=self.config.shard,
             )
             self.child = await asyncio.create_subprocess_exec(
                 sys.executable,
-                str(FD_WRAPPER),
+                str(FD_LAUNCHER),
                 *(str(descriptor) for descriptor in server_fds),
                 *command,
-                cwd=self.args.executable.parent,
+                cwd=self.config.executable.parent,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 limit=SUBPROCESS_STREAM_LIMIT,
                 pass_fds=server_fds,
             )
-            self.instrumentation.set_process_up(True)
+            self.recorder.set_process_up(True)
         except BaseException:
             for transport in transports:
                 transport.close()
@@ -154,9 +158,9 @@ class Server:  # ruff:ignore[too-many-public-methods]
 
         self.console = Console(command_writer, result_reader, self.game_events)
         self.read_transports = (result_transport, event_transport)
-        self.event_task = asyncio.create_task(
-            self.server_events.pump(event_reader, self.driver.session_started),
-            name=f"dst-events-{self.args.shard}",
+        self.lifecycle_task = asyncio.create_task(
+            self.lifecycle.pump(event_reader, self.driver.session_started),
+            name=f"dst-events-{self.config.shard}",
         )
         stdout = self.process.stdout
         if stdout is None:
@@ -164,11 +168,11 @@ class Server:  # ruff:ignore[too-many-public-methods]
             raise RuntimeError(msg)
         self.log_task = asyncio.create_task(
             self.pump_logs(stdout),
-            name=f"dst-logs-{self.args.shard}",
+            name=f"dst-logs-{self.config.shard}",
         )
         try:
             await self.wait_ready()
-            await self.driver.install(self.server_events.session_generation)
+            await self.driver.install(self.lifecycle.session_generation)
         except BaseException:
             if self.process.returncode is None:
                 self.process.kill()
@@ -178,7 +182,7 @@ class Server:  # ruff:ignore[too-many-public-methods]
             raise
 
     async def execute(self, command: str) -> str:
-        with self.instrumentation.operation("console.execute", self.session_id):
+        with self.recorder.operation("console.execute", self.session_id):
             await self.wait_ready()
             if self.process.returncode is not None:
                 msg = f"DST server exited with status {self.process.returncode}"
@@ -188,8 +192,8 @@ class Server:  # ruff:ignore[too-many-public-methods]
                 raise RuntimeError(msg)
             logger.info(
                 "execute DST console command: {cluster}/{shard}",
-                cluster=self.args.cluster,
-                shard=self.args.shard,
+                cluster=self.config.cluster,
+                shard=self.config.shard,
             )
             if __debug__:
                 logger.debug("DST console command : {command}", command=command)
@@ -202,10 +206,10 @@ class Server:  # ruff:ignore[too-many-public-methods]
         if self.child is None:
             msg = "DST server has not been started"
             raise RuntimeError(msg)
-        await self.server_events.wait_ready()
+        await self.lifecycle.wait_ready()
 
-    async def read_event(self) -> ServerEvent | None:
-        return await self.server_events.read()
+    async def read_event(self) -> server_events.Event | None:
+        return await self.lifecycle.read()
 
     async def read_game_event(self) -> ObservedGameEvent | None:
         return await self.game_events.read()
@@ -213,34 +217,38 @@ class Server:  # ruff:ignore[too-many-public-methods]
     async def install_driver(self) -> DriverHealth:
         return await self.game.install()
 
-    async def save(self, completion_timeout: float = 30) -> ServerSavedEvent:
-        with self.instrumentation.operation("save", self.session_id) as span:
-            completion_timeout = number("completion timeout", completion_timeout)
-            if completion_timeout <= 0:
+    async def save(self, completion_timeout: float = 30) -> server_events.SavedEvent:
+        with self.recorder.operation("save", self.session_id) as span:
+            if (
+                isinstance(completion_timeout, bool)
+                or not isinstance(completion_timeout, (int, float))
+                or not math.isfinite(completion_timeout)
+                or completion_timeout <= 0
+            ):
                 msg = "completion timeout must be positive"
                 raise ValueError(msg)
-            event = await self.server_events.wait_for_save(
+            event = await self.lifecycle.wait_for_save(
                 self.game.world.request_save,
-                completion_timeout,
+                float(completion_timeout),
             )
             if event.snapshot is not None:
                 span.set_attribute("dst.snapshot", event.snapshot)
             return event
 
     async def stop(self, grace_period: float = 30) -> int:
-        with self.instrumentation.operation("stop", self.session_id):
+        with self.recorder.operation("stop", self.session_id):
             process = self.process
             if process.returncode is not None:
                 return await self.wait()
 
             logger.info(
                 "stop DST server: {cluster}/{shard}",
-                cluster=self.args.cluster,
-                shard=self.args.shard,
+                cluster=self.config.cluster,
+                shard=self.config.shard,
             )
             process.terminate()
             exited = asyncio.create_task(process.wait())
-            stopping = asyncio.create_task(self.server_events.stopping.wait())
+            stopping = asyncio.create_task(self.lifecycle.stopping.wait())
             done, pending = await asyncio.wait(
                 (exited, stopping),
                 timeout=grace_period,
@@ -257,23 +265,23 @@ class Server:  # ruff:ignore[too-many-public-methods]
             return await self.wait()
 
     async def kill(self) -> int:
-        with self.instrumentation.operation("kill", self.session_id):
+        with self.recorder.operation("kill", self.session_id):
             process = self.process
             if process.returncode is None:
                 process.kill()
             return await self.wait()
 
     async def wait(self) -> int:
-        with self.instrumentation.operation("wait", self.session_id) as span:
+        with self.recorder.operation("wait", self.session_id) as span:
             process = self.process
             returncode = await process.wait()
             await self.finish()
-            self.instrumentation.set_process_up(False)
+            self.recorder.set_process_up(False)
             span.set_attribute("process.exit.code", returncode)
             logger.info(
                 "DST server exited: {cluster}/{shard} ({returncode})",
-                cluster=self.args.cluster,
-                shard=self.args.shard,
+                cluster=self.config.cluster,
+                shard=self.config.shard,
                 returncode=returncode,
             )
             return returncode
@@ -303,7 +311,7 @@ class Server:  # ruff:ignore[too-many-public-methods]
                 task
                 for task in (
                     self.console.pending_result if self.console is not None else None,
-                    self.event_task,
+                    self.lifecycle_task,
                     self.log_task,
                     driver_task,
                 )
@@ -325,7 +333,7 @@ class Server:  # ruff:ignore[too-many-public-methods]
         self.driver.close()
         for task in (
             self.console.pending_result if self.console is not None else None,
-            self.event_task,
+            self.lifecycle_task,
             self.log_task,
             driver_task,
         ):

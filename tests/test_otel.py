@@ -18,9 +18,9 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 from opentelemetry.trace import StatusCode
 
-from dst_server import otel
 from dst_server.events import GAME_EVENT_ADAPTER, GameEvent, ObservedGameEvent
-from dst_server.otel import emit_game_event
+from dst_server.telemetry import otel
+from dst_server.telemetry.otel import emit
 from tests.helpers import StubServer, room_data, structured_result
 
 
@@ -57,7 +57,7 @@ def player_action(nonce: str) -> GameEvent:
     )
 
 
-async def exercise_pipeline(server: StubServer, pipeline: otel.OtelPipeline) -> int:
+async def exercise_pipeline(server: StubServer, pipeline: otel.Pipeline) -> int:
     tracer = pipeline.tracer_provider.get_tracer("tests")
     with tracer.start_as_current_span("bot.operation") as parent:
         parent_span_id = parent.get_span_context().span_id
@@ -71,12 +71,20 @@ async def exercise_pipeline(server: StubServer, pipeline: otel.OtelPipeline) -> 
     )
     observed = await server.read_game_event()
     assert observed is not None
-    emit_game_event(pipeline.logger, observed, server=server)
+    emit(
+        pipeline.logger,
+        observed,
+        attributes={
+            "dst.cluster.name": server.config.cluster,
+            "dst.shard.name": server.config.shard,
+            "dst.session.id": server.session_id or "",
+        },
+    )
     assert await pipeline.force_flush()
     return parent_span_id
 
 
-def test_emit_game_event_as_structured_otel_event() -> None:
+def test_emit_as_structured_otel_event() -> None:
     exporter = InMemoryLogRecordExporter()
     provider = LoggerProvider(shutdown_on_exit=False)
     provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
@@ -97,12 +105,13 @@ def test_emit_game_event_as_structured_otel_event() -> None:
     )
 
     try:
-        emit_game_event(
+        emit(
             logger,
             ObservedGameEvent(
                 record=event,
                 observed_timestamp_ns=observed_timestamp_ns,
             ),
+            attributes={"dst.cluster.name": "test", "dst.tick": 999},
         )
 
         (readable,) = exporter.get_finished_logs()
@@ -116,6 +125,7 @@ def test_emit_game_event_as_structured_otel_event() -> None:
             "dst.tick": 10,
             "dst.monotonic_ms": 20,
             "dst.world.cycle": 2,
+            "dst.cluster.name": "test",
         }
     finally:
         provider.shutdown()
@@ -135,7 +145,7 @@ async def test_otlp_pipeline_exports_traces_metrics_and_logs(
         "PeriodicExportingMetricReader",
         Mock(return_value=metric_reader),
     )
-    pipeline = otel.configure_otlp(
+    pipeline = otel.configure(
         service_instance_id="dst-test-instance",
         resource_attributes={"service.namespace": "tests"},
     )
@@ -143,7 +153,7 @@ async def test_otlp_pipeline_exports_traces_metrics_and_logs(
         structured_result(room_data()),
         'DST_SERVER_RESULT|{"ok":false,"error":"boom"}',
     ])
-    server.server_events.session_id = "TEST"
+    server.lifecycle.session_id = "TEST"
 
     try:
         parent_span_id = await exercise_pipeline(server, pipeline)

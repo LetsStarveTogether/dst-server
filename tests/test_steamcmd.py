@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from dst_server import SteamCMD
+from dst_server.steamcmd import SteamCMD
 
 FAKE_STEAMCMD = r"""#!/usr/bin/env python3
 import os

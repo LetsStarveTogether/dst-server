@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from dst_server.models import Position
-from dst_server.schema import (
+from dst_server.models.base import (
     FiniteFloat,
     FrozenModel,
     Identifier,
@@ -18,29 +18,29 @@ from .base import CausedData, EntityRef, EventRecord, ItemRef, PlayerData
 type EventText = Annotated[str, Field(max_length=256)]
 
 
-class PlayerDisconnectedData(PlayerData):
+class DisconnectedData(PlayerData):
     expected: bool
 
 
-class PlayerMigrationStartedData(PlayerData):
+class MigrationStartedData(PlayerData):
     destination_shard_id: Identifier
     portal_id: NonNegativeInt | None
     destination: Position | None
 
 
-class PlayerSpawnedData(PlayerData):
+class SpawnedData(PlayerData):
     mode: Identifier
 
 
-class PlayerGhostedData(PlayerData):
+class GhostedData(PlayerData):
     corpse: bool
 
 
-class PlayerRevivedData(PlayerGhostedData):
+class RevivedData(GhostedData):
     reviver: EntityRef | None
 
 
-class PlayerActionData(FrozenModel):
+class ActionData(FrozenModel):
     action_id: Identifier
     action_sequence: PositiveInt
     success: bool
@@ -67,68 +67,68 @@ class CombatData(PlayerData):
     caused_by_action_sequence: PositiveInt | None
 
 
-class PlayerCombatHitData(CombatData):
+class CombatHitData(CombatData):
     target: EntityRef
     damage_resolved: FiniteFloat
     redirected: EntityRef | None
 
 
-class PlayerCombatReceivedData(CombatData):
+class CombatReceivedData(CombatData):
     attacker: EntityRef | None
-    damage_resolved: FiniteFloat
+    damage_resolved: FiniteFloat | None
     original_damage: FiniteFloat | None
     redirected: EntityRef | None
 
 
-class PlayerCombatBlockedData(CombatData):
+class CombatBlockedData(CombatData):
     attacker: EntityRef | None
     original_damage: FiniteFloat | None
 
 
-class PlayerCraftedData(CausedData):
+class CraftedData(CausedData):
     item: ItemRef
     recipe: Identifier
     kind: Literal["item", "structure"]
     skin: Identifier | None
 
 
-class PlayerAteData(CausedData):
+class AteData(CausedData):
     food: ItemRef
     feeder: EntityRef | None
 
 
-class PlayerPickedData(CausedData):
+class PickedData(CausedData):
     source: EntityRef
     loot: tuple[ItemRef, ...]
 
 
-class PlayerHarvestedData(CausedData):
+class HarvestedData(CausedData):
     source: EntityRef
 
 
-class PlayerFinishedWorkData(CausedData):
+class FinishedWorkData(CausedData):
     target: EntityRef
     action_id: Identifier
 
 
-class PlayerDeployedData(CausedData):
+class DeployedData(CausedData):
     prefab: Identifier
 
 
-class PlayerEquippedData(CausedData):
+class EquippedData(CausedData):
     item: ItemRef
     slot: Identifier
 
 
-class PlayerUnequippedData(PlayerEquippedData):
+class UnequippedData(EquippedData):
     slip: bool
 
 
-class PlayerDroppedData(CausedData):
+class DroppedData(CausedData):
     item: ItemRef
 
 
-class BooleanPlayerConditionData(PlayerData):
+class BooleanConditionData(PlayerData):
     condition: Literal[
         "starving",
         "freezing",
@@ -139,143 +139,198 @@ class BooleanPlayerConditionData(PlayerData):
     active: bool
 
 
-class SanityPlayerConditionData(PlayerData):
+class SanityConditionData(PlayerData):
     condition: Literal["sanity"]
     state: Literal["sane", "insane", "enlightened"]
 
 
-type PlayerConditionData = Annotated[
-    BooleanPlayerConditionData | SanityPlayerConditionData,
+type ConditionData = Annotated[
+    BooleanConditionData | SanityConditionData,
     Field(discriminator="condition"),
 ]
 
 
-class PlayerIncidentData(PlayerData):
+class IncidentData(PlayerData):
     kind: Literal["sink", "fall_in_void"]
     source: EntityRef | None
     destination: Position | None
 
 
-class PlayerFishedData(CausedData):
+class FishedData(CausedData):
     fish: ItemRef
     method: Literal["inland", "ocean"]
 
 
-class PlayerPlantedData(CausedData):
+class PlantedData(CausedData):
     position: Position
 
 
-class PlayerSkillChangedData(PlayerData):
+class SkillChangedData(PlayerData):
     skill: Identifier
     active: bool
 
 
-class PlayerHoundWarningData(PlayerData):
+class HoundWarningData(PlayerData):
     warning_type: Annotated[int, Field(ge=0, le=8)]
 
 
-class PlayerShardEnteredEvent(EventRecord[PlayerData]):
+class ShardEnteredEvent(EventRecord[PlayerData]):
     event: Literal["dst.player.shard_entered"]
 
 
-class PlayerShardLeftEvent(EventRecord[PlayerData]):
+class ShardLeftEvent(EventRecord[PlayerData]):
     event: Literal["dst.player.shard_left"]
 
 
-class PlayerDisconnectedEvent(EventRecord[PlayerDisconnectedData]):
+class DisconnectedEvent(EventRecord[DisconnectedData]):
     event: Literal["dst.player.disconnected"]
 
 
-class PlayerMigrationStartedEvent(EventRecord[PlayerMigrationStartedData]):
+class MigrationStartedEvent(EventRecord[MigrationStartedData]):
     event: Literal["dst.player.migration_started"]
 
 
-class PlayerSpawnedEvent(EventRecord[PlayerSpawnedData]):
+class SpawnedEvent(EventRecord[SpawnedData]):
     event: Literal["dst.player.spawned"]
 
 
-class PlayerGhostedEvent(EventRecord[PlayerGhostedData]):
+class GhostedEvent(EventRecord[GhostedData]):
     event: Literal["dst.player.ghosted"]
 
 
-class PlayerRevivedEvent(EventRecord[PlayerRevivedData]):
+class RevivedEvent(EventRecord[RevivedData]):
     event: Literal["dst.player.revived"]
 
 
-class PlayerActionEvent(EventRecord[PlayerActionData]):
+class ActionEvent(EventRecord[ActionData]):
     event: Literal["dst.player.action"]
 
 
-class PlayerCombatHitEvent(EventRecord[PlayerCombatHitData]):
+class CombatHitEvent(EventRecord[CombatHitData]):
     event: Literal["dst.player.combat_hit"]
 
 
-class PlayerCombatReceivedEvent(EventRecord[PlayerCombatReceivedData]):
+class CombatReceivedEvent(EventRecord[CombatReceivedData]):
     event: Literal["dst.player.combat_received"]
 
 
-class PlayerCombatBlockedEvent(EventRecord[PlayerCombatBlockedData]):
+class CombatBlockedEvent(EventRecord[CombatBlockedData]):
     event: Literal["dst.player.combat_blocked"]
 
 
-class PlayerCraftedEvent(EventRecord[PlayerCraftedData]):
+class CraftedEvent(EventRecord[CraftedData]):
     event: Literal["dst.player.crafted"]
 
 
-class PlayerAteEvent(EventRecord[PlayerAteData]):
+class AteEvent(EventRecord[AteData]):
     event: Literal["dst.player.ate"]
 
 
-class PlayerPickedEvent(EventRecord[PlayerPickedData]):
+class PickedEvent(EventRecord[PickedData]):
     event: Literal["dst.player.picked"]
 
 
-class PlayerHarvestedEvent(EventRecord[PlayerHarvestedData]):
+class HarvestedEvent(EventRecord[HarvestedData]):
     event: Literal["dst.player.harvested"]
 
 
-class PlayerFinishedWorkEvent(EventRecord[PlayerFinishedWorkData]):
+class FinishedWorkEvent(EventRecord[FinishedWorkData]):
     event: Literal["dst.player.finished_work"]
 
 
-class PlayerDeployedEvent(EventRecord[PlayerDeployedData]):
+class DeployedEvent(EventRecord[DeployedData]):
     event: Literal["dst.player.deployed"]
 
 
-class PlayerEquippedEvent(EventRecord[PlayerEquippedData]):
+class EquippedEvent(EventRecord[EquippedData]):
     event: Literal["dst.player.equipped"]
 
 
-class PlayerUnequippedEvent(EventRecord[PlayerUnequippedData]):
+class UnequippedEvent(EventRecord[UnequippedData]):
     event: Literal["dst.player.unequipped"]
 
 
-class PlayerDroppedEvent(EventRecord[PlayerDroppedData]):
+class DroppedEvent(EventRecord[DroppedData]):
     event: Literal["dst.player.dropped"]
 
 
-class PlayerConditionChangedEvent(EventRecord[PlayerConditionData]):
+class ConditionChangedEvent(EventRecord[ConditionData]):
     event: Literal["dst.player.condition_changed"]
 
 
-class PlayerIncidentEvent(EventRecord[PlayerIncidentData]):
+class IncidentEvent(EventRecord[IncidentData]):
     event: Literal["dst.player.incident"]
 
 
-class PlayerFishedEvent(EventRecord[PlayerFishedData]):
+class FishedEvent(EventRecord[FishedData]):
     event: Literal["dst.player.fished"]
 
 
-class PlayerPlantedEvent(EventRecord[PlayerPlantedData]):
+class PlantedEvent(EventRecord[PlantedData]):
     event: Literal["dst.player.planted"]
 
 
-class PlayerSkillChangedEvent(EventRecord[PlayerSkillChangedData]):
+class SkillChangedEvent(EventRecord[SkillChangedData]):
     event: Literal["dst.player.skill_changed"]
 
 
-class PlayerHoundWarningEvent(EventRecord[PlayerHoundWarningData]):
+class HoundWarningEvent(EventRecord[HoundWarningData]):
     event: Literal["dst.player.hound_warning"]
 
 
-__all__ = [name for name in globals() if name.startswith("Player")]
+__all__ = [
+    "ActionData",
+    "ActionEvent",
+    "AteData",
+    "AteEvent",
+    "BooleanConditionData",
+    "CombatBlockedData",
+    "CombatBlockedEvent",
+    "CombatData",
+    "CombatHitData",
+    "CombatHitEvent",
+    "CombatReceivedData",
+    "CombatReceivedEvent",
+    "ConditionChangedEvent",
+    "ConditionData",
+    "CraftedData",
+    "CraftedEvent",
+    "DeployedData",
+    "DeployedEvent",
+    "DisconnectedData",
+    "DisconnectedEvent",
+    "DroppedData",
+    "DroppedEvent",
+    "EquippedData",
+    "EquippedEvent",
+    "FinishedWorkData",
+    "FinishedWorkEvent",
+    "FishedData",
+    "FishedEvent",
+    "GhostedData",
+    "GhostedEvent",
+    "HarvestedData",
+    "HarvestedEvent",
+    "HoundWarningData",
+    "HoundWarningEvent",
+    "IncidentData",
+    "IncidentEvent",
+    "MigrationStartedData",
+    "MigrationStartedEvent",
+    "PickedData",
+    "PickedEvent",
+    "PlantedData",
+    "PlantedEvent",
+    "RevivedData",
+    "RevivedEvent",
+    "SanityConditionData",
+    "ShardEnteredEvent",
+    "ShardLeftEvent",
+    "SkillChangedData",
+    "SkillChangedEvent",
+    "SpawnedData",
+    "SpawnedEvent",
+    "SpecialDamage",
+    "UnequippedData",
+    "UnequippedEvent",
+]

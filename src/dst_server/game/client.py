@@ -1,22 +1,25 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 from pydantic import JsonValue
 
-from dst_server.arguments import ServerArgs
-from dst_server.events import DriverHealth
-from dst_server.instrumentation import Instrumentation
-from dst_server.protocol import (
+from dst_server.telemetry import TelemetrySettings
+from dst_server.telemetry.recorder import Recorder
+
+from .players import PlayerClient
+from .rpc import (
+    DRIVER_RESPONSE,
     RESULT_PREFIX,
+    DriverHealth,
+    Failure,
+    ResponseAdapter,
     json_text,
     lua_package_path,
     lua_request,
     lua_string,
 )
-
-from .players import PlayerClient
-from .rpc import DRIVER_RESPONSE, Failure, ResponseAdapter
 from .world import WorldClient
 
 DRIVER_MODULE = "dst_server"
@@ -25,15 +28,20 @@ DRIVER_MODULE = "dst_server"
 class GameClient:
     def __init__(
         self,
-        args: ServerArgs,
+        *,
+        shard: str,
+        lua_directory: Path,
+        telemetry: TelemetrySettings,
         execute: Callable[[str], Awaitable[str]],
-        instrumentation: Instrumentation,
+        recorder: Recorder,
         session_id: Callable[[], str | None],
         nonce: str,
     ) -> None:
-        self.args = args
+        self.shard = shard
+        self.lua_directory = lua_directory
+        self.telemetry = telemetry
         self.execute = execute
-        self.instrumentation = instrumentation
+        self.recorder = recorder
         self.session_id = session_id
         self.nonce = nonce
         self.health: DriverHealth | None = None
@@ -48,10 +56,10 @@ class GameClient:
         return self.health
 
     async def install(self) -> DriverHealth:
-        options = self.args.telemetry.model_dump(mode="json") | {
+        options = self.telemetry.model_dump(mode="json") | {
             "nonce": self.nonce,
         }
-        package_path = lua_package_path(self.args.lua_directory)
+        package_path = lua_package_path(self.lua_directory)
         body = (
             f"package.path={lua_string(package_path)}..package.path;"
             f"local driver=require({lua_string(DRIVER_MODULE)});"
@@ -59,7 +67,7 @@ class GameClient:
             f"json.decode({lua_string(json_text(options))}))"
         )
         self.health = await self.send(body, DRIVER_RESPONSE)
-        self.instrumentation.set_player_count(self.health.players)
+        self.recorder.set_player_count(self.health.players)
         return self.health
 
     async def request[DataT](
@@ -68,7 +76,7 @@ class GameClient:
         arguments: dict[str, JsonValue],
         adapter: ResponseAdapter[DataT],
     ) -> DataT:
-        with self.instrumentation.operation(
+        with self.recorder.operation(
             f"lua.{method}",
             self.session_id(),
         ) as span:
@@ -105,7 +113,7 @@ class GameClient:
 
     async def get_health(self) -> DriverHealth:
         self.health = await self.request("health", {}, DRIVER_RESPONSE)
-        self.instrumentation.set_player_count(self.health.players)
+        self.recorder.set_player_count(self.health.players)
         return self.health
 
 

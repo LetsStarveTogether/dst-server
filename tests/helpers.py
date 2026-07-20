@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from dst_server import Server, ServerArgs
+from dst_server.runtime import Server, ServerConfig
 
 FAKE_SERVER = r"""#!/usr/bin/env python3
 import json
@@ -237,7 +237,7 @@ class StubServer(Server):
     def __init__(self, responses: list[str]) -> None:
         self.responses = responses
         self.commands: list[str] = []
-        super().__init__(ServerArgs(shard="test"))
+        super().__init__(ServerConfig(shard="test"))
 
     async def execute(self, command: str) -> str:
         self.commands.append(command)

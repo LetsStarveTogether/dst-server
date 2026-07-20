@@ -3,13 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .events import TelemetrySettings
+from dst_server.telemetry import TelemetrySettings
 
-LUA_DIRECTORY = Path(__file__).with_name("lua")
+LUA_DIRECTORY = Path(__file__).parents[1] / "lua"
 
 
 @dataclass(frozen=True, slots=True)
-class ServerArgs:
+class ServerConfig:
     shard: str
     executable: Path = Path(
         "/install/bin64/dontstarve_dedicated_server_nullrenderer_x64"
@@ -18,7 +18,7 @@ class ServerArgs:
     conf_dir: str = "/"
     cluster: str = "cluster"
     ugc_directory: Path | None = Path("/cluster/mods/ugc")
-    extra: tuple[str, ...] = ("-skip_update_server_mods",)
+    extra_args: tuple[str, ...] = ("-skip_update_server_mods",)
     lua_directory: Path = LUA_DIRECTORY
     telemetry: TelemetrySettings = field(default_factory=TelemetrySettings)
     monitor_parent_process: bool = True
@@ -39,9 +39,9 @@ class ServerArgs:
             command.extend(("-ugc_directory", str(self.ugc_directory)))
         if monitor_parent_process is not None:
             command.extend(("-monitor_parent_process", str(monitor_parent_process)))
-        command.extend(self.extra)
+        command.extend(self.extra_args)
         command.append("-cloudserver")
         return tuple(command)
 
 
-__all__ = ["ServerArgs"]
+__all__ = ["ServerConfig"]

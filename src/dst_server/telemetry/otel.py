@@ -36,14 +36,13 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.util.types import AttributeValue
 
 if TYPE_CHECKING:
-    from .events import ObservedGameEvent
-    from .process import Server
+    from dst_server.events import ObservedGameEvent
 
 configured = False
 
 
 @dataclass(slots=True)
-class OtelPipeline:
+class Pipeline:
     logger: Logger
     tracer_provider: TracerProvider
     meter_provider: MeterProvider
@@ -98,11 +97,11 @@ class OtelPipeline:
                 self.tracer_provider.shutdown()
 
 
-def configure_otlp(
+def configure(
     *,
     service_instance_id: str | None = None,
     resource_attributes: Mapping[str, AttributeValue] | None = None,
-) -> OtelPipeline:
+) -> Pipeline:
     global configured  # ruff:ignore[global-statement]
     if configured:
         msg = "OTLP providers have already been configured"
@@ -155,7 +154,7 @@ def configure_otlp(
     trace.set_tracer_provider(tracer_provider)
     set_logger_provider(logger_provider)
     configured = True
-    return OtelPipeline(
+    return Pipeline(
         logger=logger_provider.get_logger("dst-server.game-events"),
         tracer_provider=tracer_provider,
         meter_provider=meter_provider,
@@ -163,25 +162,20 @@ def configure_otlp(
     )
 
 
-def emit_game_event(
+def emit(
     logger: Logger,
     observed: ObservedGameEvent,
     *,
-    server: Server | None = None,
+    attributes: Mapping[str, AttributeValue] | None = None,
 ) -> None:
     event = observed.record
-    attributes: dict[str, AttributeValue] = {
+    values: dict[str, AttributeValue] = dict(attributes or {}) | {
         "dst.event.sequence": event.seq,
         "dst.tick": event.tick,
         "dst.monotonic_ms": event.monotonic_ms,
     }
     if event.cycle is not None:
-        attributes["dst.world.cycle"] = event.cycle
-    if server is not None:
-        attributes["dst.cluster.name"] = server.args.cluster
-        attributes["dst.shard.name"] = server.args.shard
-        if server.session_id is not None:
-            attributes["dst.session.id"] = server.session_id
+        values["dst.world.cycle"] = event.cycle
     logger.emit(
         timestamp=observed.observed_timestamp_ns,
         observed_timestamp=observed.observed_timestamp_ns,
@@ -189,18 +183,12 @@ def emit_game_event(
         severity_text="INFO",
         event_name=event.event,
         body=event.data.model_dump(mode="json"),
-        attributes=attributes,
+        attributes=values,
     )
 
 
-async def export_game_events(server: Server, logger: Logger) -> None:
-    while (event := await server.read_game_event()) is not None:
-        emit_game_event(logger, event, server=server)
-
-
 __all__ = [
-    "OtelPipeline",
-    "configure_otlp",
-    "emit_game_event",
-    "export_game_events",
+    "Pipeline",
+    "configure",
+    "emit",
 ]

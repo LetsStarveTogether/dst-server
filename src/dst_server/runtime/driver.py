@@ -5,12 +5,12 @@ from collections.abc import Awaitable, Callable
 
 from logbook import Logger
 
-from .events import DriverHealth
+from dst_server.game import DriverHealth
 
 logger = Logger(__name__)
 
 
-class DriverManager:
+class Driver:
     def __init__(
         self,
         install: Callable[[], Awaitable[DriverHealth]],
@@ -84,4 +84,4 @@ class DriverManager:
             self.task.cancel()
 
 
-__all__ = ["DriverManager"]
+__all__ = ["Driver"]

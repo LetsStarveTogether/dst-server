@@ -10,7 +10,6 @@ English | [简体中文](README.zh-Hans.md)
 Container image: `quay.io/wh2099/dst-server`
 
 The image runs every shard in one DST cluster and keeps the familiar console FIFO.
-It can also export validated game events through OpenTelemetry.
 
 ## Quick Start
 
@@ -65,15 +64,9 @@ Use `c_announce("...")` to send a message and `c_listallplayers()` to inspect pl
 
 ## What the Entrypoint Does
 
-On startup, [`entrypoint.py`](entrypoint.py) validates the cluster and prepares permission and Mod files.
-It updates Workshop content once, discovers every shard, and starts one `Server` per shard in `-cloudserver` mode.
-
-`DST_SKIP_MOD_UPDATE=1` skips the one-shot Workshop update.
-
-`DST_INSTALL_PATH` and `DST_CLUSTER_PATH` override `/install` and `/cluster` for development and tests.
-
-An `OTEL_EXPORTER_OTLP_*_ENDPOINT` variable enables the official OpenTelemetry pipeline.
-The entrypoint then exports validated game events.
+On startup, [`entrypoint.sh`](entrypoint.sh) validates the cluster and prepares permission and Mod files.
+It updates Workshop content once, discovers every shard, creates the console FIFOs, and starts the shard processes.
+The image uses the fixed `/install` and `/cluster` paths shown above.
 
 ## Python SDK
 
@@ -82,11 +75,11 @@ The `dst-server` package starts and controls one Linux DST shard process.
 ```python
 import asyncio
 
-from dst_server import Server, ServerArgs
+from dst_server import Server, ServerConfig
 
 
 async def main() -> None:
-    async with Server(ServerArgs(shard="Master")) as server:
+    async with Server(ServerConfig(shard="Master")) as server:
         world = await server.game.world.state()
         players = await server.game.players.list()
         await server.game.world.announce(

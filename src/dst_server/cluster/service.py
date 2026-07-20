@@ -3,56 +3,56 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
-import sys
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from logbook import Logger, StreamHandler
+from logbook import Logger
 
-from .arguments import ServerArgs
-from .cluster import Shard, discover_shards, ensure_fifo, prepare_cluster
-from .mods import prepare_mods, update_server_mods
-from .observers import configure_otel, forward_console, log_line, start_observers
-from .process import Server
+from dst_server.runtime import Server, ServerConfig
+
+from . import console, layout, mods
+
+if TYPE_CHECKING:
+    from opentelemetry._logs import (
+        Logger as OtelLogger,
+    )
+
+    from dst_server.telemetry.otel import Pipeline
 
 DEFAULT_INSTALL_PATH = Path("/install")
 DEFAULT_CLUSTER_PATH = Path("/cluster")
 EXECUTABLE = Path("bin64/dontstarve_dedicated_server_nullrenderer_x64")
 PROXY_URL = "socks5://127.0.0.1:1080"
+OTEL_ENDPOINTS = (
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+)
 logger = Logger(__name__)
 
 
-def build_server(
-    shard: Shard,
-    *,
-    executable: Path,
-    cluster_path: Path,
-) -> Server:
-    return Server(
-        ServerArgs(
-            shard=shard.name,
-            executable=executable,
-            persistent_storage_root=cluster_path.parent,
-            conf_dir=".",
-            cluster=cluster_path.name,
-            ugc_directory=cluster_path / "mods" / "ugc",
-        ),
-        log_handler=log_line(f"{shard.name}: "),
-    )
+def log_handler(prefix: str) -> Callable[[str], None]:
+    def write(line: str) -> None:
+        logger.info("{prefix}{line}", prefix=prefix, line=line)
+
+    return write
 
 
-async def prepare_servers(
+async def prepare(
     install_path: Path,
     cluster_path: Path,
     *,
     update_mods: bool,
-) -> tuple[tuple[Shard, ...], tuple[Server, ...]]:
+) -> tuple[tuple[layout.Shard, ...], tuple[Server, ...]]:
     executable = install_path / EXECUTABLE
     if not executable.is_file():
         raise FileNotFoundError(executable)
-    prepare_cluster(cluster_path)
-    shards = discover_shards(cluster_path)
-    mod_ids = prepare_mods(install_path, cluster_path)
+    layout.prepare(cluster_path)
+    shards = layout.discover(cluster_path)
+    mod_ids = mods.prepare(install_path, cluster_path)
     logger.info(
         "Found {shards} shard(s) and {mods} Workshop mod(s).",
         shards=len(shards),
@@ -60,28 +60,38 @@ async def prepare_servers(
     )
     if update_mods and mod_ids:
         proxy_url = PROXY_URL if (cluster_path / "mods" / "proxy").is_file() else None
-        await update_server_mods(
+        await mods.update(
             executable,
             cluster_path / "mods" / "ugc",
             proxy_url=proxy_url,
-            log_handler=log_line("[MOD_UPDATE]: "),
+            log_handler=log_handler("[MOD_UPDATE]: "),
         )
     for shard in shards:
-        ensure_fifo(shard.console_path)
+        console.ensure(shard.console)
     servers = tuple(
-        build_server(shard, executable=executable, cluster_path=cluster_path)
+        Server(
+            ServerConfig(
+                shard=shard.name,
+                executable=executable,
+                persistent_storage_root=cluster_path.parent,
+                conf_dir=".",
+                cluster=cluster_path.name,
+                ugc_directory=cluster_path / "mods" / "ugc",
+            ),
+            log_handler=log_handler(f"{shard.name}: "),
+        )
         for shard in shards
     )
     return shards, servers
 
 
-async def start_servers(servers: tuple[Server, ...]) -> None:
+async def start(servers: tuple[Server, ...]) -> None:
     async with asyncio.TaskGroup() as tasks:
         for server in servers:
             tasks.create_task(server.start())
 
 
-async def stop_server(server: Server) -> None:
+async def stop_one(server: Server) -> None:
     try:
         process = server.process
     except RuntimeError:
@@ -95,9 +105,9 @@ async def stop_server(server: Server) -> None:
         await server.kill()
 
 
-async def stop_servers(servers: tuple[Server, ...]) -> None:
+async def stop(servers: tuple[Server, ...]) -> None:
     await asyncio.gather(
-        *(stop_server(server) for server in servers),
+        *(stop_one(server) for server in servers),
         return_exceptions=True,
     )
 
@@ -106,7 +116,7 @@ async def wait_for_start(
     servers: tuple[Server, ...],
     signal_task: asyncio.Task[bool],
 ) -> bool:
-    start_task = asyncio.create_task(start_servers(servers), name="dst-start")
+    start_task = asyncio.create_task(start(servers), name="dst-start")
     done, _ = await asyncio.wait(
         (start_task, signal_task),
         return_when=asyncio.FIRST_COMPLETED,
@@ -134,14 +144,72 @@ async def wait_for_exit(
     returncode = exited.result()
     logger.error(
         "shard {shard} exited unexpectedly with status {returncode}",
-        shard=server.args.shard,
+        shard=server.config.shard,
         returncode=returncode,
     )
     return returncode or 1
 
 
+def otel_requested() -> bool:
+    return os.environ.get("OTEL_SDK_DISABLED", "").casefold() != "true" and any(
+        os.environ.get(name) for name in OTEL_ENDPOINTS
+    )
+
+
+def configure_otel(cluster_path: Path) -> Pipeline | None:
+    if not otel_requested():
+        return None
+
+    from dst_server.telemetry.otel import configure
+
+    return configure(resource_attributes={"dst.cluster.name": cluster_path.name})
+
+
+async def log_events(server: Server) -> None:
+    while (observed := await server.read_game_event()) is not None:
+        logger.info(
+            "{shard}: DST_EVENT|{event}",
+            shard=server.config.shard,
+            event=observed.record.model_dump_json(),
+        )
+
+
+async def export_events(server: Server, logger: OtelLogger) -> None:
+    from dst_server.telemetry.otel import emit
+
+    while (observed := await server.read_game_event()) is not None:
+        attributes = {
+            "dst.cluster.name": server.config.cluster,
+            "dst.shard.name": server.config.shard,
+        }
+        if server.session_id is not None:
+            attributes["dst.session.id"] = server.session_id
+        emit(logger, observed, attributes=attributes)
+
+
+def start_event_tasks(
+    servers: tuple[Server, ...],
+    pipeline: Pipeline | None,
+) -> list[asyncio.Task[None]]:
+    if pipeline is None:
+        return [
+            asyncio.create_task(
+                log_events(server),
+                name=f"dst-events-{server.config.shard}",
+            )
+            for server in servers
+        ]
+    return [
+        asyncio.create_task(
+            export_events(server, pipeline.logger),
+            name=f"dst-otel-{server.config.shard}",
+        )
+        for server in servers
+    ]
+
+
 async def serve(
-    shards: tuple[Shard, ...],
+    shards: tuple[layout.Shard, ...],
     servers: tuple[Server, ...],
     cluster_path: Path,
     shutdown: asyncio.Event,
@@ -153,10 +221,10 @@ async def serve(
     try:
         if not await wait_for_start(servers, signal_task):
             return 0
-        background = start_observers(servers, pipeline)
+        background = start_event_tasks(servers, pipeline)
         background.extend(
             asyncio.create_task(
-                forward_console(shard.console_path, server),
+                console.forward(shard.console, server),
                 name=f"dst-console-{shard.name}",
             )
             for shard, server in zip(shards, servers, strict=True)
@@ -164,14 +232,14 @@ async def serve(
         wait_tasks = {
             asyncio.create_task(
                 server.wait(),
-                name=f"dst-wait-{server.args.shard}",
+                name=f"dst-wait-{server.config.shard}",
             ): server
             for server in servers
         }
         logger.info("All DST shards are ready.")
         return await wait_for_exit(wait_tasks, signal_task)
     finally:
-        await stop_servers(servers)
+        await stop(servers)
         signal_task.cancel()
         for task in (*background, *wait_tasks):
             if not task.done():
@@ -193,7 +261,7 @@ async def run(
     update_mods: bool = True,
     shutdown: asyncio.Event | None = None,
 ) -> int:
-    shards, servers = await prepare_servers(
+    shards, servers = await prepare(
         install_path,
         cluster_path,
         update_mods=update_mods,
@@ -214,27 +282,4 @@ async def run(
                     loop.remove_signal_handler(value)
 
 
-def main() -> int:
-    install_path = Path(os.environ.get("DST_INSTALL_PATH", DEFAULT_INSTALL_PATH))
-    cluster_path = Path(os.environ.get("DST_CLUSTER_PATH", DEFAULT_CLUSTER_PATH))
-    skip_mod_update = os.environ.get("DST_SKIP_MOD_UPDATE", "").casefold() in {
-        "1",
-        "true",
-        "yes",
-    }
-    handler = StreamHandler(sys.stdout, format_string="{record.message}")
-    with handler.applicationbound():
-        try:
-            return asyncio.run(
-                run(
-                    install_path=install_path,
-                    cluster_path=cluster_path,
-                    update_mods=not skip_mod_update,
-                )
-            )
-        except Exception as error:
-            logger.exception("Error: {error}", error=error)
-            return 1
-
-
-__all__ = ["main", "run"]
+__all__ = ["prepare", "run"]

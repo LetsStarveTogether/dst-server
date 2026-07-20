@@ -9,8 +9,6 @@ from contextlib import suppress
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from .validation import required_string
-
 type LogHandler = Callable[[str], None]
 type SteamCMDCommand = Sequence[str]
 
@@ -445,7 +443,9 @@ def normalize_commands(
 
 
 def validate_argument(name: str, value: str) -> str:
-    value = required_string(name, value)
+    if not isinstance(value, str) or not value:
+        msg = f"{name} must not be empty"
+        raise ValueError(msg)
     if not value.isprintable():
         msg = f"{name} must not contain control characters"
         raise ValueError(msg)

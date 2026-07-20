@@ -5,14 +5,6 @@ from typing import TYPE_CHECKING
 from pydantic import JsonValue
 
 from dst_server.models import Inventory, Player
-from dst_server.validation import (
-    item_count,
-    number,
-    percent,
-    player_id,
-    prefab,
-    required_string,
-)
 
 from .rpc import (
     BOOL_RESPONSE,
@@ -20,6 +12,14 @@ from .rpc import (
     INVENTORY_RESPONSE,
     PLAYER_RESPONSE,
     PLAYERS_RESPONSE,
+)
+from .validation import (
+    item_count,
+    number,
+    percent,
+    player_id,
+    prefab,
+    required_string,
 )
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ class PlayerClient:
 
     async def list(self) -> tuple[Player, ...]:
         players = await self.game.request("get_players", {}, PLAYERS_RESPONSE)
-        self.game.instrumentation.set_player_count(len(players))
+        self.game.recorder.set_player_count(len(players))
         return players
 
     async def get(self, userid: str) -> Player | None:
