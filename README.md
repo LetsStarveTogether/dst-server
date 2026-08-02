@@ -94,6 +94,22 @@ asyncio.run(main())
 The typed API covers world and player queries, inventory, administration, confirmed saves, and raw Lua.
 It also exposes lifecycle and game events.
 
+By default, the SDK installs only the management RPC driver and keeps Lua game-event telemetry off.
+OTLP environment variables configure export transport but do not enable game-event hooks.
+Enable a telemetry profile explicitly when Lua game events are required:
+
+```python
+from dst_server import ServerConfig
+from dst_server.telemetry import TelemetrySettings
+
+config = ServerConfig(
+    shard="Master",
+    telemetry=TelemetrySettings(profile="history"),
+)
+```
+
+Use `critical` instead of `history` for the smaller event set.
+
 Install `dst-server[otel]` for OTLP export or `dst-server[klei]` for Klei build and lobby services.
 
 ## Lua Annotations

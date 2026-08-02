@@ -33,7 +33,7 @@ Python 管理进程负责补充 cluster、shard、session 和进程实例信息�
 
 服务端 ready 后，Python 通过 FD 3 扩展 `package.path`，加载包内的 `dst_server` 模块并调用 `install`。
 
-安装只在 `TheWorld.ismastersim` 上执行，并且是幂等的。
+默认 profile 为 `off`，只安装 management RPC；需要游戏事件时必须显式选择 `critical` 或 `history`。
 
 埋点选择权威、低歧义的领域位置，例如玩家进出分片、复活、死亡、选定 Action 的最终结果，以及少量世界状态变化。
 
@@ -61,6 +61,30 @@ Lua 使用 `json.encode_compliant` 生成标准 JSON，再通过 `print("DST_OTE
 Lua 不实现 OTLP、HTTP 重试、鉴权或磁盘缓冲，也不持有 Collector 凭据。
 
 这些能力与游戏模拟无关，放进 Lua 只会扩大故障面。
+
+## 安装与健康状态
+
+Python 通过一次同步 `driver.install(options)` RPC 完成安装。
+
+Health 固定包含五个字段：
+
+```text
+protocol
+telemetry_status
+telemetry_error
+events_emitted
+errors
+```
+
+| `telemetry_status` | `telemetry_error` | 含义 |
+| --- | --- | --- |
+| `disabled` | `null` | profile 为 `off`，未加载 telemetry 模块或安装 Hook |
+| `active` | `null` | 所需 Hook 全部安装成功 |
+| `failed` | 非空字符串 | telemetry 安装失败并在当前 generation 关闭 |
+
+完整调用时序见 [Python SDK Telemetry Driver 关键时序](python-sdk-telemetry-flow.md)。
+
+安装边界和已知限制详见 [Python SDK 接入已确认问题](python-sdk-known-issues.md)。
 
 ## Python 侧：分流、校验和背压
 
@@ -99,6 +123,8 @@ Python 保存接收时间，因为 Lua 的 `GetTimeReal` 是进程内单调时�
 Python 使用官方 OpenTelemetry SDK 的批处理器和 OTLP exporter。
 
 endpoint、headers、证书、压缩和超时继续使用标准 `OTEL_EXPORTER_OTLP_*` 环境变量，不在项目中复制一套配置。
+
+这些环境变量只配置传输，不会隐式启用 Lua 游戏事件采集。
 
 生产部署建议先发给 Collector，再由 Collector 负责重试、批处理、过滤、鉴权和后端路由。
 
