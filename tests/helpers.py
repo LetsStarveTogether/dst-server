@@ -10,8 +10,11 @@ import os
 import re
 import signal
 import stat
+import sys
 
 assert all(stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (3, 4, 5))
+arguments = sys.argv[1:]
+shard = arguments[arguments.index("-shard") + 1]
 commands = os.fdopen(3)
 results = os.fdopen(4, "w", buffering=1)
 events = os.fdopen(5, "w", buffering=1)
@@ -32,32 +35,52 @@ for command in commands:
         match = re.search(r'\\"nonce\\":\\"([^"\\]+)', command)
         assert match is not None
         nonce = match.group(1)
+        if shard == "core-failure":
+            results.write(
+                "DST_SERVER_RESULT|"
+                + json.dumps({"ok": False, "error": "core install failed"})
+                + "\nDST_RemoteCommandDone\n"
+            )
+            continue
+        failed = shard == "telemetry-failure"
         health = {
             "protocol": 1,
-            "installed": True,
-            "profile": "history",
+            "telemetry_status": "failed" if failed else "active",
+            "telemetry_error": "world hook unavailable" if failed else None,
             "events_emitted": 0,
             "errors": 0,
-            "players": 0,
-            "action_hook": True,
-            "shard_hook": True,
         }
         results.write(
             "DST_SERVER_RESULT|"
             + json.dumps({"ok": True, "data": health})
             + "\nDST_RemoteCommandDone\n"
         )
-        event = {
-            "v": 1,
-            "nonce": nonce,
-            "seq": 1,
-            "event": "dst.world.state_changed",
-            "tick": 10,
-            "monotonic_ms": 20,
-            "cycle": 2,
-            "data": {"name": "cycles", "value": 2},
-        }
-        print("[00:00:01]: DST_OTEL|" + json.dumps(event), flush=True)
+        if health["telemetry_status"] == "active":
+            event = {
+                "v": 1,
+                "nonce": nonce,
+                "seq": 1,
+                "event": "dst.world.state_changed",
+                "tick": 10,
+                "monotonic_ms": 20,
+                "cycle": 2,
+                "data": {"name": "cycles", "value": 2},
+            }
+            print("[00:00:01]: DST_OTEL|" + json.dumps(event), flush=True)
+        continue
+    if "get_players" in command:
+        results.write(
+            "DST_SERVER_RESULT|"
+            + json.dumps({"ok": True, "data": []})
+            + "\nDST_RemoteCommandDone\n"
+        )
+        continue
+    if '"save"' in command:
+        results.write(
+            "DST_SERVER_RESULT|"
+            + json.dumps({"ok": True, "data": True})
+            + "\nDST_RemoteCommandDone\n"
+        )
         continue
     print("command received", flush=True)
     event = {

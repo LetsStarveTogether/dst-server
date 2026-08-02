@@ -10,6 +10,7 @@ from dst_server.events import server as server_events
 from dst_server.events import world
 from dst_server.game import DriverHealth
 from dst_server.runtime import Server, ServerConfig
+from dst_server.telemetry import TelemetrySettings
 from tests.helpers import FAKE_SERVER, StubServer, structured_result
 
 
@@ -23,13 +24,10 @@ class ReloadingServer(Server):
         health = DriverHealth.model_validate(
             {
                 "protocol": 1,
-                "installed": True,
-                "profile": "history",
+                "telemetry_status": "active",
+                "telemetry_error": None,
                 "events_emitted": self.installs,
                 "errors": 0,
-                "players": 0,
-                "action_hook": True,
-                "shard_hook": True,
             },
             strict=True,
         )
@@ -49,15 +47,14 @@ async def test_cloud_protocol_and_lifecycle(tmp_path: Path) -> None:
         cluster="Cluster_1",
         ugc_directory=None,
         extra_args=(),
+        telemetry=TelemetrySettings(profile="history"),
     )
     logs: list[str] = []
     server = Server(config, log_handler=logs.append)
 
     await server.start()
 
-    assert server.driver_health.installed is True
-    assert server.driver_health.action_hook is True
-    assert server.driver_health.shard_hook is True
+    assert server.driver_health.telemetry_status == "active"
     assert server.session_id == "TEST"
     observed = await server.read_game_event()
     assert observed is not None
@@ -91,6 +88,7 @@ def test_server_config() -> None:
     config = ServerConfig(shard="cave")
     command = config.command(monitor_parent_process=42)
 
+    assert config.telemetry.profile == "off"
     assert command[-3:] == ("42", "-skip_update_server_mods", "-cloudserver")
     assert command[command.index("-shard") + 1] == "cave"
     lua_files = {
@@ -100,6 +98,56 @@ def test_server_config() -> None:
     assert "dst_server.lua" in lua_files
     assert "dst_server/commands.lua" in lua_files
     assert "dst_server/world_events.lua" in lua_files
+
+
+async def test_telemetry_install_failure_keeps_core_driver_running(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-server"
+    executable.write_text(FAKE_SERVER, encoding="utf-8")
+    executable.chmod(0o755)
+    server = Server(
+        ServerConfig(
+            shard="telemetry-failure",
+            executable=executable,
+            persistent_storage_root=tmp_path,
+            conf_dir="conf",
+            cluster="Cluster_1",
+            ugc_directory=None,
+            extra_args=(),
+            telemetry=TelemetrySettings(profile="history"),
+        )
+    )
+    async with server:
+        assert server.driver_health.telemetry_status == "failed"
+        assert server.returncode is None
+        assert await server.game.players.list() == ()
+        await server.game.world.request_save()
+        assert server.returncode is None
+
+
+async def test_core_driver_install_failure_cleans_up_process(tmp_path: Path) -> None:
+    executable = tmp_path / "fake-server"
+    executable.write_text(FAKE_SERVER, encoding="utf-8")
+    executable.chmod(0o755)
+    server = Server(
+        ServerConfig(
+            shard="core-failure",
+            executable=executable,
+            persistent_storage_root=tmp_path,
+            conf_dir="conf",
+            cluster="Cluster_1",
+            ugc_directory=None,
+            extra_args=(),
+            telemetry=TelemetrySettings(profile="history"),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="core install failed"):
+        await server.start()
+
+    assert server.returncode is not None
+    assert server.closed is True
 
 
 async def test_save_waits_for_fd5_completion() -> None:

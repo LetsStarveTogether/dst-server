@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from unittest.mock import Mock
+
+import pytest
 
 from dst_server.cluster.service import run
+from dst_server.telemetry import TelemetrySettings, otel
 
 FAKE_SERVER = r"""#!/usr/bin/env python3
 import json
 import os
-import re
 import signal
 import sys
 from pathlib import Path
@@ -29,17 +32,13 @@ def stop(signum, frame):
 signal.signal(signal.SIGTERM, stop)
 for command in commands:
     if "driver.install" in command:
-        match = re.search(r'\\"nonce\\":\\"([^"\\]+)', command)
-        assert match is not None
+        failed = shard == "cave"
         health = {
             "protocol": 1,
-            "installed": True,
-            "profile": "history",
+            "telemetry_status": "failed" if failed else "active",
+            "telemetry_error": "world hook unavailable" if failed else None,
             "events_emitted": 0,
             "errors": 0,
-            "players": 0,
-            "action_hook": True,
-            "shard_hook": True,
         }
         results.write("DST_SERVER_RESULT|" + json.dumps({"ok": True, "data": health}))
         results.write("\nDST_RemoteCommandDone\n")
@@ -68,7 +67,10 @@ def wait_for(path: Path) -> None:
     raise TimeoutError(path)
 
 
-async def test_service_runs_shards_and_console(tmp_path: Path) -> None:
+async def test_service_runs_shards_and_falls_back_from_otlp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     install = tmp_path / "install"
     cluster = tmp_path / "cluster"
     markers = tmp_path / "markers"
@@ -85,12 +87,16 @@ async def test_service_runs_shards_and_console(tmp_path: Path) -> None:
     (cluster / "cluster_token.txt").touch()
     write_shard(cluster / "forest", master=True)
     write_shard(cluster / "cave", master=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.invalid")
+    configure = Mock(side_effect=RuntimeError("collector unavailable"))
+    monkeypatch.setattr(otel, "configure", configure)
     shutdown = asyncio.Event()
     running = asyncio.create_task(
         run(
             install_path=install,
             cluster_path=cluster,
             update_mods=False,
+            telemetry=TelemetrySettings(profile="history"),
             shutdown=shutdown,
         )
     )
@@ -109,6 +115,7 @@ async def test_service_runs_shards_and_console(tmp_path: Path) -> None:
         shutdown.set()
         assert await running == 0
 
+    configure.assert_called_once()
     assert (cluster / "console").is_fifo()
     assert (cluster / "cave" / "console").is_fifo()
     assert 'print("hello")' in (markers / "command-forest").read_text(encoding="utf-8")

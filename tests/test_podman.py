@@ -71,9 +71,8 @@ async def test_existing_image_with_real_save(tmp_path: Path) -> None:
         async with asyncio.timeout(120):
             await server.start()
             started = True
-            assert server.driver_health.installed is True
-            assert server.driver_health.action_hook is True
-            assert server.driver_health.shard_hook is True
+            assert server.driver_health.telemetry_status == "active"
+            assert server.driver_health.telemetry_error is None
             assert (await server.game.world.room()).is_dedicated is True
             assert (await server.game.world.state()).cycles >= 0
             runtime = await server.game.world.runtime()
