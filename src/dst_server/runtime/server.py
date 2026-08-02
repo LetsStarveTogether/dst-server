@@ -215,7 +215,17 @@ class Server:  # ruff:ignore[too-many-public-methods]
         return await self.game_events.read()
 
     async def install_driver(self) -> DriverHealth:
-        return await self.game.install()
+        health = await self.game.install()
+        if health.telemetry_status == "failed":
+            logger.warning(
+                "failed to install DST telemetry: "
+                "{cluster}/{shard} ({profile}): {error}",
+                cluster=self.config.cluster,
+                shard=self.config.shard,
+                profile=self.config.telemetry.profile,
+                error=health.telemetry_error,
+            )
+        return health
 
     async def save(self, completion_timeout: float = 30) -> server_events.SavedEvent:
         with self.recorder.operation("save", self.session_id) as span:

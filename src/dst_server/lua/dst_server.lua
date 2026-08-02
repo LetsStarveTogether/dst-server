@@ -1,6 +1,4 @@
-local actions = require("dst_server.actions")
 local state = require("dst_server.state")
-local world_events = require("dst_server.world_events")
 local driver = {}
 local methods = {}
 
@@ -15,15 +13,15 @@ for _, source in ipairs({
 end
 
 function driver.health()
+    local telemetry_status = state.requested_profile == "off" and "disabled"
+        or state.telemetry_active and "active"
+        or "failed"
     return {
         protocol = state.protocol,
-        installed = state.installed,
-        profile = state.profile,
+        telemetry_status = telemetry_status,
+        telemetry_error = state.telemetry_error or json.null,
         events_emitted = state.events_emitted,
         errors = state.errors,
-        players = GetTableSize(state.players),
-        action_hook = state.action_hook,
-        shard_hook = state.shard_hook,
     }
 end
 
@@ -31,50 +29,57 @@ function driver.install(options)
     if state.installed then
         return driver.health()
     end
-    if TheWorld == nil or not TheWorld.ismastersim then
-        error("master simulation is unavailable")
-    end
     if type(options) ~= "table" then
         error("driver options must be a table")
     end
-    if type(options.nonce) ~= "string"
-        or #options.nonce < 16
-        or #options.nonce > 128 then
+    local nonce = options.nonce
+    if type(nonce) ~= "string" or #nonce < 16 or #nonce > 128 then
         error("nonce must contain 16 to 128 bytes")
     end
-    if options.profile ~= "off"
-        and options.profile ~= "critical"
-        and options.profile ~= "history" then
+    local profile = options.profile
+    if profile ~= "off" and profile ~= "critical" and profile ~= "history" then
         error("unknown telemetry profile")
     end
     if type(options.actions) ~= "table" then
         error("actions must be a table")
     end
-
-    state.nonce = options.nonce
-    state.profile = options.profile
-    for _, action_id in ipairs(options.actions) do
+    local action_allowlist = {}
+    for _, action_id in pairs(options.actions) do
         if type(action_id) ~= "string" or action_id == "" then
             error("action IDs must be non-empty strings")
         end
-        state.action_allowlist[action_id] = true
+        action_allowlist[action_id] = true
+    end
+    if TheWorld == nil or not TheWorld.ismastersim then
+        error("master simulation is unavailable")
     end
 
-    if state.profile ~= "off" then
-        if type(TheWorld.ListenForEvent) ~= "function"
-            or type(TheWorld.WatchWorldState) ~= "function"
-            or type(json.encode_compliant) ~= "function"
-            or type(GetTick) ~= "function"
-            or type(GetTimeReal) ~= "function" then
-            error("required telemetry API is unavailable")
+    state.nonce = nonce
+    state.requested_profile = profile
+    state.action_allowlist = action_allowlist
+    state.installed = true
+    if profile == "off" then
+        return driver.health()
+    end
+
+    local ok, failure = pcall(function()
+        if type(GetTick) ~= "function" or type(GetTimeReal) ~= "function" then
+            error("required telemetry clock is unavailable")
         end
-        if state.profile == "history" then
-            actions.install()
+        if profile == "history" then
+            require("dst_server.actions").install()
         end
+        local world_events = require("dst_server.world_events")
         world_events.install_shard()
         world_events.install_world()
+    end)
+    if ok then
+        state.telemetry_active = true
+    else
+        local message = type(failure) == "string" and failure ~= "" and failure
+            or "telemetry installation failed"
+        state.telemetry_error = message:gsub("%c", " "):sub(1, 1024)
     end
-    state.installed = true
     return driver.health()
 end
 

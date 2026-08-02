@@ -76,7 +76,7 @@ function world_events.install_world()
         })
     end))
 
-    if state.profile == "history" then
+    if state.requested_profile == "history" then
         TheWorld:ListenForEvent("itemplanted", telemetry.guard(function(_, data)
             local player = data.doer
             if player ~= nil and player.userid ~= nil and player:HasTag("player") then
@@ -118,19 +118,26 @@ function world_events.install_shard()
         error("Shard_UpdateWorldState is unavailable")
     end
     local original = Shard_UpdateWorldState
-    Shard_UpdateWorldState = function(world_id, shard_state, tags, world_data, shard_name)
-        local results = telemetry.pack(
-            original(world_id, shard_state, tags, world_data, shard_name)
-        )
-        telemetry.safe_emit("dst.shard.connection_changed", {
-            shard_id = tostring(world_id),
-            name = tostring(shard_name or ""),
-            ready = shard_state == REMOTESHARDSTATE.READY,
-            tags = values.tags(tags),
-        })
+    Shard_UpdateWorldState = function(...)
+        if not state.telemetry_active then
+            return original(...)
+        end
+
+        local world_id, shard_state, tags, _, shard_name = ...
+        local results = telemetry.pack(original(...))
+        local emitted = pcall(function()
+            telemetry.emit("dst.shard.connection_changed", {
+                shard_id = tostring(world_id),
+                name = tostring(shard_name or ""),
+                ready = shard_state == REMOTESHARDSTATE.READY,
+                tags = values.tags(tags),
+            })
+        end)
+        if not emitted then
+            state.errors = state.errors + 1
+        end
         return telemetry.unpack(results)
     end
-    state.shard_hook = true
 end
 
 return world_events

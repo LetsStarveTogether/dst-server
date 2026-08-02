@@ -200,7 +200,7 @@ function player_events.attach(player)
     end
     state.players[player] = true
     attach_lifecycle(player)
-    if state.profile == "history" then
+    if state.requested_profile == "history" then
         attach_combat(player)
         attach_conditions(player)
         attach_skills_and_fishing(player)

@@ -8,20 +8,16 @@ from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
 from dst_server.models.base import FrozenModel, NonNegativeInt
-from dst_server.telemetry import TelemetryProfile
 
 RESULT_PREFIX = "DST_SERVER_RESULT|"
 
 
 class DriverHealth(FrozenModel):
     protocol: Literal[1]
-    installed: bool
-    profile: TelemetryProfile
+    telemetry_status: Literal["disabled", "active", "failed"]
+    telemetry_error: str | None
     events_emitted: NonNegativeInt
     errors: NonNegativeInt
-    players: NonNegativeInt
-    action_hook: bool
-    shard_hook: bool
 
 
 class Envelope(BaseModel):

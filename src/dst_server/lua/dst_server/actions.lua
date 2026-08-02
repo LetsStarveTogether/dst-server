@@ -23,35 +23,48 @@ function actions.install()
         error("BufferedAction.Do is unavailable")
     end
     if BufferedAction._dst_original_do ~= nil then
-        state.action_hook = true
         return
     end
 
     local original_do = BufferedAction.Do
     BufferedAction._dst_original_do = original_do
-    BufferedAction.Do = function(action, ...)
-        local actor = action.doer
-        local action_id = action.action ~= nil and action.action.id or nil
-        if actor == nil
-            or not actor:HasTag("player")
-            or not state.action_allowlist[action_id] then
-            return original_do(action, ...)
+    BufferedAction.Do = function(...)
+        if not state.telemetry_active then
+            return original_do(...)
         end
 
-        state.action_sequence = state.action_sequence + 1
-        action._dst_action_seq = state.action_sequence
-        local captured, snapshot = pcall(capture, action)
-        local results = telemetry.pack(original_do(action, ...))
-        if captured then
+        local action = ...
+        local captured, snapshot = pcall(function()
+            local actor = action.doer
+            local action_id = action.action ~= nil and action.action.id or nil
+            if actor == nil
+                or not actor:HasTag("player")
+                or not state.action_allowlist[action_id] then
+                return nil
+            end
+            state.action_sequence = state.action_sequence + 1
+            action._dst_action_seq = state.action_sequence
+            return capture(action)
+        end)
+        if not captured then
+            state.errors = state.errors + 1
+            return original_do(...)
+        end
+        if snapshot == nil then
+            return original_do(...)
+        end
+
+        local results = telemetry.pack(original_do(...))
+        local emitted = pcall(function()
             snapshot.success = results[1] == true
             snapshot.reason = values.text(results[2], 256)
-            telemetry.safe_emit("dst.player.action", snapshot)
-        else
+            telemetry.emit("dst.player.action", snapshot)
+        end)
+        if not emitted then
             state.errors = state.errors + 1
         end
         return telemetry.unpack(results)
     end
-    state.action_hook = true
 end
 
 return actions

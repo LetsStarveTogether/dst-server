@@ -67,7 +67,6 @@ class GameClient:
             f"json.decode({lua_string(json_text(options))}))"
         )
         self.health = await self.send(body, DRIVER_RESPONSE)
-        self.recorder.set_player_count(self.health.players)
         return self.health
 
     async def request[DataT](
@@ -113,7 +112,6 @@ class GameClient:
 
     async def get_health(self) -> DriverHealth:
         self.health = await self.request("health", {}, DRIVER_RESPONSE)
-        self.recorder.set_player_count(self.health.players)
         return self.health
 
 

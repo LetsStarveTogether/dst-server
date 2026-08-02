@@ -15,9 +15,8 @@ function telemetry.emit(event_name, data)
         cycle = cycle == nil and json.null or cycle,
         data = data,
     }
-    local ok, encoded = pcall(json.encode_compliant, envelope)
-    if not ok
-        or type(encoded) ~= "string"
+    local encoded = json.encode_compliant(envelope)
+    if type(encoded) ~= "string"
         or #state.prefix + #encoded > state.max_line_bytes then
         state.errors = state.errors + 1
         return
@@ -28,17 +27,13 @@ end
 
 function telemetry.guard(callback)
     return function(...)
+        if not state.telemetry_active then
+            return
+        end
         local ok = pcall(callback, ...)
         if not ok then
             state.errors = state.errors + 1
         end
-    end
-end
-
-function telemetry.safe_emit(event_name, data)
-    local ok = pcall(telemetry.emit, event_name, data)
-    if not ok then
-        state.errors = state.errors + 1
     end
 end
 

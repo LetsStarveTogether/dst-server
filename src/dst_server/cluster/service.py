@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from logbook import Logger
 
 from dst_server.runtime import Server, ServerConfig
+from dst_server.telemetry import TelemetrySettings
 
 from . import console, layout, mods
 
@@ -46,6 +47,7 @@ async def prepare(
     cluster_path: Path,
     *,
     update_mods: bool,
+    telemetry: TelemetrySettings | None = None,
 ) -> tuple[tuple[layout.Shard, ...], tuple[Server, ...]]:
     executable = install_path / EXECUTABLE
     if not executable.is_file():
@@ -68,6 +70,7 @@ async def prepare(
         )
     for shard in shards:
         console.ensure(shard.console)
+    telemetry = telemetry if telemetry is not None else TelemetrySettings()
     servers = tuple(
         Server(
             ServerConfig(
@@ -77,6 +80,7 @@ async def prepare(
                 conf_dir=".",
                 cluster=cluster_path.name,
                 ugc_directory=cluster_path / "mods" / "ugc",
+                telemetry=telemetry,
             ),
             log_handler=log_handler(f"{shard.name}: "),
         )
@@ -160,9 +164,13 @@ def configure_otel(cluster_path: Path) -> Pipeline | None:
     if not otel_requested():
         return None
 
-    from dst_server.telemetry.otel import configure
+    try:
+        from dst_server.telemetry.otel import configure
 
-    return configure(resource_attributes={"dst.cluster.name": cluster_path.name})
+        return configure(resource_attributes={"dst.cluster.name": cluster_path.name})
+    except Exception:
+        logger.exception("failed to configure OpenTelemetry; using local event logging")
+        return None
 
 
 async def log_events(server: Server) -> None:
@@ -259,12 +267,14 @@ async def run(
     install_path: Path = DEFAULT_INSTALL_PATH,
     cluster_path: Path = DEFAULT_CLUSTER_PATH,
     update_mods: bool = True,
+    telemetry: TelemetrySettings | None = None,
     shutdown: asyncio.Event | None = None,
 ) -> int:
     shards, servers = await prepare(
         install_path,
         cluster_path,
         update_mods=update_mods,
+        telemetry=telemetry,
     )
     loop = asyncio.get_running_loop()
     own_shutdown = shutdown is None
