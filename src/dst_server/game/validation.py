@@ -37,6 +37,18 @@ def number(name: str, value: float) -> float:
     return float(value)
 
 
+def positive_timeout(value: float, name: str = "completion") -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        msg = f"{name} timeout must be positive"
+        raise ValueError(msg)
+    return float(value)
+
+
 def item_count(value: int, *, allow_zero: bool = False) -> int:
     minimum = 0 if allow_zero else 1
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:

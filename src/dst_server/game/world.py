@@ -15,7 +15,7 @@ from .rpc import (
     SHARDS_RESPONSE,
     WORLD_RESPONSE,
 )
-from .validation import item_count
+from .validation import item_count, positive_timeout
 
 if TYPE_CHECKING:
     from .client import GameClient
@@ -62,27 +62,44 @@ class WorldClient:
             BOOL_RESPONSE,
         )
 
-    async def reset(self) -> None:
-        await self.game.request("reset", {}, BOOL_RESPONSE)
+    async def reset(self, completion_timeout: float = 30) -> None:
+        await self.game.reload(
+            "reset",
+            {},
+            BOOL_RESPONSE,
+            positive_timeout(completion_timeout),
+        )
 
-    async def regenerate(self) -> None:
-        await self.game.request("regenerate_world", {}, BOOL_RESPONSE)
+    async def regenerate(self, completion_timeout: float = 30) -> None:
+        await self.game.reload(
+            "regenerate_world",
+            {},
+            BOOL_RESPONSE,
+            positive_timeout(completion_timeout),
+        )
 
-    async def regenerate_shard(self, *, preserve_settings: bool = True) -> None:
+    async def regenerate_shard(
+        self,
+        *,
+        preserve_settings: bool = True,
+        completion_timeout: float = 30,
+    ) -> None:
         if not isinstance(preserve_settings, bool):
             msg = "preserve_settings must be a boolean"
             raise TypeError(msg)
-        await self.game.request(
+        await self.game.reload(
             "regenerate_shard",
             {"preserve_settings": preserve_settings},
             BOOL_RESPONSE,
+            positive_timeout(completion_timeout),
         )
 
-    async def rollback(self, count: int = 1) -> None:
-        await self.game.request(
+    async def rollback(self, count: int = 1, *, completion_timeout: float = 30) -> None:
+        await self.game.reload(
             "rollback",
             {"count": item_count(count, allow_zero=True)},
             BOOL_RESPONSE,
+            positive_timeout(completion_timeout),
         )
 
     async def execute(self, source: str) -> JsonValue:

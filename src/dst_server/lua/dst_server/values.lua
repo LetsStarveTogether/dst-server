@@ -37,7 +37,18 @@ function values.text(value, maximum)
         return json.null
     end
     value = tostring(value)
-    return #value > maximum and string.sub(value, 1, maximum) or value
+    if #value <= maximum then
+        return value
+    end
+
+    while maximum > 0 do
+        local byte = string.byte(value, maximum + 1)
+        if byte < 128 or byte >= 192 then
+            break
+        end
+        maximum = maximum - 1
+    end
+    return string.sub(value, 1, maximum)
 end
 
 function values.position(value)
@@ -176,7 +187,10 @@ function values.loot_refs(loot)
         return { values.item_ref(loot) }
     end
     local result = {}
-    for _, item in ipairs(loot) do
+    for index, item in ipairs(loot) do
+        if index > 64 then
+            error("loot contains more than 64 items")
+        end
         result[#result + 1] = values.item_ref(item)
     end
     return result

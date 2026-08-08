@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import logging
 from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
 from pathlib import Path
 
 from .visitors import DEFAULT_VAR, parse_component, parse_modutil
-
-logger = logging.getLogger(__name__)
 
 
 def extract_class_name(content: str) -> str | None:
@@ -18,19 +15,15 @@ def extract_class_name(content: str) -> str | None:
     return None
 
 
-def component_definition(path: Path, folder_name: str) -> tuple[str, str] | None:
-    try:
-        content = path.read_text(encoding="utf-8")
-        class_name = extract_class_name(content) or path.stem
-        fields, definitions = parse_component(
-            content,
-            path.stem,
-            class_name,
-            folder_name,
-        )
-    except Exception as error:
-        logger.warning("Could not parse %s: %s", path, error)
-        return None
+def component_definition(path: Path, folder_name: str) -> tuple[str, str]:
+    content = path.read_text(encoding="utf-8")
+    class_name = extract_class_name(content) or path.stem
+    fields, definitions = parse_component(
+        content,
+        path.stem,
+        class_name,
+        folder_name,
+    )
 
     lines = [f"---@class {class_name}", *fields]
     lines.extend((
@@ -56,7 +49,7 @@ def generate_components(input_dir: Path, max_workers: int | None = None) -> str:
                 executor.map(component_definition, files, repeat(input_dir.name))
             )
 
-    definitions = sorted(result for result in results if result is not None)
+    definitions = sorted(results)
     return "\n".join(content for _, content in definitions)
 
 

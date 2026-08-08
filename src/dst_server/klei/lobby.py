@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from ipaddress import IPv4Address
 from typing import Annotated
 
-from pydantic import Field, ValidationInfo, model_validator
+from pydantic import Field, JsonValue, ValidationInfo, model_validator
 
 from .enums import Platform, Region, Role
 from .schema import KleiModel
@@ -96,7 +96,7 @@ class Room(Lobby):
     nat: int
     data: str | None = None
     worldgen: str | None = None
-    mods_info: tuple[str | bool | None, ...] | None = None
+    mods_info: list[JsonValue] | None = None
     players: str | None = None
     desc: str | None = None
 

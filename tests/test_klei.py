@@ -39,7 +39,10 @@ class StubKleiClient(KleiClient):
         json: object | None = None,
     ) -> bytes:
         self.calls.append((method, url, json))
-        return json_module.dumps(self.routes[url]).encode()
+        response = self.routes[url]
+        if isinstance(response, Exception):
+            raise response
+        return json_module.dumps(response).encode()
 
 
 def lobby_row() -> dict[str, object]:
@@ -102,10 +105,24 @@ def test_version_page_uses_strict_lexbor_models() -> None:
         VersionPage.model_validate('<li class="cCmsRecord_row">broken</li>')
 
 
-async def test_klei_client_queries_lobby_and_room_in_order() -> None:
+@pytest.mark.parametrize(
+    "mods_info",
+    [
+        [["workshop-1", {"name": "Example mod"}]],
+        ["workshop-1", "Example mod", True, None],
+    ],
+)
+async def test_klei_client_queries_lobby_and_room_in_order(
+    mods_info: object,
+) -> None:
     lobby_url = "https://lobby.test/us-east-1-Steam.json.gz"
     room_url = "https://room.test/us-east-1/lobby/read"
-    room = lobby_row() | {"tick": 12345, "clientmodsoff": False, "nat": 1}
+    room = lobby_row() | {
+        "tick": 12345,
+        "clientmodsoff": False,
+        "nat": 1,
+        "mods_info": mods_info,
+    }
     credential = "credential-value"
     client = StubKleiClient(
         {
@@ -128,6 +145,7 @@ async def test_klei_client_queries_lobby_and_room_in_order() -> None:
     assert lobbies[0].season == "dry"
     assert lobbies[0].connect_code == "c_connect('127.0.0.1', 10999)"
     assert rooms[0].tick == 12345
+    assert rooms[0].mods_info == mods_info
     assert client.calls[0] == (HTTPMethod.GET, lobby_url, None)
     assert client.calls[1][0:2] == (HTTPMethod.POST, room_url)
     assert client.calls[1][2] == {
@@ -135,6 +153,31 @@ async def test_klei_client_queries_lobby_and_room_in_order() -> None:
         "__token": credential,
         "query": {"__rowId": "row-1"},
     }
+
+
+async def test_klei_client_tolerates_unavailable_lobby_and_room() -> None:
+    lobby_url = "https://lobby.test/us-east-1-Steam.json.gz"
+    room_url = "https://room.test/us-east-1/lobby/read"
+    credential = "credential"
+    client = StubKleiClient(
+        {
+            lobby_url: HTTPError("lobby unavailable"),
+            room_url: HTTPError("room unavailable"),
+        },
+        access_token=credential,
+        lobby_url="https://lobby.test/{region}-{platform}.json.gz",
+        room_url="https://room.test/{region}/lobby/read",
+    )
+
+    assert await client.lobby(Region.US_EAST, Platform.STEAM) == ()
+    assert await client.room("row-1", Region.US_EAST) is None
+
+
+async def test_room_queries_require_access_token() -> None:
+    client = KleiClient()
+
+    with pytest.raises(ValueError, match="access token"):
+        await client.get_rooms(())
 
 
 def test_klei_client_rejects_invalid_concurrency() -> None:

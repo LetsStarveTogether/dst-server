@@ -1,5 +1,6 @@
 local values = require("dst_server.values")
 local commands = {}
+local MAX_GIVE_ITEMS = 64
 
 function commands.announce(args)
     c_announce(values.required_string(args, "message"))
@@ -50,6 +51,67 @@ function commands.ban_player(args)
         TheNet:BanForTime(userid, values.required_integer(args, "seconds", 1))
     end
     return true
+end
+
+function commands.get_blocklist()
+    local result = {}
+    for _, entry in ipairs(TheNet:GetBlacklist() or {}) do
+        if type(entry) == "table" then
+            local userid = type(entry.userid) == "string" and entry.userid or nil
+            local netid = type(entry.netid) == "string" and entry.netid or nil
+            local identifier = userid ~= "" and userid or netid
+            if identifier ~= nil and identifier ~= "" then
+                result[#result + 1] = identifier
+            end
+        end
+    end
+    table.sort(result)
+    return result
+end
+
+function commands.is_blocked(args)
+    local userid = values.required_string(args, "userid")
+    for _, entry in ipairs(TheNet:GetBlacklist() or {}) do
+        if type(entry) == "table"
+            and (entry.userid == userid or entry.netid == userid) then
+            return true
+        end
+    end
+    return false
+end
+
+function commands.unban_player(args)
+    local userid = values.required_string(args, "userid")
+    local blacklist = TheNet:GetBlacklist() or {}
+    local changed = false
+    for index = #blacklist, 1, -1 do
+        local entry = blacklist[index]
+        if type(entry) == "table"
+            and (entry.userid == userid or entry.netid == userid) then
+            table.remove(blacklist, index)
+            changed = true
+        end
+    end
+    if changed then
+        TheNet:SetBlacklist(blacklist)
+    end
+    return changed
+end
+
+function commands.is_whitelisted(args)
+    return TheNet:IsWhiteListed(values.required_string(args, "userid")) == true
+end
+
+function commands.whitelist_player(args)
+    local userid = values.required_string(args, "userid")
+    TheNet:AddToWhiteList(userid)
+    return TheNet:IsWhiteListed(userid) == true
+end
+
+function commands.unwhitelist_player(args)
+    local userid = values.required_string(args, "userid")
+    TheNet:RemoveFromWhiteList(userid)
+    return TheNet:IsWhiteListed(userid) ~= true
 end
 
 function commands.set_player_vitals(args)
@@ -147,12 +209,16 @@ function commands.teleport_player(args)
 end
 
 function commands.give_item(args)
-    local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
+    local userid = values.required_string(args, "userid")
+    local prefab = string.lower(values.required_string(args, "prefab"))
+    local count = values.required_integer(args, "count", 1)
+    if count > MAX_GIVE_ITEMS then
+        error("count must not exceed " .. tostring(MAX_GIVE_ITEMS))
+    end
+    local player = LookupPlayerInstByUserID(userid)
     if player == nil or player.components.inventory == nil then
         return 0
     end
-    local prefab = string.lower(values.required_string(args, "prefab"))
-    local count = values.required_integer(args, "count", 1)
     if not PrefabExists(prefab) then
         return 0
     end

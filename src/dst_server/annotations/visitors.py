@@ -188,7 +188,7 @@ class ComponentVisitor(BaseVisitor):
         self.processed.add(name)
         self.methods.append(
             self.build_function(
-                name,
+                f"{self.local_var}.{name}",
                 argument_names(node.args),
                 return_info(node.body),
                 node,

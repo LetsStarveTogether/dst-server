@@ -53,7 +53,7 @@ function player_values.player(client, player)
             and player.prefab
             or client.prefab
             or client.lobbycharacter
-            or "",
+            or json.null,
         admin = client.admin == true,
         moderator = client.moderator == true,
         is_ghost = json.null,

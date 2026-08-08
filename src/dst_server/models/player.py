@@ -21,7 +21,7 @@ from .entity import Entity, Position
 class Stat(FrozenModel):
     current: FiniteFloat
     maximum: FiniteFloat
-    percent: FiniteFloat
+    percent: Percent
 
 
 class Health(Stat):
@@ -66,7 +66,7 @@ class PlayerState(FrozenModel):
 class Player(FrozenModel):
     userid: Identifier
     name: Name
-    prefab: Identifier
+    prefab: Identifier | None
     admin: bool
     moderator: bool
     is_ghost: bool | None
@@ -82,10 +82,10 @@ class Item(FrozenModel):
     skin: Identifier | None
     stack_size: PositiveInt
     moisture_percent: Percent | None
-    uses_percent: FiniteFloat | None
-    freshness_percent: FiniteFloat | None
-    fuel_percent: FiniteFloat | None
-    armor_percent: FiniteFloat | None
+    uses_percent: Percent | None
+    freshness_percent: Percent | None
+    fuel_percent: Percent | None
+    armor_percent: Percent | None
     charge_percent: Percent | None
 
 

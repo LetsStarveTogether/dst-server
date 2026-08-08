@@ -10,6 +10,7 @@ from .rpc import (
     BOOL_RESPONSE,
     INT_RESPONSE,
     INVENTORY_RESPONSE,
+    PLAYER_IDS_RESPONSE,
     PLAYER_RESPONSE,
     PLAYERS_RESPONSE,
 )
@@ -25,8 +26,10 @@ from .validation import (
 if TYPE_CHECKING:
     from .client import GameClient
 
+MAX_GIVE_ITEMS = 64
 
-class PlayerClient:
+
+class PlayerClient:  # ruff:ignore[too-many-public-methods]
     def __init__(self, game: GameClient) -> None:
         self.game = game
 
@@ -61,6 +64,54 @@ class PlayerClient:
         if seconds is not None:
             arguments["seconds"] = item_count(seconds)
         await self.game.request("ban_player", arguments, BOOL_RESPONSE)
+
+    async def blocklist(self) -> tuple[str, ...]:
+        """Return this shard process's runtime blacklist identifiers."""
+        return await self.game.request("get_blocklist", {}, PLAYER_IDS_RESPONSE)
+
+    async def is_blocked(self, userid: str) -> bool:
+        return await self.game.request(
+            "is_blocked",
+            {"userid": player_id(userid)},
+            BOOL_RESPONSE,
+        )
+
+    async def unban(self, userid: str) -> bool:
+        """Remove all matching entries and report whether any existed."""
+        return await self.game.request(
+            "unban_player",
+            {"userid": player_id(userid)},
+            BOOL_RESPONSE,
+        )
+
+    async def is_whitelisted(self, userid: str) -> bool:
+        """Query whitelist membership on the master shard."""
+        return await self.game.request(
+            "is_whitelisted",
+            {"userid": player_id(userid)},
+            BOOL_RESPONSE,
+        )
+
+    async def whitelist(self, userid: str) -> bool:
+        """Add a member on the master shard and report resulting membership."""
+        return await self.game.request(
+            "whitelist_player",
+            {"userid": player_id(userid)},
+            BOOL_RESPONSE,
+        )
+
+    async def unwhitelist(self, userid: str) -> bool:
+        """Remove a member on the master shard and report resulting absence."""
+        return await self.game.request(
+            "unwhitelist_player",
+            {"userid": player_id(userid)},
+            BOOL_RESPONSE,
+        )
+
+    async def is_admin(self, userid: str) -> bool | None:
+        """Return online admin state, or ``None`` when not connected."""
+        player = await self.get(userid)
+        return None if player is None else player.admin
 
     async def set_vitals(
         self,
@@ -147,12 +198,16 @@ class PlayerClient:
         )
 
     async def give(self, userid: str, item: str, count: int = 1) -> int:
+        count = item_count(count)
+        if count > MAX_GIVE_ITEMS:
+            msg = f"count must not exceed {MAX_GIVE_ITEMS}"
+            raise ValueError(msg)
         return await self.game.request(
             "give_item",
             {
                 "userid": player_id(userid),
                 "prefab": prefab(item),
-                "count": item_count(count),
+                "count": count,
             },
             INT_RESPONSE,
         )
@@ -169,4 +224,4 @@ class PlayerClient:
         )
 
 
-__all__ = ["PlayerClient"]
+__all__ = ["MAX_GIVE_ITEMS", "PlayerClient"]
