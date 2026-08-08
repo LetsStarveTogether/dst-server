@@ -4,11 +4,22 @@ local values = require("dst_server.values")
 local actions = {}
 
 local function capture(action)
+    local action_id = action.action ~= nil and action.action.id or nil
+    if not state.action_allowlist[action_id] then
+        return nil
+    end
+    local actor = action.doer
+    if actor == nil or not actor:HasTag("player") then
+        return nil
+    end
+
+    state.action_sequence = state.action_sequence + 1
+    action._dst_action_seq = state.action_sequence
     local point = action.GetActionPoint ~= nil and action:GetActionPoint() or nil
     return {
-        action_id = tostring(action.action.id),
+        action_id = tostring(action_id),
         action_sequence = action._dst_action_seq,
-        actor = values.entity_ref(action.doer),
+        actor = values.entity_ref(actor),
         target = values.entity_ref(action.target),
         initial_target_owner = values.entity_ref(action.initialtargetowner),
         inventory_object = values.item_ref(action.invobject),
@@ -16,6 +27,12 @@ local function capture(action)
         recipe = values.text(action.recipe, 128),
         forced = action.forced == true,
     }
+end
+
+local function emit(snapshot, results)
+    snapshot.success = results[1] == true
+    snapshot.reason = values.text(results[2], 256)
+    telemetry.emit("dst.player.action", snapshot)
 end
 
 function actions.install()
@@ -34,18 +51,7 @@ function actions.install()
         end
 
         local action = ...
-        local captured, snapshot = pcall(function()
-            local actor = action.doer
-            local action_id = action.action ~= nil and action.action.id or nil
-            if actor == nil
-                or not actor:HasTag("player")
-                or not state.action_allowlist[action_id] then
-                return nil
-            end
-            state.action_sequence = state.action_sequence + 1
-            action._dst_action_seq = state.action_sequence
-            return capture(action)
-        end)
+        local captured, snapshot = pcall(capture, action)
         if not captured then
             state.errors = state.errors + 1
             return original_do(...)
@@ -55,11 +61,7 @@ function actions.install()
         end
 
         local results = telemetry.pack(original_do(...))
-        local emitted = pcall(function()
-            snapshot.success = results[1] == true
-            snapshot.reason = values.text(results[2], 256)
-            telemetry.emit("dst.player.action", snapshot)
-        end)
+        local emitted = pcall(emit, snapshot, results)
         if not emitted then
             state.errors = state.errors + 1
         end

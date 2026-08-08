@@ -11,6 +11,7 @@ dependencies = [
     "luaparser>=4.0.1,<5",
     "opentelemetry-api~=1.44.0",
     "pydantic>=2.13.4",
+    "python-ulid>=4.0.1",
 ]
 
 [project.optional-dependencies]

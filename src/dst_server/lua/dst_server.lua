@@ -1,4 +1,5 @@
 local state = require("dst_server.state")
+local values = require("dst_server.values")
 local driver = {}
 local methods = {}
 
@@ -33,8 +34,10 @@ function driver.install(options)
         error("driver options must be a table")
     end
     local nonce = options.nonce
-    if type(nonce) ~= "string" or #nonce < 16 or #nonce > 128 then
-        error("nonce must contain 16 to 128 bytes")
+    if type(nonce) ~= "string"
+        or #nonce ~= 26
+        or string.match(nonce, "^[0-7][0-9A-HJKMNP-TV-Z]+$") == nil then
+        error("nonce must be a canonical ULID")
     end
     local profile = options.profile
     if profile ~= "off" and profile ~= "critical" and profile ~= "history" then
@@ -66,19 +69,19 @@ function driver.install(options)
         if type(GetTick) ~= "function" or type(GetTimeReal) ~= "function" then
             error("required telemetry clock is unavailable")
         end
-        if profile == "history" then
-            require("dst_server.actions").install()
-        end
         local world_events = require("dst_server.world_events")
         world_events.install_shard()
         world_events.install_world()
+        if profile == "history" and next(action_allowlist) ~= nil then
+            require("dst_server.actions").install()
+        end
     end)
     if ok then
         state.telemetry_active = true
     else
         local message = type(failure) == "string" and failure ~= "" and failure
             or "telemetry installation failed"
-        state.telemetry_error = message:gsub("%c", " "):sub(1, 1024)
+        state.telemetry_error = values.text(message:gsub("%c", " "), 1024)
     end
     return driver.health()
 end

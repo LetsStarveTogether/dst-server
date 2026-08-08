@@ -32,7 +32,10 @@ class CausedData(PlayerData):
 
 class EventRecord[DataT](FrozenModel):
     v: Literal[1]
-    nonce: Annotated[str, Field(min_length=16, max_length=128)]
+    nonce: Annotated[
+        str,
+        Field(pattern=r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"),
+    ]
     seq: PositiveInt
     event: str
     tick: NonNegativeInt

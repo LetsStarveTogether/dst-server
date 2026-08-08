@@ -69,7 +69,7 @@ class CombatData(PlayerData):
 
 class CombatHitData(CombatData):
     target: EntityRef
-    damage_resolved: FiniteFloat
+    damage_resolved: FiniteFloat | None
     redirected: EntityRef | None
 
 

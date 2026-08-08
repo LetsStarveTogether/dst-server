@@ -43,7 +43,7 @@ DEFAULT_ACTIONS = (
 
 
 class TelemetrySettings(FrozenModel):
-    profile: TelemetryProfile = "off"
+    profile: TelemetryProfile = "critical"
     actions: tuple[Identifier, ...] = DEFAULT_ACTIONS
 
 
