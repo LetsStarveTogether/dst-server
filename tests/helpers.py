@@ -1,8 +1,69 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import re
+import select
+from collections.abc import Callable
+from typing import Self
 
+from dst_server.game import DriverHealth
 from dst_server.runtime import Server, ServerConfig
+from dst_server.runtime.console import StaleGenerationError
+
+FRAME = re.compile(rb"DST_SERVER_FRAME\|([0-9A-HJKMNP-TV-Z]{26})\|START")
+COMMAND_DONE = b"DST_RemoteCommandDone"
+
+
+def process_stopped(process_id: int) -> bool:
+    try:
+        descriptor = os.pidfd_open(process_id)
+    except ProcessLookupError:
+        return True
+    try:
+        readable, _, _ = select.select((descriptor,), (), (), 2)
+        return bool(readable)
+    finally:
+        os.close(descriptor)
+
+
+class StubWriter:
+    def __init__(self) -> None:
+        self.commands: list[bytes] = []
+        self.writes: asyncio.Queue[bytes] = asyncio.Queue()
+
+    def write(self, data: bytes) -> None:
+        self.commands.append(data)
+        self.writes.put_nowait(data)
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    async def wait_closed(self) -> None:
+        pass
+
+
+async def next_frame(writer: StubWriter) -> tuple[bytes, bytes, bytes]:
+    wrapped = await asyncio.wait_for(writer.writes.get(), 1)
+    match = FRAME.search(wrapped)
+    assert match is not None
+    token = match.group(1)
+    prefix = b"DST_SERVER_FRAME|" + token
+    return prefix + b"|START", prefix + b"|END", wrapped
+
+
+def feed_frame(
+    reader: asyncio.StreamReader,
+    start: bytes,
+    end: bytes,
+    *lines: bytes,
+) -> None:
+    reader.feed_data(b"\n".join((start, *lines, end, COMMAND_DONE, b"")))
+
 
 FAKE_SERVER = r"""#!/usr/bin/env python3
 import json
@@ -25,22 +86,40 @@ def stop(signum, frame):
     events.write("DST_Shutdown\nDST_Saved|session/TEST/1\nDST_Stopping\n")
 
 signal.signal(signal.SIGTERM, stop)
+
+def start_frame(command):
+    match = re.search(r"DST_SERVER_FRAME\|([0-9A-HJKMNP-TV-Z]{26})\|START", command)
+    assert match is not None
+    token = match.group(1)
+    results.write(f"DST_SERVER_FRAME|{token}|START\n")
+    return token
+
+def finish_frame(token):
+    results.write(
+        f"DST_SERVER_FRAME|{token}|END\nDST_RemoteCommandDone\n"
+    )
+
 busy = True
 for command in commands:
     if busy:
         busy = False
         results.write("DST_LuaBusy\n")
         continue
+    token = start_frame(command)
     if "driver.install" in command:
-        match = re.search(r'\\"nonce\\":\\"([^"\\]+)', command)
+        if shard == "driver-eof":
+            results.close()
+            continue
+        match = re.search(r'nonce\\*"\\*:\\*"([^"\\]+)', command)
         assert match is not None
         nonce = match.group(1)
         if shard == "core-failure":
             results.write(
                 "DST_SERVER_RESULT|"
                 + json.dumps({"ok": False, "error": "core install failed"})
-                + "\nDST_RemoteCommandDone\n"
+                + "\n"
             )
+            finish_frame(token)
             continue
         failed = shard == "telemetry-failure"
         health = {
@@ -53,8 +132,9 @@ for command in commands:
         results.write(
             "DST_SERVER_RESULT|"
             + json.dumps({"ok": True, "data": health})
-            + "\nDST_RemoteCommandDone\n"
+            + "\n"
         )
+        finish_frame(token)
         if health["telemetry_status"] == "active":
             event = {
                 "v": 1,
@@ -72,15 +152,17 @@ for command in commands:
         results.write(
             "DST_SERVER_RESULT|"
             + json.dumps({"ok": True, "data": []})
-            + "\nDST_RemoteCommandDone\n"
+            + "\n"
         )
+        finish_frame(token)
         continue
-    if '"save"' in command:
+    if "save" in command:
         results.write(
             "DST_SERVER_RESULT|"
             + json.dumps({"ok": True, "data": True})
-            + "\nDST_RemoteCommandDone\n"
+            + "\n"
         )
+        finish_frame(token)
         continue
     print("command received", flush=True)
     event = {
@@ -106,7 +188,8 @@ for command in commands:
         },
     }
     results.write("DST_OTEL|" + json.dumps(event) + "\n")
-    results.write(f"result:{command.strip()}\nDST_RemoteCommandDone\n")
+    results.write('result:print("hello")\n')
+    finish_frame(token)
 """
 
 
@@ -117,151 +200,36 @@ def structured_result(data: object) -> str:
     })
 
 
-def room_data() -> dict[str, object]:
-    return {
-        "name": "Test Room",
-        "description": "Description",
-        "game_mode": "survival",
-        "playstyle": "social",
-        "max_players": 6,
-        "player_count": 1,
-        "pvp": False,
-        "is_paused": False,
-        "has_password": True,
-        "is_dedicated": True,
-        "is_online": True,
-        "lan_only": False,
-        "friends_only": False,
-        "mods_enabled": True,
-        "clan_id": "",
-        "clan_only": False,
-        "shard_id": "1",
-        "is_master_shard": True,
-    }
-
-
-def world_data() -> dict[str, object]:
-    return {
-        "age": 11.5,
-        "cycles": 10,
-        "day": 11,
-        "time": 0.5,
-        "time_in_phase": 0.25,
-        "phase": "day",
-        "is_day": True,
-        "is_dusk": False,
-        "is_night": False,
-        "moon_phase": "new",
-        "is_waxing_moon": True,
-        "is_full_moon": False,
-        "is_new_moon": False,
-        "season": "autumn",
-        "is_spring": False,
-        "is_summer": False,
-        "is_autumn": True,
-        "is_winter": False,
-        "elapsed_days_in_season": 2,
-        "season_progress": 0.2,
-        "remaining_days_in_season": 8,
-        "spring_length": 20,
-        "summer_length": 15,
-        "autumn_length": 20,
-        "winter_length": 15,
-        "temperature": 20.5,
-        "moisture": 0,
-        "moisture_ceiling": 480,
-        "precipitation_probability": 0,
-        "precipitation_rate": 0,
-        "precipitation": "none",
-        "is_raining": False,
-        "is_snowing": False,
-        "is_lunar_hailing": False,
-        "is_acid_raining": False,
-        "is_snow_covered": False,
-        "snow_level": 0,
-        "lunar_hail_level": 42,
-        "lunar_hail_rate": 0,
-        "wetness": 73,
-        "is_wet": False,
-        "is_cave": False,
-    }
-
-
-def player_data() -> dict[str, object]:
-    return {
-        "userid": "KU_TEST",
-        "name": "Player",
-        "prefab": "wilson",
-        "admin": True,
-        "moderator": False,
-        "is_ghost": False,
-        "position": {"x": 1, "y": 0, "z": 2},
-        "age": {"seconds": 480.5, "days": 1, "display_days": 2},
-        "vitals": {
-            "health": {
-                "current": 120,
-                "maximum": 150,
-                "percent": 0.8,
-                "is_dead": False,
-                "is_invincible": False,
-            },
-            "hunger": {"current": 105, "maximum": 150, "percent": 0.7},
-            "sanity": {"current": 120, "maximum": 200, "percent": 0.6},
-            "temperature": {"current": 25, "maximum": 70},
-            "moisture": {"current": 10, "maximum": 100, "percent": 0.1},
-        },
-        "state": {
-            "network_score": 0,
-            "combat_target": {"prefab": "hound", "guid": 50},
-            "weapon": {"prefab": "spear", "guid": 51},
-            "mount": None,
-            "follower_count": 1,
-            "followers": [{"prefab": "chester", "guid": 52}],
-            "skill_xp": 15,
-            "available_skill_points": 2,
-            "activated_skills": ["wilson_torch_1"],
-        },
-    }
-
-
-def item_data(prefab: str = "twigs") -> dict[str, object]:
-    return {
-        "prefab": prefab,
-        "guid": 100,
-        "skin": None,
-        "stack_size": 12,
-        "moisture_percent": 0,
-        "uses_percent": None,
-        "freshness_percent": None,
-        "fuel_percent": None,
-        "armor_percent": None,
-        "charge_percent": 1,
-    }
-
-
-def runtime_data() -> dict[str, object]:
-    return {
-        "session_id": "0123456789ABCDEF",
-        "snapshot": 26,
-        "build_version": "740477",
-        "save_version": 5.23,
-        "generated_on_save_version": 5.23,
-        "seed": 704793166,
-        "level_id": "SURVIVAL_TOGETHER",
-        "branch": "release",
-        "app_version": "740477",
-        "shard_id": "1",
-        "is_master_shard": True,
-        "is_cave": False,
-    }
-
-
 class StubServer(Server):
     def __init__(self, responses: list[str]) -> None:
         self.responses = responses
         self.commands: list[str] = []
+        self.initial_install = True
         super().__init__(ServerConfig(shard="test"))
 
-    async def execute(self, command: str) -> str:
+    async def initialize(self) -> Self:
+        await self.driver.install(0)
+        return self
+
+    async def install_driver(self) -> DriverHealth:
+        if not self.initial_install:
+            return await super().install_driver()
+        self.initial_install = False
+        return DriverHealth(
+            protocol=1,
+            telemetry_status="disabled",
+            telemetry_error=None,
+            events_emitted=0,
+            errors=0,
+        )
+
+    async def _execute(
+        self,
+        command: str,
+        generation_is_current: Callable[[], bool] | None = None,
+    ) -> str:
+        if generation_is_current is not None and not generation_is_current():
+            msg = "DST generation changed before the command was written"
+            raise StaleGenerationError(msg)
         self.commands.append(command)
         return self.responses.pop(0)

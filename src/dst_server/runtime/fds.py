@@ -7,6 +7,7 @@ import sys
 
 PROTOCOL_FDS = (3, 4, 5)
 LAST_PROTOCOL_FD = PROTOCOL_FDS[-1]
+PROTOCOL_LINE_LIMIT = 64 * 1024
 
 
 def open_pipes() -> tuple[list[int], tuple[int, int, int]]:
@@ -49,7 +50,7 @@ async def open_reader(
     descriptor: int,
 ) -> tuple[asyncio.StreamReader, asyncio.ReadTransport]:
     loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader()
+    reader = asyncio.StreamReader(limit=PROTOCOL_LINE_LIMIT)
     protocol = asyncio.StreamReaderProtocol(reader)
     pipe = os.fdopen(descriptor, "rb", buffering=0)
     try:

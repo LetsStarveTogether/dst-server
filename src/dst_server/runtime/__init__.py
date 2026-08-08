@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 from .config import ServerConfig
+from .console import IndeterminateCommandError, ResponseTooLargeError
 from .server import Server
 
-__all__ = ["Server", "ServerConfig"]
+__all__ = [
+    "IndeterminateCommandError",
+    "ResponseTooLargeError",
+    "Server",
+    "ServerConfig",
+]

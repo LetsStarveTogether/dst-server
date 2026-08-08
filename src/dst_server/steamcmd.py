@@ -15,9 +15,12 @@ type SteamCMDCommand = Sequence[str]
 COMMAND_NAME = re.compile(r"[A-Za-z0-9_@.-]+\Z")
 PLATFORMS = {"linux", "windows", "macos"}
 TERMINATE_GRACE_PERIOD = 5.0
+PROXY_VARIABLES = ("http_proxy", "https_proxy")
 
 
 class SteamCMD:  # ruff:ignore[too-many-public-methods]
+    """Run SteamCMD, optionally proxying it via ``DST_SERVER_STEAMCMD_PROXY``."""
+
     def __init__(
         self,
         executable: str | Path,
@@ -348,10 +351,13 @@ class SteamCMD:  # ruff:ignore[too-many-public-methods]
         script: Path,
         secrets: tuple[str, ...],
     ) -> str:
-        environment = None
+        environment = os.environ.copy()
+        if proxy := environment.get("DST_SERVER_STEAMCMD_PROXY"):
+            environment.update(dict.fromkeys(PROXY_VARIABLES, proxy))
+            secrets += (proxy,)
         working_directory = None
         if self.steam_home is not None:
-            environment = os.environ | {"HOME": str(self.steam_home)}
+            environment["HOME"] = str(self.steam_home)
             working_directory = self.steam_home
         process = await asyncio.create_subprocess_exec(
             self.executable,
@@ -365,12 +371,28 @@ class SteamCMD:  # ruff:ignore[too-many-public-methods]
             limit=1024 * 1024,
             start_new_session=True,
         )
-        try:
-            output = await self.read_output(process, secrets)
-        except BaseException:
+        wait_task = asyncio.create_task(process.wait())
+        output_task = asyncio.create_task(self.read_output(process, secrets))
+        try:  # ruff:ignore[too-many-statements-in-try-clause]
+            done, _ = await asyncio.wait(
+                (wait_task, output_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if output_task in done:
+                output_task.result()
+            returncode = await wait_task
             await terminate_process(process)
+            output = await output_task
+        except BaseException as primary:
+            cleanup_error = await cleanup_process_tasks(
+                process,
+                primary,
+                wait_task,
+                output_task,
+            )
+            if cleanup_error is not None:
+                raise primary from cleanup_error
             raise
-        returncode = await process.wait()
         if returncode:
             detail = output[-4000:].strip()
             suffix = "" if not detail else f": {detail}"
@@ -407,6 +429,47 @@ async def terminate_process(process: asyncio.subprocess.Process) -> None:
             signal_process_group(process.pid, signal.SIGKILL)
             await process.wait()
     signal_process_group(process.pid, signal.SIGKILL)
+
+
+async def cleanup_process_tasks(  # ruff:ignore[complex-structure]
+    process: asyncio.subprocess.Process,
+    primary: BaseException,
+    *tasks: asyncio.Task[object],
+) -> BaseException | None:
+    failures: list[BaseException] = []
+    try:
+        await terminate_process(process)
+    except BaseException as error:
+        if error is not primary:
+            failures.append(error)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+    while True:
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except BaseException as error:
+            if error is not primary and not any(
+                error is failure for failure in failures
+            ):
+                failures.append(error)
+        else:
+            break
+    failures.extend(
+        result
+        for result in results
+        if isinstance(result, BaseException)
+        and not isinstance(result, asyncio.CancelledError)
+        and result is not primary
+        and not any(result is failure for failure in failures)
+    )
+    if not failures:
+        return None
+    if len(failures) == 1:
+        return failures[0]
+    message = "process cleanup failed"
+    return BaseExceptionGroup(message, failures)
 
 
 def signal_process_group(process_id: int, value: signal.Signals) -> None:

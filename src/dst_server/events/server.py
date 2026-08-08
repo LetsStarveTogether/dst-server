@@ -33,7 +33,7 @@ class ShutdownEvent(FrozenModel):
 
 class UnknownEvent(FrozenModel):
     event: Literal["unknown"] = "unknown"
-    line: Annotated[str, Field(max_length=1024 * 1024)]
+    line: str
 
 
 type Event = (
@@ -47,23 +47,26 @@ type Event = (
 
 
 def parse_event(line: str) -> Event:
-    if line == "DST_Master_Ready" or line.startswith("DST_Master_Ready|"):
-        return ReadyEvent(detail=line.partition("|")[2])
-    if line.startswith("DST_SessionId|"):
-        session_id = line.removeprefix("DST_SessionId|")
-        if session_id:
-            return SessionEvent(session_id=session_id)
-    if line == "DST_Saved" or line.startswith("DST_Saved|"):
-        path = line.partition("|")[2]
-        tail = path.rsplit("/", 1)[-1]
-        return SavedEvent(
-            path=path,
-            snapshot=int(tail) if tail.isdigit() else None,
-        )
-    if line == "DST_Stopping":
-        return StoppingEvent()
-    if line == "DST_Shutdown":
-        return ShutdownEvent()
+    try:  # ruff:ignore[too-many-statements-in-try-clause]
+        if line == "DST_Master_Ready" or line.startswith("DST_Master_Ready|"):
+            return ReadyEvent(detail=line.partition("|")[2])
+        if line.startswith("DST_SessionId|"):
+            session_id = line.removeprefix("DST_SessionId|")
+            if session_id:
+                return SessionEvent(session_id=session_id)
+        if line == "DST_Saved" or line.startswith("DST_Saved|"):
+            path = line.partition("|")[2]
+            tail = path.rsplit("/", 1)[-1]
+            return SavedEvent(
+                path=path,
+                snapshot=int(tail) if tail.isdigit() else None,
+            )
+        if line == "DST_Stopping":
+            return StoppingEvent()
+        if line == "DST_Shutdown":
+            return ShutdownEvent()
+    except ValueError:
+        pass
     return UnknownEvent(line=line)
 
 

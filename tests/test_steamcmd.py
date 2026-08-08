@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import pytest
 
+from dst_server import steamcmd
 from dst_server.steamcmd import SteamCMD
+
+from .helpers import process_stopped
 
 FAKE_STEAMCMD = r"""#!/usr/bin/env python3
 import os
@@ -16,7 +18,6 @@ import shlex
 import signal
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 assert sys.argv[1] == "+runscript"
@@ -24,6 +25,9 @@ script = Path(sys.argv[2])
 content = script.read_text(encoding="utf-8")
 print("ARGV|" + "|".join(sys.argv[1:]), flush=True)
 print("HOME|" + os.environ.get("HOME", ""), flush=True)
+print("PROXY|" + "|".join(os.environ.get(name, "") for name in (
+    "http_proxy", "https_proxy"
+)), flush=True)
 print(f"MODE|{script.stat().st_mode & 0o777:o}", flush=True)
 print("SCRIPT-BEGIN", flush=True)
 print(content, end="", flush=True)
@@ -36,36 +40,33 @@ for line in content.splitlines():
     if tokens[0] == "fail":
         print("failure: " + tokens[1], flush=True)
         raise SystemExit(7)
-    if tokens[0] == "serialize":
-        marker = Path(tokens[1])
-        descriptor = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        try:
-            time.sleep(0.1)
-        finally:
-            os.close(descriptor)
-            marker.unlink()
     if tokens[0] == "hang":
-        marker = Path(tokens[1])
         child = subprocess.Popen([
             sys.executable,
             "-c",
-            "import os,signal,sys,time;"
-            "from pathlib import Path;"
-            "Path(sys.argv[1]).write_text(str(os.getpid()),encoding='utf-8');"
+            "import signal;"
             "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
-            "time.sleep(60)",
-            str(marker),
+            "signal.pause()",
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        while not marker.exists():
-            time.sleep(0.01)
+        print(f"CHILD|{child.pid}", flush=True)
         child.wait()
+    if tokens[0] == "orphan":
+        child = subprocess.Popen([
+            sys.executable,
+            "-c",
+            "import signal;"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+            "signal.pause()",
+        ])
+        print(f"CHILD|{child.pid}", flush=True)
+        raise SystemExit(0)
 """
 
 
 def make_client(
     tmp_path: Path,
     *,
-    log_handler: list[str] | None = None,
+    log_handler: Callable[[str], None] | None = None,
 ) -> SteamCMD:
     executable = tmp_path / "fake-steamcmd"
     executable.write_text(FAKE_STEAMCMD, encoding="utf-8")
@@ -73,7 +74,7 @@ def make_client(
     return SteamCMD(
         executable,
         steam_home=tmp_path / "steam home",
-        log_handler=None if log_handler is None else log_handler.append,
+        log_handler=log_handler,
     )
 
 
@@ -81,37 +82,11 @@ def script_from(output: str) -> str:
     return output.split("SCRIPT-BEGIN\n", 1)[1].split("SCRIPT-END\n", 1)[0]
 
 
-def path_missing(path: Path) -> bool:
-    return not path.exists()
-
-
-def process_stopped(process_id: int) -> bool:
-    for _ in range(100):
-        status = Path(f"/proc/{process_id}/stat")
-        try:
-            state = status.read_text(encoding="utf-8").split()[2]
-        except FileNotFoundError, ProcessLookupError:
-            return True
-        if state == "Z":
-            return True
-        time.sleep(0.01)
-    return False
-
-
-def wait_for_path(path: Path) -> None:
-    deadline = time.monotonic() + 2
-    while not path.exists():
-        if time.monotonic() >= deadline:
-            msg = f"timed out waiting for {path}"
-            raise TimeoutError(msg)
-        time.sleep(0.01)
-
-
 async def test_execute_uses_isolated_home_script_and_streaming_log(
     tmp_path: Path,
 ) -> None:
     lines: list[str] = []
-    client = make_client(tmp_path, log_handler=lines)
+    client = make_client(tmp_path, log_handler=lines.append)
 
     output = await client.execute([
         ("login", "anonymous"),
@@ -125,8 +100,29 @@ async def test_execute_uses_isolated_home_script_and_streaming_log(
     assert script.startswith("@ShutdownOnFailedCommand 1\n@NoPromptForPassword 1\n")
     assert 'custom_command "hello world"\n' in script
     assert script.endswith("quit\n")
-    assert path_missing(script_path)
+    assert not await asyncio.to_thread(script_path.exists)
     assert "SCRIPT-BEGIN" in lines
+
+
+async def test_dedicated_proxy_is_scoped_to_steamcmd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy_variables = ("http_proxy", "https_proxy")
+    for name in proxy_variables:
+        monkeypatch.setenv(name, "http://inherited.invalid")
+    monkeypatch.setenv(
+        "DST_SERVER_STEAMCMD_PROXY",
+        "http://user:secret@127.0.0.1:1080",
+    )
+
+    output = await make_client(tmp_path).execute([("noop",)])
+
+    assert "PROXY|***|***" in output
+    assert "secret" not in output
+    assert all(
+        os.environ[name] == "http://inherited.invalid" for name in proxy_variables
+    )
 
 
 async def test_query_commands(tmp_path: Path) -> None:
@@ -218,7 +214,7 @@ async def test_update_validate_and_maintenance_commands(tmp_path: Path) -> None:
 
 async def test_failure_redacts_output_and_removes_script(tmp_path: Path) -> None:
     lines: list[str] = []
-    client = make_client(tmp_path, log_handler=lines)
+    client = make_client(tmp_path, log_handler=lines.append)
 
     with pytest.raises(ChildProcessError, match="status 7") as error:
         await client.execute([("fail", "secret-value")], secrets=("secret-value",))
@@ -239,41 +235,172 @@ async def test_spawn_failure_removes_script(tmp_path: Path) -> None:
 
 
 async def test_external_timeout_terminates_process_group(tmp_path: Path) -> None:
-    client = make_client(tmp_path)
-    marker = tmp_path / "timeout-child.pid"
+    loop = asyncio.get_running_loop()
+    child: asyncio.Future[int] = loop.create_future()
+    timeout = asyncio.timeout(2)
+
+    def handle_log(line: str) -> None:
+        if line.startswith("CHILD|") and not child.done():
+            child.set_result(int(line.partition("|")[2]))
+            timeout.reschedule(loop.time())
+
+    client = make_client(tmp_path, log_handler=handle_log)
 
     with pytest.raises(TimeoutError):
-        async with asyncio.timeout(0.5):
-            await client.execute([("hang", str(marker))])
+        async with timeout:
+            await client.execute([("hang",)])
 
-    process_id = int(marker.read_text(encoding="utf-8"))
+    process_id = child.result()
     assert await asyncio.to_thread(process_stopped, process_id)
 
 
 async def test_cancellation_terminates_process_group(tmp_path: Path) -> None:
-    client = make_client(tmp_path)
-    marker = tmp_path / "cancelled-child.pid"
-    task = asyncio.create_task(client.execute([("hang", str(marker))]))
-    await asyncio.to_thread(wait_for_path, marker)
+    started = asyncio.Event()
+    process_id = 0
+
+    def handle_log(line: str) -> None:
+        nonlocal process_id
+        if line.startswith("CHILD|"):
+            process_id = int(line.partition("|")[2])
+            started.set()
+
+    client = make_client(tmp_path, log_handler=handle_log)
+    task = asyncio.create_task(client.execute([("hang",)]))
+    async with asyncio.timeout(2):
+        await started.wait()
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        async with asyncio.timeout(2):
+            await task
 
-    process_id = int(marker.read_text(encoding="utf-8"))
     assert await asyncio.to_thread(process_stopped, process_id)
 
 
-async def test_client_serializes_shared_steam_home(tmp_path: Path) -> None:
+async def test_leader_exit_terminates_descendant_holding_stdout(
+    tmp_path: Path,
+) -> None:
     client = make_client(tmp_path)
-    marker = tmp_path / "active"
 
-    await asyncio.gather(
-        client.execute([("serialize", str(marker))]),
-        client.execute([("serialize", str(marker))]),
+    async with asyncio.timeout(2):
+        output = await client.execute([("orphan",)])
+
+    process_id = int(
+        next(
+            line for line in output.splitlines() if line.startswith("CHILD|")
+        ).partition("|")[2]
     )
+    assert await asyncio.to_thread(process_stopped, process_id)
 
-    assert path_missing(marker)
+
+@pytest.mark.parametrize("cancelled", [False, True], ids=["error", "cancel"])
+async def test_cleanup_failure_preserves_primary_and_reaps_tasks(
+    cancelled: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Reader:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.line = None if cancelled else b"READY\n"
+
+        async def readline(self) -> bytes:
+            if self.line is not None:
+                line, self.line = self.line, None
+                return line
+            self.started.set()
+            await asyncio.Event().wait()
+            return b""
+
+    class Process:
+        pid = 1
+        returncode = None
+
+        def __init__(self) -> None:
+            self.stdout = Reader()
+
+        async def wait(self) -> int:
+            await asyncio.Event().wait()
+            return 0
+
+    process = Process()
+
+    async def spawn(  # ruff:ignore[unused-async]
+        *_args: object,
+        **_kwargs: object,
+    ) -> Process:
+        return process
+
+    async def fail_cleanup(_process: object) -> None:  # ruff:ignore[unused-async]
+        msg = "cleanup B"
+        raise LookupError(msg)
+
+    def fail_log(_line: str) -> None:
+        msg = "primary A"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(steamcmd, "terminate_process", fail_cleanup)
+    client = SteamCMD(tmp_path / "steamcmd", log_handler=fail_log)
+    existing_tasks = asyncio.all_tasks()
+    executing = client.execute_script(tmp_path / "script", ())
+
+    if cancelled:
+        task = asyncio.create_task(executing)
+        async with asyncio.timeout(1):
+            await process.stdout.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            async with asyncio.timeout(1):
+                await task
+    else:
+        with pytest.raises(RuntimeError, match="primary A") as caught:
+            await executing
+
+    assert isinstance(caught.value.__cause__, LookupError)
+    assert str(caught.value.__cause__) == "cleanup B"
+    assert asyncio.all_tasks() == existing_tasks
+
+
+async def test_client_serializes_executions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_client(tmp_path)
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_normalized = asyncio.Event()
+    calls = 0
+
+    async def execute_script(script: Path, secrets: tuple[str, ...]) -> str:
+        nonlocal calls
+        del script, secrets
+        calls += 1
+        if calls == 1:
+            first_entered.set()
+            await release_first.wait()
+        return ""
+
+    def second_commands() -> Iterable[tuple[str, ...]]:
+        second_normalized.set()
+        yield ("noop",)
+
+    monkeypatch.setattr(client, "execute_script", execute_script)
+    first = asyncio.create_task(client.execute([("noop",)]))
+    async with asyncio.timeout(1):
+        await first_entered.wait()
+    second = asyncio.create_task(client.execute(second_commands()))
+
+    try:
+        async with asyncio.timeout(1):
+            await second_normalized.wait()
+        assert calls == 1
+    finally:
+        release_first.set()
+        async with asyncio.timeout(1):
+            await asyncio.gather(first, second)
+
+    assert calls == 2
 
 
 async def test_input_validation(tmp_path: Path) -> None:
@@ -304,14 +431,12 @@ async def test_input_validation(tmp_path: Path) -> None:
     os.environ.get("DST_SERVER_STEAMCMD_TEST") != "1",
     reason="set DST_SERVER_STEAMCMD_TEST=1 to run the real SteamCMD query test",
 )
-async def test_real_steamcmd_app_and_depot_query() -> None:
+@pytest.mark.system
+async def test_real_steamcmd_depot_query(tmp_path: Path) -> None:
     executable = os.environ.get("DST_SERVER_STEAMCMD", "/usr/bin/steamcmd")
-    with TemporaryDirectory(prefix="dst-server-steamcmd-test-", dir="/tmp") as value:
-        root = Path(value)
-        client = SteamCMD(executable, steam_home=root / "home")
-        async with asyncio.timeout(180):
-            info = await client.app_info(343050)
-            depots = await client.depot_info(343050)
-        assert '"343050"' in info
-        assert '"depots"' in depots
-    assert path_missing(root)
+    home = tmp_path / "home"
+    client = SteamCMD(executable, steam_home=home)
+    async with asyncio.timeout(180):
+        depots = await client.depot_info(343050)
+    assert '"depots"' in depots
+    assert not tuple(home.glob(".dst-server-steamcmd-*"))

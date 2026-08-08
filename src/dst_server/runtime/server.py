@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from time import time_ns
-from types import TracebackType
 from typing import Self
 
 from logbook import Logger
@@ -15,20 +15,45 @@ from logbook import Logger
 from dst_server.events import ObservedGameEvent
 from dst_server.events import server as server_events
 from dst_server.game import DriverHealth, GameClient
+from dst_server.game.validation import positive_timeout
 from dst_server.telemetry.recorder import Recorder
 from dst_server.telemetry.stream import EventStream
 
 from .config import ServerConfig
-from .console import Console
+from .console import (
+    DEFAULT_COMMAND_TIMEOUT,
+    Console,
+    StaleGenerationError,
+    track_request,
+)
 from .driver import Driver
 from .fds import open_pipes, open_reader, open_writer
-from .lifecycle import Lifecycle
+from .lifecycle import Lifecycle, RequestState, read_line
 
 FD_LAUNCHER = Path(__file__).with_name("fds.py")
 SUBPROCESS_STREAM_LIMIT = 1024 * 1024
+DEFAULT_STARTUP_TIMEOUT = 300.0
 logger = Logger(__name__)
+_operation_deadline = ContextVar[float | None](
+    "dst_server_operation_deadline", default=None
+)
 
 type LogHandler = Callable[[str], None]
+
+
+@asynccontextmanager
+async def _timeout_scope(duration: float) -> AsyncIterator[float]:
+    inherited = _operation_deadline.get()
+    if inherited is not None:
+        yield inherited
+        return
+    deadline = asyncio.get_running_loop().time() + duration
+    token = _operation_deadline.set(deadline)
+    try:
+        async with asyncio.timeout_at(deadline):
+            yield deadline
+    finally:
+        _operation_deadline.reset(token)
 
 
 class Server:  # ruff:ignore[too-many-public-methods]
@@ -48,18 +73,26 @@ class Server:  # ruff:ignore[too-many-public-methods]
         self.lifecycle_task: asyncio.Task[None] | None = None
         self.log_task: asyncio.Task[None] | None = None
         self.closed = False
-        self.recorder = Recorder(config.cluster, config.shard)
+        self.recorder = Recorder(
+            config.telemetry_cluster or config.cluster,
+            config.shard,
+        )
         self.game_events = EventStream(self.recorder)
+        self.driver = Driver(self.install_driver, config.cluster, config.shard)
+        self._driver_error: str | None = None
+        self._generation_changed = asyncio.Event()
         self.game = GameClient(
             shard=config.shard,
             lua_directory=config.lua_directory,
             telemetry=config.telemetry,
             execute=self.execute,
+            execute_ready=self._execute_ready,
+            execute_reload=self._execute_reload,
+            wait_reload=self._wait_reload,
             recorder=self.recorder,
             session_id=lambda: self.session_id,
             nonce=self.game_events.nonce,
         )
-        self.driver = Driver(self.install_driver, config.cluster, config.shard)
 
     @property
     def process(self) -> asyncio.subprocess.Process:
@@ -78,7 +111,11 @@ class Server:  # ruff:ignore[too-many-public-methods]
 
     @property
     def driver_health(self) -> DriverHealth:
-        return self.game.driver_health
+        return self.driver.health
+
+    @property
+    def driver_error(self) -> str | None:
+        return self._driver_error
 
     @property
     def telemetry_invalid(self) -> int:
@@ -92,19 +129,19 @@ class Server:  # ruff:ignore[too-many-public-methods]
         await self.start()
         return self
 
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        del exc_type, exc, exc_tb
-        await self.stop()
+    async def __aexit__(self, *_: object) -> None:
+        try:
+            await self.stop()
+        except TimeoutError:
+            await self.kill()
+            raise
 
-    async def start(self) -> None:
+    async def start(self, startup_timeout: float = DEFAULT_STARTUP_TIMEOUT) -> None:
         with self.recorder.operation("start", self.session_id) as span:
             try:
-                await self.start_process()
+                timeout = positive_timeout(startup_timeout, "startup")
+                async with _timeout_scope(timeout):
+                    await self.start_process()
             except BaseException:
                 self.recorder.set_process_up(False)
                 raise
@@ -112,7 +149,7 @@ class Server:  # ruff:ignore[too-many-public-methods]
             if self.session_id is not None:
                 span.set_attribute("dst.session.id", self.session_id)
 
-    async def start_process(self) -> None:
+    async def start_process(self) -> None:  # ruff:ignore[complex-structure]
         if self.child is not None:
             msg = "DST server process objects are single-use"
             raise RuntimeError(msg)
@@ -159,7 +196,7 @@ class Server:  # ruff:ignore[too-many-public-methods]
         self.console = Console(command_writer, result_reader, self.game_events)
         self.read_transports = (result_transport, event_transport)
         self.lifecycle_task = asyncio.create_task(
-            self.lifecycle.pump(event_reader, self.driver.session_started),
+            self._pump_lifecycle(event_reader),
             name=f"dst-events-{self.config.shard}",
         )
         stdout = self.process.stdout
@@ -170,18 +207,104 @@ class Server:  # ruff:ignore[too-many-public-methods]
             self.pump_logs(stdout),
             name=f"dst-logs-{self.config.shard}",
         )
-        try:
+        try:  # ruff:ignore[too-many-statements-in-try-clause]
             await self.wait_ready()
-            await self.driver.install(self.lifecycle.session_generation)
+            try:
+                await self.driver.install(self.lifecycle.session_generation)
+            except Exception:
+                if self.process.returncode is not None or self.lifecycle.eof:
+                    raise
+                logger.exception(
+                    "failed to install DST Lua driver; game remains running: "
+                    "{cluster}/{shard}",
+                    cluster=self.config.cluster,
+                    shard=self.config.shard,
+                )
         except BaseException:
             if self.process.returncode is None:
                 self.process.kill()
             await self.process.wait()
-            self.cancel_tasks()
             await self.finish()
             raise
 
-    async def execute(self, command: str) -> str:
+    async def _pump_lifecycle(self, reader: asyncio.StreamReader) -> None:
+        try:
+            await self.lifecycle.pump(reader, self._session_started)
+        finally:
+            self._generation_changed.set()
+
+    def _session_started(self, generation: int) -> None:
+        token = _operation_deadline.set(None)
+        try:
+            self.driver.session_started(generation)
+        finally:
+            _operation_deadline.reset(token)
+        changed = self._generation_changed
+        self._generation_changed = asyncio.Event()
+        changed.set()
+
+    async def execute(
+        self,
+        command: str,
+        completion_timeout: float = DEFAULT_COMMAND_TIMEOUT,
+    ) -> str:
+        timeout = positive_timeout(completion_timeout)
+        async with _timeout_scope(timeout):
+            return await self._execute(command)
+
+    async def _execute_ready(self, command: str) -> str:
+        async with _timeout_scope(DEFAULT_COMMAND_TIMEOUT):
+            while True:
+                generation = await self.driver.wait_ready()
+                try:
+                    return await self._execute(
+                        command,
+                        lambda generation=generation: self.driver.is_ready(generation),
+                    )
+                except StaleGenerationError:
+                    continue
+
+    async def _execute_reload(
+        self,
+        command: str,
+        completion_timeout: float,
+    ) -> tuple[str, int, float]:
+        timeout = positive_timeout(completion_timeout)
+        async with _timeout_scope(timeout) as deadline:
+            while True:
+                generation = await self.driver.wait_ready()
+                with track_request() as request_state:
+                    try:
+                        result = await self._execute(
+                            command,
+                            lambda generation=generation, request_state=request_state: (
+                                request_state.sent or self.driver.is_ready(generation)
+                            ),
+                        )
+                    except StaleGenerationError:
+                        if request_state.sent:
+                            raise
+                        continue
+                return result, generation, deadline
+
+    async def _wait_reload(self, generation: int, deadline: float) -> None:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError
+        async with asyncio.timeout_at(deadline):
+            while self.driver.generation <= generation:
+                if self.lifecycle.eof:
+                    msg = "DST event stream closed before reload completed"
+                    raise EOFError(msg)
+                changed = self._generation_changed
+                if self.driver.generation <= generation:
+                    await changed.wait()
+            await self.driver.wait_ready()
+
+    async def _execute(
+        self,
+        command: str,
+        generation_is_current: Callable[[], bool] | None = None,
+    ) -> str:
         with self.recorder.operation("console.execute", self.session_id):
             await self.wait_ready()
             if self.process.returncode is not None:
@@ -190,14 +313,13 @@ class Server:  # ruff:ignore[too-many-public-methods]
             if self.console is None:
                 msg = "DST console is unavailable"
                 raise RuntimeError(msg)
-            logger.info(
-                "execute DST console command: {cluster}/{shard}",
-                cluster=self.config.cluster,
-                shard=self.config.shard,
-            )
             if __debug__:
                 logger.debug("DST console command : {command}", command=command)
-            result = await self.console.execute(command)
+            result = await self.console.execute(
+                command,
+                generation_is_current,
+                completion_deadline=_operation_deadline.get(),
+            )
             if __debug__:
                 logger.debug("DST console result : {result}", result=result)
             return result
@@ -215,7 +337,12 @@ class Server:  # ruff:ignore[too-many-public-methods]
         return await self.game_events.read()
 
     async def install_driver(self) -> DriverHealth:
-        health = await self.game.install()
+        try:
+            health = await self.game.install()
+        except Exception as error:
+            self._driver_error = str(error) or type(error).__name__
+            raise
+        self._driver_error = None
         if health.telemetry_status == "failed":
             logger.warning(
                 "failed to install DST telemetry: "
@@ -228,19 +355,27 @@ class Server:  # ruff:ignore[too-many-public-methods]
         return health
 
     async def save(self, completion_timeout: float = 30) -> server_events.SavedEvent:
+        return await self._save(
+            self.game.world.request_save,
+            completion_timeout,
+            RequestState(),
+        )
+
+    async def _save(
+        self,
+        request: Callable[[], Awaitable[None]],
+        completion_timeout: float,
+        request_state: RequestState,
+    ) -> server_events.SavedEvent:
         with self.recorder.operation("save", self.session_id) as span:
-            if (
-                isinstance(completion_timeout, bool)
-                or not isinstance(completion_timeout, (int, float))
-                or not math.isfinite(completion_timeout)
-                or completion_timeout <= 0
-            ):
-                msg = "completion timeout must be positive"
-                raise ValueError(msg)
-            event = await self.lifecycle.wait_for_save(
-                self.game.world.request_save,
-                float(completion_timeout),
-            )
+            timeout = positive_timeout(completion_timeout)
+            async with _timeout_scope(timeout):
+                with track_request(request_state):
+                    event = await self.lifecycle.wait_for_save(
+                        request,
+                        timeout,
+                        request_state,
+                    )
             if event.snapshot is not None:
                 span.set_attribute("dst.snapshot", event.snapshot)
             return event
@@ -248,8 +383,9 @@ class Server:  # ruff:ignore[too-many-public-methods]
     async def stop(self, grace_period: float = 30) -> int:
         with self.recorder.operation("stop", self.session_id):
             process = self.process
+            grace_period = positive_timeout(grace_period, "grace period")
             if process.returncode is not None:
-                return await self.wait()
+                return await self._reap()
 
             logger.info(
                 "stop DST server: {cluster}/{shard}",
@@ -259,34 +395,51 @@ class Server:  # ruff:ignore[too-many-public-methods]
             process.terminate()
             exited = asyncio.create_task(process.wait())
             stopping = asyncio.create_task(self.lifecycle.stopping.wait())
-            done, pending = await asyncio.wait(
-                (exited, stopping),
-                timeout=grace_period,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            tasks = (exited, stopping)
+            try:  # ruff:ignore[too-many-statements-in-try-clause]
+                try:
+                    done, _ = await asyncio.wait(
+                        tasks,
+                        timeout=grace_period,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            except asyncio.CancelledError:
+                if process.returncode is None:
+                    process.kill()
+                await self._reap()
+                raise
             if not done:
                 msg = "DST server did not report DST_Stopping; process left running"
                 raise TimeoutError(msg)
             if process.returncode is None:
                 process.kill()
-            return await self.wait()
+            return await self._reap()
 
     async def kill(self) -> int:
         with self.recorder.operation("kill", self.session_id):
             process = self.process
             if process.returncode is None:
                 process.kill()
-            return await self.wait()
+            return await self._reap()
+
+    async def _reap(self) -> int:
+        waiting = asyncio.create_task(self.wait())
+        try:
+            return await asyncio.shield(waiting)
+        except asyncio.CancelledError:
+            await asyncio.shield(waiting)
+            raise
 
     async def wait(self) -> int:
         with self.recorder.operation("wait", self.session_id) as span:
             process = self.process
             returncode = await process.wait()
             await self.finish()
-            self.recorder.set_process_up(False)
             span.set_attribute("process.exit.code", returncode)
             logger.info(
                 "DST server exited: {cluster}/{shard} ({returncode})",
@@ -297,26 +450,36 @@ class Server:  # ruff:ignore[too-many-public-methods]
             return returncode
 
     async def pump_logs(self, reader: asyncio.StreamReader) -> None:
-        try:
-            while raw_line := await reader.readline():
-                observed_timestamp_ns = time_ns()
-                line = raw_line.decode(errors="replace").rstrip("\r\n")
-                if self.game_events.accept(line, observed_timestamp_ns):
-                    continue
-                if self.log_handler is not None:
+        handler_failed = False
+        while (raw_line := await read_line(reader)) is not None:
+            observed_timestamp_ns = time_ns()
+            raw_line = raw_line.rstrip(b"\r\n")
+            if self.game_events.accept(raw_line, observed_timestamp_ns):
+                continue
+            line = raw_line.decode(errors="replace")
+            if self.log_handler is not None:
+                try:
                     self.log_handler(line)
-                elif __debug__:
-                    logger.debug("DST server log : {line}", line=line)
-        finally:
-            self.game_events.close()
+                except Exception:
+                    if not handler_failed:
+                        logger.exception(
+                            "DST log handler failed: {cluster}/{shard}",
+                            cluster=self.config.cluster,
+                            shard=self.config.shard,
+                        )
+                        handler_failed = True
+            elif __debug__:
+                logger.debug("DST server log : {line}", line=line)
 
     async def finish(self) -> None:
         async with self.finish_lock:
             if self.closed:
                 return
-            self.closed = True
             driver_task = self.driver.task
             self.driver.close()
+            self.lifecycle.close()
+            self._generation_changed.set()
+            self.game_events.close()
             tasks = [
                 task
                 for task in (
@@ -329,26 +492,17 @@ class Server:  # ruff:ignore[too-many-public-methods]
             ]
             for transport in self.read_transports:
                 transport.close()
-            if self.console is not None:
-                await self.console.close()
-            await asyncio.sleep(0)
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-
-    def cancel_tasks(self) -> None:
-        driver_task = self.driver.task
-        self.driver.close()
-        for task in (
-            self.console.pending_result if self.console is not None else None,
-            self.lifecycle_task,
-            self.log_task,
-            driver_task,
-        ):
-            if task is not None:
-                task.cancel()
+            try:
+                if self.console is not None:
+                    await self.console.close()
+                await asyncio.sleep(0)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            self.closed = True
 
 
 __all__ = ["LogHandler", "Server"]

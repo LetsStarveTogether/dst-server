@@ -17,6 +17,7 @@ class ServerConfig:
     persistent_storage_root: Path = Path("/")
     conf_dir: str = "/"
     cluster: str = "cluster"
+    telemetry_cluster: str | None = None
     ugc_directory: Path | None = Path("/cluster/mods/ugc")
     extra_args: tuple[str, ...] = ("-skip_update_server_mods",)
     lua_directory: Path = LUA_DIRECTORY
