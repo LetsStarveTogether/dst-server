@@ -1,8 +1,13 @@
+endpoint:
+  path: "10.255.255.254:4317"
+
 logs:
-  journal_dir: /data/netdata/log/otel/v1
-  size_of_journal_file: "1GiB"
-  entries_of_journal_file: 1000000
-  duration_of_journal_file: "6 hours"
-  number_of_journal_files: 100000
-  size_of_journal_files: "64TiB"
-  duration_of_journal_files: "365 days"
+  rotation:
+    default:
+      max_file_size: "100MB"
+      max_entries: 200000
+  retention:
+    default:
+      max_files: 500000
+      max_total_size: "1TB"
+      max_age: "9 years"
