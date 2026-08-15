@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +23,15 @@ class FrozenModel(BaseModel):
         strict=True,
     )
 
+    def replace(self, **changes: object) -> Self:
+        values = {field: getattr(self, field) for field in self.model_fields_set}
+        values.update(changes)
+        return type(self).model_validate(values)
+
+
+class RevalidatedFrozenModel(FrozenModel):
+    model_config = ConfigDict(revalidate_instances="always")
+
 
 __all__ = [
     "Description",
@@ -35,4 +44,5 @@ __all__ = [
     "Percent",
     "PercentagePoints",
     "PositiveInt",
+    "RevalidatedFrozenModel",
 ]
