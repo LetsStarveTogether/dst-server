@@ -14,6 +14,7 @@ from .overrides import (
     WorldgenOverride,
 )
 from .presets import RoomPreset
+from .runtime import Cluster, ClusterLogHandler
 from .world import (
     CaveOverrides,
     ForestOverrides,
@@ -24,7 +25,9 @@ from .world import (
 
 __all__ = [
     "CaveOverrides",
+    "Cluster",
     "ClusterConfig",
+    "ClusterLogHandler",
     "ClusterSettings",
     "CustomPreset",
     "CustomWorldOverrides",

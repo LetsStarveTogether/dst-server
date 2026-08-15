@@ -8,8 +8,23 @@ from pathlib import Path
 from logbook import Logger
 
 from dst_server.runtime import Server
+from dst_server.runtime.fds import PROTOCOL_LINE_LIMIT, open_reader
 
 logger = Logger(__name__)
+
+
+async def _read_command(reader: asyncio.StreamReader) -> tuple[bytes | None, bool]:
+    oversized = False
+    while True:
+        try:
+            line = await reader.readuntil(b"\n")
+        except asyncio.LimitOverrunError as error:
+            await reader.readexactly(min(error.consumed, PROTOCOL_LINE_LIMIT))
+            oversized = True
+            continue
+        except asyncio.IncompleteReadError as error:
+            return (error.partial or None, oversized)
+        return line, oversized
 
 
 def ensure(path: Path) -> None:
@@ -29,15 +44,20 @@ def ensure(path: Path) -> None:
 
 async def forward(path: Path, server: Server) -> None:
     descriptor = os.open(path, os.O_RDWR | os.O_NONBLOCK)
-    pipe = os.fdopen(descriptor, "rb", buffering=0)
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    transport, _ = await asyncio.get_running_loop().connect_read_pipe(
-        lambda: protocol,
-        pipe,
-    )
+    reader, transport = await open_reader(descriptor)
     try:
-        while raw_line := await reader.readline():
+        while True:
+            raw_line, oversized = await _read_command(reader)
+            if oversized:
+                logger.warning(
+                    "{shard}: discarded oversized console command",
+                    shard=server.config.shard,
+                )
+                if raw_line is None:
+                    break
+                continue
+            if raw_line is None:
+                break
             command = raw_line.decode(errors="replace").rstrip("\r\n")
             if not command:
                 continue

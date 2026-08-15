@@ -20,6 +20,7 @@ otel = ["opentelemetry-exporter-otlp-proto-grpc~=1.44.0"]
 
 [project.scripts]
 dst-annotations = "dst_server.annotations.cli:main"
+dst-server = "dst_server.cluster.cli:main"
 
 [dependency-groups]
 dev = [

@@ -50,6 +50,5 @@ RUN uv sync --locked --extra otel --no-install-project --no-editable
 COPY src ./src
 RUN uv sync --locked --extra otel --no-editable
 
-COPY entrypoint.sh /entrypoint.sh
 WORKDIR /
-CMD ["/usr/bin/bash", "/entrypoint.sh"]
+CMD ["/app/.venv/bin/dst-server"]
