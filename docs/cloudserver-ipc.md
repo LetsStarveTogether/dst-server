@@ -41,17 +41,28 @@ sequenceDiagram
 
 FD 4 只提供文本行，没有请求 ID、类型和错误模型。
 
-本项目一次只执行一条命令，并在 Lua 外包一层最小协议：
+本项目一次只执行一条命令，并在 Lua 外包一层带 ULID 请求身份的最小协议：
 
-1. 用 `pcall` 捕获 Lua 错误。
-2. 把成功值或错误编码为 JSON。
-3. 用 `print` 输出 `DST_SERVER_RESULT|<json>`。
-4. 继续读取 FD 4，直到服务端追加 `DST_RemoteCommandDone`。
-5. Python 找到带前缀的行，再用严格的 Pydantic 模型校验。
+1. 每次尝试生成标准 26 字符 ULID，并在编译原命令前输出 `DST_SERVER_FRAME|<ulid>|START`。
+2. 原命令经 `lua_string()` 转义后由 `loadstring()` 编译，并在 `pcall` 内执行。
+3. 类型化调用把成功值或错误编码为 JSON，再输出 `DST_SERVER_RESULT|<json>`。
+4. 外层编译或运行错误会安全转换为普通文本，再输出匹配 token 的 `END`，不会在 END 后重新抛出。
+5. Python 只在匹配 START 与 END 后接受 DST 最终追加的原生 `DST_RemoteCommandDone`。
+6. Python 找到结构化结果前缀后，再用严格的 Pydantic 模型校验。
+
+START 与 END 之间出现的文本 `DST_RemoteCommandDone` 或 `DST_LuaBusy` 只是命令输出，不会结束或重放当前命令。
+
+只有 START 前没有其他普通输出的原生 `DST_LuaBusy` 会触发使用新 token 的重试。
 
 成功的 Lua `return` 值不会自动成为 FD 4 的结果。
 
 需要返回给管理进程的数据必须显式 `print`，本项目用 `json.encode_compliant` 保证输出是标准 JSON。
+
+`DST_SERVER_RESULT|` 前缀与 JSON 合计最多 65,536 bytes，不计算结尾 LF。
+
+SDK 生成的结果超限时会改发短 failure envelope；其他 FD 4 超长行会被完整丢弃，当前 ULID 帧排空后才允许下一条命令。
+
+如果 EOF、传输错误或结果读取任务取消导致帧无法重新对齐，Console 会拒绝后续命令。
 
 ## 本项目如何接管 FD
 
