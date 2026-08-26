@@ -7,8 +7,8 @@ on:
       - '.containerignore'
       - '.github/workflows/image.yml'
       - 'Containerfile'
-      - 'entrypoint.sh'
       - 'src/**'
+      - 'tests/test_podman.py'
       - 'pyproject.toml'
       - 'uv.lock'
       - 'README.md'
@@ -29,11 +29,6 @@ on:
         required: false
         default: false
         type: boolean
-      game_version:
-        description: 'Optional DST version for a single target'
-        required: false
-        default: ''
-        type: string
 
 permissions: {}
 
@@ -47,44 +42,54 @@ env:
   IMAGE_REGISTRY: quay.io/wh2099
 
 jobs:
-  detect:
-    name: Resolve image versions
+  test:
+    name: Test Python supervisor
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
-    outputs:
-      matrix: ${{ steps.detect.outputs.matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
+      - name: Setup Python and uv
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes luajit
+
+      - name: Test
+        run: uv run --locked --all-extras pytest
+
+  detect:
+    name: Resolve image versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+    steps:
       - name: Resolve image versions
         id: detect
         uses: actions/github-script@v9
         env:
           BUILD_TARGET: ${{ inputs.build_target || 'both' }}
           FORCE_BUILD: ${{ inputs.force_build }}
-          GAME_VERSION: ${{ inputs.game_version }}
         with:
           script: |
             const fs = require('node:fs/promises');
 
             const buildTarget = process.env.BUILD_TARGET;
             const forceBuild = process.env.FORCE_BUILD === 'true';
-            const requestedVersion = process.env.GAME_VERSION.trim();
             const targets = [
               { tag: 'latest', beta: '', channel: 'release', upstream: 'release' },
               { tag: 'beta', beta: '1', channel: 'beta', upstream: 'updatebeta' },
             ];
             const selectedTargets = targets.filter(({ tag }) => buildTarget === 'both' || tag === buildTarget);
             const isVersion = (version) => /^\d+$/.test(version) && Number.isSafeInteger(Number(version));
-
-            if (requestedVersion && !isVersion(requestedVersion)) {
-              throw new Error(`Invalid game version: ${requestedVersion}`);
-            }
-            if (requestedVersion && selectedTargets.length !== 1) {
-              throw new Error('game_version requires a single build target');
-            }
 
             let builds;
             const upstreamVersion = async (channel) => {
@@ -136,11 +141,11 @@ jobs:
               let version;
 
               if (context.eventName === 'push') {
-                version = published || await upstreamVersion(target.upstream);
+                version = await upstreamVersion(target.upstream);
                 build = true;
                 summary.push(`${published ? 'Rebuild' : 'Bootstrap'} ${target.tag} ${version}`);
               } else {
-                version = requestedVersion || await upstreamVersion(target.upstream);
+                version = await upstreamVersion(target.upstream);
                 build = forceBuild || published !== version;
                 summary.push(`${build ? 'Build' : 'Skip'} ${target.tag} ${version}`);
               }
@@ -152,7 +157,7 @@ jobs:
                 created,
                 image_tag: target.tag,
                 version,
-                version_tag: `${target.channel}-${version}`,
+                version_tag: version,
               });
             }
 
@@ -161,8 +166,9 @@ jobs:
 
   image:
     name: ${{ matrix.build && 'Build' || 'Skip' }} ${{ matrix.image_tag }} ${{ matrix.version }}
-    needs: detect
+    needs: [detect, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -177,10 +183,10 @@ jobs:
       - name: Build image
         if: ${{ matrix.build }}
         id: build
-        uses: redhat-actions/buildah-build@v2
+        uses: redhat-actions/buildah-build@v3
         with:
           image: ${{ env.IMAGE_NAME }}
-          tags: ${{ matrix.image_tag }} ${{ matrix.version_tag }}
+          tags: ${{ matrix.version_tag }} ${{ matrix.image_tag }}
           containerfiles: Containerfile
           build-args: |
             BETA=${{ matrix.beta }}
@@ -193,10 +199,24 @@ jobs:
             org.opencontainers.image.licenses=MIT
             io.github.letsstarvetogether.dst.channel=${{ matrix.channel }}
 
+      - name: Setup uv for image tests
+        if: ${{ matrix.build }}
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Test built image with the real game
+        if: ${{ matrix.build }}
+        timeout-minutes: 30
+        env:
+          DST_SERVER_EXPECTED_REVISION: ${{ github.sha }}
+          DST_SERVER_EXPECTED_VERSION: ${{ matrix.version }}
+          DST_SERVER_IMAGE: ${{ steps.build.outputs.image-with-tag }}
+          DST_SERVER_PODMAN_TEST: '1'
+        run: uv run --locked --all-extras pytest -m system tests/test_podman.py
+
       - name: Push to registry
         if: ${{ matrix.build }}
         id: push
-        uses: redhat-actions/push-to-registry@v2
+        uses: redhat-actions/push-to-registry@v3
         with:
           image: ${{ steps.build.outputs.image }}
           tags: ${{ steps.build.outputs.tags }}

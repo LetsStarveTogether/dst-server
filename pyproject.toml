@@ -79,8 +79,16 @@ ignore-one-line-docstrings = true
 python-platform = "linux"
 
 [tool.pytest]
-minversion = '9.0'
+minversion = '9.1'
+testpaths = ['tests']
+addopts = ['--import-mode=importlib', '-m', 'not system']
+strict = true
+filterwarnings = ['error']
+required_plugins = ['pytest-asyncio>=1.4']
+markers = ['system: requires an explicitly provisioned external system']
 asyncio_mode = 'auto'
+asyncio_debug = true
+asyncio_default_fixture_loop_scope = 'function'
 
 [tool.rumdl]
 enable = ['ALL']
