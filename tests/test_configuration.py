@@ -755,6 +755,8 @@ def test_historical_levels_round_trip_with_location_inference(
     overrides_type: type[WorldOverrides],
 ) -> None:
     source = Path(__file__).parents[1] / "ref" / "dst" / relative
+    if not source.is_file():
+        pytest.skip("historical room fixtures are not part of the repository")
     level = LevelDataOverride.load(source)
     rendered = tmp_path / "leveldataoverride.lua"
     rendered.write_text(level.render(), encoding="utf-8")
@@ -776,6 +778,8 @@ def test_all_historical_level_and_world_overrides_round_trip_sparsely(
     tmp_path: Path,
 ) -> None:
     root = Path(__file__).parents[1] / "ref" / "dst"
+    if not root.is_dir():
+        pytest.skip("historical room fixtures are not part of the repository")
     levels = tuple(root.rglob("leveldataoverride.lua"))
     worlds = tuple(root.rglob("worldgenoverride.lua"))
 
@@ -848,6 +852,8 @@ def test_hamlet_shard_loads_klei_header_and_saves_every_managed_file(
     tmp_path: Path,
 ) -> None:
     source = Path(__file__).parents[1] / "ref" / "dst" / "25" / "hamlet"
+    if not source.is_dir():
+        pytest.skip("historical room fixtures are not part of the repository")
     shard = ShardConfig.load(source)
     target = tmp_path / "hamlet"
     shard.save(target)
