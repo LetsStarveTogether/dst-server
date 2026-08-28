@@ -2,9 +2,9 @@
 
 The tracked `scripts` tree contains 4,045 files, including 4,030 Lua files.
 
-The `scripts` submodule is pinned to `c2d52ec` (build `740477`, authored 2026-07-06).
+The `scripts` submodule is pinned to `6ea1ee2` (build `747465`, authored 2026-08-13).
 
-The latest delta contains no gameplay Lua or path changes; the focus areas below come from the preceding `740256` update.
+Compared with `c2d52ec` (build `740477`), this snapshot modifies 19 existing files without changing the source tree shape.
 
 ## `0x10021111` Purpose
 
@@ -35,8 +35,9 @@ Count tracked files first, use directory totals to choose a runtime topic, and l
 
 - The tracked total includes 15 non-Lua files.
 - They are `scripts/.github/workflows/update.yml`, `scripts/controller.vdf`, and 13 files under `scripts/languages/`.
-- Compared with parent `3b390612` (build `740256`), `c2d52ec` modifies five files and adds or removes none.
-- Those files are the update workflow, three language catalogs, and `scripts/skin_strings.lua`.
+- Compared with `c2d52ec` (build `740477`), `6ea1ee2` modifies 19 files and adds, removes, or renames none.
+- The delta contains 979 insertions and 75 deletions across 16 Lua files and three language catalogs.
+- Most of the volume is generated account-item data and localization catalogs.
 - Directory totals guide reading effort but do not replace the reference coverage inventory.
 
 ## `0x10024111` Directory Breakdown
@@ -61,19 +62,19 @@ Count tracked files first, use directory totals to choose a runtime topic, and l
 
 ## `0x10024211` Focus Areas
 
-The preceding `740256` update changed these gameplay clusters:
+Build `747465` changes these clusters:
 
-- Carnival golf spans `scripts/recipes.lua`, `scripts/standardcomponents.lua`, and `scripts/widgets/controls.lua`.
-- Its Prefabs use the `carnivalgame_golf` prefix under `scripts/prefabs/`.
-- Item temperature enters through `scripts/components/inventoryitem.lua`.
-- Its state lives in `scripts/components/inventoryitemtemperature.lua`.
-- `scripts/prefabs/desiccant.lua` and `scripts/prefabs/trap_fumarole.lua` consume that temperature state.
-- Eets starts in `scripts/prefabs/critters.lua` and `scripts/components/crittertraits.lua`.
-- Its states live in `scripts/stategraphs/SGcritter_common.lua` and `scripts/stategraphs/SGcritter_eets.lua`.
-- Vault changes touch `scripts/components/vaultroom.lua` and `scripts/prefabs/vault_key_activator.lua`.
-- Scrapbook support touches `scripts/screens/redux/scrapbookdata.lua` and `scripts/debugcommands.lua`.
-- `scripts/prefabskins.lua` and `scripts/skin_strings.lua` add three `walrushat_minigolf_*` skins.
-- `scripts/speech_wx78.lua` and `scripts/languages/strings.pot` correct WX-78's green and blue spoon-lure descriptions.
+- Release group 184 adds 16 account items, including nine `SEASIDE` outfits and a beach mystery box.
+- `waterballoon_insect` gains the complete base-prefab, skin initializer, held-symbol, and equip-event path.
+- `body_wathgrithr_ancient` overrides its character-specific upper-arm symbol instead of hiding it.
+- New strings cover store login, online/offline world conversion, and premium-online membership.
+- They have no direct references elsewhere in tracked Lua.
+- `worldroutefollower` clears its current teleport task handle when the callback starts.
+- It can then schedule the next virtual route hop.
+- Cannonball launches deactivate inventory mines and custom traps before marking them airborne.
+- Repaired fumarole shovels use `TUNING.SHOVEL_DAMAGE` rather than axe damage.
+- The AoE spider-healing scan excludes `creaturecorpse` targets that have no health component.
+- The HUD clock scales its higher-resolution face, rim, and hand textures to `0.5` without changing clock state.
 
 ## `0x10025100` Verification
 
@@ -87,7 +88,8 @@ git ls-files --recurse-submodules scripts/prefabs | rg "\.lua$" | wc -l
 git ls-files --recurse-submodules scripts/components | rg "\.lua$" | wc -l
 git -C scripts rev-parse --short=7 HEAD
 git -C scripts log -1 --format='%as %s'
-git -C scripts diff --name-status 3b390612..c2d52ec
+git -C scripts diff --shortstat c2d52ec..6ea1ee2
+git -C scripts diff --name-status c2d52ec..6ea1ee2
 ~~~
 
 ### `0x10025111` Next Step

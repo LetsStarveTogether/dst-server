@@ -27,6 +27,9 @@ This guide starts with an existing runtime world and follows player, boat, attac
 | `scripts/components/boatphysics.lua` | `BoatPhysics` | Controls speed, steering, and drag |
 | `scripts/components/boatcrew.lua` | `RemoveMember` | Cleans up crews and pirate ship data |
 | `scripts/components/boatleak.lua` | `SetState` | Manages leak repair states |
+| `scripts/components/boatcannon.lua` | `BoatCannon:Shoot` | Launches a cannonball projectile |
+| `scripts/prefabs/cannonballs.lua` | `OnHit` / `launch_away` | Damages boats and launches nearby items |
+| `scripts/componentutil.lua` | `DeactivateInventoryItemBeforeLaunch` | Disarms inventory mines and custom traps before launch |
 | `scripts/components/mast.lua` | `SetBoat` / `CalcSailForce` / `CalcMaxVelocity` | Adds mast force |
 | `scripts/components/anchor.lua` | `SetBoat` | Binds an anchor to a boat |
 | `scripts/components/boatdrag.lua` | `drag` / `sailforcemodifier` | Supplies drag parameters |
@@ -92,6 +95,13 @@ When the last member leaves, `Boatcrew:RemoveMember` removes ship data from `pir
 It also removes `vanish_on_sleep` and `boatcrew` from the boat.
 The `repaired_tape` state in `boatleak.lua` uses the Winona tape repair sound.
 
+### `0x63023331` Cannonball Landing Impact
+
+`BoatCannon:Shoot` launches the projectile.
+The local `OnHit` in `cannonballs.lua` applies splash damage, boat leakage, and nearby-item launch effects.
+`launch_away` calls `DeactivateInventoryItemBeforeLaunch` before updating an inventory item's landed state.
+The helper disarms its `mine` component or custom deactivation hook.
+
 ## `0x63024111` Masts and Anchors
 
 In `components/mast.lua`, `Mast:SetBoat` calls `RemoveMast` on the old boat and `AddMast` on the new boat.
@@ -138,6 +148,11 @@ rg -n "AddMast|RemoveMast|CalcSailForce|AddBoatDrag|ApplyRowForce|GetMaxVelocity
 rg -n "RemoveMember|RemoveShipData|repaired_tape|ChangeToRepaired" \
   scripts/components/boatcrew.lua \
   scripts/components/boatleak.lua
+
+rg -n "BoatCannon:Shoot|OnHit|launch_away|DeactivateInventoryItemBeforeLaunch" \
+  scripts/components/boatcannon.lua \
+  scripts/prefabs/cannonballs.lua \
+  scripts/componentutil.lua
 ~~~
 
 ### `0x63025111` Reading Order

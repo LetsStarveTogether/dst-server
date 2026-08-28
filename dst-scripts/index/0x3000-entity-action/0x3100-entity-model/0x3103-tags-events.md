@@ -21,6 +21,7 @@ World state subscriptions register with `TheWorld.components.worldstate`.
 | `scripts/stategraph.lua` | `HandleEvent` | SG event handling. |
 | `scripts/brain.lua` | `Brain:PushEvent` | Brain event handling. |
 | `scripts/componentutil.lua` | Tag constants and `PushEvent` calls | Gameplay-level examples. |
+| `scripts/prefabs/spider_healer_item.lua` | `SPIDER_TAGS` / `SPIDER_IGNORE_TAGS` | Include and exclude filters for healing targets. |
 
 ### `0x31032111` Primary Anchors
 
@@ -82,6 +83,8 @@ flowchart TD
 - The include and exclude arguments to `TheSim:FindEntities` consume these lists.
 - `componentutil.lua` also calls `inst:HasTag`, `ent:PushEvent`, and `PushEventImmediate`.
 - Tags and events are shared by components, prefabs, and helpers rather than private component state.
+- The AoE spider scan requires the `spider` tag and excludes `creaturecorpse`.
+- A required tag alone does not guarantee that a later component access is valid.
 
 ## `0x31035100` Verification
 
@@ -92,6 +95,7 @@ rg -n "AddTag|HasTag|ListenForEvent|RemoveEventCallback|PushEvent_Internal" \
   scripts/brain.lua \
   scripts/componentutil.lua
 rg -n "PushEventImmediate|WatchWorldState|StopAllWatchingWorldStates" scripts/entityscript.lua scripts/componentutil.lua
+rg -n "SPIDER_TAGS|SPIDER_IGNORE_TAGS|FindEntities|components.health" scripts/prefabs/spider_healer_item.lua
 ~~~
 
 ### `0x31035111` Minimal Trace

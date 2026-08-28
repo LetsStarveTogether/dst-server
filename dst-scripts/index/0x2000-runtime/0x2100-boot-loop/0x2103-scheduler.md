@@ -31,6 +31,7 @@ It calls `ExecutePeriodic(..., limit = 1)` and stores the callback in `attime[wa
 | `scripts/scheduler.lua` | `RunStaticScheduler` | Drive the static scheduler each static tick |
 | `scripts/update.lua` | `Update` | Call `RunScheduler(i)` |
 | `scripts/update.lua` | `StaticUpdate` | Call `RunStaticScheduler(i)` |
+| `scripts/components/worldroutefollower.lua` | `TryToTeleportToDestination_Bridge` | Clears an owned task handle before continuing a route |
 
 ### `0x21032111` Primary Search
 
@@ -66,6 +67,8 @@ flowchart TD
 
 When due, `Scheduler:OnTick()` calls `k.fn(...)` directly without going through `Scheduler:Run()`.
 
+It runs `onfinish` and `Cleanup()` only after the callback returns.
+
 ### `0x21033121` Coroutine Tasks
 
 `StartThread()` and `StartStaticThread()` call `Scheduler:AddTask()` to create a `Task` and coroutine.
@@ -100,6 +103,12 @@ Entity tasks use `task_finish` to leave `inst.pendingtasks`.
 
 One-shot tasks call `Cleanup()` after their first run because `limit = 1`.
 
+`task_finish` does not clear extra component fields that point to the same task.
+
+`worldroutefollower` therefore clears `trytoteleporttodestinationtask` inside its bridge callback.
+
+The callback can then schedule another route hop.
+
 ## `0x21035100` Verification
 
 ~~~bash
@@ -116,9 +125,12 @@ rg -n \
   -e "Yield" \
   -e "RunScheduler" \
   -e "RunStaticScheduler" \
+  -e "TryToTeleportToDestination_Bridge" \
+  -e "trytoteleporttodestinationtask" \
   scripts/entityscript.lua \
   scripts/scheduler.lua \
-  scripts/update.lua
+  scripts/update.lua \
+  scripts/components/worldroutefollower.lua
 ~~~
 
 ### `0x21035111` Next Read
@@ -128,3 +140,5 @@ Trace `EntityScript:DoTaskInTime()` to `Scheduler:OnTick()`.
 Then trace `StartThread()`, `Sleep()`, `Yield()`, and `Scheduler:Run()`.
 
 Finally, confirm the normal and static entry points in `update.lua`.
+
+Use `TryToTeleportToDestination_Bridge` to verify why an owner-held task reference must be cleared by its callback.

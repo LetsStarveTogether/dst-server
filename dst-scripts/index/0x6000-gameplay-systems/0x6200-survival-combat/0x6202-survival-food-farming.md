@@ -35,6 +35,7 @@ Separately connect `PLANTSOIL`, `farmplantable`, `farm_plants`, and `farming_man
 | `scripts/components/inventoryitemtemperature.lua` | `UpdateTemperature` | Updates item temperature |
 | `scripts/components/inventoryitem.lua` | `EnableTemperature` | Enables the temperature component |
 | `scripts/standardcomponents.lua` | `MakeFumaroleTool` | Configures insulated fumarole tools |
+| `scripts/prefabs/shovel.lua` | `fumarole_onbroken` / `fumarole_onrepaired` | Removes and restores the fumarole shovel's tool components |
 | `scripts/prefabs/trap_fumarole.lua` | `OnTemperatureDelta` | Recomputes the trap's heat modifier |
 | `scripts/components/hunger.lua` | `Hunger:DoDec` | Depletes hunger and applies starvation damage |
 | `scripts/components/sanity.lua` | `Sanity:DoDelta` | Applies food and continuous sanity changes |
@@ -164,6 +165,7 @@ Crop stress is not one field.
 `DoDelta()` and `UpdateTemperature()` scale heating and cooling with inherent winter and summer insulation.
 Nearby exothermic heaters accumulate `externalheaterpower`.
 Fumarole tools and traps use it to adjust the `fumaroletool_mod` temperature modifier.
+Breaking the fumarole shovel removes its equip, tool, and weapon components, while repair restores digging and `TUNING.SHOVEL_DAMAGE`.
 `desiccant.lua` uses `DESSICANT_MIN_TEMPERATURE` and `DESSICANT_THRESHOLD_TEMPERATURE`.
 Together with owner wetness, they determine whether the system controls moisture.
 When the owner is not dry, an overheated desiccant is clamped to `DESICCANT_HELD_TEMPERATURE`.
@@ -226,10 +228,13 @@ rg -n "farmplantstress|CycleNutrientsAtPoint|AddSoilMoistureAtPoint|AddTileNutri
   scripts/components/farming_manager.lua \
   scripts/standardcomponents.lua
 
-rg -n "GetTargetDeltaTemperature|GetInsulation|externalheaterpower|SetNoWetTemperaturePenalty|DESSICANT|DESICCANT" \
+rg -n \
+  -e "GetTargetDeltaTemperature|GetInsulation|externalheaterpower|SetNoWetTemperaturePenalty|DESSICANT|DESICCANT" \
+  -e "fumarole_onbroken|fumarole_onrepaired|SHOVEL_DAMAGE" \
   scripts/components/inventoryitemtemperature.lua \
   scripts/components/inventoryitem.lua \
   scripts/prefabs/desiccant.lua \
+  scripts/prefabs/shovel.lua \
   scripts/prefabs/trap_fumarole.lua \
   scripts/standardcomponents.lua \
   scripts/tuning.lua
