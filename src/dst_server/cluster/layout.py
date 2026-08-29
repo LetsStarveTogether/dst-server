@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from configparser import ConfigParser
 from configparser import Error as ConfigError
 from dataclasses import dataclass
@@ -42,7 +40,11 @@ def read_master(path: Path) -> bool:
         raise ValueError(msg)
     if not sections:
         return True
-    return _parse_bool(parser.get(sections[0], "is_master", fallback="true"))
+    try:
+        return _parse_bool(parser.get(sections[0], "is_master", fallback="true"))
+    except ValueError as error:
+        msg = f"invalid DST shard configuration: {path}: {error}"
+        raise ValueError(msg) from error
 
 
 def discover(cluster: Path) -> tuple[Shard, ...]:
@@ -104,6 +106,3 @@ def prepare(cluster: Path) -> None:
             missing.append(path)
     for path in missing:
         path.touch(exist_ok=False)
-
-
-__all__ = ["Shard", "discover", "prepare"]
