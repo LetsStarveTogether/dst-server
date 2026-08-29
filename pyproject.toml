@@ -10,12 +10,13 @@ dependencies = [
     "logbook>=1.9.2",
     "luaparser>=4.0.1,<5",
     "opentelemetry-api~=1.44.0",
+    "pycapnp>=2.2.4,<3",
     "pydantic>=2.13.4",
     "python-ulid>=4.0.1",
 ]
 
 [project.optional-dependencies]
-klei = ["selectolax>=0.4.11,<0.5", "urllib3-future>=2.22.901,<3"]
+klei = ["httpx2[http2]>=2.12,<3", "selectolax>=0.4.11,<0.5"]
 otel = ["opentelemetry-exporter-otlp-proto-grpc~=1.44.0"]
 
 [project.scripts]
