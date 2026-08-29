@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import re
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -244,6 +242,28 @@ def _lua_literal(value: LuaValue, level: int = 0) -> str:
 _WORLD_TABLE = TypeAdapter(dict[LuaKey, LuaScalar])
 
 
+def _validated_world_values(overrides: WorldOverrides) -> dict[LuaKey, LuaValue]:
+    values = overrides.model_dump(
+        mode="python",
+        by_alias=True,
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    validated = type(overrides).model_validate(values)
+    return cast(
+        dict[LuaKey, LuaValue],
+        _WORLD_TABLE.validate_python(
+            validated.model_dump(
+                mode="python",
+                by_alias=True,
+                exclude_none=True,
+                exclude_unset=True,
+            ),
+            strict=True,
+        ),
+    )
+
+
 def _lua_statements(path: Path, description: str) -> list[Node]:
     if path.is_symlink():
         msg = f"{description} cannot be a symlink: {path}"
@@ -366,6 +386,22 @@ def _lua_value_node(  # ruff: ignore[complex-structure, too-many-branches]
             raise ValueError(msg)
         return [numeric[index] for index in range(1, len(numeric) + 1)]
     return mapping
+
+
+def _literal_lua_value(source: str, description: str) -> LuaValue:
+    try:
+        statements = list(ast.parse(f"return {source}").body.body)
+    except (SyntaxException, UnicodeError) as error:
+        msg = f"invalid {description}: {error}"
+        raise ValueError(msg) from error
+    if (
+        len(statements) != 1
+        or not isinstance(statements[0], Return)
+        or len(statements[0].values) != 1
+    ):
+        msg = f"{description} must contain one literal Lua value"
+        raise ValueError(msg)
+    return _lua_value_node(statements[0].values[0], description)
 
 
 def _literal_return_table(
@@ -588,26 +624,7 @@ class LevelDataOverride(RevalidatedFrozenModel):
                 exclude_unset=True,
             ),
         )
-        override_values = validated.overrides.model_dump(
-            mode="python",
-            by_alias=True,
-            exclude_none=True,
-            exclude_unset=True,
-        )
-        override_values = (
-            type(validated.overrides)
-            .model_validate(override_values)
-            .model_dump(
-                mode="python",
-                by_alias=True,
-                exclude_none=True,
-                exclude_unset=True,
-            )
-        )
-        values["overrides"] = cast(
-            dict[LuaKey, LuaValue],
-            _WORLD_TABLE.validate_python(override_values, strict=True),
-        )
+        values["overrides"] = _validated_world_values(validated.overrides)
         return f"return {_lua_literal(values)}\n"
 
 
@@ -824,32 +841,7 @@ class WorldgenOverride(RevalidatedFrozenModel):
 
     def render(self) -> str:
         validated = type(self).model_validate(self)
-        override_values = validated.overrides.model_dump(
-            mode="python",
-            by_alias=True,
-            exclude_none=True,
-            exclude_unset=True,
-        )
-        override_values = (
-            type(validated.overrides)
-            .model_validate(override_values)
-            .model_dump(
-                mode="python",
-                by_alias=True,
-                exclude_none=True,
-                exclude_unset=True,
-            )
-        )
-        overrides = _lua_literal(
-            cast(
-                LuaValue,
-                _WORLD_TABLE.validate_python(
-                    override_values,
-                    strict=True,
-                ),
-            ),
-            1,
-        )
+        overrides = _lua_literal(_validated_world_values(validated.overrides), 1)
         lines = [
             "return {",
             f"    override_enabled = {str(validated.enabled).lower()},",
@@ -885,28 +877,7 @@ class ModOverrides(RevalidatedFrozenModel):
         values: dict[str, object] = {}
         if "client_mods_disabled" in raw:
             values["client_mods_disabled"] = raw.pop("client_mods_disabled")
-        entries = {}
-        for name, raw_entry in raw.items():
-            if not isinstance(raw_entry, dict):
-                msg = f"Mod override {name!r} must be a literal table"
-                raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
-            if unknown := set(raw_entry).difference({
-                "enabled",
-                "configuration_options",
-            }):
-                msg = f"unknown Mod override fields for {name!r}: {sorted(unknown)}"
-                raise ValueError(msg)
-            entry: dict[str, object] = {}
-            if "enabled" in raw_entry:
-                entry["enabled"] = raw_entry["enabled"]
-            if "configuration_options" in raw_entry:
-                options = raw_entry["configuration_options"]
-                if not isinstance(options, dict):
-                    msg = f"configuration_options for {name!r} must be a literal table"
-                    raise ValueError(msg)
-                entry["configuration_options"] = options
-            entries[name] = ModOverride.model_validate(entry)
-        values["entries"] = entries
+        values["entries"] = raw
         return cls.model_validate(values)
 
     @property
@@ -1049,16 +1020,3 @@ class WorkshopDownloads(RevalidatedFrozenModel):
                 for collection in sorted(validated.collections)
             ]
         )
-
-
-__all__ = [
-    "CustomPreset",
-    "CustomWorldOverrides",
-    "LevelDataOverride",
-    "LuaValue",
-    "ModOverride",
-    "ModOverrides",
-    "ModSettings",
-    "WorkshopDownloads",
-    "WorldgenOverride",
-]

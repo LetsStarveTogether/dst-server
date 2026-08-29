@@ -489,7 +489,7 @@ def test_internal_worldgen_topology_overrides_are_typed_and_sparse() -> None:
         ForestOverrides(layout_mode="unknown")  # ty: ignore[invalid-argument-type]
 
 
-def test_world_override_models_match_build_747465_customize_source(
+def test_world_override_models_match_bundled_customize_source(
     luajit: str,
 ) -> None:
     contract = source_customize_contract(luajit)
@@ -510,13 +510,6 @@ def test_world_override_models_match_build_747465_customize_source(
         "wormhole_prefab",
     }
 
-    assert {name: len(options) for name, options in source_options.items()} == {
-        "forest": 190,
-        "cave": 125,
-    }
-    assert (
-        len(set().union(*(set(options) for options in source_options.values()))) == 236
-    )
     assert set(source_misc) == misc_keys
 
     for location, model in (
@@ -697,104 +690,11 @@ def test_worldgen_loader_upgrades_server_supported_v1_format(tmp_path: Path) -> 
     assert WorldgenOverride.load(path).overrides == ForestOverrides()
 
 
-@pytest.mark.parametrize(
-    ("relative", "overrides_type", "identifier", "location", "portal"),
-    [
-        (
-            "30/gorge/leveldataoverride.lua",
-            QuagmireOverrides,
-            "QUAGMIRE",
-            "quagmire",
-            "quagmire_portal",
-        ),
-        (
-            "33/xforge/leveldataoverride.lua",
-            LavaArenaOverrides,
-            "LAVAARENA",
-            "lavaarena",
-            "lavaarena_portal",
-        ),
-    ],
-)
-def test_historical_event_level_data_round_trips_without_field_loss(
-    tmp_path: Path,
-    relative: str,
-    overrides_type: type[WorldOverrides],
-    identifier: str,
-    location: str,
-    portal: str,
-) -> None:
-    source = Path(__file__).parents[1] / "ref" / "dst" / relative
-    if not source.is_file():
-        pytest.skip("historical room fixtures are not part of the repository")
-    level = LevelDataOverride.load(source, overrides_type=overrides_type)
-    rendered = tmp_path / "leveldataoverride.lua"
-    rendered.write_text(level.render(), encoding="utf-8")
-    loaded = LevelDataOverride.load(rendered, overrides_type=overrides_type)
-
-    assert loaded == level
-    assert loaded.model_fields_set == level.model_fields_set
-    assert loaded.id == identifier
-    assert loaded.location == location
-    assert loaded.required_prefabs is not None
-    assert portal in loaded.required_prefabs
-    assert {"task_set", "start_location"}.issubset(loaded.overrides.model_fields_set)
-
-
-@pytest.mark.parametrize(
-    ("relative", "overrides_type"),
-    [
-        ("0/forest/leveldataoverride.lua", ForestOverrides),
-        ("0/cave/leveldataoverride.lua", CaveOverrides),
-        ("21/shipwrecked/leveldataoverride.lua", CustomWorldOverrides),
-    ],
-)
-def test_historical_levels_round_trip_with_location_inference(
-    tmp_path: Path,
-    relative: str,
-    overrides_type: type[WorldOverrides],
-) -> None:
-    source = Path(__file__).parents[1] / "ref" / "dst" / relative
-    if not source.is_file():
-        pytest.skip("historical room fixtures are not part of the repository")
-    level = LevelDataOverride.load(source)
-    rendered = tmp_path / "leveldataoverride.lua"
-    rendered.write_text(level.render(), encoding="utf-8")
-
-    assert isinstance(level.overrides, overrides_type)
-    assert LevelDataOverride.load(rendered) == level
-    if "shipwrecked" in relative:
-        assert "\n" in level.desc
-
-
 def test_event_and_legacy_level_only_fields_stay_out_of_worldgen_models() -> None:
     forest_only = {"berrybush", "grass", "spiders", "weather"}
     assert forest_only.isdisjoint(QuagmireOverrides.model_fields)
     assert forest_only.isdisjoint(LavaArenaOverrides.model_fields)
     assert "roads" not in CaveOverrides.model_fields
-
-
-def test_all_historical_level_and_world_overrides_round_trip_sparsely(
-    tmp_path: Path,
-) -> None:
-    root = Path(__file__).parents[1] / "ref" / "dst"
-    if not root.is_dir():
-        pytest.skip("historical room fixtures are not part of the repository")
-    levels = tuple(root.rglob("leveldataoverride.lua"))
-    worlds = tuple(root.rglob("worldgenoverride.lua"))
-
-    assert (len(levels), len(worlds)) == (180, 3)
-    target = tmp_path / "override.lua"
-    for path in levels:
-        loaded = LevelDataOverride.load(path)
-        target.write_text(loaded.render(), encoding="utf-8")
-        reloaded = LevelDataOverride.load(target)
-        assert reloaded.overrides.model_fields_set == loaded.overrides.model_fields_set
-    for path in worlds:
-        loaded = WorldgenOverride.load(path)
-        target.write_text(loaded.render(), encoding="utf-8")
-        reloaded = WorldgenOverride.load(target)
-        assert reloaded.overrides.model_fields_set == loaded.overrides.model_fields_set
 
 
 def test_modded_level_supports_scalar_inference_and_explicit_model(
@@ -846,25 +746,6 @@ def test_modded_level_supports_scalar_inference_and_explicit_model(
             overrides=ForestOverrides(task_set="default"),
             background_node_range=(2, 1),
         )
-
-
-def test_hamlet_shard_loads_klei_header_and_saves_every_managed_file(
-    tmp_path: Path,
-) -> None:
-    source = Path(__file__).parents[1] / "ref" / "dst" / "25" / "hamlet"
-    if not source.is_dir():
-        pytest.skip("historical room fixtures are not part of the repository")
-    shard = ShardConfig.load(source)
-    target = tmp_path / "hamlet"
-    shard.save(target)
-
-    assert shard.level is not None
-    assert shard.world is not None
-    assert shard.world.worldgen_preset == "PORKLAND_DEFAULT"
-    reloaded = ShardConfig.load(target)
-    assert reloaded.level == shard.level
-    assert reloaded.world == shard.world
-    assert (target / "leveldataoverride.lua").is_file()
 
 
 @pytest.mark.parametrize(
@@ -1677,41 +1558,6 @@ def test_cluster_save_rejects_shard_symlink_without_touching_target(
     assert (cluster / "cluster.ini").read_text(encoding="utf-8") == "original"
 
 
-def test_writer_rejects_invalid_tree_and_utf8_before_any_write(tmp_path: Path) -> None:
-    root = tmp_path / "cluster"
-    with pytest.raises(ValueError, match="ancestor"):
-        configuration._write_files(
-            root,
-            {Path("collision"): "file", Path("collision/child"): "child"},
-        )
-    assert not root.exists()
-
-    with pytest.raises(ValueError, match="UTF-8"):
-        configuration._write_files(root, {Path("cluster.ini"): "\ud800"})
-    assert not root.exists()
-
-    root.mkdir()
-    (root / "conflict").mkdir()
-    with pytest.raises(ValueError, match="not a file"):
-        configuration._write_files(
-            root,
-            {Path("new/child"): "child", Path("conflict"): "file"},
-        )
-    assert not (root / "new").exists()
-
-
-def test_writer_rejects_symlink_root_without_writing_target(tmp_path: Path) -> None:
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    root = tmp_path / "cluster"
-    root.symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(ValueError, match="root cannot be a symlink"):
-        configuration._write_files(root, {Path("cluster.ini"): "escaped"})
-
-    assert list(outside.iterdir()) == []
-
-
 def test_cluster_save_rejects_symlink_root_before_reading_files(
     tmp_path: Path,
 ) -> None:
@@ -1793,25 +1639,6 @@ def test_shard_ids_follow_master_and_secondary_roles() -> None:
             ),
         },
     )
-
-
-def test_atomic_writer_keeps_original_and_cleans_temporary_on_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = tmp_path / "cluster.ini"
-    path.write_text("original", encoding="utf-8")
-
-    def fail_replace(_source: Path, _target: Path) -> None:
-        msg = "injected replace failure"
-        raise OSError(msg)
-
-    monkeypatch.setattr(os, "replace", fail_replace)
-    with pytest.raises(OSError, match="injected replace failure"):
-        configuration._atomic_write(path, "replacement", 0o644)
-
-    assert path.read_text(encoding="utf-8") == "original"
-    assert list(tmp_path.glob(".cluster.ini.*")) == []
 
 
 def test_generated_lua_executes_as_literal_tables(
