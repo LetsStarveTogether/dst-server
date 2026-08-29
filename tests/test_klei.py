@@ -1,48 +1,43 @@
-from __future__ import annotations
-
-import json as json_module
+import gzip
+import json
 from datetime import date
-from http import HTTPMethod
-from typing import cast
-from unittest.mock import AsyncMock
 
+import httpx2
 import pytest
 from pydantic import ValidationError
-from urllib3 import AsyncPoolManager
-from urllib3.exceptions import HTTPError
 
-from dst_server.klei import KleiClient, Platform, Region, VersionPage, VersionType
+from dst_server.klei import (
+    DataResponse,
+    KleiClient,
+    Platform,
+    Region,
+    Role,
+    Room,
+    VersionPage,
+    VersionType,
+)
 
+BUILD_URL = "https://s3.amazonaws.com/dstbuilds/builds.json"
+VERSION_URL = "https://kleiforums.com/game-updates/dst/"
+REGION_URL = "https://lobby-v2-cdn.klei.com/regioncapabilities-v2.json"
+LOBBY_URL = "https://lobby-v2-cdn.klei.com/us-east-1-Steam.json.gz"
+ROOM_URL = "https://lobby-v2-us-east-1.klei.com/lobby/read"
 
-class StubKleiClient(KleiClient):
-    def __init__(
-        self,
-        routes: dict[str, object],
-        *,
-        access_token: str,
-        lobby_url: str,
-        room_url: str,
-    ) -> None:
-        super().__init__(
-            access_token=access_token,
-            lobby_url=lobby_url,
-            room_url=room_url,
-        )
-        self.routes = routes
-        self.calls: list[tuple[HTTPMethod, str, object | None]] = []
-
-    async def request(
-        self,
-        method: HTTPMethod,
-        url: str,
-        *,
-        json: object | None = None,
-    ) -> bytes:
-        self.calls.append((method, url, json))
-        response = self.routes[url]
-        if isinstance(response, Exception):
-            raise response
-        return json_module.dumps(response).encode()
+VERSION_HTML = """
+<h1>Don't Starve Together</h1>
+<a data-role="followButton"><span class="ipsCommentCount">262</span></a>
+<li class="cCmsRecord_row" data-rowID="2754">
+  <a href="https://example.test/736959" class="cRelease"
+     data-releaseID="2754" data-currentRelease>
+    <span class="cUpdate_hotfix"></span>
+    <h3 class="ipsType_sectionHead">
+      736959 <span class="ipsBadge">Release</span>
+    </h3>
+    <div class="ipsDataItem_meta">Released 06/11/26</div>
+  </a>
+</li>
+<ul class="ipsPagination"><li>Page 1 of 35</li></ul>
+"""
 
 
 def lobby_row() -> dict[str, object]:
@@ -75,23 +70,7 @@ def lobby_row() -> dict[str, object]:
 
 
 def test_version_page_uses_strict_lexbor_models() -> None:
-    html = """
-    <h1>Don't Starve Together</h1>
-    <a data-role="followButton"><span class="ipsCommentCount">262</span></a>
-    <li class="cCmsRecord_row" data-rowID="2754">
-      <a href="https://example.test/736959" class="cRelease"
-         data-releaseID="2754" data-currentRelease>
-        <span class="cUpdate_hotfix"></span>
-        <h3 class="ipsType_sectionHead">
-          736959 <span class="ipsBadge">Release</span>
-        </h3>
-        <div class="ipsDataItem_meta">Released 06/11/26</div>
-      </a>
-    </li>
-    <ul class="ipsPagination"><li>Page 1 of 35</li></ul>
-    """
-
-    page = VersionPage.model_validate(html)
+    page = VersionPage.model_validate(VERSION_HTML)
 
     assert page.title == "Don't Starve Together"
     assert page.page_count == 35
@@ -115,30 +94,51 @@ def test_version_page_uses_strict_lexbor_models() -> None:
 async def test_klei_client_queries_lobby_and_room_in_order(
     mods_info: object,
 ) -> None:
-    lobby_url = "https://lobby.test/us-east-1-Steam.json.gz"
-    room_url = "https://room.test/us-east-1/lobby/read"
     room = lobby_row() | {
         "tick": 12345,
         "clientmodsoff": False,
         "nat": 1,
         "mods_info": mods_info,
+        "players": """{
+            {
+                name = "Wilson",
+                kuid = "KU_WILSON",
+                role = "wilson",
+                steam_id = 76561198000000001,
+                ip = "127.0.0.1",
+            },
+            {
+                name = "Mod Hero",
+                kuid = "KU_MOD",
+                role = "workshop-123-character",
+            },
+        }""",
     }
+    calls: list[tuple[str, str, object | None]] = []
     credential = "credential-value"
-    client = StubKleiClient(
-        {
-            lobby_url: {"GET": [lobby_row()]},
-            room_url: {"GET": [room]},
-        },
-        access_token=credential,
-        lobby_url="https://lobby.test/{region}-{platform}.json.gz",
-        room_url="https://room.test/{region}/lobby/read",
-    )
 
-    lobbies = await client.get_lobbies(
-        regions=(Region.US_EAST,),
-        platforms=(Platform.STEAM,),
-    )
-    rooms = await client.get_rooms(((lobbies[0].row_id, Region.US_EAST),))
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        payload = json.loads(request.content) if request.content else None
+        calls.append((request.method, str(request.url), payload))
+        if str(request.url) == LOBBY_URL:
+            content = gzip.compress(json.dumps({"GET": [lobby_row()]}).encode())
+            return httpx2.Response(
+                200,
+                content=content,
+                headers={"Content-Encoding": "gzip"},
+            )
+        if str(request.url) == ROOM_URL:
+            return httpx2.Response(200, json={"GET": [room]})
+        msg = f"unexpected URL: {request.url}"
+        raise AssertionError(msg)
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
+        client = KleiClient(access_token=credential, client=http)
+        lobbies = await client.get_lobbies(
+            regions=(Region.US_EAST,),
+            platforms=(Platform.STEAM,),
+        )
+        rooms = await client.get_rooms(((lobbies[0].row_id, Region.US_EAST),))
 
     assert lobbies[0].region is Region.US_EAST
     assert lobbies[0].platform is Platform.STEAM
@@ -146,31 +146,124 @@ async def test_klei_client_queries_lobby_and_room_in_order(
     assert lobbies[0].connect_code == "c_connect('127.0.0.1', 10999)"
     assert rooms[0].tick == 12345
     assert rooms[0].mods_info == mods_info
-    assert client.calls[0] == (HTTPMethod.GET, lobby_url, None)
-    assert client.calls[1][0:2] == (HTTPMethod.POST, room_url)
-    assert client.calls[1][2] == {
-        "__gameId": "DontStarveTogether",
-        "__token": credential,
-        "query": {"__rowId": "row-1"},
+    assert rooms[0].players[0].role is Role.WILSON
+    assert rooms[0].players[0].steam_id == 76561198000000001
+    assert rooms[0].players[1].role == "workshop-123-character"
+    assert calls == [
+        ("GET", LOBBY_URL, None),
+        (
+            "POST",
+            ROOM_URL,
+            {
+                "__gameId": "DontStarveTogether",
+                "__token": credential,
+                "query": {"__rowId": "row-1"},
+            },
+        ),
+    ]
+
+
+@pytest.mark.parametrize("players", [None, "", "  \n", "{}"])
+def test_klei_room_empty_players(players: str | None) -> None:
+    payload = lobby_row() | {
+        "tick": 1,
+        "clientmodsoff": False,
+        "nat": 1,
+        "players": players,
     }
 
-
-async def test_klei_client_tolerates_unavailable_lobby_and_room() -> None:
-    lobby_url = "https://lobby.test/us-east-1-Steam.json.gz"
-    room_url = "https://room.test/us-east-1/lobby/read"
-    credential = "credential"
-    client = StubKleiClient(
-        {
-            lobby_url: HTTPError("lobby unavailable"),
-            room_url: HTTPError("room unavailable"),
-        },
-        access_token=credential,
-        lobby_url="https://lobby.test/{region}-{platform}.json.gz",
-        room_url="https://room.test/{region}/lobby/read",
+    response = DataResponse[Room].model_validate_json(
+        json.dumps({"GET": [payload]}),
+        context={"region": Region.US_EAST},
     )
 
-    assert await client.lobby(Region.US_EAST, Platform.STEAM) == ()
-    assert await client.room("row-1", Region.US_EAST) is None
+    assert response.rows[0].players == ()
+
+
+async def test_klei_client_parses_strict_endpoints() -> None:
+    urls: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        urls.append(str(request.url))
+        responses = {
+            BUILD_URL: httpx2.Response(200, json={"release": [736958, "736959"]}),
+            VERSION_URL: httpx2.Response(200, text=VERSION_HTML),
+            REGION_URL: httpx2.Response(
+                200,
+                json={
+                    "LobbyRegions": [
+                        {"Region": "us-east-1"},
+                        {"Region": "eu-central-1"},
+                    ]
+                },
+            ),
+        }
+        return responses[str(request.url)]
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
+        client = KleiClient(client=http)
+        assert await client.get_latest_build() == 736959
+        assert await client.get_regions() == ("us-east-1", "eu-central-1")
+        assert (await client.get_versions())[0].number == 736959
+    assert urls == [BUILD_URL, REGION_URL, VERSION_URL]
+
+
+@pytest.mark.parametrize("failure", ["status", "connect"])
+async def test_klei_client_has_explicit_error_boundaries(failure: str) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if failure == "connect":
+            message = "unavailable"
+            raise httpx2.ConnectError(message, request=request)
+        return httpx2.Response(503)
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
+        credential = "credential"
+        client = KleiClient(access_token=credential, client=http)
+        assert await client.lobby(Region.US_EAST, Platform.STEAM) == ()
+        assert await client.room("row-1", Region.US_EAST) is None
+        error = httpx2.ConnectError if failure == "connect" else httpx2.HTTPStatusError
+        with pytest.raises(error):
+            await client.get_latest_build()
+
+
+async def test_klei_client_only_closes_its_own_http_client() -> None:
+    transport = httpx2.MockTransport(
+        lambda _: httpx2.Response(200, json={"release": [736959]})
+    )
+    external = httpx2.AsyncClient(transport=transport)
+    client = KleiClient(client=external)
+
+    async with client:
+        assert await client.get_latest_build() == 736959
+    await client.aclose()
+    assert external.is_closed is False
+    await external.aclose()
+
+    owned = KleiClient()
+    async with owned:
+        internal = owned._client
+    assert internal.is_closed is True
+
+
+async def test_room_never_redirects_its_access_token() -> None:
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(
+            307,
+            headers={"Location": "https://untrusted.invalid/lobby/read"},
+        )
+
+    async with httpx2.AsyncClient(
+        follow_redirects=True,
+        transport=httpx2.MockTransport(handler),
+    ) as http:
+        credential = "credential"
+        client = KleiClient(access_token=credential, client=http)
+        assert await client.room("row-1", Region.US_EAST) is None
+
+    assert [str(request.url) for request in requests] == [ROOM_URL]
 
 
 async def test_room_queries_require_access_token() -> None:
@@ -178,40 +271,10 @@ async def test_room_queries_require_access_token() -> None:
 
     with pytest.raises(ValueError, match="access token"):
         await client.get_rooms(())
+    await client.aclose()
 
 
-def test_klei_client_rejects_invalid_concurrency() -> None:
+@pytest.mark.parametrize("value", [0, False])
+def test_klei_client_rejects_invalid_concurrency(value: int) -> None:
     with pytest.raises(ValueError, match="positive integer"):
-        KleiClient(lobby_concurrency=0)
-
-
-async def test_klei_client_uses_urllib3_pool() -> None:
-    class Response:
-        status = 200
-
-        @property
-        async def data(self) -> bytes:
-            return b"response"
-
-    response = Response()
-    pool = AsyncMock(spec=AsyncPoolManager)
-    pool.request.return_value = response
-    client = KleiClient(pool=cast(AsyncPoolManager, pool))
-
-    assert (
-        await client.request(
-            HTTPMethod.POST,
-            "https://klei.test",
-            json={"key": "value"},
-        )
-        == b"response"
-    )
-    pool.request.assert_awaited_once_with(
-        HTTPMethod.POST,
-        "https://klei.test",
-        json={"key": "value"},
-    )
-
-    response.status = 503
-    with pytest.raises(HTTPError, match="HTTP 503"):
-        await client.request(HTTPMethod.POST, "https://klei.test")
+        KleiClient(lobby_concurrency=value)

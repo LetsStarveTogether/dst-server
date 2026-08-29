@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from .client import KleiClient
 from .enums import Platform, Region, Role, VersionType
 from .lobby import (

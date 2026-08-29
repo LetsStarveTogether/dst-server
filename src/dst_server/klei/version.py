@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import re
 from datetime import date
 
@@ -135,6 +133,3 @@ class VersionPage(KleiModel):
 
 class Builds(RootModel[dict[str, tuple[int | str, ...]]]):
     model_config = ConfigDict(strict=True)
-
-
-__all__ = ["Builds", "Version", "VersionPage"]

@@ -1,10 +1,16 @@
-from __future__ import annotations
-
 from collections.abc import Mapping
 from ipaddress import IPv4Address
 from typing import Annotated
 
-from pydantic import Field, JsonValue, ValidationInfo, model_validator
+from pydantic import (
+    Field,
+    JsonValue,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
+
+from dst_server.cluster.overrides import _literal_lua_value
 
 from .enums import Platform, Region, Role
 from .schema import KleiModel
@@ -28,9 +34,14 @@ class DataResponse[DataT](KleiModel):
 class Player(KleiModel):
     name: str
     kuid: str
-    role: Role | None = None
+    role: Role | str | None = None
     steam_id: int | None = None
     ip: IPv4Address | None = None
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def preserve_custom_role(cls, value: object) -> object:
+        return Role(value) if isinstance(value, str) and value in Role else value
 
 
 class Secondary(KleiModel):
@@ -97,16 +108,20 @@ class Room(Lobby):
     data: str | None = None
     worldgen: str | None = None
     mods_info: list[JsonValue] | None = None
-    players: str | None = None
+    players: tuple[Player, ...] = ()
     desc: str | None = None
 
-
-__all__ = [
-    "Capabilities",
-    "DataResponse",
-    "Lobby",
-    "LobbyRegion",
-    "Player",
-    "Room",
-    "Secondary",
-]
+    @field_validator("players", mode="before")
+    @classmethod
+    def parse_players(cls, value: object) -> object:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return ()
+        if not isinstance(value, str):
+            return value
+        players = _literal_lua_value(value, "Klei room players")
+        if players == {}:
+            return ()
+        if not isinstance(players, list):
+            msg = "Klei room players must be a literal Lua array"
+            raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
+        return tuple(players)

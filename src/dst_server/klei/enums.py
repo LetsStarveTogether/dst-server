@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from enum import IntFlag, StrEnum
 
 
@@ -54,6 +52,3 @@ class Role(StrEnum):
 class VersionType(StrEnum):
     RELEASE = "Release"
     TEST = "Test"
-
-
-__all__ = ["Platform", "Region", "Role", "VersionType"]

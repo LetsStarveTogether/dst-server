@@ -1,21 +1,22 @@
-from __future__ import annotations
-
 from asyncio import Semaphore, TaskGroup
 from collections.abc import Iterable
-from http import HTTPMethod, HTTPStatus
 from itertools import chain, product
 from types import TracebackType
 from typing import Self
 
+import httpx2
 from logbook import Logger
 from pydantic import SecretStr
-from urllib3 import AsyncPoolManager
-from urllib3.exceptions import HTTPError
-from urllib3.util import Timeout
 
 from .enums import Platform, Region
 from .lobby import Capabilities, DataResponse, Lobby, Room
 from .version import Builds, Version, VersionPage
+
+BUILD_URL = "https://s3.amazonaws.com/dstbuilds/builds.json"
+VERSION_URL = "https://kleiforums.com/game-updates/dst/"
+REGION_URL = "https://lobby-v2-cdn.klei.com/regioncapabilities-v2.json"
+LOBBY_URL = "https://lobby-v2-cdn.klei.com/{region}-{platform}.json.gz"
+ROOM_URL = "https://lobby-v2-{region}.klei.com/lobby/read"
 
 logger = Logger(__name__)
 
@@ -25,34 +26,35 @@ class KleiClient:
         self,
         access_token: SecretStr | str | None = None,
         *,
-        build_url: str = "https://s3.amazonaws.com/dstbuilds/builds.json",
-        version_url: str = "https://forums.kleientertainment.com/game-updates/dst/",
-        region_url: str = "https://lobby-v2-cdn.klei.com/regioncapabilities-v2.json",
-        lobby_url: str = "https://lobby-v2-cdn.klei.com/{region}-{platform}.json.gz",
-        room_url: str = "https://lobby-v2-{region}.klei.com/lobby/read",
+        client: httpx2.AsyncClient | None = None,
         lobby_concurrency: int = 8,
         room_concurrency: int = 24,
-        timeout: Timeout | None = None,
-        pool: AsyncPoolManager | None = None,
     ) -> None:
         self.access_token = (
             access_token
             if isinstance(access_token, SecretStr) or access_token is None
             else SecretStr(access_token)
         )
-        self.build_url = build_url
-        self.version_url = version_url
-        self.region_url = region_url
-        self.lobby_url = lobby_url
-        self.room_url = room_url
         self.lobby_concurrency = positive("lobby_concurrency", lobby_concurrency)
         self.room_concurrency = positive("room_concurrency", room_concurrency)
-        self.pool = pool or AsyncPoolManager(
-            timeout=timeout or Timeout(total=30, connect=10)
+        self._owns_client = client is None
+        self._client = (
+            httpx2.AsyncClient(
+                timeout=httpx2.Timeout(30, connect=10),
+                transport=httpx2.AsyncHTTPTransport(
+                    http2=True,
+                    retries=2,
+                    trust_env=False,
+                ),
+                trust_env=False,
+            )
+            if client is None
+            else client
         )
-        self.owns_pool = pool is None
 
     async def __aenter__(self) -> Self:
+        if self._owns_client:
+            await self._client.__aenter__()
         return self
 
     async def __aexit__(
@@ -61,17 +63,17 @@ class KleiClient:
         exc: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        del exc_type, exc, exc_tb
-        await self.close()
+        if self._owns_client:
+            await self._client.__aexit__(exc_type, exc, exc_tb)
 
-    async def close(self) -> None:
-        if self.owns_pool:
-            await self.pool.clear()
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
 
     async def get_latest_build(self, version_type: str = "release") -> int:
-        versions = Builds.model_validate_json(
-            await self.request(HTTPMethod.GET, self.build_url)
-        ).root.get(version_type)
+        response = await self._client.get(BUILD_URL)
+        response.raise_for_status()
+        versions = Builds.model_validate_json(response.content).root.get(version_type)
         if not versions:
             msg = f"Klei build response has no versions for {version_type!r}"
             raise ValueError(msg)
@@ -87,8 +89,9 @@ class KleiClient:
         return (await self.get_version_page()).versions
 
     async def get_version_page(self) -> VersionPage:
-        body = await self.request(HTTPMethod.GET, self.version_url)
-        page = VersionPage.model_validate(body.decode())
+        response = await self._client.get(VERSION_URL)
+        response.raise_for_status()
+        page = VersionPage.model_validate(response.text)
         logger.info(
             "Klei version page loaded: {page}/{page_count} ({count} rows)",
             page=page.page,
@@ -98,9 +101,9 @@ class KleiClient:
         return page
 
     async def get_regions(self) -> tuple[str, ...]:
-        data = Capabilities.model_validate_json(
-            await self.request(HTTPMethod.GET, self.region_url)
-        )
+        response = await self._client.get(REGION_URL)
+        response.raise_for_status()
+        data = Capabilities.model_validate_json(response.content)
         return tuple(region.region for region in data.lobby_regions)
 
     async def get_lobbies(
@@ -108,7 +111,6 @@ class KleiClient:
         regions: Iterable[Region] = Region,
         platforms: Iterable[Platform] = Platform,
     ) -> tuple[Lobby, ...]:
-        pairs = tuple(product(regions, platforms))
         semaphore = Semaphore(self.lobby_concurrency)
 
         async def load(region: Region, platform: Platform) -> tuple[Lobby, ...]:
@@ -117,7 +119,8 @@ class KleiClient:
 
         async with TaskGroup() as group:
             tasks = [
-                group.create_task(load(region, platform)) for region, platform in pairs
+                group.create_task(load(region, platform))
+                for region, platform in product(regions, platforms)
             ]
         return tuple(chain.from_iterable(task.result() for task in tasks))
 
@@ -146,10 +149,11 @@ class KleiClient:
         region: Region,
         platform: Platform,
     ) -> tuple[Lobby, ...]:
-        url = self.lobby_url.format(region=region, platform=platform.lobby_name)
+        url = LOBBY_URL.format(region=region, platform=platform.lobby_name)
         try:
-            body = await self.request(HTTPMethod.GET, url)
-        except HTTPError as error:
+            response = await self._client.get(url)
+            response.raise_for_status()
+        except httpx2.HTTPError as error:
             logger.warning(
                 "Klei lobby request failed: {region}/{platform}: {error}",
                 region=region,
@@ -160,7 +164,7 @@ class KleiClient:
         return (
             DataResponse[Lobby]
             .model_validate_json(
-                body,
+                response.content,
                 context={"region": region},
             )
             .rows
@@ -175,35 +179,26 @@ class KleiClient:
         if access_token is None:
             msg = "a Klei access token is required to query room details"
             raise ValueError(msg)
-        url = self.room_url.format(region=region)
+        url = ROOM_URL.format(region=region)
         payload = {
             "__gameId": "DontStarveTogether",
             "__token": access_token.get_secret_value(),
             "query": {"__rowId": row_id},
         }
         try:
-            body = await self.request(HTTPMethod.POST, url, json=payload)
-        except HTTPError:
+            response = await self._client.post(
+                url,
+                json=payload,
+                follow_redirects=False,
+            )
+            response.raise_for_status()
+        except httpx2.HTTPError:
             return None
         data = DataResponse[Room].model_validate_json(
-            body,
+            response.content,
             context={"region": region},
         )
         return data.rows[0] if data.rows else None
-
-    async def request(
-        self,
-        method: HTTPMethod,
-        url: str,
-        *,
-        json: object | None = None,
-    ) -> bytes:
-        response = await self.pool.request(method, url, json=json)
-        body = await response.data
-        if response.status >= HTTPStatus.BAD_REQUEST:
-            msg = f"Klei request failed with HTTP {response.status}: {method} {url}"
-            raise HTTPError(msg)
-        return body
 
 
 def positive(name: str, value: int) -> int:
@@ -211,6 +206,3 @@ def positive(name: str, value: int) -> int:
         msg = f"{name} must be a positive integer"
         raise ValueError(msg)
     return value
-
-
-__all__ = ["KleiClient"]
