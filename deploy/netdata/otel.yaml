@@ -1,3 +1,5 @@
+base_dir: "/data/netdata/log/otel"
+
 endpoint:
   path: "10.255.255.254:4317"
 

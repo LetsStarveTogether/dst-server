@@ -19,9 +19,13 @@ tc: lint
 test:
     uv run --locked --all-extras pytest
 
-# Run the real game against an explicitly selected local image without network access.
+# Run the real game against an explicitly selected local image.
 test-system image:
     DST_SERVER_IMAGE="{{ image }}" DST_SERVER_PODMAN_TEST=1 uv run --locked --all-extras pytest -m system tests/test_podman.py
+
+# Also verify the OTLP round trip against a configured local Netdata.
+test-netdata-system image:
+    DST_SERVER_NETDATA_TEST=1 just test-system "{{ image }}"
 
 # Query a real SteamCMD installation separately because it requires host network access.
 test-steamcmd-system:
