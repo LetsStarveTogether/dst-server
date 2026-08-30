@@ -1,8 +1,6 @@
-from __future__ import annotations
-
-import json
 import os
 import stat
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
 from pathlib import Path
 
 import pytest
@@ -19,6 +17,7 @@ def write_shard(path: Path, *, is_master: bool, name: str) -> None:
     )
 
 
+@pytest.fixture
 def service_layout(tmp_path: Path) -> tuple[Path, Path]:
     install = tmp_path / "install"
     executable = install / "bin64" / "dontstarve_dedicated_server_nullrenderer_x64"
@@ -41,58 +40,93 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
     )
     rendered = "\n".join(application.files().values())
 
-    assert not (quadlet / "dst@.container").exists()
-    assert len(application.workers) == 2
-    assert application.pod.networks == application.prepare.networks == ()
+    assert len(application.secondaries) == 1
+    assert application.pod.networks == ()
     assert not tuple(quadlet.glob("*.network"))
-    assert application.prepare.exec[-1] == "prepare"
-    assert {worker.exec[-1] for worker in application.workers} == {
-        "cave",
-        "forest",
-    }
-    assert len(application.pod.publish_ports) == 4
-    assert "Network=host" not in rendered
-    assert "127.0.0.1:4317" not in rendered
+    master = application.master
+    secondary = application.secondaries[0]
+    assert master.name == "dst-room-000-forest"
+    assert master.exec[1] == "master"
+    assert secondary.exec[1:] == ("serve", "--external-port", "30002", "--", "cave")
+    assert master.wants == (f"{secondary.name}.container",)
+    assert secondary.after == secondary.binds_to == (f"{master.name}.container",)
+    assert tuple(
+        (mapping.host, mapping.container) for mapping in application.pod.publish_ports
+    ) == (
+        (30000, 10999),
+        (30001, 27016),
+        (30002, 11000),
+        (30003, 27017),
+    )
+    assert master.exec[3] == "30000"
     assert "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://10.255.255.254:4317" in rendered
     assert "DST_SERVER_TELEMETRY_PROFILE=history" in rendered
     assert "OTEL_METRICS_EXPORTER=none" in rendered
     assert "OTEL_TRACES_EXPORTER=none" in rendered
-    assert all(
-        (quadlet / path).read_text(encoding="utf-8") == content
-        for path, content in application.files().items()
+
+
+def test_netdata_deployment_contract_is_consistent() -> None:
+    deploy = Path(__file__).parents[1] / "deploy"
+    application = cluster_api.QuadletApplication.load(
+        deploy / "quadlet", name="dst-room-000"
     )
-    assert json.loads((deploy / "podman" / "podman.json").read_text()) == {
-        "name": "podman",
-        "id": "2f259bab93aaaaa2542ba43ef33eb990d0999ee1b9924b557b7be53c0b7a1bb9",
-        "driver": "bridge",
-        "network_interface": "podman0",
-        "subnets": [{"subnet": "10.88.0.0/16", "gateway": "10.88.0.1"}],
-        "ipv6_enabled": False,
-        "internal": False,
-        "dns_enabled": True,
-        "ipam_options": {"driver": "host-local"},
-    }
-    assert (deploy / "netdata" / "otel.yaml").read_text(encoding="utf-8") == (
-        'endpoint:\n  path: "10.255.255.254:4317"\n\n'
-        "logs:\n  rotation:\n    default:\n"
-        '      max_file_size: "100MB"\n      max_entries: 200000\n'
-        "  retention:\n    default:\n"
-        "      max_files: 500000\n"
-        '      max_total_size: "1TB"\n      max_age: "9 years"\n'
-    )
-    assert (deploy / "networkd" / "10-netdata-loopback.network").read_text(
+    address = dict(application.master.environment)[
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
+    ].removeprefix("http://")
+    base_dir = "/data/netdata/log/otel"
+    otel = (deploy / "netdata/otel.yaml").read_text(encoding="utf-8")
+
+    assert f'path: "{address}"' in otel
+    assert f'base_dir: "{base_dir}"' in otel
+    assert f"Address={address.rsplit(':', 1)[0]}/32" in (
+        deploy / "networkd/10-netdata-loopback.network"
+    ).read_text(encoding="utf-8")
+    assert f"RequiresMountsFor={base_dir}" in (
+        deploy / "netdata/netdata.service.d/dependencies.conf"
+    ).read_text(encoding="utf-8")
+    assert "bind to = localhost" in (deploy / "netdata/netdata.conf").read_text(
         encoding="utf-8"
-    ) == ("[Match]\nName=lo\n\n[Network]\nAddress=10.255.255.254/32\n")
-    assert not (
-        deploy / "netdata" / "netdata.service.d" / "otel-container-address.conf"
-    ).exists()
-    assert (deploy / "netdata" / "netdata.service.d" / "networkd.conf").read_text(
-        encoding="utf-8"
-    ) == (
-        "[Unit]\nWants=systemd-networkd-wait-online@lo.service\n"
-        "After=systemd-networkd-wait-online@lo.service\n"
     )
-    assert not (deploy / "netdata" / "otel-signal-viewer.yaml").exists()
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [
+        ("", "30000-32999"),
+        ("20000-21000", "20000-21000,30000-32999"),
+        (
+            "20000-21000,30000-32999",
+            "20000-21000,30000-32999,30000-32999",
+        ),
+        ("29000-34000", "29000-34000,30000-32999"),
+        (
+            "29000-31000,32000-34000",
+            "29000-31000,32000-34000,30000-32999",
+        ),
+        ("32999-33001,25000", "32999-33001,25000,30000-32999"),
+    ],
+)
+def test_port_reservation_appends_to_existing_sysctl_bitmap(
+    tmp_path: Path,
+    existing: str,
+    expected: str,
+) -> None:
+    deploy = Path(__file__).parents[1] / "deploy" / "sysctl"
+    setting = tmp_path / "ip_local_reserved_ports"
+    setting.write_text(existing + "\n", encoding="ascii")
+
+    subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        (str(deploy / "dst-server-reserve-ports"), str(setting)),
+        check=True,
+    )
+
+    assert setting.read_text(encoding="ascii") == expected + "\n"
+    service = (deploy / "dst-server-port-reservation.service").read_text(
+        encoding="utf-8"
+    )
+    assert "After=systemd-sysctl.service" in service
+    assert "Before=sysinit.target" in service
+    assert "ExecStart=/usr/libexec/dst-server-reserve-ports" in service
 
 
 def test_cluster_and_mod_files_are_prepared(tmp_path: Path) -> None:
@@ -117,7 +151,8 @@ def test_cluster_and_mod_files_are_prepared(tmp_path: Path) -> None:
     )
 
     cluster_api.prepare(cluster)
-    mod_ids = mods.prepare(install, cluster)
+    mod_ids = mods.prepare_shared(cluster)
+    mods.activate(install, cluster)
     shards = cluster_api.discover(cluster)
 
     assert mod_ids == (7, 42)
@@ -259,8 +294,10 @@ def test_console_ensure_refuses_directory(tmp_path: Path) -> None:
     assert path.is_dir()
 
 
-async def test_service_prepare_skips_updater_without_mods(tmp_path: Path) -> None:
-    install, cluster = service_layout(tmp_path)
+async def test_prepare_shared_skips_updater_without_mods(
+    service_layout: tuple[Path, Path],
+) -> None:
+    install, cluster = service_layout
     shard = cluster / "forest"
     write_shard(shard, is_master=True, name="Forest")
     (shard / "modoverrides.lua").write_text("return {}", encoding="utf-8")
@@ -271,27 +308,30 @@ async def test_service_prepare_skips_updater_without_mods(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
-    shards, servers = await service.prepare(install, cluster, update_mods=True)
+    shards = await service.prepare_shared(install, cluster, update_mods=True)
 
-    assert len(shards) == len(servers) == 1
+    assert tuple(value.name for value in shards) == ("forest",)
 
 
-async def test_service_prepare_selects_exactly_one_shard(tmp_path: Path) -> None:
-    install, cluster = service_layout(tmp_path)
+async def test_activate_shard_and_create_server_config(
+    service_layout: tuple[Path, Path],
+) -> None:
+    install, cluster = service_layout
     write_shard(cluster / "forest", is_master=True, name="Forest")
     write_shard(cluster / "cave", is_master=False, name="Caves")
 
-    shards, servers = await service.prepare(
+    shards = await service.prepare_shared(install, cluster, update_mods=False)
+    selected = next(value for value in shards if value.name == "cave")
+    service.activate_shard(install, cluster, selected)
+    config = service.create_server_config(
         install,
         cluster,
-        update_mods=False,
-        shard="cave",
+        selected,
         external_port=30007,
     )
 
-    assert tuple(value.name for value in shards) == ("cave",)
-    assert tuple(value.config.shard for value in servers) == ("cave",)
-    assert servers[0].config.extra_args == (
+    assert config.shard == "cave"
+    assert config.extra_args == (
         "-skip_update_server_mods",
         "-external_port",
         "30007",
@@ -299,20 +339,12 @@ async def test_service_prepare_selects_exactly_one_shard(tmp_path: Path) -> None
     assert not (cluster / "console").exists()
     assert (cluster / "cave" / "console").is_fifo()
 
-    with pytest.raises(ValueError, match="unknown DST shard"):
-        await service.prepare(
-            install,
-            cluster,
-            update_mods=False,
-            shard="missing",
-        )
 
-
-async def test_service_prepare_updates_collection_only_setup(
-    tmp_path: Path,
+async def test_prepare_shared_updates_collection_only_setup(
+    service_layout: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    install, cluster = service_layout(tmp_path)
+    install, cluster = service_layout
     mods_path = cluster / "mods"
     mods_path.mkdir()
     write_shard(cluster / "forest", is_master=True, name="Forest")
@@ -326,19 +358,23 @@ async def test_service_prepare_updates_collection_only_setup(
         *args: object,
         **kwargs: object,
     ) -> None:
+        assert (install / "mods").is_symlink()
+        assert (install / "mods").resolve() == (cluster / "mods").resolve()
+        assert args[1] == cluster / "mods" / "ugc"
         calls.append((args, kwargs))
 
     monkeypatch.setattr(mods, "update", update)
 
-    await service.prepare(install, cluster, update_mods=True)
+    await service.prepare_shared(install, cluster, update_mods=True)
 
     assert len(calls) == 1
+    assert "lock_path" not in calls[0][1]
 
 
-async def test_service_prepare_validates_layout_before_replacing_mods(
-    tmp_path: Path,
+async def test_prepare_shared_validates_layout_before_replacing_mods(
+    service_layout: tuple[Path, Path],
 ) -> None:
-    install, cluster = service_layout(tmp_path)
+    install, cluster = service_layout
     install_mods = install / "mods"
     install_mods.mkdir()
     sentinel = install_mods / "keep"
@@ -346,7 +382,7 @@ async def test_service_prepare_validates_layout_before_replacing_mods(
     (cluster / "forest").mkdir()
 
     with pytest.raises(FileNotFoundError, match=r"server\.ini"):
-        await service.prepare(install, cluster, update_mods=False)
+        await service.prepare_shared(install, cluster, update_mods=False)
 
     assert sentinel.is_file()
     assert not (cluster / "mods").exists()
@@ -356,17 +392,10 @@ async def test_service_prepare_validates_layout_before_replacing_mods(
     )
 
 
-async def test_mod_updater_uses_isolated_config_ports_and_proxy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+async def test_mod_updater_uses_isolated_config_ports(tmp_path: Path) -> None:
     executable = tmp_path / "fake-updater"
     executable.write_text(
-        "#!/usr/bin/env python3\n"
-        "import os, sys\n"
-        "print('ARGS|' + '|'.join(sys.argv[1:]))\n"
-        "print('PROXY|' + os.environ.get('HTTPS_PROXY', ''))\n",
+        "#!/usr/bin/env python3\nimport sys\nprint('ARGS|' + '|'.join(sys.argv[1:]))\n",
         encoding="utf-8",
     )
     executable.chmod(0o755)
@@ -377,7 +406,6 @@ async def test_mod_updater_uses_isolated_config_ports_and_proxy(
     await mods.update(
         executable,
         ugc,
-        proxy_url="socks5://127.0.0.1:1080",
         log_handler=lines.append,
     )
 
@@ -393,5 +421,3 @@ async def test_mod_updater_uses_isolated_config_ports_and_proxy(
     }
     assert len(ports) == 2
     assert "-steam_authentication_port" not in arguments
-    assert lines[1] == "PROXY|socks5://127.0.0.1:1080"
-    assert "HTTPS_PROXY" not in os.environ

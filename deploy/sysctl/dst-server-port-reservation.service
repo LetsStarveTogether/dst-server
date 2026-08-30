@@ -1,0 +1,14 @@
+[Unit]
+Description=Reserve Don't Starve Together published ports
+Documentation=https://docs.kernel.org/networking/ip-sysctl.html#ip-variables
+DefaultDependencies=no
+After=systemd-sysctl.service
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/dst-server-reserve-ports
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

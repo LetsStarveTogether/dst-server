@@ -1,14 +1,12 @@
 [Unit]
 Description=Don't Starve Together cluster dst-room-000
-Requires=dst-room-000-prepare.container
-After=dst-room-000-prepare.container
 
 [Pod]
 ExitPolicy=continue
 PublishPort=30000:10999/udp
-PublishPort=30300:27016/udp
-PublishPort=30600:11000/udp
-PublishPort=30900:27017/udp
+PublishPort=30001:27016/udp
+PublishPort=30002:11000/udp
+PublishPort=30003:27017/udp
 
 [Install]
 WantedBy=default.target

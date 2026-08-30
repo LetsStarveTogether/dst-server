@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 from typing import cast
@@ -32,6 +30,7 @@ from scripts.generate_rooms import (
     TOKEN_ENVIRONMENT,
     RoomType,
     build,
+    generate_configured_rooms,
     generate_room,
     generate_rooms,
     main,
@@ -453,12 +452,13 @@ def test_generate_room_saves_cluster_and_quadlet_application(tmp_path: Path) -> 
     assert len(written) == len(set(written))
     assert ClusterConfig.load(cluster_dir).settings.cluster_name == "LST-007-纯净生存"
     application = QuadletApplication.load(quadlet_dir)
-    assert len(application.workers) == 2
-    assert all(unit.image == DEFAULT_IMAGE for unit in application.containers)
-    assert application.pod.publish_ports[0].host == 30007
-    for worker in application.workers:
-        assert worker.environment["OTEL_SDK_DISABLED"] == "true"
-        assert worker.environment["DST_SERVER_CLUSTER_NAME"] == "dst-room-007"
+    units = (application.master, *application.secondaries)
+    assert len(units) == 2
+    assert all(unit.image == DEFAULT_IMAGE for unit in units)
+    assert application.pod.publish_ports[0].host == 30070
+    for unit in units:
+        assert unit.environment["OTEL_SDK_DISABLED"] == "true"
+        assert unit.environment["DST_SERVER_CLUSTER_NAME"] == "dst-room-007"
 
 
 def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
@@ -476,7 +476,7 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
     assert len(written) == len(set(written))
     assert len(tuple(cluster_root.glob("room-*"))) == 140
     assert len(tuple(quadlet_dir.glob("*.pod"))) == 140
-    assert len(tuple(quadlet_dir.glob("*.container"))) == 395
+    assert len(tuple(quadlet_dir.glob("*.container"))) == 255
     assert len(tuple(cluster_root.rglob("leveldataoverride.lua"))) == 7
     assert not tuple(quadlet_dir.glob("*.network"))
     ports = []
@@ -487,11 +487,24 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
             name=f"dst-room-{number:03d}",
         )
         mappings = application.pod.publish_ports
-        assert application.pod.networks == application.prepare.networks == ()
-        shard_count += len(application.workers)
+        units = (application.master, *application.secondaries)
+        shard_count += len(units)
         ports.extend(mapping.host for mapping in mappings)
-        assert len(mappings) == 2 * len(application.workers)
+        assert len(mappings) == 2 * len(units)
+        base = 30000 + 10 * number
+        assert tuple(mapping.host for mapping in mappings) == tuple(
+            range(base, base + len(mappings))
+        )
         assert all(mapping.protocol == "udp" for mapping in mappings)
+        cluster = ClusterConfig.load(cluster_root / f"room-{number:03d}")
+        player_ports = {mapping.container: mapping.host for mapping in mappings}
+        master_name = next(
+            name for name, shard in cluster.shards.items() if shard.settings.is_master
+        )
+        named_units = {
+            master_name: application.master,
+            **{unit.exec[-1]: unit for unit in application.secondaries},
+        }
         history = room(number)[0] in {
             RoomType.PURE_SURVIVAL,
             RoomType.PURE_ENDLESS,
@@ -500,18 +513,47 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
             RoomType.LIGHTS_OUT_SURVIVAL,
             RoomType.LIGHTS_OUT_ENDLESS,
         }
-        for worker in application.workers:
+        for shard_name, unit in named_units.items():
+            shard = cluster.shards[shard_name]
+            assert unit.exec[3] == str(player_ports[shard.settings.server_port])
             assert all(
-                worker.environment[name] == value
+                unit.environment[name] == value
                 for name, value in NETDATA_ENVIRONMENT.items()
             )
-            assert worker.environment.get("DST_SERVER_TELEMETRY_PROFILE") == (
+            assert unit.environment.get("DST_SERVER_TELEMETRY_PROFILE") == (
                 "history" if history else None
             )
     assert shard_count == 255
     assert len(ports) == len(set(ports)) == 510
     assert min(ports) == 30000
-    assert max(ports) == 31024
+    assert max(ports) == 31391
+
+
+def test_explicit_configurations_cover_remaining_port_slots(tmp_path: Path) -> None:
+    template = build(0, token=TOKEN, cluster_key=CLUSTER_KEY)
+    configurations = {
+        number: template.replace(
+            settings=template.settings.replace(cluster_name=f"explicit-{number:03d}")
+        )
+        for number in (140, 299)
+    }
+
+    generate_configured_rooms(
+        configurations,
+        cluster_root=tmp_path / "clusters",
+        quadlet_dir=tmp_path / "quadlet",
+    )
+
+    for number, base in ((140, 31400), (299, 32990)):
+        cluster = ClusterConfig.load(tmp_path / "clusters" / f"room-{number:03d}")
+        assert cluster.settings.cluster_name == f"explicit-{number:03d}"
+        application = QuadletApplication.load(
+            tmp_path / "quadlet",
+            name=f"dst-room-{number:03d}",
+        )
+        assert tuple(
+            mapping.host for mapping in application.pod.publish_ports
+        ) == tuple(range(base, base + 4))
 
 
 def test_main_can_generate_selected_rooms(
@@ -535,7 +577,10 @@ def test_main_can_generate_selected_rooms(
         str(token_file),
     ])
 
-    assert {path.name for path in cluster_root.iterdir()} == {"room-000", "room-139"}
+    assert {path.name for path in cluster_root.glob("room-*")} == {
+        "room-000",
+        "room-139",
+    }
     assert {path.name for path in quadlet_dir.glob("*.pod")} == {
         "dst-room-000.pod",
         "dst-room-139.pod",
@@ -565,69 +610,47 @@ def test_main_reads_token_from_environment(
     assert token.stat().st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize("token", [None, ""])
-def test_main_requires_a_token_before_writing(
+@pytest.mark.parametrize(
+    ("token", "from_file", "invalid"),
+    [
+        (None, False, False),
+        ("", False, False),
+        ("invalid token", False, True),
+        ("\n", True, False),
+    ],
+    ids=("missing", "empty-environment", "invalid-environment", "empty-file"),
+)
+def test_main_rejects_invalid_token_before_writing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     token: str | None,
+    from_file: bool,
+    invalid: bool,
 ) -> None:
-    if token is None:
+    cluster_root = tmp_path / "clusters"
+    quadlet_dir = tmp_path / "quadlet"
+    arguments = [
+        "0",
+        "--cluster-root",
+        str(cluster_root),
+        "--quadlet-dir",
+        str(quadlet_dir),
+    ]
+    if from_file:
+        assert token is not None
+        token_file = tmp_path / "token"
+        token_file.write_text(token, encoding="utf-8")
+        arguments.extend(("--token-file", str(token_file)))
+        monkeypatch.delenv(TOKEN_ENVIRONMENT, raising=False)
+    elif token is None:
         monkeypatch.delenv(TOKEN_ENVIRONMENT, raising=False)
     else:
         monkeypatch.setenv(TOKEN_ENVIRONMENT, token)
-    cluster_root = tmp_path / "clusters"
-    quadlet_dir = tmp_path / "quadlet"
 
-    with pytest.raises(SystemExit):
-        main([
-            "0",
-            "--cluster-root",
-            str(cluster_root),
-            "--quadlet-dir",
-            str(quadlet_dir),
-        ])
-
-    assert not cluster_root.exists()
-    assert not quadlet_dir.exists()
-
-
-def test_main_rejects_an_invalid_environment_token_before_writing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(TOKEN_ENVIRONMENT, "invalid token")
-    cluster_root = tmp_path / "clusters"
-    quadlet_dir = tmp_path / "quadlet"
-
-    with pytest.raises(ValidationError, match="cluster tokens"):
-        main([
-            "0",
-            "--cluster-root",
-            str(cluster_root),
-            "--quadlet-dir",
-            str(quadlet_dir),
-        ])
-
-    assert not cluster_root.exists()
-    assert not quadlet_dir.exists()
-
-
-def test_main_rejects_an_empty_token_before_writing(tmp_path: Path) -> None:
-    token_file = tmp_path / "token"
-    token_file.write_text("\n", encoding="utf-8")
-    cluster_root = tmp_path / "clusters"
-    quadlet_dir = tmp_path / "quadlet"
-
-    with pytest.raises(SystemExit):
-        main([
-            "0",
-            "--cluster-root",
-            str(cluster_root),
-            "--quadlet-dir",
-            str(quadlet_dir),
-            "--token-file",
-            str(token_file),
-        ])
+    error = ValidationError if invalid else SystemExit
+    message = "cluster tokens" if error is ValidationError else None
+    with pytest.raises(error, match=message):
+        main(arguments)
 
     assert not cluster_root.exists()
     assert not quadlet_dir.exists()

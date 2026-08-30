@@ -1,17 +1,24 @@
 [Unit]
-Description=Don't Starve Together shard forest
+Description=Don't Starve Together master shard forest
+Wants=dst-room-000-cave.container
 
 [Container]
 Image=quay.io/wh2099/dst-server
 Pod=dst-room-000.pod
-Exec=/app/.venv/bin/dst-server run --external-port 30000 -- forest
+Exec=/app/.venv/bin/dst-server master --external-port 30000
 Environment=DST_SERVER_CLUSTER_NAME=dst-room-000
 Environment=DST_SERVER_TELEMETRY_PROFILE=history
 Environment=OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://10.255.255.254:4317
 Environment=OTEL_METRICS_EXPORTER=none
 Environment=OTEL_TRACES_EXPORTER=none
-Volume=/srv/dst/room-000:/cluster:z
+Volume=/srv/dst/room-000:/cluster
 StopTimeout=40
+HealthCmd=/app/.venv/bin/dst-server healthcheck
+HealthInterval=5s
+HealthTimeout=3s
+HealthRetries=2
+HealthStartPeriod=15s
+HealthOnFailure=kill
 
 [Service]
 Restart=on-failure

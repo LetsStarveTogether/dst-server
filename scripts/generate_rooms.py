@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 from argparse import ArgumentParser
 from collections.abc import Iterable, Mapping, Sequence
@@ -240,11 +238,10 @@ def build(
     )
 
 
-def generate_room(
+def generate_configured_room(
     number: int,
     *,
-    token: SecretStr,
-    cluster_key: SecretStr | None = None,
+    cluster: ClusterConfig,
     cluster_dir: Path,
     quadlet_dir: Path,
     image: str = DEFAULT_IMAGE,
@@ -258,7 +255,6 @@ def generate_room(
             msg = f"{label} must be an absolute path"
             raise ValueError(msg)
 
-    cluster = build(number, token=token, cluster_key=cluster_key)
     allocation = RoomPortAllocation(number=number)
     application = QuadletApplication.for_cluster(
         cluster,
@@ -268,6 +264,50 @@ def generate_room(
         telemetry_environment=environment,
     )
     return (*cluster.save(cluster_dir), *application.save(quadlet_dir))
+
+
+def generate_room(
+    number: int,
+    *,
+    token: SecretStr,
+    cluster_key: SecretStr | None = None,
+    cluster_dir: Path,
+    quadlet_dir: Path,
+    image: str = DEFAULT_IMAGE,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[Path, ...]:
+    return generate_configured_room(
+        number,
+        cluster=build(number, token=token, cluster_key=cluster_key),
+        cluster_dir=cluster_dir,
+        quadlet_dir=quadlet_dir,
+        image=image,
+        environment=environment,
+    )
+
+
+def generate_configured_rooms(
+    configurations: Mapping[int, ClusterConfig],
+    *,
+    cluster_root: Path,
+    quadlet_dir: Path,
+    image: str = DEFAULT_IMAGE,
+    environments: Mapping[int, Mapping[str, str]] | None = None,
+) -> tuple[Path, ...]:
+    """Generate explicitly configured rooms in any port slot from 000 through 299."""
+    written = []
+    for number, cluster in sorted(configurations.items()):
+        written.extend(
+            generate_configured_room(
+                number,
+                cluster=cluster,
+                cluster_dir=cluster_root / f"room-{number:03d}",
+                quadlet_dir=quadlet_dir,
+                image=image,
+                environment=(environments or {}).get(number),
+            )
+        )
+    return tuple(written)
 
 
 def generate_rooms(

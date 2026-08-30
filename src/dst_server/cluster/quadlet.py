@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import re
 import shlex
 from collections.abc import Mapping
@@ -15,6 +13,10 @@ from .overrides import FrozenMapping
 
 type Port = Annotated[int, Field(ge=1024, le=65535)]
 type Seconds = Annotated[int, Field(ge=0)]
+type HealthDuration = Annotated[
+    str,
+    Field(pattern=r"^(?:0|(?:(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:ns|us|ms|s|m|h))+)$"),
+]
 type UnitValue = Annotated[str, Field(pattern=r"^[^\x00\r\n]*$")]
 type NonEmptyUnitValue = Annotated[
     str,
@@ -42,9 +44,11 @@ DEFAULT_IMAGE = "quay.io/wh2099/dst-server"
 DEFAULT_TARGET = "default.target"
 MAX_ROOM_SLOT = 299
 MAX_ROOM_SHARDS = 4
+ROOM_PORTS_PER_SLOT = 10
 MAX_UNIT_NAME_BYTES = 240
-PREPARE_COMMAND = ("/app/.venv/bin/dst-server", "prepare")
-RUN_COMMAND = ("/app/.venv/bin/dst-server", "run")
+SERVE_COMMAND = ("/app/.venv/bin/dst-server", "serve")
+MASTER_COMMAND = ("/app/.venv/bin/dst-server", "master")
+HEALTHCHECK_COMMAND = ("/app/.venv/bin/dst-server", "healthcheck")
 CLUSTER_ENVIRONMENT = "DST_SERVER_CLUSTER_NAME"
 _UNIT_NAME = re.compile(r"(?:[A-Za-z0-9:_.-]|\\x[0-9a-f]{2})+\Z")
 _PORT_MAPPING = re.compile(r"([0-9]+):([0-9]+)/(udp|tcp)\Z")
@@ -152,7 +156,6 @@ class VolumeMount(RevalidatedFrozenModel):
     source: Path
     target: PurePosixPath
     read_only: bool = False
-    relabel: Literal["z", "Z"] | None = None
 
     @model_validator(mode="after")
     def _validate_paths(self) -> Self:
@@ -176,12 +179,10 @@ class VolumeMount(RevalidatedFrozenModel):
             raise ValueError(msg)
         source, target, *option_parts = parts
         options = option_parts[0].split(",") if option_parts else []
-        unknown = set(options).difference({"ro", "rw", "z", "Z"})
-        relabels = set(options).intersection({"z", "Z"})
+        unknown = set(options).difference({"ro", "rw"})
         if (
             unknown
             or len(options) != len(set(options))
-            or len(relabels) > 1
             or {"ro", "rw"}.issubset(options)
         ):
             msg = f"invalid Quadlet volume options: {value!r}"
@@ -190,14 +191,11 @@ class VolumeMount(RevalidatedFrozenModel):
             source=Path(source),
             target=PurePosixPath(target),
             read_only="ro" in options,
-            relabel=cast(Literal["z", "Z"] | None, next(iter(relabels), None)),
         )
 
     def render(self) -> str:
         validated = type(self).model_validate(self)
         options = ["ro"] if validated.read_only else []
-        if validated.relabel is not None:
-            options.append(validated.relabel)
         suffix = f":{','.join(options)}" if options else ""
         return f"{validated.source}:{validated.target}{suffix}"
 
@@ -218,7 +216,7 @@ _POD_SCHEMA: _Schema = {
     "Install": _INSTALL_KEYS,
 }
 _CONTAINER_SCHEMA: _Schema = {
-    "Unit": _UNIT_KEYS,
+    "Unit": _UNIT_KEYS | {"Wants": True, "BindsTo": True},
     "Container": {
         "Image": False,
         "Pod": False,
@@ -229,6 +227,12 @@ _CONTAINER_SCHEMA: _Schema = {
         "ContainerName": False,
         "Network": True,
         "StopTimeout": False,
+        "HealthCmd": False,
+        "HealthInterval": False,
+        "HealthTimeout": False,
+        "HealthRetries": False,
+        "HealthStartPeriod": False,
+        "HealthOnFailure": False,
     },
     "Service": {
         "Type": False,
@@ -526,11 +530,51 @@ class PodUnit(RevalidatedFrozenModel):
         )
 
 
+class HealthCheck(RevalidatedFrozenModel):
+    command: tuple[NonEmptyUnitValue, ...] = Field(min_length=1)
+    interval: HealthDuration | None = None
+    timeout: HealthDuration | None = None
+    retries: Annotated[int, Field(ge=1)] | None = None
+    start_period: HealthDuration | None = None
+    on_failure: Literal["none", "kill", "restart", "stop"] | None = None
+
+
+DAEMON_HEALTHCHECK = HealthCheck(
+    command=HEALTHCHECK_COMMAND,
+    interval="5s",
+    timeout="3s",
+    retries=2,
+    start_period="15s",
+    on_failure="kill",
+)
+
+
+def _render_health(value: HealthCheck | None) -> list[str]:
+    if value is None:
+        return []
+    command = shlex.join(tuple(map(_escape_expansions, value.command)))
+    result = [f"HealthCmd={command}"]
+    result.extend(
+        f"{key}={field}"
+        for field, key in (
+            (value.interval, "HealthInterval"),
+            (value.timeout, "HealthTimeout"),
+            (value.retries, "HealthRetries"),
+            (value.start_period, "HealthStartPeriod"),
+            (value.on_failure, "HealthOnFailure"),
+        )
+        if field is not None
+    )
+    return result
+
+
 class ContainerUnit(RevalidatedFrozenModel):
     name: UnitName
     image: UnitToken
     description: BareUnitValue = ""
     requires: tuple[UnitToken, ...] = ()
+    wants: tuple[UnitToken, ...] = ()
+    binds_to: tuple[UnitToken, ...] = ()
     after: tuple[UnitToken, ...] = ()
     pod: UnitToken | None = None
     exec: tuple[NonEmptyUnitValue, ...] = ()
@@ -542,6 +586,7 @@ class ContainerUnit(RevalidatedFrozenModel):
     container_name: UnitToken | None = None
     networks: tuple[UnitToken, ...] = ()
     stop_timeout: Seconds | None = None
+    health: HealthCheck | None = None
     service_type: Literal["oneshot", "notify"] | None = None
     remain_after_exit: bool | None = None
     nice: Annotated[int, Field(ge=-20, le=19)] | None = None
@@ -552,6 +597,8 @@ class ContainerUnit(RevalidatedFrozenModel):
     @model_validator(mode="after")
     def _validate_related_values(self) -> Self:
         _validate_unique(self.requires, "Requires")
+        _validate_unique(self.wants, "Wants")
+        _validate_unique(self.binds_to, "BindsTo")
         _validate_unique(self.after, "After")
         _validate_unique(self.wanted_by, "WantedBy")
         _validate_unique(self.networks, "Network")
@@ -598,12 +645,32 @@ class ContainerUnit(RevalidatedFrozenModel):
                 value,
                 "Container.ContainerName",
             )
+        health: dict[str, object] = {}
+        if (value := _one(parsed, "Container", "HealthCmd")) is not None:
+            health["command"] = _command(value)
+        for field, key in (
+            ("interval", "HealthInterval"),
+            ("timeout", "HealthTimeout"),
+            ("start_period", "HealthStartPeriod"),
+            ("on_failure", "HealthOnFailure"),
+        ):
+            if (value := _one(parsed, "Container", key)) is not None:
+                health[field] = value
+        if (value := _one(parsed, "Container", "HealthRetries")) is not None:
+            health["retries"] = _integer(value, "HealthRetries")
+        if health:
+            if "command" not in health:
+                msg = "Quadlet health settings require HealthCmd"
+                raise ValueError(msg)
+            values["health"] = HealthCheck.model_validate(health)
         if (value := _one(parsed, "Service", "Type")) is not None:
             values["service_type"] = value
         if (value := _one(parsed, "Service", "Restart")) is not None:
             values["restart"] = value
         for field, section, key in (
             ("requires", "Unit", "Requires"),
+            ("wants", "Unit", "Wants"),
+            ("binds_to", "Unit", "BindsTo"),
             ("after", "Unit", "After"),
             ("wanted_by", "Install", "WantedBy"),
         ):
@@ -637,6 +704,8 @@ class ContainerUnit(RevalidatedFrozenModel):
         if validated.description:
             unit.append(f"Description={_escape_expansions(validated.description)}")
         unit.extend(f"Requires={value}" for value in validated.requires)
+        unit.extend(f"Wants={value}" for value in validated.wants)
+        unit.extend(f"BindsTo={value}" for value in validated.binds_to)
         unit.extend(f"After={value}" for value in validated.after)
         container = [
             f"Image={validated.image}"
@@ -671,6 +740,7 @@ class ContainerUnit(RevalidatedFrozenModel):
             )
         if validated.stop_timeout is not None:
             container.append(f"StopTimeout={validated.stop_timeout}")
+        container.extend(_render_health(validated.health))
         service = []
         if validated.service_type is not None:
             service.append(f"Type={validated.service_type}")
@@ -731,99 +801,149 @@ class RoomPortAllocation(RevalidatedFrozenModel):
             msg = f"room port allocation supports at most {MAX_ROOM_SHARDS} shards"
             raise ValueError(msg)
         slot = self.number + self.offset
-        mappings = []
-        for ordinal, (_, shard) in enumerate(shards):
-            settings = shard.settings
-            for base, container in (
-                (30000, settings.server_port),
-                (30300, settings.master_server_port),
-            ):
-                mappings.append(
-                    PortMapping(
-                        host=base + 600 * ordinal + slot,
-                        container=container,
-                    )
-                )
-        ordered = tuple(sorted(mappings, key=lambda item: (item.host, item.container)))
-        PodUnit(name="validation", publish_ports=ordered)
-        return ordered
+        base = 30000 + ROOM_PORTS_PER_SLOT * slot
+        return tuple(
+            PortMapping(
+                host=base + 2 * ordinal + port_offset,
+                container=container,
+            )
+            for ordinal, (_, shard) in enumerate(shards)
+            for port_offset, container in enumerate((
+                shard.settings.server_port,
+                shard.settings.master_server_port,
+            ))
+        )
+
+
+def _sync_external_port(
+    unit: ContainerUnit,
+    replacements: Mapping[int, int | None],
+    addition: int | None,
+) -> ContainerUnit:
+    command = list(unit.exec)
+    try:
+        index = command.index("--external-port") + 1
+    except ValueError:
+        if addition is None:
+            return unit
+        index = command.index("--") if "--" in command else len(command)
+        command[index:index] = ("--external-port", str(addition))
+    else:
+        try:
+            previous = int(command[index])
+        except ValueError, IndexError:
+            return unit
+        if previous not in replacements and addition is None:
+            return unit
+        replacement = replacements.get(previous, addition)
+        if replacement is None:
+            del command[index - 1 : index + 1]
+        else:
+            command[index] = str(replacement)
+    return unit.replace(exec=tuple(command))
 
 
 class QuadletApplication(RevalidatedFrozenModel):
     pod: PodUnit
-    prepare: ContainerUnit
-    workers: tuple[ContainerUnit, ...] = Field(min_length=1)
+    master: ContainerUnit
+    secondaries: tuple[ContainerUnit, ...] = ()
 
     @model_validator(mode="after")
     def _validate_topology(self) -> Self:
         pod_source = f"{self.pod.name}.pod"
-        prepare_source = f"{self.prepare.name}.container"
-        if self.prepare.name != f"{self.pod.name}-prepare":
-            msg = "Quadlet prepare unit must use the application pod name"
+        if "host" in self.pod.networks:
+            msg = "Quadlet application cannot use host network"
             raise ValueError(msg)
-        if (
-            self.prepare.pod is not None
-            or self.prepare.service_type != "oneshot"
-            or self.prepare.remain_after_exit is not None
-        ):
-            msg = "Quadlet prepare unit must be a transient standalone oneshot"
+        secondary_names = tuple(unit.name for unit in self.secondaries)
+        if secondary_names != tuple(sorted(secondary_names)):
+            msg = "Quadlet secondaries must use canonical unit-name order"
             raise ValueError(msg)
-        if (
-            prepare_source not in self.pod.requires
-            or prepare_source not in self.pod.after
-        ):
-            msg = f"Quadlet Pod does not depend on {prepare_source}"
+        if f"{self.pod.name}-pod" in {self.master.name, *secondary_names}:
+            msg = "Quadlet container unit conflicts with the pod service"
             raise ValueError(msg)
-        worker_names = tuple(worker.name for worker in self.workers)
-        if worker_names != tuple(sorted(worker_names)):
-            msg = "Quadlet workers must use canonical unit-name order"
+        master_source = f"{self.master.name}.container"
+        secondary_sources = tuple(f"{name}.container" for name in secondary_names)
+        if any((
+            self.master.pod != pod_source,
+            self.master.exec[: len(MASTER_COMMAND)] != MASTER_COMMAND,
+            bool(self.master.requires),
+            bool(self.master.binds_to),
+            bool(self.master.after),
+            self.master.wants != secondary_sources,
+        )):
+            msg = "Quadlet application has an invalid master unit"
             raise ValueError(msg)
-        names = {self.prepare.name}
-        for worker in self.workers:
-            if worker.name in names:
-                msg = f"duplicate Quadlet container unit: {worker.name}"
+        names = {self.master.name}
+        for secondary in self.secondaries:
+            if secondary.name in names:
+                msg = f"duplicate Quadlet container unit: {secondary.name}"
                 raise ValueError(msg)
-            names.add(worker.name)
-            if worker.pod != pod_source:
-                msg = f"Quadlet worker is not a member of {pod_source}: {worker.name}"
+            names.add(secondary.name)
+            if secondary.pod != pod_source:
+                msg = (
+                    f"Quadlet secondary is not a member of {pod_source}: "
+                    f"{secondary.name}"
+                )
+                raise ValueError(msg)
+            if any((
+                secondary.exec[: len(SERVE_COMMAND)] != SERVE_COMMAND,
+                bool(secondary.requires),
+                bool(secondary.wants),
+                secondary.binds_to != (master_source,),
+                secondary.after != (master_source,),
+            )):
+                msg = f"Quadlet secondary has invalid master binding: {secondary.name}"
                 raise ValueError(msg)
         return self
 
     def replace(self, **changes: object) -> Self:
-        if "pod" in changes and "workers" not in changes:
+        if "pod" in changes:
             pod = PodUnit.model_validate(changes["pod"])
-            new_hosts = {
-                mapping.container: mapping.host
-                for mapping in pod.publish_ports
-                if mapping.protocol == "udp"
-            }
-            replacements = {
-                mapping.host: new_hosts.get(mapping.container)
+            units = (self.master, *self.secondaries)
+            old_udp = tuple(
+                mapping
                 for mapping in self.pod.publish_ports
                 if mapping.protocol == "udp"
-                and mapping.host != new_hosts.get(mapping.container)
+            )
+            new_udp = tuple(
+                mapping for mapping in pod.publish_ports if mapping.protocol == "udp"
+            )
+            new_hosts = {mapping.container: mapping.host for mapping in new_udp}
+            replacements = {
+                mapping.host: new_hosts.get(mapping.container)
+                for mapping in old_udp
+                if mapping.host != new_hosts.get(mapping.container)
             }
-            if replacements:
-                workers = []
-                for worker in self.workers:
-                    command = list(worker.exec)
-                    try:
-                        index = command.index("--external-port") + 1
-                        replacement = replacements[int(command[index])]
-                    except ValueError, IndexError, KeyError:
-                        pass
-                    else:
-                        if replacement is None:
-                            del command[index - 1 : index + 1]
-                        else:
-                            command[index] = str(replacement)
-                    workers.append(worker.replace(exec=tuple(command)))
-                changes["workers"] = tuple(workers)
+            additions: dict[str, int] = {}
+            if not old_udp:
+                implicit_units = (() if "master" in changes else (self.master,)) + (
+                    () if "secondaries" in changes else self.secondaries
+                )
+                if new_udp and len(new_udp) != 2 * len(units) and implicit_units:
+                    msg = "cannot infer player ports from partial new mappings"
+                    raise ValueError(msg)
+                if len(new_udp) == 2 * len(units):
+                    additions = {
+                        unit.name: mapping.host
+                        for unit, mapping in zip(units, new_udp[::2], strict=True)
+                    }
+            if replacements or additions:
+                if "master" not in changes:
+                    changes["master"] = _sync_external_port(
+                        self.master,
+                        replacements,
+                        additions.get(self.master.name),
+                    )
+                if "secondaries" not in changes:
+                    changes["secondaries"] = tuple(
+                        _sync_external_port(
+                            unit,
+                            replacements,
+                            additions.get(unit.name),
+                        )
+                        for unit in self.secondaries
+                    )
         return super().replace(**changes)
-
-    @property
-    def containers(self) -> tuple[ContainerUnit, ...]:
-        return (self.prepare, *self.workers)
 
     @classmethod
     def for_cluster(
@@ -840,46 +960,69 @@ class QuadletApplication(RevalidatedFrozenModel):
         logical_name = name or f"dst-{cluster_path.name}"
         base = _escape_unit_name(logical_name)
         pod_source = f"{base}.pod"
-        prepare_name = f"{base}-prepare"
-        dependency = f"{prepare_name}.container"
         volume = VolumeMount(
             source=cluster_path.absolute(),
             target=PurePosixPath("/cluster"),
-            relabel="z",
         )
         publish_ports = allocation.mappings(validated) if allocation else ()
         published_hosts = {mapping.container: mapping.host for mapping in publish_ports}
         pod = PodUnit(
             name=base,
             description=f"Don't Starve Together cluster {logical_name}",
-            requires=(dependency,),
-            after=(dependency,),
             exit_policy="continue",
             publish_ports=publish_ports,
             wanted_by=(DEFAULT_TARGET,),
-        )
-        prepare = ContainerUnit(
-            name=prepare_name,
-            description=f"Prepare Don't Starve Together cluster {logical_name}",
-            exec=PREPARE_COMMAND,
-            service_type="oneshot",
-            image=image,
-            volumes=(volume,),
-            stop_timeout=40,
-            restart="on-failure",
-            timeout_stop_sec=50,
         )
         environment = dict(telemetry_environment or {})
         if environment.get(CLUSTER_ENVIRONMENT, logical_name) != logical_name:
             msg = f"{CLUSTER_ENVIRONMENT} is managed by QuadletApplication"
             raise ValueError(msg)
         environment[CLUSTER_ENVIRONMENT] = logical_name
-        workers = tuple(
+        master_name = next(
+            name for name, shard in validated.shards.items() if shard.settings.is_master
+        )
+        secondary_names = sorted(
+            (name for name in validated.shards if name != master_name),
+            key=_escape_unit_name,
+        )
+        master_unit_name = f"{base}-{_escape_unit_name(master_name)}"
+        master = ContainerUnit(
+            name=master_unit_name,
+            description=f"Don't Starve Together master shard {master_name}",
+            exec=(
+                *MASTER_COMMAND,
+                *(
+                    (
+                        "--external-port",
+                        str(
+                            published_hosts[
+                                validated.shards[master_name].settings.server_port
+                            ]
+                        ),
+                    )
+                    if published_hosts
+                    else ()
+                ),
+            ),
+            environment=environment,
+            image=image,
+            pod=pod_source,
+            volumes=(volume,),
+            wants=tuple(
+                f"{base}-{_escape_unit_name(name)}.container"
+                for name in secondary_names
+            ),
+            stop_timeout=40,
+            health=DAEMON_HEALTHCHECK,
+            restart="on-failure",
+            timeout_stop_sec=50,
+        )
+        secondaries = tuple(
             ContainerUnit(
                 name=f"{base}-{_escape_unit_name(shard_name)}",
                 description=f"Don't Starve Together shard {shard_name}",
                 exec=(
-                    *RUN_COMMAND,
+                    *SERVE_COMMAND,
                     *(
                         (
                             "--external-port",
@@ -895,17 +1038,20 @@ class QuadletApplication(RevalidatedFrozenModel):
                     "--",
                     shard_name,
                 ),
+                after=(f"{master.name}.container",),
+                binds_to=(f"{master.name}.container",),
                 environment=environment,
                 image=image,
                 pod=pod_source,
                 volumes=(volume,),
                 stop_timeout=40,
+                health=DAEMON_HEALTHCHECK,
                 restart="on-failure",
                 timeout_stop_sec=50,
             )
-            for shard_name in sorted(validated.shards, key=_escape_unit_name)
+            for shard_name in secondary_names
         )
-        return cls(pod=pod, prepare=prepare, workers=workers)
+        return cls(pod=pod, master=master, secondaries=secondaries)
 
     @classmethod
     def load(cls, directory: Path, *, name: str | None = None) -> Self:
@@ -924,22 +1070,31 @@ class QuadletApplication(RevalidatedFrozenModel):
             pod_path = directory / f"{_escape_unit_name(name)}.pod"
         pod = PodUnit.load(pod_path)
         pod_source = pod_path.name
-        prepare_name = f"{pod.name}-prepare"
-        prepare_path = directory / f"{prepare_name}.container"
-        prepare = ContainerUnit.load(prepare_path)
-        workers = tuple(
+        units = tuple(
             ContainerUnit.load(path)
             for path in sorted(directory.glob("*.container"))
-            if path != prepare_path and _references_pod(path, pod_source)
+            if _references_pod(path, pod_source)
         )
-        return cls(pod=pod, prepare=prepare, workers=workers)
+        masters = tuple(
+            unit for unit in units if unit.exec[: len(MASTER_COMMAND)] == MASTER_COMMAND
+        )
+        if len(masters) != 1:
+            msg = f"expected exactly one Quadlet master, found {len(masters)}"
+            raise ValueError(msg)
+        master = masters[0]
+        return cls(
+            pod=pod,
+            master=master,
+            secondaries=tuple(unit for unit in units if unit is not master),
+        )
 
     def files(self) -> dict[Path, str]:
         validated = type(self).model_validate(self)
         files = {Path(f"{validated.pod.name}.pod"): validated.pod.render()}
+        files[Path(f"{validated.master.name}.container")] = validated.master.render()
         files.update({
             Path(f"{unit.name}.container"): unit.render()
-            for unit in validated.containers
+            for unit in validated.secondaries
         })
         return files
 
@@ -956,14 +1111,3 @@ class QuadletApplication(RevalidatedFrozenModel):
                 msg = f"unmanaged Quadlet units would remain active: {unexpected}"
                 raise ValueError(msg)
         return _write_files(directory, files)
-
-
-__all__ = [
-    "DEFAULT_IMAGE",
-    "ContainerUnit",
-    "PodUnit",
-    "PortMapping",
-    "QuadletApplication",
-    "RoomPortAllocation",
-    "VolumeMount",
-]
