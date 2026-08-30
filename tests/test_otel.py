@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
 from pathlib import Path
@@ -71,8 +69,9 @@ async def exercise_pipeline(
     game: GameClient,
     events: stream.EventStream,
     pipeline: otel.Pipeline,
+    tracer_provider: TracerProvider,
 ) -> int:
-    tracer = pipeline.tracer_provider.get_tracer("tests")
+    tracer = tracer_provider.get_tracer("tests")
     with tracer.start_as_current_span("bot.operation") as parent:
         parent_span_id = parent.get_span_context().span_id
         await game.world.pause(True)
@@ -97,7 +96,6 @@ async def exercise_pipeline(
             "dst.session.id": "TEST",
         },
     )
-    assert await pipeline.force_flush()
     return parent_span_id
 
 
@@ -204,6 +202,7 @@ def test_configure_closes_unowned_exporter(
 
 def test_configure_honors_disabled_signal_exporters() -> None:
     run_python("""
+from asyncio import run
 from os import environ
 from unittest.mock import Mock
 
@@ -224,12 +223,13 @@ pipeline = otel.configure()
 metric_exporter.assert_not_called()
 span_exporter.assert_not_called()
 log_exporter.assert_called_once()
-pipeline.shutdown_sync()
+run(pipeline.shutdown())
 """)
 
 
 def test_configure_without_log_exporter_has_no_event_logger() -> None:
     run_python("""
+from asyncio import run
 from os import environ
 from unittest.mock import Mock
 
@@ -243,12 +243,13 @@ otel.BatchSpanProcessor = lambda *_, **__: Mock()
 
 pipeline = otel.configure()
 assert pipeline.logger is None
-pipeline.shutdown_sync()
+run(pipeline.shutdown())
 """)
 
 
 def test_configure_installs_global_providers_once() -> None:
     run_python("""
+from asyncio import run
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from time import sleep
@@ -288,17 +289,19 @@ errors = [result for result in results if isinstance(result, RuntimeError)]
 assert len(pipelines) == len(errors) == 1
 pipeline = pipelines[0]
 assert str(errors[0]) == "OTLP providers have already been configured"
-assert trace.get_tracer_provider() is pipeline.tracer_provider
-assert metrics.get_meter_provider() is pipeline.meter_provider
-assert get_logger_provider() is pipeline.logger_provider
-instance_id = str(pipeline.tracer_provider.resource.attributes["service.instance.id"])
+logger_provider, tracer_provider, meter_provider = pipeline._resources
+assert trace.get_tracer_provider() is tracer_provider
+assert metrics.get_meter_provider() is meter_provider
+assert get_logger_provider() is logger_provider
+instance_id = str(tracer_provider.resource.attributes["service.instance.id"])
 assert str(ULID.from_str(instance_id)) == instance_id
-pipeline.shutdown_sync()
+run(pipeline.shutdown())
 """)
 
 
 def test_configure_failure_cleans_up_and_can_retry() -> None:
     run_python("""
+from asyncio import run
 from os import environ
 from threading import enumerate as enumerate_threads
 
@@ -341,41 +344,31 @@ def metric_threads():
 assert not metric_threads()
 pipeline = otel.configure()
 assert metric_threads()
-pipeline.shutdown_sync()
+run(pipeline.shutdown())
 assert not metric_threads()
 """)
 
 
-def test_pipeline_flush_and_shutdown_preserve_order_after_failure() -> None:
+async def test_pipeline_shutdown_preserves_order_after_failure() -> None:
     calls: list[str] = []
     providers = {name: Mock() for name in ("logger", "tracer", "meter")}
 
-    def call(operation: str, name: str) -> bool:
-        calls.append(f"{operation}:{name}")
-        if name == "logger":
-            raise RuntimeError(operation)
-        return True
+    def shutdown(name: str) -> None:
+        calls.append(name)
+        if name != "meter":
+            raise RuntimeError(name)
 
     for name, provider in providers.items():
-        provider.force_flush.side_effect = lambda _timeout, name=name: call(
-            "flush", name
-        )
-        provider.shutdown.side_effect = lambda name=name: call("shutdown", name)
+        provider.shutdown.side_effect = lambda name=name: shutdown(name)
     pipeline = otel.Pipeline(
         logger=Mock(),
-        logger_provider=providers["logger"],
-        tracer_provider=providers["tracer"],
-        meter_provider=providers["meter"],
+        _resources=tuple(providers.values()),
     )
 
-    with pytest.raises(RuntimeError, match="flush"):
-        pipeline.force_flush_sync(100)
-    assert calls == ["flush:logger", "flush:tracer", "flush:meter"]
-
-    calls.clear()
-    with pytest.raises(RuntimeError, match="shutdown"):
-        pipeline.shutdown_sync()
-    assert calls == ["shutdown:logger", "shutdown:tracer", "shutdown:meter"]
+    with pytest.raises(BaseExceptionGroup) as caught:
+        await pipeline.shutdown()
+    assert calls == ["logger", "tracer", "meter"]
+    assert [str(error) for error in caught.value.exceptions] == ["logger", "tracer"]
 
 
 async def test_pipeline_shutdown_is_idempotent() -> None:
@@ -384,9 +377,7 @@ async def test_pipeline_shutdown_is_idempotent() -> None:
     meter_provider = Mock()
     pipeline = otel.Pipeline(
         logger=Mock(),
-        logger_provider=logger_provider,
-        tracer_provider=tracer_provider,
-        meter_provider=meter_provider,
+        _resources=(logger_provider, tracer_provider, meter_provider),
     )
 
     await pipeline.shutdown()
@@ -419,9 +410,7 @@ async def test_otlp_pipeline_exports_traces_metrics_and_logs(  # ruff: ignore[to
     logger_provider.add_log_record_processor(SimpleLogRecordProcessor(log_exporter))
     pipeline = otel.Pipeline(
         logger=logger_provider.get_logger("dst-server.game-events"),
-        tracer_provider=tracer_provider,
-        meter_provider=meter_provider,
-        logger_provider=logger_provider,
+        _resources=(logger_provider, tracer_provider, meter_provider),
     )
     responses = [
         structured_result(True),
@@ -432,11 +421,11 @@ async def test_otlp_pipeline_exports_traces_metrics_and_logs(  # ruff: ignore[to
 
     monkeypatch.setattr(
         "dst_server.telemetry.recorder.trace.get_tracer",
-        pipeline.tracer_provider.get_tracer,
+        tracer_provider.get_tracer,
     )
     monkeypatch.setattr(
         "dst_server.telemetry.recorder.metrics.get_meter",
-        pipeline.meter_provider.get_meter,
+        meter_provider.get_meter,
     )
     recorder = Recorder("cluster", "test")
     events = stream.EventStream(recorder)
@@ -454,7 +443,12 @@ async def test_otlp_pipeline_exports_traces_metrics_and_logs(  # ruff: ignore[to
     )
 
     try:
-        parent_span_id = await exercise_pipeline(game, events, pipeline)
+        parent_span_id = await exercise_pipeline(
+            game,
+            events,
+            pipeline,
+            tracer_provider,
+        )
 
         finished_spans = span_exporter.get_finished_spans()
         assert len({span.name for span in finished_spans}) == len(finished_spans)

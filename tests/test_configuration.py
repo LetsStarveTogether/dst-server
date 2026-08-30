@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import os
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
@@ -1315,10 +1313,8 @@ def test_permission_files_preserve_blank_lines_and_unset_metadata(
 def test_mod_prepare_preserves_generated_downloads(tmp_path: Path) -> None:
     cluster = tmp_path / "cluster"
     make_cluster().save(cluster)
-    install = tmp_path / "install"
-    install.mkdir()
 
-    assert mods.prepare(install, cluster) == (8, 42)
+    assert mods.prepare_shared(cluster) == (8, 42)
     assert (cluster / "mods" / "dedicated_server_mods_setup.lua").read_text(
         encoding="utf-8"
     ) == ('ServerModSetup("8")\nServerModSetup("42")\nServerModCollectionSetup("99")\n')
@@ -1345,14 +1341,11 @@ def test_mod_prepare_preserves_setup_lua_and_only_prepends_missing_items(
         'ServerModSetup("8"); return ServerModSetup("9")\r\n'
     )
     setup.write_text(original, encoding="utf-8")
-    install = tmp_path / "install"
-    install.mkdir()
-
-    assert mods.prepare(install, cluster) == (8, 9, 42)
+    assert mods.prepare_shared(cluster) == (8, 9, 42)
     shebang, body = original.split("\n", 1)
     expected = f'{shebang}\nServerModSetup("42")\n{body}'
     assert setup.read_bytes() == expected.encode()
-    assert mods.prepare(install, cluster) == (8, 9, 42)
+    assert mods.prepare_shared(cluster) == (8, 9, 42)
     assert setup.read_bytes() == expected.encode()
 
 
@@ -1367,7 +1360,7 @@ def test_mod_override_parser_accepts_empty_files_and_rejects_truthy_numbers(
         'return { ["workshop-42"] = { enabled = 1 } }',
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="literal boolean"):
+    with pytest.raises(ValueError, match="valid boolean"):
         mods.workshop_ids((path,))
 
 
@@ -1377,7 +1370,7 @@ def test_mod_file_parsers_enforce_static_workshop_boundaries(tmp_path: Path) -> 
         'return { ["workshop-18446744073709551616"] = { enabled = true } }',
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="uint64"):
+    with pytest.raises(ValueError, match="invalid DST Workshop mod name"):
         mods.workshop_ids((override,))
 
     override.write_text(
@@ -1388,8 +1381,8 @@ def test_mod_file_parsers_enforce_static_workshop_boundaries(tmp_path: Path) -> 
         mods.workshop_ids((override,))
 
     invalid_overrides = (
-        ("return { client_mods_disabled = 1 }", "literal boolean"),
-        ('return { ["local"] = true }', "literal tables"),
+        ("return { client_mods_disabled = 1 }", "valid boolean"),
+        ('return { ["local"] = true }', "valid dictionary"),
         (
             'return { ["workshop-42"] = { enabled = true, enabled = false } }',
             "duplicate key",

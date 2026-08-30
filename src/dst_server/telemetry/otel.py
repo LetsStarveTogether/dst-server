@@ -1,12 +1,10 @@
-from __future__ import annotations
-
 import asyncio
 import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import TYPE_CHECKING, Protocol, Self
+from typing import TYPE_CHECKING, Protocol
 
 from opentelemetry import metrics, trace
 from opentelemetry._logs import (  # ruff:ignore[import-private-name]
@@ -77,60 +75,14 @@ def _shutdown_resources(
 @dataclass(slots=True)
 class Pipeline:
     logger: Logger | None
-    tracer_provider: TracerProvider
-    meter_provider: MeterProvider
-    logger_provider: LoggerProvider
-    closed: bool = field(default=False, init=False)
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *_: object) -> None:
-        await self.shutdown()
-
-    async def force_flush(self, timeout_millis: int = 30_000) -> bool:
-        if (
-            isinstance(timeout_millis, bool)
-            or not isinstance(timeout_millis, int)
-            or timeout_millis <= 0
-        ):
-            msg = "timeout_millis must be a positive integer"
-            raise ValueError(msg)
-        if self.closed:
-            return False
-        return await asyncio.to_thread(self.force_flush_sync, timeout_millis)
+    _resources: tuple[_ShutdownResource, ...] = field(repr=False)
+    _closed: bool = field(default=False, init=False)
 
     async def shutdown(self) -> None:
-        if self.closed:
+        if self._closed:
             return
-        self.closed = True
-        await asyncio.to_thread(self.shutdown_sync)
-
-    def force_flush_sync(self, timeout_millis: int) -> bool:
-        results: list[bool] = []
-        failures: list[BaseException] = []
-        for provider in (
-            self.logger_provider,
-            self.tracer_provider,
-            self.meter_provider,
-        ):
-            try:
-                results.append(provider.force_flush(timeout_millis))
-            except BaseException as error:
-                failures.append(error)
-        if len(failures) == 1:
-            raise failures[0]
-        if failures:
-            message = "failed to flush OpenTelemetry providers"
-            raise BaseExceptionGroup(message, failures)
-        return all(results)
-
-    def shutdown_sync(self) -> None:
-        _shutdown_resources((
-            self.logger_provider,
-            self.tracer_provider,
-            self.meter_provider,
-        ))
+        self._closed = True
+        await asyncio.to_thread(_shutdown_resources, self._resources)
 
 
 def configure(  # ruff: ignore[complex-structure, too-many-branches, too-many-locals, too-many-statements]
@@ -205,13 +157,11 @@ def configure(  # ruff: ignore[complex-structure, too-many-branches, too-many-lo
 
             pipeline = Pipeline(
                 logger=event_logger,
-                tracer_provider=tracer_provider,
-                meter_provider=meter_provider,
-                logger_provider=logger_provider,
+                _resources=(logger_provider, tracer_provider, meter_provider),
             )
-            metrics.set_meter_provider(pipeline.meter_provider)
-            trace.set_tracer_provider(pipeline.tracer_provider)
-            set_logger_provider(pipeline.logger_provider)
+            metrics.set_meter_provider(meter_provider)
+            trace.set_tracer_provider(tracer_provider)
+            set_logger_provider(logger_provider)
         except BaseException as error:
             try:  # ruff:ignore[too-many-statements-in-try-clause]
                 pending: list[_ShutdownResource] = []
@@ -269,10 +219,3 @@ def emit(
         body=event.data.model_dump(mode="json"),
         attributes=values,
     )
-
-
-__all__ = [
-    "Pipeline",
-    "configure",
-    "emit",
-]

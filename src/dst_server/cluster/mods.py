@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import os
 import shutil
@@ -21,12 +19,13 @@ from luaparser.astnodes import (
 from dst_server.steamcmd import cleanup_process_tasks, terminate_process
 
 from .config import _atomic_write, _configuration_file_exists
-from .overrides import MAX_WORKSHOP_ID, WORKSHOP_MOD, _literal_return_table
+from .overrides import MAX_WORKSHOP_ID, ModOverrides
 
 SETUP_FUNCTIONS = {
     "ServerModSetup": 0,
     "ServerModCollectionSetup": 1,
 }
+UPDATE_PROCESS_TIMEOUT = 30 * 60
 
 
 async def _stream_logs(
@@ -38,25 +37,13 @@ async def _stream_logs(
             log_handler(line.decode(errors="replace").rstrip("\r\n"))
 
 
-def prepare(  # ruff: ignore[complex-structure, too-many-branches, too-many-locals, too-many-statements]
-    install_path: Path,
+def prepare_shared(
     cluster_path: Path,
 ) -> tuple[int, ...]:
-    install_path = install_path.resolve()
     cluster_path = cluster_path.resolve()
-    if not install_path.is_dir():
-        raise NotADirectoryError(install_path)
     if not cluster_path.is_dir():
         raise NotADirectoryError(cluster_path)
     mods_path = cluster_path / "mods"
-    install_mods = install_path / "mods"
-    if (
-        install_mods == mods_path
-        or install_mods.is_relative_to(mods_path)
-        or mods_path.is_relative_to(install_mods)
-    ):
-        msg = "install and cluster Mod directories cannot contain each other"
-        raise ValueError(msg)
     setup_path = mods_path / "dedicated_server_mods_setup.lua"
     modsettings_path = mods_path / "modsettings.lua"
     ugc_path = mods_path / "ugc"
@@ -93,18 +80,49 @@ def prepare(  # ruff: ignore[complex-structure, too-many-branches, too-many-loca
     if not setup_path.exists() or missing:
         _atomic_write(setup_path, setup, 0o644)
 
-    if install_mods.is_symlink():
-        if install_mods.resolve() != mods_path.resolve():
-            install_mods.unlink()
-            install_mods.symlink_to(mods_path, target_is_directory=True)
-    else:
-        if install_mods.is_dir():
-            shutil.rmtree(install_mods)
-        elif install_mods.exists():
-            install_mods.unlink()
-        install_mods.symlink_to(mods_path, target_is_directory=True)
-
     return mod_ids
+
+
+def _validate_activation_paths(
+    install_path: Path,
+    cluster_path: Path,
+) -> tuple[Path, Path]:
+    install_path = install_path.resolve()
+    cluster_path = cluster_path.resolve()
+    if not install_path.is_dir():
+        raise NotADirectoryError(install_path)
+    if not cluster_path.is_dir():
+        raise NotADirectoryError(cluster_path)
+    mods_path = cluster_path / "mods"
+    install_mods = install_path / "mods"
+    if (
+        install_mods == mods_path
+        or install_mods.is_relative_to(mods_path)
+        or mods_path.is_relative_to(install_mods)
+    ):
+        msg = "install and cluster Mod directories cannot contain each other"
+        raise ValueError(msg)
+    return install_path, cluster_path
+
+
+def activate(install_path: Path, cluster_path: Path) -> None:
+    install_path, cluster_path = _validate_activation_paths(
+        install_path,
+        cluster_path,
+    )
+    mods_path = cluster_path / "mods"
+    install_mods = install_path / "mods"
+    _validate_directory(mods_path)
+
+    if install_mods.is_symlink():
+        if install_mods.resolve() == mods_path.resolve():
+            return
+        install_mods.unlink()
+    elif install_mods.is_dir():
+        shutil.rmtree(install_mods)
+    elif install_mods.exists():
+        install_mods.unlink()
+    install_mods.symlink_to(mods_path, target_is_directory=True)
 
 
 def _validate_directory(path: Path) -> None:
@@ -130,36 +148,7 @@ def workshop_ids(paths: Iterable[Path]) -> tuple[int, ...]:
 
 
 def _enabled_workshop_ids(path: Path) -> set[int]:
-    values = _literal_return_table(path, "modoverrides.lua", allow_empty=True)
-    if "client_mods_disabled" in values and not isinstance(
-        values.pop("client_mods_disabled"),
-        bool,
-    ):
-        msg = "client_mods_disabled must be a literal boolean"
-        raise ValueError(msg)
-
-    enabled_ids: set[int] = set()
-    for name, entry in values.items():
-        if not isinstance(entry, dict):
-            msg = "modoverrides.lua entries must be literal tables"
-            raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
-        match = WORKSHOP_MOD.fullmatch(name)
-        if name.startswith("workshop-") and match is None:
-            msg = f"invalid Workshop mod name: {name!r}"
-            raise ValueError(msg)
-        if match is None:
-            continue
-        workshop_id = int(match.group(1))
-        if workshop_id > MAX_WORKSHOP_ID:
-            msg = f"Workshop ID exceeds uint64: {workshop_id}"
-            raise ValueError(msg)
-        enabled = entry.get("enabled", False)
-        if not isinstance(enabled, bool):
-            msg = "Workshop mod enabled must be a literal boolean"
-            raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
-        if enabled:
-            enabled_ids.add(workshop_id)
-    return enabled_ids
+    return set(ModOverrides.load(path).workshop_items)
 
 
 def setup_downloads(path: Path) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -216,7 +205,6 @@ async def update(
     executable: Path,
     ugc_directory: Path,
     *,
-    proxy_url: str | None = None,
     log_handler: Callable[[str], None] | None = None,
 ) -> None:
     with TemporaryDirectory(prefix="dst-mod-update-") as temporary:
@@ -243,16 +231,9 @@ async def update(
             "-shard",
             "shard",
         )
-        environment = None
-        if proxy_url is not None:
-            environment = os.environ | {
-                "HTTP_PROXY": proxy_url,
-                "HTTPS_PROXY": proxy_url,
-            }
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=executable.parent,
-            env=environment,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -266,15 +247,16 @@ async def update(
         wait_task = asyncio.create_task(process.wait())
         log_task = asyncio.create_task(_stream_logs(stdout, log_handler))
         try:  # ruff:ignore[too-many-statements-in-try-clause]
-            done, _ = await asyncio.wait(
-                (wait_task, log_task),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if log_task in done:
-                log_task.result()
-            returncode = await wait_task
-            await terminate_process(process)
-            await log_task
+            async with asyncio.timeout(UPDATE_PROCESS_TIMEOUT):
+                done, _ = await asyncio.wait(
+                    (wait_task, log_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if log_task in done:
+                    log_task.result()
+                returncode = await wait_task
+                await terminate_process(process)
+                await log_task
         except BaseException as primary:
             cleanup_error = await cleanup_process_tasks(
                 process,
@@ -301,12 +283,3 @@ def free_udp_ports(count: int) -> tuple[int, ...]:
     finally:
         for value in sockets:
             value.close()
-
-
-__all__ = [
-    "has_setup_code",
-    "prepare",
-    "setup_downloads",
-    "update",
-    "workshop_ids",
-]

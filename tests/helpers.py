@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import json
 import os
@@ -26,6 +24,19 @@ def process_stopped(process_id: int) -> bool:
         return bool(readable)
     finally:
         os.close(descriptor)
+
+
+class BlockingProcess:
+    pid = 1
+    returncode = None
+
+    def __init__(self) -> None:
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_data(b"READY\n")
+
+    async def wait(self) -> int:
+        await asyncio.Event().wait()
+        return 0
 
 
 class StubWriter:

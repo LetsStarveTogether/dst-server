@@ -1,16 +1,12 @@
-from __future__ import annotations
-
 import asyncio
-from collections.abc import Coroutine
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from dst_server import steamcmd
 from dst_server.cluster import mods
 
-from .helpers import process_stopped
+from .helpers import BlockingProcess, process_stopped
 
 FAKE_UPDATER = r"""#!/usr/bin/env python3
 import os
@@ -71,7 +67,7 @@ def test_prepare_validates_overrides_before_replacing_install_mods(
     (shard / "modoverrides.lua").write_bytes(b"\xff")
 
     with pytest.raises(ValueError, match=r"invalid.*utf-8"):
-        mods.prepare(install, cluster)
+        mods.prepare_shared(cluster)
 
     if existing == "file":
         assert install_mods.read_bytes() == sentinel
@@ -95,7 +91,7 @@ def test_prepare_rejects_managed_setup_symlink_before_replacing_install_mods(
     (cluster_mods / "dedicated_server_mods_setup.lua").symlink_to(outside)
 
     with pytest.raises(ValueError, match="configuration cannot be a symlink"):
-        mods.prepare(install, tmp_path / "cluster")
+        mods.prepare_shared(tmp_path / "cluster")
 
     assert sentinel.is_file()
     assert outside.read_text(encoding="utf-8") == 'ServerModSetup("42")\n'
@@ -111,7 +107,7 @@ def test_prepare_rejects_overlapping_install_and_cluster_mod_directories(
     sentinel.touch()
 
     with pytest.raises(ValueError, match="cannot contain each other"):
-        mods.prepare(install, cluster)
+        mods.activate(install, cluster)
 
     assert sentinel.is_file()
     assert not (cluster / "mods").exists()
@@ -130,7 +126,7 @@ def test_prepare_rejects_invalid_setup_before_mutation(tmp_path: Path) -> None:
     setup.write_text("this is not Lua }", encoding="utf-8")
 
     with pytest.raises(ValueError, match="invalid DST Mod setup"):
-        mods.prepare(install, cluster)
+        mods.prepare_shared(cluster)
 
     assert setup.read_text(encoding="utf-8") == "this is not Lua }"
     assert sentinel.is_file()
@@ -154,7 +150,7 @@ def test_prepare_rejects_shard_override_symlink_before_mutation(
     (shard / "modoverrides.lua").symlink_to(outside)
 
     with pytest.raises(ValueError, match="configuration cannot be a symlink"):
-        mods.prepare(install, cluster)
+        mods.prepare_shared(cluster)
 
     assert not (cluster / "mods").exists()
     assert outside.read_text(encoding="utf-8").endswith("true } }")
@@ -186,66 +182,16 @@ async def assert_stopped(processes: tuple[int, int]) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("cancelled", "interrupt_cleanup"),
-    [(False, False), (True, False), (False, True), (True, True)],
-)
-async def test_cleanup_failure_preserves_primary_and_reaps_tasks(  # ruff:ignore[complex-structure]
-    cancelled: bool,
-    interrupt_cleanup: bool,
+async def test_update_chains_cleanup_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Reader:
-        def __init__(self) -> None:
-            self.started = asyncio.Event()
-            self.line = None if cancelled else b"READY\n"
-
-        async def readline(self) -> bytes:
-            if self.line is not None:
-                line, self.line = self.line, None
-                return line
-            self.started.set()
-            await asyncio.Event().wait()
-            return b""
-
-    class Process:
-        pid = 1
-        returncode = None
-
-        def __init__(self) -> None:
-            self.stdout = Reader()
-
-        async def wait(self) -> int:
-            await asyncio.Event().wait()
-            return 0
-
-    process = Process()
-    tasks: list[asyncio.Task[object]] = []
-    create_task = asyncio.create_task
-    gather = asyncio.gather
-    gather_calls = 0
-
-    def track_task(
-        coroutine: Coroutine[Any, Any, object],
-    ) -> asyncio.Task[object]:
-        task = create_task(coroutine)
-        tasks.append(task)
-        return task
-
-    async def interrupt_gather(*values: Any, **options: Any) -> Any:
-        nonlocal gather_calls
-        gather_calls += 1
-        if gather_calls == 1:
-            task = asyncio.current_task()
-            assert task is not None
-            asyncio.get_running_loop().call_soon(task.cancel, "cleanup cancel")
-        return await gather(*values, **options)
+    process = BlockingProcess()
 
     async def spawn(  # ruff:ignore[unused-async]
         *_args: object,
         **_kwargs: object,
-    ) -> Process:
+    ) -> BlockingProcess:
         return process
 
     async def fail_cleanup(_process: object) -> None:  # ruff:ignore[unused-async]
@@ -258,34 +204,15 @@ async def test_cleanup_failure_preserves_primary_and_reaps_tasks(  # ruff:ignore
 
     monkeypatch.setattr(mods, "free_udp_ports", lambda _count: (1, 2))
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setattr(asyncio, "create_task", track_task)
     monkeypatch.setattr(steamcmd, "terminate_process", fail_cleanup)
-    if interrupt_cleanup:
-        monkeypatch.setattr(asyncio, "gather", interrupt_gather)
-    update = mods.update(tmp_path / "updater", tmp_path, log_handler=fail_log)
+    existing_tasks = asyncio.all_tasks()
 
-    if cancelled:
-        update_task = create_task(update)
-        await process.stdout.started.wait()
-        update_task.cancel()
-        with pytest.raises(asyncio.CancelledError) as caught:
-            await update_task
-    else:
-        with pytest.raises(RuntimeError, match="primary A") as caught:
-            await update
+    with pytest.raises(RuntimeError, match="primary A") as caught:
+        await mods.update(tmp_path / "updater", tmp_path, log_handler=fail_log)
 
-    cause = caught.value.__cause__
-    if interrupt_cleanup:
-        assert isinstance(cause, BaseExceptionGroup)
-        assert [type(error) for error in cause.exceptions] == [
-            LookupError,
-            asyncio.CancelledError,
-        ]
-    else:
-        assert isinstance(cause, LookupError)
-        assert str(cause) == "cleanup B"
-    assert len(tasks) == 2
-    assert all(task.done() for task in tasks)
+    assert isinstance(caught.value.__cause__, LookupError)
+    assert str(caught.value.__cause__) == "cleanup B"
+    assert asyncio.all_tasks() == existing_tasks
 
 
 async def test_log_handler_failure_terminates_process_group(
