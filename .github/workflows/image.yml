@@ -212,7 +212,10 @@ jobs:
           DST_SERVER_EXPECTED_VERSION: ${{ matrix.version }}
           DST_SERVER_IMAGE: ${{ steps.build.outputs.image-with-tag }}
           DST_SERVER_PODMAN_TEST: '1'
-        run: uv run --locked --all-extras pytest -m system tests/test_podman.py
+        run: |
+          podman save "$DST_SERVER_IMAGE" | sudo podman load
+          sudo --preserve-env=DST_SERVER_EXPECTED_REVISION,DST_SERVER_EXPECTED_VERSION,DST_SERVER_IMAGE,DST_SERVER_PODMAN_TEST \
+            "$(command -v uv)" run --locked --all-extras pytest -m system tests/test_podman.py
 
       - name: Push to registry
         if: ${{ matrix.build }}
