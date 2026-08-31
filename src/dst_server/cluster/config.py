@@ -373,7 +373,10 @@ class ShardSettings(_IniSettings):
         return self
 
     def render(self, *, multi_shard: bool = False) -> str:
-        return self._render({"is_master": self.is_master} if multi_shard else None)
+        forced = {"encode_user_path": self.encode_user_path}
+        if multi_shard:
+            forced["is_master"] = self.is_master
+        return self._render(forced)
 
 
 def _validate_configuration_directory(path: Path) -> None:

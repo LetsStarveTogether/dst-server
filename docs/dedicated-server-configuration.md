@@ -182,6 +182,19 @@ Pod 发布宿主机端口时，容器仍监听 `server.ini` 中的内部端口�
 
 旧 `server.ini` 中的 `authentication_port` 仅为读取兼容而接受；SDK 会丢弃该值，且不会生成或映射此端口。
 
+```ini
+[ACCOUNT]
+; false 直接以原生 Klei ID（KU_...）命名玩家存档目录。
+; true 使用可逆的大写安全编码，以兼容大小写不敏感的文件系统。
+; 编码会移除 KU_ 中的下划线分隔符，再按字符表
+; 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_ 生成连续的 6-bit 符号流。
+; 然后每 5 bit 使用 Base32hex 字符表 0123456789ABCDEFGHIJKLMNOPQRSTUV 输出，不添加填充。
+; KU_WRv6AVc8 会编码为 A7K1NP32JUC8；A7 由 KU 本身生成，不是额外前缀。
+; 这是无损编码而非加密；SDK 提供 dst_server.encode_klei_id 和 dst_server.decode_klei_id。
+; SDK 默认显式写入 false；已有玩家存档后切换会让游戏改查另一套目录。
+; encode_user_path = false
+```
+
 ## 世界配置
 
 每个分片独立读取自己的世界配置。

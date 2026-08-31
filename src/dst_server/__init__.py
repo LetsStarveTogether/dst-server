@@ -1,3 +1,4 @@
+from .klei_id import decode_klei_id, encode_klei_id
 from .runtime import (
     IndeterminateCommandError,
     ResponseTooLargeError,
@@ -12,4 +13,6 @@ __all__ = [
     "Server",
     "ServerConfig",
     "SteamCMD",
+    "decode_klei_id",
+    "encode_klei_id",
 ]

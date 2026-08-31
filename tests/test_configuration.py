@@ -97,7 +97,7 @@ def schema_types(
     return {cast(str, definition["type"])}
 
 
-def test_ini_defaults_are_omitted_but_explicit_defaults_are_preserved(
+def test_ini_defaults_are_omitted_except_raw_klei_user_paths(
     tmp_path: Path,
 ) -> None:
     assert ClusterSettings().render() == ""
@@ -106,10 +106,18 @@ def test_ini_defaults_are_omitted_but_explicit_defaults_are_preserved(
     loaded_shard = ShardSettings.load(server_ini)
     assert loaded_shard.is_master is True
     assert loaded_shard.model_fields_set == set()
-    assert loaded_shard.render() == ""
-    assert ShardSettings().render(multi_shard=True) == ("[SHARD]\nis_master = true\n")
+    account = "[ACCOUNT]\nencode_user_path = false\n"
+    assert loaded_shard.render() == account
+    assert ShardSettings().render(multi_shard=True) == (
+        "[SHARD]\nis_master = true\n\n" + account
+    )
     assert ShardSettings(is_master=True).encode_user_path is False
-    assert "encode_user_path" not in ShardSettings(is_master=True).render()
+    assert ShardSettings(is_master=True).render() == (
+        "[SHARD]\nis_master = true\n\n" + account
+    )
+    assert ShardSettings(encode_user_path=True).render() == (
+        "[ACCOUNT]\nencode_user_path = true\n"
+    )
     settings = ClusterSettings(
         max_snapshots=6,
         offline_cluster=False,
@@ -182,7 +190,7 @@ def test_shard_loader_discards_legacy_authentication_port(tmp_path: Path) -> Non
     settings = ShardSettings.load(path)
 
     assert settings.model_fields_set == set()
-    assert settings.render() == ""
+    assert settings.render() == "[ACCOUNT]\nencode_user_path = false\n"
     assert "authentication_port" not in settings.model_dump()
 
 

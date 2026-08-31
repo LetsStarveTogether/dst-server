@@ -346,10 +346,12 @@ async def test_sdk_real_game_core_contract(
                 "return {"
                 "day=TheWorld.topology.overrides.day,"
                 "game_mode=TheNet:GetDefaultGameMode(),"
-                "max_players=TheNet:GetDefaultMaxPlayers()"
+                "max_players=TheNet:GetDefaultMaxPlayers(),"
+                "encode_user_path=TheNet:GetDefaultEncodeUserPath()"
                 "}"
             ) == {
                 "day": "onlyday",
+                "encode_user_path": False,
                 "game_mode": "survival",
                 "max_players": 16,
             }
