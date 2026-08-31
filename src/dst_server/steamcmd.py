@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import os
 import re
@@ -551,6 +549,3 @@ def redact(value: str, secrets: tuple[str, ...]) -> str:
     for secret in secrets:
         value = value.replace(secret, "***")
     return value
-
-
-__all__ = ["SteamCMD"]

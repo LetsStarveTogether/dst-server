@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -68,15 +66,3 @@ def parse_event(line: str) -> Event:
     except ValueError:
         pass
     return UnknownEvent(line=line)
-
-
-__all__ = [
-    "Event",
-    "ReadyEvent",
-    "SavedEvent",
-    "SessionEvent",
-    "ShutdownEvent",
-    "StoppingEvent",
-    "UnknownEvent",
-    "parse_event",
-]

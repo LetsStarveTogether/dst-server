@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import dst_server
 from dst_server.runtime import IndeterminateCommandError, Server, ServerConfig
 from dst_server.steamcmd import SteamCMD

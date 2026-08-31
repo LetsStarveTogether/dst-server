@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Literal
@@ -151,29 +149,3 @@ def lua_package_path(directory: Path) -> str:
         msg = "Lua directory must not contain ';', '?', CR, or LF"
         raise ValueError(msg)
     return f"{value}/?.lua;"
-
-
-__all__ = [
-    "BOOL_RESPONSE",
-    "DRIVER_RESPONSE",
-    "INT_RESPONSE",
-    "INVENTORY_RESPONSE",
-    "JSON_RESPONSE",
-    "MAX_RESULT_LINE_BYTES",
-    "MODS_RESPONSE",
-    "PLAYERS_RESPONSE",
-    "PLAYER_IDS_RESPONSE",
-    "PLAYER_RESPONSE",
-    "RESULT_PREFIX",
-    "ROOM_RESPONSE",
-    "RUNTIME_RESPONSE",
-    "SHARDS_RESPONSE",
-    "WORLD_RESPONSE",
-    "DriverHealth",
-    "Failure",
-    "ResponseAdapter",
-    "json_text",
-    "lua_package_path",
-    "lua_request",
-    "lua_string",
-]

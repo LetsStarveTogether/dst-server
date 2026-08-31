@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from .client import GameClient
 from .players import PlayerClient
 from .rpc import DriverHealth

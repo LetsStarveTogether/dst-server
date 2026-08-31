@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Annotated
 
 from pydantic import Field
@@ -111,19 +109,3 @@ class Inventory(FrozenModel):
     equipment: tuple[EquipmentSlot, ...]
     active_item: Item | None
     overflow: Container | None
-
-
-__all__ = [
-    "Age",
-    "Container",
-    "EquipmentSlot",
-    "Health",
-    "Inventory",
-    "InventorySlot",
-    "Item",
-    "Player",
-    "PlayerState",
-    "Stat",
-    "Temperature",
-    "Vitals",
-]

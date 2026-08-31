@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -276,61 +274,3 @@ class SkillChangedEvent(EventRecord[SkillChangedData]):
 
 class HoundWarningEvent(EventRecord[HoundWarningData]):
     event: Literal["dst.player.hound_warning"]
-
-
-__all__ = [
-    "ActionData",
-    "ActionEvent",
-    "AteData",
-    "AteEvent",
-    "BooleanConditionData",
-    "CombatBlockedData",
-    "CombatBlockedEvent",
-    "CombatData",
-    "CombatHitData",
-    "CombatHitEvent",
-    "CombatReceivedData",
-    "CombatReceivedEvent",
-    "ConditionChangedEvent",
-    "ConditionData",
-    "CraftedData",
-    "CraftedEvent",
-    "DeployedData",
-    "DeployedEvent",
-    "DisconnectedData",
-    "DisconnectedEvent",
-    "DroppedData",
-    "DroppedEvent",
-    "EquippedData",
-    "EquippedEvent",
-    "FinishedWorkData",
-    "FinishedWorkEvent",
-    "FishedData",
-    "FishedEvent",
-    "GhostedData",
-    "GhostedEvent",
-    "HarvestedData",
-    "HarvestedEvent",
-    "HoundWarningData",
-    "HoundWarningEvent",
-    "IncidentData",
-    "IncidentEvent",
-    "MigrationStartedData",
-    "MigrationStartedEvent",
-    "PickedData",
-    "PickedEvent",
-    "PlantedData",
-    "PlantedEvent",
-    "RevivedData",
-    "RevivedEvent",
-    "SanityConditionData",
-    "ShardEnteredEvent",
-    "ShardLeftEvent",
-    "SkillChangedData",
-    "SkillChangedEvent",
-    "SpawnedData",
-    "SpawnedEvent",
-    "SpecialDamage",
-    "UnequippedData",
-    "UnequippedEvent",
-]

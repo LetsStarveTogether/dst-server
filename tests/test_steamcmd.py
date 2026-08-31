@@ -1,16 +1,15 @@
-from __future__ import annotations
-
 import asyncio
 import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from dst_server import steamcmd
 from dst_server.steamcmd import SteamCMD
 
-from .helpers import process_stopped
+from .helpers import BlockingProcess, process_stopped
 
 FAKE_STEAMCMD = r"""#!/usr/bin/env python3
 import os
@@ -293,42 +292,73 @@ async def test_leader_exit_terminates_descendant_holding_stdout(
     assert await asyncio.to_thread(process_stopped, process_id)
 
 
-@pytest.mark.parametrize("cancelled", [False, True], ids=["error", "cancel"])
-async def test_cleanup_failure_preserves_primary_and_reaps_tasks(
+@pytest.mark.parametrize(
+    ("cancelled", "interrupt_cleanup"),
+    [(False, False), (True, False), (False, True), (True, True)],
+)
+async def test_cleanup_process_tasks_preserves_primary_and_reaps_tasks(
     cancelled: bool,
+    interrupt_cleanup: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blocker = asyncio.Event()
+    primary: BaseException = (
+        asyncio.CancelledError("primary A") if cancelled else RuntimeError("primary A")
+    )
+
+    async def blocked() -> object:
+        await blocker.wait()
+        return None
+
+    async def fail_or_block() -> object:
+        if cancelled:
+            await blocker.wait()
+        raise primary
+
+    tasks: tuple[asyncio.Task[object], ...] = (
+        asyncio.create_task(blocked()),
+        asyncio.create_task(fail_or_block()),
+    )
+    await asyncio.sleep(0)
+
+    async def fail_cleanup(_process: object) -> None:  # ruff:ignore[unused-async]
+        msg = "cleanup B"
+        raise LookupError(msg)
+
+    monkeypatch.setattr(steamcmd, "terminate_process", fail_cleanup)
+    if interrupt_cleanup:
+        current = asyncio.current_task()
+        assert current is not None
+        asyncio.get_running_loop().call_soon(current.cancel, "cleanup cancel")
+
+    cleanup_error = await steamcmd.cleanup_process_tasks(
+        cast(asyncio.subprocess.Process, BlockingProcess()),
+        primary,
+        *tasks,
+    )
+
+    if interrupt_cleanup:
+        assert isinstance(cleanup_error, BaseExceptionGroup)
+        assert [type(error) for error in cleanup_error.exceptions] == [
+            LookupError,
+            asyncio.CancelledError,
+        ]
+    else:
+        assert isinstance(cleanup_error, LookupError)
+        assert str(cleanup_error) == "cleanup B"
+    assert all(task.done() for task in tasks)
+
+
+async def test_execute_script_chains_cleanup_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Reader:
-        def __init__(self) -> None:
-            self.started = asyncio.Event()
-            self.line = None if cancelled else b"READY\n"
-
-        async def readline(self) -> bytes:
-            if self.line is not None:
-                line, self.line = self.line, None
-                return line
-            self.started.set()
-            await asyncio.Event().wait()
-            return b""
-
-    class Process:
-        pid = 1
-        returncode = None
-
-        def __init__(self) -> None:
-            self.stdout = Reader()
-
-        async def wait(self) -> int:
-            await asyncio.Event().wait()
-            return 0
-
-    process = Process()
+    process = BlockingProcess()
 
     async def spawn(  # ruff:ignore[unused-async]
         *_args: object,
         **_kwargs: object,
-    ) -> Process:
+    ) -> BlockingProcess:
         return process
 
     async def fail_cleanup(_process: object) -> None:  # ruff:ignore[unused-async]
@@ -343,19 +373,9 @@ async def test_cleanup_failure_preserves_primary_and_reaps_tasks(
     monkeypatch.setattr(steamcmd, "terminate_process", fail_cleanup)
     client = SteamCMD(tmp_path / "steamcmd", log_handler=fail_log)
     existing_tasks = asyncio.all_tasks()
-    executing = client.execute_script(tmp_path / "script", ())
 
-    if cancelled:
-        task = asyncio.create_task(executing)
-        async with asyncio.timeout(1):
-            await process.stdout.started.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError) as caught:
-            async with asyncio.timeout(1):
-                await task
-    else:
-        with pytest.raises(RuntimeError, match="primary A") as caught:
-            await executing
+    with pytest.raises(RuntimeError, match="primary A") as caught:
+        await client.execute_script(tmp_path / "script", ())
 
     assert isinstance(caught.value.__cause__, LookupError)
     assert str(caught.value.__cause__) == "cleanup B"

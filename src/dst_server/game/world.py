@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 from pydantic import JsonValue
@@ -111,6 +109,3 @@ class WorldClient:
             {"source": source},
             JSON_RESPONSE,
         )
-
-
-__all__ = ["WorldClient"]

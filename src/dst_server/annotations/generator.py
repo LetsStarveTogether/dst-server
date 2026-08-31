@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
 from pathlib import Path

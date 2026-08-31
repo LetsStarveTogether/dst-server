@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Literal
 
 from dst_server.models.base import FrozenModel, Identifier
@@ -45,6 +43,3 @@ DEFAULT_ACTIONS = (
 class TelemetrySettings(FrozenModel):
     profile: TelemetryProfile = "critical"
     actions: tuple[Identifier, ...] = DEFAULT_ACTIONS
-
-
-__all__ = ["DEFAULT_ACTIONS", "TelemetryProfile", "TelemetrySettings"]

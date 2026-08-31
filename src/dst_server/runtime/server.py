@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import os
 import sys
@@ -503,6 +501,3 @@ class Server:  # ruff:ignore[too-many-public-methods]
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
             self.closed = True
-
-
-__all__ = ["LogHandler", "Server"]

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from . import player, server, world
 from .base import EntityRef, ItemRef
 from .record import GAME_EVENT_ADAPTER, GameEvent, ObservedGameEvent

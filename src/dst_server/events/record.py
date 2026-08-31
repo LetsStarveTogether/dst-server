@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -85,6 +83,3 @@ GAME_EVENT_ADAPTER = TypeAdapter(GameEvent)
 class ObservedGameEvent:
     record: GameEvent
     observed_timestamp_ns: int
-
-
-__all__ = ["GAME_EVENT_ADAPTER", "GameEvent", "ObservedGameEvent"]

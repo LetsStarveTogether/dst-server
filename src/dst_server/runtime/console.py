@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -315,11 +313,3 @@ class Console:
         self.broken = True
         self.writer.close()
         await asyncio.gather(self.writer.wait_closed(), return_exceptions=True)
-
-
-__all__ = [
-    "Console",
-    "IndeterminateCommandError",
-    "LuaBusyError",
-    "ResponseTooLargeError",
-]

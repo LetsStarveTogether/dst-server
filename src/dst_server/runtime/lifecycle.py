@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -220,6 +218,3 @@ class Lifecycle:
                 msg = "DST reported a save without save metadata"
                 raise RuntimeError(msg)
             return confirmation[0]
-
-
-__all__ = ["Lifecycle", "read_line"]

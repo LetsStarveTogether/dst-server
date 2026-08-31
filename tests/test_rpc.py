@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 
@@ -18,138 +16,86 @@ from dst_server.game.rpc import (
 TOO_LARGE = b'DST_SERVER_RESULT|{"ok":false,"error":"RPC result exceeds 64 KiB"}'
 
 
-@pytest.mark.parametrize(
-    "character",
-    [";", "?", "\r", "\n"],
-    ids=["semicolon", "question-mark", "carriage-return", "line-feed"],
-)
-def test_lua_package_path_rejects_control_syntax(character: str) -> None:
-    with pytest.raises(ValueError, match="Lua directory"):
-        lua_package_path(Path(f"/sdk{character}modules"))
-
-
-def contract_response(body: str, luajit: str) -> bytes:
+def lua_response(body: str, luajit: str) -> bytes:
     root = Path(__file__).parents[1]
-    dst_json = root / "dst-scripts/scripts/json.lua"
-    module = "json" if dst_json.is_file() else "json_contract"
-    directory = dst_json.parent if dst_json.is_file() else root / "tests/lua"
-    package_path = lua_string(f"{directory}/?.lua;")
-    setup = f'package.path={package_path}..package.path;json=require("{module}");'
+    bundled = root / "dst-scripts/scripts/json.lua"
+    module = "json" if bundled.is_file() else "json_contract"
+    directory = bundled.parent if bundled.is_file() else root / "tests/lua"
+    setup = (
+        f"package.path={lua_string(f'{directory}/?.lua;')}..package.path;"
+        f'json=require("{module}");'
+    )
     result = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]
         [luajit, "-e", setup + lua_request(body)],
         capture_output=True,
         timeout=5,
         check=True,
-    )
-    assert result.stdout.startswith(RESULT_PREFIX.encode())
-    assert result.stdout.endswith(b"\n")
-    return result.stdout[len(RESULT_PREFIX) : -1]
+    ).stdout
+    assert result.startswith(RESULT_PREFIX.encode())
+    assert result.endswith(b"\n")
+    return result[len(RESULT_PREFIX) : -1]
 
 
-@pytest.mark.parametrize("fails", [False, True])
-@pytest.mark.parametrize("extra", [0, 1])
-def test_lua_request_limits_complete_result_line(
-    fails: bool,
-    extra: int,
+@pytest.mark.parametrize("character", [";", "?", "\r", "\n"])
+def test_lua_package_path_rejects_control_syntax(character: str) -> None:
+    with pytest.raises(ValueError, match="Lua directory"):
+        lua_package_path(Path(f"/sdk{character}modules"))
+
+
+@pytest.mark.parametrize("failure", [False, True], ids=["return", "error"])
+@pytest.mark.parametrize("overflow", [False, True], ids=["limit", "overflow"])
+def test_lua_result_line_limit(
+    failure: bool,
+    overflow: bool,
     luajit: str,
 ) -> None:
-    envelope_size = len(
-        b'{"ok":false,"error":""}' if fails else b'{"ok":true,"data":""}'
+    envelope = b'{"ok":false,"error":""}' if failure else b'{"ok":true,"data":""}'
+    size = (
+        MAX_RESULT_LINE_BYTES - len(RESULT_PREFIX.encode()) - len(envelope) + overflow
     )
-    payload_size = (
-        MAX_RESULT_LINE_BYTES - len(RESULT_PREFIX.encode()) - envelope_size + extra
-    )
-    payload = f'string.rep("x",{payload_size})'
-    body = f"error({payload},0)" if fails else f"return {payload}"
-    line = RESULT_PREFIX.encode() + contract_response(body, luajit)
-    if extra:
-        assert line == TOO_LARGE
-    else:
-        assert len(line) == MAX_RESULT_LINE_BYTES
-        assert line.startswith(RESULT_PREFIX.encode())
+    value = f'string.rep("x",{size})'
+    body = f"error({value},0)" if failure else f"return {value}"
+    line = RESULT_PREFIX.encode() + lua_response(body, luajit)
 
-
-@pytest.mark.parametrize("control", [0, 8, 12])
-def test_lua_request_rejects_invalid_json_from_dst_encoder(
-    control: int,
-    luajit: str,
-) -> None:
-    envelope = JSON_RESPONSE.validate_json(
-        contract_response(f"return string.char({control})", luajit),
-        strict=True,
-    )
-
-    assert isinstance(envelope, Failure)
-    assert envelope.error == "RPC result is not valid JSON"
-
-
-def test_lua_request_handles_unstringifiable_errors(luajit: str) -> None:
-    body = (
-        "error(setmetatable({}, {__tostring=function() "
-        'error("stringify failed",0) end}),0)'
-    )
-    envelope = JSON_RESPONSE.validate_json(
-        contract_response(body, luajit),
-        strict=True,
-    )
-
-    assert isinstance(envelope, Failure)
-    assert envelope.error == "Lua request failed"
-
-
-def test_lua_request_rejects_results_omitted_by_dst_encoder(luajit: str) -> None:
-    envelope = JSON_RESPONSE.validate_json(
-        contract_response("return function() end", luajit),
-        strict=True,
-    )
-
-    assert isinstance(envelope, Failure)
-
-
-@pytest.mark.parametrize("fails", [False, True])
-def test_lua_request_rejects_invalid_utf8(fails: bool, luajit: str) -> None:
-    value = "string.char(255)"
-    body = f"error({value},0)" if fails else f"return {value}"
-    envelope = JSON_RESPONSE.validate_json(
-        contract_response(body, luajit),
-        strict=True,
-    )
-
-    assert isinstance(envelope, Failure)
-    assert envelope.error == "RPC result is not valid JSON"
+    assert line == TOO_LARGE if overflow else len(line) == MAX_RESULT_LINE_BYTES
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "message"),
     [
-        "return {nested={bad=function() end}}",
-        "return {nested={bad=coroutine.create(function() end)}}",
-        "return {nested={bad=newproxy(true)}}",
-        "return 0/0",
-        "return math.huge",
-        "return -math.huge",
-        'return {[1]="numeric",["1"]="string"}',
-        "return {[math.huge]=true}",
-        "local value={};value.self=value;return value",
-        "return {[1]=true,[3]=true}",
+        ("return string.char(0)", "RPC result is not valid JSON"),
+        ("return string.char(8)", "RPC result is not valid JSON"),
+        ("return string.char(12)", "RPC result is not valid JSON"),
+        ("return string.char(255)", "RPC result is not valid JSON"),
+        ("error(string.char(255),0)", "RPC result is not valid JSON"),
+        (
+            (
+                "error(setmetatable({}, {__tostring=function() "
+                'error("stringify failed",0) end}),0)'
+            ),
+            "Lua request failed",
+        ),
+        ("return function() end", None),
+        ("return {nested={bad=function() end}}", None),
+        ("return {nested={bad=coroutine.create(function() end)}}", None),
+        ("return {nested={bad=newproxy(true)}}", None),
+        ("return 0/0", None),
+        ("return math.huge", None),
+        ("return -math.huge", None),
+        ('return {[1]="numeric",["1"]="string"}', None),
+        ("return {[math.huge]=true}", None),
+        ("local value={};value.self=value;return value", None),
+        ("return {[1]=true,[3]=true}", None),
     ],
-    ids=(
-        "nested-function",
-        "nested-thread",
-        "nested-userdata",
-        "nan",
-        "positive-infinity",
-        "negative-infinity",
-        "mixed-keys",
-        "infinite-key",
-        "cycle",
-        "sparse-array",
-    ),
+    ids=lambda value: str(value)[:32],
 )
-def test_lua_request_rejects_non_json_values(body: str, luajit: str) -> None:
-    envelope = JSON_RESPONSE.validate_json(
-        contract_response(body, luajit),
-        strict=True,
-    )
+def test_lua_rejects_values_without_a_json_wire_representation(
+    body: str,
+    message: str | None,
+    luajit: str,
+) -> None:
+    envelope = JSON_RESPONSE.validate_json(lua_response(body, luajit), strict=True)
 
     assert isinstance(envelope, Failure)
+    if message is not None:
+        assert envelope.error == message

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,6 +41,3 @@ class ServerConfig:
         command.extend(self.extra_args)
         command.append("-cloudserver")
         return tuple(command)
-
-
-__all__ = ["ServerConfig"]

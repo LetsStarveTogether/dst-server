@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -111,6 +109,3 @@ class Mod(FrozenModel):
     id: Annotated[str, Field(min_length=1, max_length=256)]
     name: Name
     version: Annotated[str, Field(max_length=128)]
-
-
-__all__ = ["Mod", "Room", "Runtime", "ShardStatus", "World"]

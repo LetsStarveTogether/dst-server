@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -42,12 +40,3 @@ class EventRecord[DataT](FrozenModel):
     monotonic_ms: NonNegativeInt
     cycle: NonNegativeInt | None
     data: DataT
-
-
-__all__ = [
-    "CausedData",
-    "EntityRef",
-    "EventRecord",
-    "ItemRef",
-    "PlayerData",
-]

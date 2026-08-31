@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dst_server.cluster import LuaValue
 
 MOD_CONFIGURATIONS: dict[int, dict[str, LuaValue]] = {
@@ -380,6 +378,3 @@ MOD_CONFIGURATIONS: dict[int, dict[str, LuaValue]] = {
         "showcounter": True,
     },
 }
-
-
-__all__ = ["MOD_CONFIGURATIONS"]

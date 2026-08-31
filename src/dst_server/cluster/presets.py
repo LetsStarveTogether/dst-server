@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pydantic import Field, SecretStr
 
 from dst_server.models.base import FrozenModel, RevalidatedFrozenModel
@@ -235,21 +233,3 @@ FOREST_ONLY_NIGHT = shard(
     "forest",
     WorldgenOverride(overrides=ForestOverrides(day="onlynight")),
 )
-__all__ = [
-    "CAVES",
-    "ENDLESS",
-    "ENDLESS_GENERATION",
-    "ENDLESS_SETTINGS",
-    "FOREST",
-    "FOREST_CAVES",
-    "FOREST_ONLY_NIGHT",
-    "LAVAARENA",
-    "LIGHTS_OUT_GENERATION",
-    "LIGHTS_OUT_SETTINGS",
-    "QUAGMIRE",
-    "SHARDED",
-    "RoomPreset",
-    "compose",
-    "custom_world",
-    "shard",
-]

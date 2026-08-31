@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from .entity import Entity, Position
 from .player import (
     Age,

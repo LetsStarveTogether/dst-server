@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from .config import ServerConfig
 from .console import IndeterminateCommandError, ResponseTooLargeError
 from .server import Server

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 from collections.abc import Awaitable, Callable
 
@@ -129,6 +127,3 @@ class Driver:
         self.closed = True
         if self.task is not None:
             self.task.cancel()
-
-
-__all__ = ["Driver"]

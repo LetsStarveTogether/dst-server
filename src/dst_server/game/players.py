@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 from pydantic import JsonValue
@@ -222,6 +220,3 @@ class PlayerClient:  # ruff:ignore[too-many-public-methods]
             },
             INT_RESPONSE,
         )
-
-
-__all__ = ["MAX_GIVE_ITEMS", "PlayerClient"]

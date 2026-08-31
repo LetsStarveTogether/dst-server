@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 from collections.abc import Mapping
 from configparser import ConfigParser
@@ -875,11 +873,3 @@ def _atomic_write(path: Path, content: str, mode: int) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-
-
-__all__ = [
-    "ClusterConfig",
-    "ClusterSettings",
-    "ShardConfig",
-    "ShardSettings",
-]

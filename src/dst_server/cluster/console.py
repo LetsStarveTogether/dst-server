@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import os
 import stat
@@ -74,6 +72,3 @@ async def forward(path: Path, server: Server) -> None:
                 logger.info("{shard}: {line}", shard=server.config.shard, line=line)
     finally:
         transport.close()
-
-
-__all__ = ["ensure", "forward"]

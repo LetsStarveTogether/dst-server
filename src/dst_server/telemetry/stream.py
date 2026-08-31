@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import secrets
 
@@ -118,6 +116,3 @@ class EventStream:
             self.dropped += 1
             self.recorder.record_event("dropped", reason="stream_closed")
         self.queue.put_nowait(None)
-
-
-__all__ = ["EventStream"]

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Annotated, Literal
 
 from pydantic import AfterValidator, ConfigDict, Field
@@ -415,14 +413,3 @@ class CaveOverrides(_SharedWorldOverrides):
     wormattacks_boss: Frequency = "default"
     wormlights: WorldgenFrequency = "default"
     worms: WorldgenFrequency = "default"
-
-
-__all__ = [
-    "CaveOverrides",
-    "CavePreset",
-    "ForestOverrides",
-    "ForestPreset",
-    "LavaArenaOverrides",
-    "QuagmireOverrides",
-    "WorldOverrides",
-]

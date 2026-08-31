@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 

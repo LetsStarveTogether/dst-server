@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import signal
 from collections.abc import Callable
@@ -15,7 +13,7 @@ from dst_server.game import DriverHealth
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.console import Console, StaleGenerationError
 from dst_server.runtime.lifecycle import Lifecycle, RequestState, RequestStatus
-from dst_server.telemetry import TelemetrySettings
+from dst_server.telemetry import TelemetryProfile, TelemetrySettings
 from tests.helpers import FAKE_SERVER, StubServer, structured_result
 
 
@@ -38,20 +36,32 @@ class ReloadingServer(Server):
         )
 
 
-async def test_cloud_protocol_and_lifecycle(tmp_path: Path) -> None:
+def make_fake_server(
+    tmp_path: Path,
+    shard: str,
+    *,
+    telemetry_profile: TelemetryProfile = "critical",
+    log_handler: Callable[[str], None] | None = None,
+) -> Server:
     executable = tmp_path / "fake-server"
     executable.write_text(FAKE_SERVER, encoding="utf-8")
     executable.chmod(0o755)
-    config = ServerConfig(
-        shard="forest",
-        executable=executable,
-        persistent_storage_root=tmp_path,
-        conf_dir="conf",
-        cluster="Cluster_1",
-        ugc_directory=None,
-        extra_args=(),
-        telemetry=TelemetrySettings(profile="history"),
+    return Server(
+        ServerConfig(
+            shard=shard,
+            executable=executable,
+            persistent_storage_root=tmp_path,
+            conf_dir="conf",
+            cluster="Cluster_1",
+            ugc_directory=None,
+            extra_args=(),
+            telemetry=TelemetrySettings(profile=telemetry_profile),
+        ),
+        log_handler=log_handler,
     )
+
+
+async def test_cloud_protocol_and_lifecycle(tmp_path: Path) -> None:
     logs: list[str] = []
     command_logged = asyncio.Event()
 
@@ -60,7 +70,12 @@ async def test_cloud_protocol_and_lifecycle(tmp_path: Path) -> None:
         if line == "command received":
             command_logged.set()
 
-    server = Server(config, log_handler=capture_log)
+    server = make_fake_server(
+        tmp_path,
+        "forest",
+        telemetry_profile="history",
+        log_handler=capture_log,
+    )
 
     await server.start()
 
@@ -106,20 +121,10 @@ def test_server_config() -> None:
 async def test_telemetry_install_failure_keeps_core_driver_running(
     tmp_path: Path,
 ) -> None:
-    executable = tmp_path / "fake-server"
-    executable.write_text(FAKE_SERVER, encoding="utf-8")
-    executable.chmod(0o755)
-    server = Server(
-        ServerConfig(
-            shard="telemetry-failure",
-            executable=executable,
-            persistent_storage_root=tmp_path,
-            conf_dir="conf",
-            cluster="Cluster_1",
-            ugc_directory=None,
-            extra_args=(),
-            telemetry=TelemetrySettings(profile="history"),
-        )
+    server = make_fake_server(
+        tmp_path,
+        "telemetry-failure",
+        telemetry_profile="history",
     )
     async with server:
         assert server.driver_health.telemetry_status == "failed"
@@ -132,20 +137,10 @@ async def test_telemetry_install_failure_keeps_core_driver_running(
 async def test_core_driver_install_failure_degrades_without_stopping_game(
     tmp_path: Path,
 ) -> None:
-    executable = tmp_path / "fake-server"
-    executable.write_text(FAKE_SERVER, encoding="utf-8")
-    executable.chmod(0o755)
-    server = Server(
-        ServerConfig(
-            shard="core-failure",
-            executable=executable,
-            persistent_storage_root=tmp_path,
-            conf_dir="conf",
-            cluster="Cluster_1",
-            ugc_directory=None,
-            extra_args=(),
-            telemetry=TelemetrySettings(profile="history"),
-        )
+    server = make_fake_server(
+        tmp_path,
+        "core-failure",
+        telemetry_profile="history",
     )
 
     async with server:
@@ -162,20 +157,7 @@ async def test_core_driver_install_failure_degrades_without_stopping_game(
 
 
 async def test_driver_result_eof_degrades_without_stopping_game(tmp_path: Path) -> None:
-    executable = tmp_path / "fake-server"
-    executable.write_text(FAKE_SERVER, encoding="utf-8")
-    executable.chmod(0o755)
-    server = Server(
-        ServerConfig(
-            shard="driver-eof",
-            executable=executable,
-            persistent_storage_root=tmp_path,
-            conf_dir="conf",
-            cluster="Cluster_1",
-            ugc_directory=None,
-            extra_args=(),
-        )
-    )
+    server = make_fake_server(tmp_path, "driver-eof")
 
     async with server:
         assert server.driver_error == (

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import fcntl
 import os
@@ -90,6 +88,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-__all__ = ["open_pipes", "open_reader", "open_writer"]

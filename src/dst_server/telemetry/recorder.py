@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections.abc import Iterator
 from contextlib import contextmanager
 from time import perf_counter
@@ -104,6 +102,3 @@ class Recorder:
             self.base_attributes
             | {"dst.action.name": name, "dst.action.success": success},
         )
-
-
-__all__ = ["Recorder"]
