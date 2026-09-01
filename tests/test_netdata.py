@@ -63,7 +63,7 @@ async def test_query_maps_arguments_and_preserves_records(tmp_path: Path) -> Non
     value = request(
         until=datetime(2026, 9, 1, tzinfo=UTC) + timedelta(minutes=5),
         service_namespace="games",
-        filters=(("cluster", "room-000"), ("event", "joined")),
+        filters=(("cluster", "dst-000"), ("event", "joined")),
         query="KU_123",
         fields=("event_name", "tag"),
         limit=20,
@@ -81,7 +81,7 @@ async def test_query_maps_arguments_and_preserves_records(tmp_path: Path) -> Non
     assert f"--since|{int(value.since.timestamp())}" in result.diagnostics
     assert value.until is not None
     assert f"--until|{int(value.until.timestamp())}" in result.diagnostics
-    assert "--filter|cluster=room-000,event=joined" in result.diagnostics
+    assert "--filter|cluster=dst-000,event=joined" in result.diagnostics
     assert "--fields|event_name,tag" in result.diagnostics
     assert "--limit|20|--output|ndjson" in result.diagnostics
     assert "matched=2 returned=2" in result.diagnostics

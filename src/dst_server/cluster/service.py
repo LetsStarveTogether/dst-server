@@ -106,7 +106,10 @@ def create_server_config(
         persistent_storage_root=cluster_path.parent,
         conf_dir=".",
         cluster=cluster_path.name,
-        telemetry_cluster=(os.environ.get(CLUSTER_NAME_ENV) or cluster_path.name),
+        telemetry_cluster=(
+            os.environ.get(CLUSTER_NAME_ENV)
+            or f"dst-{cluster_path.name.removeprefix('dst-')}"
+        ),
         ugc_directory=cluster_path / "mods" / "ugc",
         extra_args=(
             "-skip_update_server_mods",

@@ -435,7 +435,7 @@ def test_event_rooms_preserve_their_game_mode(
 
 
 def test_generate_room_saves_cluster_and_quadlet_application(tmp_path: Path) -> None:
-    cluster_dir = tmp_path / "room-007"
+    cluster_dir = tmp_path / "007"
     quadlet_dir = tmp_path / "quadlet"
 
     written = generate_room(
@@ -458,7 +458,7 @@ def test_generate_room_saves_cluster_and_quadlet_application(tmp_path: Path) -> 
     assert application.pod.publish_ports[0].host == 30070
     for unit in units:
         assert unit.environment["OTEL_SDK_DISABLED"] == "true"
-        assert unit.environment["DST_SERVER_CLUSTER_NAME"] == "dst-room-007"
+        assert unit.environment["DST_SERVER_CLUSTER_NAME"] == "dst-007"
 
 
 def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
@@ -474,7 +474,9 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
 
     assert written
     assert len(written) == len(set(written))
-    assert len(tuple(cluster_root.glob("room-*"))) == 140
+    assert {path.name for path in cluster_root.iterdir()} == {
+        f"{number:03d}" for number in ROOM_NUMBERS
+    }
     assert len(tuple(quadlet_dir.glob("*.pod"))) == 140
     assert len(tuple(quadlet_dir.glob("*.container"))) == 255
     assert len(tuple(cluster_root.rglob("leveldataoverride.lua"))) == 7
@@ -484,7 +486,7 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
     for number in ROOM_NUMBERS:
         application = QuadletApplication.load(
             quadlet_dir,
-            name=f"dst-room-{number:03d}",
+            name=f"dst-{number:03d}",
         )
         mappings = application.pod.publish_ports
         units = (application.master, *application.secondaries)
@@ -496,7 +498,7 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
             range(base, base + len(mappings))
         )
         assert all(mapping.protocol == "udp" for mapping in mappings)
-        cluster = ClusterConfig.load(cluster_root / f"room-{number:03d}")
+        cluster = ClusterConfig.load(cluster_root / f"{number:03d}")
         player_ports = {mapping.container: mapping.host for mapping in mappings}
         master_name = next(
             name for name, shard in cluster.shards.items() if shard.settings.is_master
@@ -545,11 +547,11 @@ def test_explicit_configurations_cover_remaining_port_slots(tmp_path: Path) -> N
     )
 
     for number, base in ((140, 31400), (299, 32990)):
-        cluster = ClusterConfig.load(tmp_path / "clusters" / f"room-{number:03d}")
+        cluster = ClusterConfig.load(tmp_path / "clusters" / f"{number:03d}")
         assert cluster.settings.cluster_name == f"explicit-{number:03d}"
         application = QuadletApplication.load(
             tmp_path / "quadlet",
-            name=f"dst-room-{number:03d}",
+            name=f"dst-{number:03d}",
         )
         assert tuple(
             mapping.host for mapping in application.pod.publish_ports
@@ -577,15 +579,15 @@ def test_main_can_generate_selected_rooms(
         str(token_file),
     ])
 
-    assert {path.name for path in cluster_root.glob("room-*")} == {
-        "room-000",
-        "room-139",
+    assert {path.name for path in cluster_root.iterdir()} == {
+        "000",
+        "139",
     }
     assert {path.name for path in quadlet_dir.glob("*.pod")} == {
-        "dst-room-000.pod",
-        "dst-room-139.pod",
+        "dst-000.pod",
+        "dst-139.pod",
     }
-    generated_token = cluster_root / "room-000" / "cluster_token.txt"
+    generated_token = cluster_root / "000" / "cluster_token.txt"
     assert generated_token.read_text(encoding="utf-8") == "template-test-token\n"
     assert generated_token.stat().st_mode & 0o777 == 0o600
 
@@ -605,7 +607,7 @@ def test_main_reads_token_from_environment(
         str(tmp_path / "quadlet"),
     ])
 
-    token = cluster_root / "room-000" / "cluster_token.txt"
+    token = cluster_root / "000" / "cluster_token.txt"
     assert token.read_text(encoding="utf-8") == "environment-token\n"
     assert token.stat().st_mode & 0o777 == 0o600
 

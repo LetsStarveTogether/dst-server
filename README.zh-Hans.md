@@ -47,7 +47,7 @@
 
    ```shell
    systemctl --user daemon-reload
-   systemctl --user start dst-room-000-pod.service
+   systemctl --user start dst-000-pod.service
    ```
 
 rootful 部署使用 `/srv/dst` 作为 `--cluster-root`，使用 `/etc/containers/systemd` 作为 `--quadlet-dir`。
@@ -59,10 +59,10 @@ rootful 部署使用 `/srv/dst` 作为 `--cluster-root`，使用 `/etc/container
 ## 日常维护
 
 ```shell
-systemctl --user status dst-room-000-pod.service
-journalctl --user -u dst-room-000-forest.service -f
-systemctl --user restart dst-room-000-pod.service
-systemctl --user stop dst-room-000-pod.service
+systemctl --user status dst-000-pod.service
+journalctl --user -u dst-000-forest.service -f
+systemctl --user restart dst-000-pod.service
+systemctl --user stop dst-000-pod.service
 ```
 
 停止房间不会隐式保存。
@@ -72,8 +72,8 @@ systemctl --user stop dst-room-000-pod.service
 主分片 FIFO 位于集群根目录，次分片 FIFO 位于对应分片目录：
 
 ```shell
-echo 'c_announce("服务器即将维护。")' > "${HOME}/.local/share/dst/room-000/console"
-echo 'c_save()' > "${HOME}/.local/share/dst/room-000/cave/console"
+echo 'c_announce("服务器即将维护。")' > "${HOME}/.local/share/dst/000/console"
+echo 'c_save()' > "${HOME}/.local/share/dst/000/cave/console"
 ```
 
 FIFO 可以执行任意服务端 Lua，必须与游戏进程处于同一信任边界。

@@ -123,7 +123,7 @@ result = await NetdataLogs().query(
     NetdataLogQuery(
         since=datetime.now(UTC) - timedelta(minutes=15),
         filters=(
-            ("attributes.dst.cluster.name", "room-000"),
+            ("attributes.dst.cluster.name", "dst-000"),
             ("body.player.userid", "KU_..."),
         ),
         limit=100,

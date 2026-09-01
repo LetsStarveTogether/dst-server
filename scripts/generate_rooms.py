@@ -301,7 +301,7 @@ def generate_configured_rooms(
             generate_configured_room(
                 number,
                 cluster=cluster,
-                cluster_dir=cluster_root / f"room-{number:03d}",
+                cluster_dir=cluster_root / f"{number:03d}",
                 quadlet_dir=quadlet_dir,
                 image=image,
                 environment=(environments or {}).get(number),
@@ -327,7 +327,7 @@ def generate_rooms(
                 number,
                 token=token,
                 cluster_key=DEFAULT_CLUSTER_KEY,
-                cluster_dir=cluster_root / f"room-{number:03d}",
+                cluster_dir=cluster_root / f"{number:03d}",
                 quadlet_dir=quadlet_dir,
                 image=image,
                 environment=NETDATA_ENVIRONMENT

@@ -47,7 +47,7 @@ Every Agent owns one restartable game process.
 
    ```shell
    systemctl --user daemon-reload
-   systemctl --user start dst-room-000-pod.service
+   systemctl --user start dst-000-pod.service
    ```
 
 For a rootful deployment, use `/srv/dst` as `--cluster-root` and `/etc/containers/systemd` as `--quadlet-dir`.
@@ -59,10 +59,10 @@ Images use `:<game-version>` as their stable version tag.
 ## Operations
 
 ```shell
-systemctl --user status dst-room-000-pod.service
-journalctl --user -u dst-room-000-forest.service -f
-systemctl --user restart dst-room-000-pod.service
-systemctl --user stop dst-room-000-pod.service
+systemctl --user status dst-000-pod.service
+journalctl --user -u dst-000-forest.service -f
+systemctl --user restart dst-000-pod.service
+systemctl --user stop dst-000-pod.service
 ```
 
 Stopping a room does not implicitly save it.
@@ -72,8 +72,8 @@ Each Agent also creates a `console` FIFO as a recovery interface.
 The master FIFO is at the cluster root and secondary FIFOs are in their shard directories:
 
 ```shell
-echo 'c_announce("Server maintenance is coming.")' > "${HOME}/.local/share/dst/room-000/console"
-echo 'c_save()' > "${HOME}/.local/share/dst/room-000/cave/console"
+echo 'c_announce("Server maintenance is coming.")' > "${HOME}/.local/share/dst/000/console"
+echo 'c_save()' > "${HOME}/.local/share/dst/000/cave/console"
 ```
 
 The FIFO can execute arbitrary server Lua and must remain in the same trust boundary as the game process.

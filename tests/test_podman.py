@@ -625,10 +625,10 @@ class QuadletSystem:
 
     @property
     def pod_name(self) -> str:
-        return f"systemd-{self.prefix}"
+        return self.prefix
 
     def container_name(self, shard: str) -> str:
-        return f"systemd-{self.prefix}-{shard}"
+        return f"{self.prefix}-{shard}"
 
     @property
     def socket_path(self) -> Path:

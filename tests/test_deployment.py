@@ -24,7 +24,7 @@ def service_layout(tmp_path: Path) -> tuple[Path, Path]:
     executable.parent.mkdir(parents=True)
     executable.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     executable.chmod(0o755)
-    cluster = tmp_path / "cluster"
+    cluster = tmp_path / "000"
     cluster.mkdir()
     for name in ("cluster.ini", "cluster_token.txt"):
         (cluster / name).touch()
@@ -36,7 +36,7 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
     quadlet = deploy / "quadlet"
     application = cluster_api.QuadletApplication.load(
         quadlet,
-        name="dst-room-000",
+        name="dst-000",
     )
     rendered = "\n".join(application.files().values())
 
@@ -45,7 +45,7 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
     assert not tuple(quadlet.glob("*.network"))
     master = application.master
     secondary = application.secondaries[0]
-    assert master.name == "dst-room-000-forest"
+    assert master.name == "dst-000-forest"
     assert master.exec[1] == "master"
     assert secondary.exec[1:] == ("serve", "--external-port", "30002", "--", "cave")
     assert master.wants == (f"{secondary.name}.container",)
@@ -68,7 +68,7 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
 def test_netdata_deployment_contract_is_consistent() -> None:
     deploy = Path(__file__).parents[1] / "deploy"
     application = cluster_api.QuadletApplication.load(
-        deploy / "quadlet", name="dst-room-000"
+        deploy / "quadlet", name="dst-000"
     )
     address = dict(application.master.environment)[
         "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
@@ -315,8 +315,10 @@ async def test_prepare_shared_skips_updater_without_mods(
 
 async def test_activate_shard_and_create_server_config(
     service_layout: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     install, cluster = service_layout
+    monkeypatch.delenv("DST_SERVER_CLUSTER_NAME", raising=False)
     write_shard(cluster / "forest", is_master=True, name="Forest")
     write_shard(cluster / "cave", is_master=False, name="Caves")
 
@@ -331,6 +333,7 @@ async def test_activate_shard_and_create_server_config(
     )
 
     assert config.shard == "cave"
+    assert config.telemetry_cluster == "dst-000"
     assert config.extra_args == (
         "-skip_update_server_mods",
         "-external_port",

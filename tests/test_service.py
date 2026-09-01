@@ -87,8 +87,8 @@ def test_otel_resource_uses_explicit_cluster_name(
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector")
     monkeypatch.setattr(otel, "configure", configure)
 
-    config = ServerConfig(shard="forest", telemetry_cluster="dst-room-42")
+    config = ServerConfig(shard="forest", telemetry_cluster="dst-042")
     assert service.configure_otel(config) is pipeline
     configure.assert_called_once_with(
-        resource_attributes={"dst.cluster.name": "dst-room-42"}
+        resource_attributes={"dst.cluster.name": "dst-042"}
     )

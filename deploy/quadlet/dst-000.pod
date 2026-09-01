@@ -1,7 +1,8 @@
 [Unit]
-Description=Don't Starve Together cluster dst-room-000
+Description=Don't Starve Together dst-000
 
 [Pod]
+PodName=dst-000
 ExitPolicy=continue
 PublishPort=30000:10999/udp
 PublishPort=30001:27016/udp

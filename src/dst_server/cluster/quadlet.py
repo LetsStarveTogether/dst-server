@@ -95,6 +95,10 @@ def _escape_unit_name(value: str) -> str:
     return _validate_unit_name(escaped)
 
 
+def _podman_name(value: str) -> str | None:
+    return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value) else None
+
+
 def _validate_unique(values: tuple[str, ...], label: str) -> None:
     if len(values) != len(set(values)):
         msg = f"duplicate Quadlet {label}"
@@ -957,7 +961,7 @@ class QuadletApplication(RevalidatedFrozenModel):
         telemetry_environment: Mapping[str, str] | None = None,
     ) -> Self:
         validated = ClusterConfig.model_validate(cluster)
-        logical_name = name or f"dst-{cluster_path.name}"
+        logical_name = name or f"dst-{cluster_path.name.removeprefix('dst-')}"
         base = _escape_unit_name(logical_name)
         pod_source = f"{base}.pod"
         volume = VolumeMount(
@@ -968,7 +972,8 @@ class QuadletApplication(RevalidatedFrozenModel):
         published_hosts = {mapping.container: mapping.host for mapping in publish_ports}
         pod = PodUnit(
             name=base,
-            description=f"Don't Starve Together cluster {logical_name}",
+            description=f"Don't Starve Together {logical_name}",
+            pod_name=_podman_name(base),
             exit_policy="continue",
             publish_ports=publish_ports,
             wanted_by=(DEFAULT_TARGET,),
@@ -1008,6 +1013,7 @@ class QuadletApplication(RevalidatedFrozenModel):
             image=image,
             pod=pod_source,
             volumes=(volume,),
+            container_name=_podman_name(master_unit_name),
             wants=tuple(
                 f"{base}-{_escape_unit_name(name)}.container"
                 for name in secondary_names
@@ -1044,6 +1050,7 @@ class QuadletApplication(RevalidatedFrozenModel):
                 image=image,
                 pod=pod_source,
                 volumes=(volume,),
+                container_name=_podman_name(f"{base}-{_escape_unit_name(shard_name)}"),
                 stop_timeout=40,
                 health=DAEMON_HEALTHCHECK,
                 restart="on-failure",

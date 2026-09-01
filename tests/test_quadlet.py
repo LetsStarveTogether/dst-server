@@ -54,8 +54,7 @@ def cluster() -> ClusterConfig:
 def application(tmp_path: Path, cluster: ClusterConfig) -> QuadletApplication:
     return QuadletApplication.for_cluster(
         cluster,
-        tmp_path / "cluster",
-        name="dst-room-7",
+        tmp_path / "007",
         allocation=RoomPortAllocation(number=7),
         telemetry_environment={"DST_SERVER_TELEMETRY_PROFILE": "test"},
     )
@@ -353,6 +352,9 @@ def test_application_builds_master_secondary_lifecycle(
     (secondary,) = application.secondaries
     master_source = f"{application.master.name}.container"
 
+    assert application.pod.pod_name == application.pod.name == "dst-007"
+    assert application.master.container_name == application.master.name
+    assert secondary.container_name == secondary.name
     assert application.master.wants == (f"{secondary.name}.container",)
     assert application.master.requires == application.master.after == ()
     assert application.master.binds_to == ()
@@ -373,7 +375,7 @@ def test_application_builds_master_secondary_lifecycle(
         "Caves",
     )
     assert application.master.environment == secondary.environment
-    assert application.master.environment[CLUSTER_ENVIRONMENT] == "dst-room-7"
+    assert application.master.environment[CLUSTER_ENVIRONMENT] == "dst-007"
     assert application.master.environment["DST_SERVER_TELEMETRY_PROFILE"] == "test"
     assert application.master.volumes == secondary.volumes
     assert {
