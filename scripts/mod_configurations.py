@@ -360,8 +360,8 @@ MOD_CONFIGURATIONS: dict[int, dict[str, LuaValue]] = {
         "ck_listtime5": 35,
     },
     3223103565: {
-        "SIB": True,
-        "SSB": True,
+        "SIB": False,
+        "SSB": False,
         "mod_support_enabled": False,
         "sort_bookstation": True,
         "sort_chest": True,

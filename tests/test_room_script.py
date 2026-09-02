@@ -279,6 +279,8 @@ def test_every_historical_mod_has_explicit_configuration() -> None:
 
     assert set(MOD_CONFIGURATIONS) == expected_ids
     assert MOD_CONFIGURATIONS[1467214795]["游戏功能"] is False
+    assert MOD_CONFIGURATIONS[3223103565]["SIB"] is False
+    assert MOD_CONFIGURATIONS[3223103565]["SSB"] is False
 
 
 def test_pure_survival_does_not_copy_room_nine_temporary_mod() -> None:
@@ -289,6 +291,13 @@ def test_pure_survival_does_not_copy_room_nine_temporary_mod() -> None:
 
 
 def test_world_templates_keep_only_real_overrides() -> None:
+    pure_survival = build(0, token=TOKEN, cluster_key=CLUSTER_KEY)
+    assert all(
+        not shard.world.overrides.model_fields_set
+        for shard in pure_survival.shards.values()
+        if shard.world is not None
+    )
+
     endless = build(20, token=TOKEN, cluster_key=CLUSTER_KEY)
     endless_forest = endless.shards["forest"].world
     endless_cave = endless.shards["cave"].world
@@ -297,11 +306,56 @@ def test_world_templates_keep_only_real_overrides() -> None:
     assert endless_cave is not None
     assert endless_forest.worldgen_preset == "ENDLESS"
     assert endless_forest.settings_preset == "ENDLESS"
+    assert not endless_forest.overrides.model_fields_set
     assert endless_cave.overrides.model_dump(exclude_unset=True) == {
         "basicresource_regrowth": "always",
         "ghostsanitydrain": "none",
         "portalresurection": "always",
         "resettime": "none",
+    }
+
+    semi_forest = build(50, token=TOKEN, cluster_key=CLUSTER_KEY).shards["forest"].world
+    semi_cave = build(50, token=TOKEN, cluster_key=CLUSTER_KEY).shards["cave"].world
+    assert semi_forest is not None
+    assert semi_cave is not None
+    assert semi_forest.overrides.model_dump(exclude_unset=True) == {
+        "antliontribute": "never",
+        "beefalo": "often",
+        "boons": "often",
+        "cactus": "often",
+        "grass": "often",
+        "grassgekkos": "never",
+        "krampus": "always",
+        "moon_starfish": "often",
+        "ocean_bullkelp": "often",
+        "prefabswaps_start": "classic",
+        "reeds": "often",
+        "resettime": "none",
+        "sapling": "often",
+        "tallbirds": "often",
+        "touchstone": "often",
+        "wildfires": "never",
+    }
+    assert semi_cave.overrides.model_dump(exclude_unset=True) == {
+        "boons": "often",
+        "grass": "often",
+        "grassgekkos": "never",
+        "krampus": "always",
+        "prefabswaps_start": "classic",
+        "reeds": "often",
+        "resettime": "none",
+        "sapling": "often",
+        "touchstone": "often",
+    }
+    semi_endless_cave = (
+        build(70, token=TOKEN, cluster_key=CLUSTER_KEY).shards["cave"].world
+    )
+    assert semi_endless_cave is not None
+    assert semi_endless_cave.overrides.model_dump(exclude_unset=True) == {
+        **semi_cave.overrides.model_dump(exclude_unset=True),
+        "basicresource_regrowth": "always",
+        "ghostsanitydrain": "none",
+        "portalresurection": "always",
     }
 
     lights_out = build(115, token=TOKEN, cluster_key=CLUSTER_KEY)

@@ -7,6 +7,7 @@ from pathlib import Path
 from pydantic import SecretStr
 
 from dst_server.cluster import (
+    CaveOverrides,
     ClusterConfig,
     ClusterSettings,
     ForestOverrides,
@@ -119,18 +120,61 @@ _STANDARD = compose(
     _LONG_HISTORY,
     RoomPreset(settings=ClusterSettings(pause_when_empty=True)),
 )
+_SEMI_WORLD = compose(
+    shard(
+        "forest",
+        WorldgenOverride(
+            overrides=ForestOverrides(
+                antliontribute="never",
+                beefalo="often",
+                boons="often",
+                cactus="often",
+                grass="often",
+                grassgekkos="never",
+                krampus="always",
+                moon_starfish="often",
+                ocean_bullkelp="often",
+                prefabswaps_start="classic",
+                reeds="often",
+                resettime="none",
+                sapling="often",
+                tallbirds="often",
+                touchstone="often",
+                wildfires="never",
+            )
+        ),
+    ),
+    shard(
+        "cave",
+        WorldgenOverride(
+            overrides=CaveOverrides(
+                boons="often",
+                grass="often",
+                grassgekkos="never",
+                krampus="always",
+                prefabswaps_start="classic",
+                reeds="often",
+                resettime="none",
+                sapling="often",
+                touchstone="often",
+            )
+        ),
+    ),
+)
 _ROOM_PRESETS = {
     RoomType.PURE_SURVIVAL: compose(_STANDARD, FOREST_CAVES),
     RoomType.PURE_ENDLESS: compose(_STANDARD, FOREST_CAVES, ENDLESS),
     RoomType.SEMI_SURVIVAL: compose(
         _STANDARD,
         FOREST_CAVES,
+        _SEMI_WORLD,
         _mods(*_SEMI_MODS),
     ),
     RoomType.SEMI_ENDLESS: compose(
         _STANDARD,
         FOREST_CAVES,
         ENDLESS,
+        _SEMI_WORLD,
         _mods(*_SEMI_MODS),
     ),
     RoomType.AFK: compose(
