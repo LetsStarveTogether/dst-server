@@ -83,9 +83,11 @@ def image_matches_expected_build() -> None:
     expected_version = os.environ.get("DST_SERVER_EXPECTED_VERSION")
     if expected_revision is None and expected_version is None:
         return
+    podman = shutil.which("podman")
+    assert podman is not None
     inspected = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
         (
-            "/usr/bin/podman",
+            podman,
             "image",
             "inspect",
             "--format",
@@ -635,6 +637,7 @@ class QuadletSystem:
         return self.cluster_dir / ".dst-server.sock"
 
     async def install(self, *sources: str) -> None:
+        await asyncio.to_thread(SYSTEM_QUADLET_ROOT.mkdir, parents=True, exist_ok=True)
         for source in sources:
             target = SYSTEM_QUADLET_ROOT / source
             if target not in self.installed:
