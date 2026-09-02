@@ -34,15 +34,6 @@ Every Agent owns one restartable game process.
    A room supports at most four shards and publishes only the ports its shards use.
    Concurrent rooms must use distinct slots.
 
-   Reserve the range from automatic Linux port allocation before starting rooms:
-
-   ```shell
-   sudo install -Dm0755 deploy/sysctl/dst-server-reserve-ports /usr/libexec/dst-server-reserve-ports
-   sudo install -Dm0644 deploy/sysctl/dst-server-port-reservation.service /etc/systemd/system/dst-server-port-reservation.service
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now dst-server-port-reservation.service
-   ```
-
 4. Reload the rootless systemd manager and start a generated Pod:
 
    ```shell

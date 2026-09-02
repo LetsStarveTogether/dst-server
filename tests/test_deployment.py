@@ -1,6 +1,5 @@
 import os
 import stat
-import subprocess  # ruff: ignore[suspicious-subprocess-import]
 from pathlib import Path
 
 import pytest
@@ -87,46 +86,6 @@ def test_netdata_deployment_contract_is_consistent() -> None:
     assert "bind to = localhost" in (deploy / "netdata/netdata.conf").read_text(
         encoding="utf-8"
     )
-
-
-@pytest.mark.parametrize(
-    ("existing", "expected"),
-    [
-        ("", "30000-32999"),
-        ("20000-21000", "20000-21000,30000-32999"),
-        (
-            "20000-21000,30000-32999",
-            "20000-21000,30000-32999,30000-32999",
-        ),
-        ("29000-34000", "29000-34000,30000-32999"),
-        (
-            "29000-31000,32000-34000",
-            "29000-31000,32000-34000,30000-32999",
-        ),
-        ("32999-33001,25000", "32999-33001,25000,30000-32999"),
-    ],
-)
-def test_port_reservation_appends_to_existing_sysctl_bitmap(
-    tmp_path: Path,
-    existing: str,
-    expected: str,
-) -> None:
-    deploy = Path(__file__).parents[1] / "deploy" / "sysctl"
-    setting = tmp_path / "ip_local_reserved_ports"
-    setting.write_text(existing + "\n", encoding="ascii")
-
-    subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
-        (str(deploy / "dst-server-reserve-ports"), str(setting)),
-        check=True,
-    )
-
-    assert setting.read_text(encoding="ascii") == expected + "\n"
-    service = (deploy / "dst-server-port-reservation.service").read_text(
-        encoding="utf-8"
-    )
-    assert "After=systemd-sysctl.service" in service
-    assert "Before=sysinit.target" in service
-    assert "ExecStart=/usr/libexec/dst-server-reserve-ports" in service
 
 
 def test_cluster_and_mod_files_are_prepared(tmp_path: Path) -> None:

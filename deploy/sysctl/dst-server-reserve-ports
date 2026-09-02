@@ -1,6 +1,0 @@
-#!/bin/sh
-set -eu
-
-setting=${1:-/proc/sys/net/ipv4/ip_local_reserved_ports}
-reserved=$(tr -d '\n' < "$setting")
-printf '%s%s30000-32999\n' "$reserved" "${reserved:+,}" > "$setting"

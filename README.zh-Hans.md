@@ -34,15 +34,6 @@
    每个房间最多支持四个分片，并且只发布实际使用的端口。
    同时运行的房间必须使用不同槽位。
 
-   启动房间前，将该范围排除在 Linux 自动端口分配之外：
-
-   ```shell
-   sudo install -Dm0755 deploy/sysctl/dst-server-reserve-ports /usr/libexec/dst-server-reserve-ports
-   sudo install -Dm0644 deploy/sysctl/dst-server-port-reservation.service /etc/systemd/system/dst-server-port-reservation.service
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now dst-server-port-reservation.service
-   ```
-
 4. 重载 rootless systemd 管理器并启动生成的 Pod：
 
    ```shell
