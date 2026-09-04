@@ -4,13 +4,13 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from dst_server import ResponseTooLargeError
 from dst_server.events import server as server_events
 from dst_server.game.rpc import MAX_RESULT_LINE_BYTES
 from dst_server.runtime.console import (
     MAX_RESULT_LINES,
     Console,
     IndeterminateCommandError,
+    ResponseTooLargeError,
     StaleGenerationError,
     track_request,
 )

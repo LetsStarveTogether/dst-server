@@ -1,6 +1,6 @@
 import pytest
 
-from dst_server import decode_klei_id, encode_klei_id
+from dst_server.klei_id import decode_klei_id, encode_klei_id
 
 
 @pytest.mark.parametrize(

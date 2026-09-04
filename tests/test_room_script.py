@@ -8,20 +8,19 @@ from pydantic import SecretStr, ValidationError
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from dst_server.cluster import (
-    ClusterConfig,
-    ClusterSettings,
-    LavaArenaOverrides,
+from dst_server.cluster.config import ClusterConfig, ClusterSettings, ShardSettings
+from dst_server.cluster.overrides import (
+    LuaValue,
     ModOverride,
     ModOverrides,
-    QuagmireOverrides,
-    ShardSettings,
+    _lua_statements,
+    _lua_value_node,
 )
-from dst_server.cluster.overrides import LuaValue, _lua_statements, _lua_value_node
 from dst_server.cluster.quadlet import (
     DEFAULT_IMAGE,
     QuadletApplication,
 )
+from dst_server.cluster.world import LavaArenaOverrides, QuagmireOverrides
 from scripts.generate_rooms import (
     CLUSTER_DESCRIPTION,
     NETDATA_ENVIRONMENT,

@@ -20,16 +20,16 @@ from ulid import ULID
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from dst_server.cluster import (
+from dst_server.cluster.config import (
     ClusterConfig,
     ClusterSettings,
-    ForestOverrides,
     ShardConfig,
     ShardSettings,
-    WorldgenOverride,
 )
+from dst_server.cluster.overrides import WorldgenOverride
 from dst_server.cluster.quadlet import QuadletApplication, RoomPortAllocation
 from dst_server.cluster.supervisor import MAX_ATTEMPTS
+from dst_server.cluster.world import ForestOverrides
 from dst_server.events import player
 from dst_server.events import server as server_events
 from dst_server.game.rpc import lua_string

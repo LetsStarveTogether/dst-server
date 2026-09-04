@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-import dst_server.cluster as cluster_api
-from dst_server.cluster import console, mods, service
+from dst_server.cluster import console, layout, mods, service
+from dst_server.cluster.quadlet import QuadletApplication
 
 
 def write_shard(path: Path, *, is_master: bool, name: str) -> None:
@@ -33,7 +33,7 @@ def service_layout(tmp_path: Path) -> tuple[Path, Path]:
 def test_default_deployment_is_a_typed_pod_application() -> None:
     deploy = Path(__file__).parents[1] / "deploy"
     quadlet = deploy / "quadlet"
-    application = cluster_api.QuadletApplication.load(
+    application = QuadletApplication.load(
         quadlet,
         name="dst-000",
     )
@@ -66,9 +66,7 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
 
 def test_netdata_deployment_contract_is_consistent() -> None:
     deploy = Path(__file__).parents[1] / "deploy"
-    application = cluster_api.QuadletApplication.load(
-        deploy / "quadlet", name="dst-000"
-    )
+    application = QuadletApplication.load(deploy / "quadlet", name="dst-000")
     address = dict(application.master.environment)[
         "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
     ].removeprefix("http://")
@@ -109,10 +107,10 @@ def test_cluster_and_mod_files_are_prepared(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    cluster_api.prepare(cluster)
+    layout.prepare(cluster)
     mod_ids = mods.prepare_shared(cluster)
     mods.activate(install, cluster)
-    shards = cluster_api.discover(cluster)
+    shards = layout.discover(cluster)
 
     assert mod_ids == (7, 42)
     assert install_mods.is_symlink()
@@ -141,7 +139,7 @@ def test_prepare_preserves_existing_permission_files(tmp_path: Path) -> None:
         path.touch()
         os.utime(path, ns=(0, 0))
 
-    cluster_api.prepare(tmp_path)
+    layout.prepare(tmp_path)
 
     assert all(path.stat().st_mtime_ns == 0 for path in paths)
 
@@ -153,7 +151,7 @@ def test_prepare_rejects_permission_symlinks(tmp_path: Path) -> None:
     (tmp_path / "whitelist.txt").symlink_to(outside)
 
     with pytest.raises(ValueError, match="permission file cannot be a symlink"):
-        cluster_api.prepare(tmp_path)
+        layout.prepare(tmp_path)
 
     assert not outside.exists()
     assert not (tmp_path / "adminlist.txt").exists()
@@ -169,7 +167,7 @@ def test_prepare_requires_cluster_configuration(
     (tmp_path / other.pop()).touch()
 
     with pytest.raises(FileNotFoundError, match=required):
-        cluster_api.prepare(tmp_path)
+        layout.prepare(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -193,7 +191,7 @@ def test_discovery_requires_one_master(
         )
 
     with pytest.raises(ValueError, match=message):
-        cluster_api.discover(tmp_path)
+        layout.discover(tmp_path)
 
 
 def test_discovery_rejects_native_invalid_boolean_and_shard_symlink(
@@ -206,7 +204,7 @@ def test_discovery_rejects_native_invalid_boolean_and_shard_symlink(
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="true or false"):
-        cluster_api.discover(tmp_path)
+        layout.discover(tmp_path)
 
     for path in shard.iterdir():
         path.unlink()
@@ -215,7 +213,7 @@ def test_discovery_rejects_native_invalid_boolean_and_shard_symlink(
     write_shard(outside, is_master=True, name="Outside")
     (tmp_path / "forest").symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="cannot be a symlink"):
-        cluster_api.discover(tmp_path)
+        layout.discover(tmp_path)
 
 
 def test_workshop_parser_ignores_missing_files_and_sorts(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-from dst_server.cluster import LuaValue
+from dst_server.cluster.overrides import LuaValue
 
 MOD_CONFIGURATIONS: dict[int, dict[str, LuaValue]] = {
     1467214795: {
