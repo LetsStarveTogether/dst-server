@@ -23,11 +23,6 @@ _CLOSE_TIMEOUT = 5.0
 _CANCEL_REAP_TIMEOUT = 0.1
 
 
-def _consume_task(task: asyncio.Task[Any]) -> None:
-    if not task.cancelled():
-        task.exception()
-
-
 def _validate_unix_path(path: Path) -> bytes:
     encoded = os.fsencode(path)
     if not encoded or len(encoded) > _UNIX_PATH_BYTES or b"\0" in encoded:
@@ -134,11 +129,6 @@ class RpcUnixServer:
                     await asyncio.wait(pending)
             except TimeoutError:
                 logger.warning("RPC connection cleanup exceeded the shutdown deadline")
-            for task in pending:
-                if task.done():
-                    _consume_task(task)
-                else:
-                    task.add_done_callback(_consume_task)
 
 
 async def create_rpc_server(  # ruff: ignore[complex-structure]
@@ -149,23 +139,10 @@ async def create_rpc_server(  # ruff: ignore[complex-structure]
     tasks: set[asyncio.Task[Any]] = set()
     closing = asyncio.Event()
 
-    async def connected(stream: Any) -> None:  # ruff: ignore[complex-structure]
-        task = asyncio.current_task()
-        if task is not None:
-            tasks.add(task)
+    async def connected(stream: Any) -> None:
         root: object | None = None
         connection: Any | None = None
         pair: tuple[Any, Any] | None = None
-        disconnected = False
-
-        def disconnect() -> None:
-            nonlocal disconnected
-            if disconnected:
-                return
-            disconnected = True
-            if connection is not None:
-                connection.close()
-            stream.close()
 
         try:
             root = bootstrap()
@@ -175,22 +152,33 @@ async def create_rpc_server(  # ruff: ignore[complex-structure]
             if not closing.is_set():
                 await connection.on_disconnect()
         finally:
-            try:
-                if pair is not None:
-                    connections.discard(pair)
-                disconnect()
-                if root is not None and (close := getattr(root, "aclose", None)):
-                    try:
-                        closed = close()
-                        if inspect.isawaitable(closed):
-                            await closed
-                    except Exception:
-                        logger.exception("RPC connection root cleanup failed")
-            finally:
-                if task is not None:
-                    tasks.discard(task)
+            if pair is not None:
+                connections.discard(pair)
+            if connection is not None:
+                connection.close()
+            stream.close()
+            if root is not None and (close := getattr(root, "aclose", None)):
+                try:
+                    closed = close()
+                    if inspect.isawaitable(closed):
+                        await closed
+                except Exception:
+                    logger.exception("RPC connection root cleanup failed")
 
-    server = await capnp.AsyncIoStream.create_unix_server(connected, sock=sock)
+    def completed(task: asyncio.Task[None]) -> None:
+        tasks.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error("RPC connection failed: {kind}", kind=type(error).__name__)
+
+    def accepted(stream: Any) -> None:
+        if closing.is_set():
+            stream.close()
+            return
+        task = asyncio.create_task(connected(stream), name="dst-rpc-connection")
+        tasks.add(task)
+        task.add_done_callback(completed)
+
+    server = await capnp.AsyncIoStream.create_unix_server(accepted, sock=sock)
     return RpcUnixServer(server, connections, tasks, closing)
 
 

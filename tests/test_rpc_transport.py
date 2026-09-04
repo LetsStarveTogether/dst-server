@@ -2,6 +2,7 @@
 import asyncio
 import socket
 import stat
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,20 @@ from dst_server.rpc.transport import filesystem_socket
 
 capnp: Any = pytest.importorskip("capnp")
 schema = load_schema()
+
+
+@pytest.fixture
+async def callback_errors() -> AsyncIterator[list[dict[str, Any]]]:
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    errors: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _, context: errors.append(context))
+    try:
+        yield errors
+        await asyncio.sleep(0)
+        assert errors == []
+    finally:
+        loop.set_exception_handler(previous)
 
 
 @pytest.mark.parametrize("replacement", [False, True], ids=["owned", "replaced"])
@@ -225,6 +240,7 @@ async def test_disconnect_classifies_queries_and_mutations(
 async def test_server_shutdown_bounds_capability_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    callback_errors: list[dict[str, Any]],
 ) -> None:
     tmp_path.chmod(0o700)
     monkeypatch.setattr(rpc_transport, "_CLOSE_TIMEOUT", 0.01)
@@ -257,3 +273,29 @@ async def test_server_shutdown_bounds_capability_cleanup(
     assert not server.connections
     assert not server.tasks
     assert not path.exists()
+    assert callback_errors == []
+
+
+async def test_failed_connection_bootstrap_is_owned_and_reaped(
+    tmp_path: Path,
+    callback_errors: list[dict[str, Any]],
+) -> None:
+    tmp_path.chmod(0o700)
+    accepted = asyncio.Event()
+
+    def bootstrap() -> object:
+        accepted.set()
+        message = "bootstrap failed"
+        raise RuntimeError(message)
+
+    path = tmp_path / "cluster.sock"
+    async with rpc_runtime(), filesystem_rpc_server(path, bootstrap) as server:
+        stream = await capnp.AsyncIoStream.create_unix_connection(str(path))
+        await asyncio.wait_for(accepted.wait(), 1)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        stream.close()
+        assert not server.connections
+        assert not server.tasks
+
+    assert callback_errors == []
