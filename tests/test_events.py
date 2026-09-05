@@ -8,7 +8,9 @@ NONCE = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
 def test_game_event_schema_is_strict() -> None:
     data = {
-        "v": 1,
+        "v": 2,
+        "generation": 1,
+        "session_id": "SESSION",
         "nonce": NONCE,
         "seq": 1,
         "event": "dst.world.state_changed",
@@ -44,7 +46,9 @@ def test_game_event_schema_is_strict() -> None:
 def test_coordinate_migration_without_portal_is_valid() -> None:
     event = GAME_EVENT_ADAPTER.validate_python(
         {
-            "v": 1,
+            "v": 2,
+            "generation": 1,
+            "session_id": "SESSION",
             "nonce": NONCE,
             "seq": 1,
             "event": "dst.player.migration_started",
@@ -74,7 +78,9 @@ def test_coordinate_migration_without_portal_is_valid() -> None:
 def test_combat_hit_without_resolved_damage_is_valid() -> None:
     event = GAME_EVENT_ADAPTER.validate_json(
         """{
-            "v": 1,
+            "v": 2,
+            "generation": 1,
+            "session_id": "SESSION",
             "nonce": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "seq": 1,
             "event": "dst.player.combat_hit",
@@ -108,6 +114,70 @@ def test_combat_hit_without_resolved_damage_is_valid() -> None:
 
     assert isinstance(event, player.CombatHitEvent)
     assert event.data.damage_resolved is None
+
+
+def telemetry_error(**changes: object) -> dict[str, object]:
+    return {
+        "v": 2,
+        "nonce": NONCE,
+        "generation": 1,
+        "session_id": "SESSION",
+        "seq": 1,
+        "event": "dst.telemetry.error",
+        "tick": 0,
+        "monotonic_ms": 0,
+        "cycle": None,
+        "data": {
+            "stage": "player.finishedwork",
+            "message": "callback_failed",
+            "count": 1,
+        },
+    } | changes
+
+
+def test_telemetry_diagnostic_has_a_safe_strict_contract() -> None:
+    event = GAME_EVENT_ADAPTER.validate_python(telemetry_error(), strict=True)
+
+    assert event.v == 2
+    assert event.generation == 1
+    assert event.session_id == "SESSION"
+    assert event.data.message == "callback_failed"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"v": 1},
+        {"generation": -1},
+        {"generation": "1"},
+        {"generation": True},
+        {"session_id": ""},
+        {"seq": 0},
+        {"event": "dst.unknown"},
+        {"data": {"stage": "callback", "message": "callback_failed", "count": 0}},
+        {"data": {"stage": "callback", "message": "SECRET_TOKEN", "count": 1}},
+        {
+            "data": {
+                "stage": "callback\nprivate chat",
+                "message": "callback_failed",
+                "count": 1,
+            }
+        },
+        {
+            "data": {
+                "stage": "callback",
+                "message": "callback_failed",
+                "count": 1,
+                "raw": "secret",
+            }
+        },
+    ],
+)
+def test_telemetry_diagnostic_rejects_unsafe_or_ambiguous_fields(
+    changes: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        GAME_EVENT_ADAPTER.validate_python(telemetry_error(**changes), strict=True)
 
 
 def test_fd5_server_events_are_typed_without_losing_unknown_lines() -> None:

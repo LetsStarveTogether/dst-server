@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -92,5 +93,6 @@ def test_otel_resource_uses_explicit_cluster_name(
     config = ServerConfig(shard="forest", telemetry_cluster="dst-042")
     assert service.configure_otel(config) is pipeline
     configure.assert_called_once_with(
-        resource_attributes={"dst.cluster.name": "dst-042"}
+        resource_attributes={"dst.cluster.name": "dst-042"},
+        outbox_path=Path("/cluster/forest/.telemetry.sqlite3"),
     )

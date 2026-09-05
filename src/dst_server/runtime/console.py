@@ -229,6 +229,11 @@ class Console:
                 else:
                     output_before_start = True
                 continue
+            observed_timestamp_ns = time_ns()
+            if await self.game_events.accept(
+                line.rstrip(b"\r\n"), observed_timestamp_ns
+            ):
+                continue
             value = line.decode(errors="replace").rstrip("\r\n")
             if started and not ended and value != frame_end and not oversized:
                 result_bytes += len(line.removesuffix(b"\n").removesuffix(b"\r"))
@@ -239,9 +244,6 @@ class Console:
                 ):
                     oversized = True
                     lines.clear()
-            observed_timestamp_ns = time_ns()
-            if self.game_events.accept(value, observed_timestamp_ns):
-                continue
             if ended:
                 if value == COMMAND_DONE:
                     if oversized:

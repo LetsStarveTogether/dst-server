@@ -13,10 +13,10 @@ from .rpc import (
     DriverHealth,
     Failure,
     ResponseAdapter,
-    json_text,
     lua_package_path,
     lua_request,
     lua_string,
+    lua_value,
 )
 from .world import WorldClient
 
@@ -37,6 +37,7 @@ class GameClient:
         nonce: str,
         execute_reload: Callable[[str, float], Awaitable[tuple[str, int, float]]],
         wait_reload: Callable[[int, float], Awaitable[None]],
+        observe_health: Callable[[int, DriverHealth], None] | None = None,
     ) -> None:
         self.shard = shard
         self.lua_directory = lua_directory
@@ -45,24 +46,28 @@ class GameClient:
         self.execute_ready = execute_ready
         self.execute_reload = execute_reload
         self.wait_reload = wait_reload
+        self.observe_health = observe_health
         self.recorder = recorder
         self.session_id = session_id
         self.nonce = nonce
         self.world = WorldClient(self)
         self.players = PlayerClient(self)
 
-    async def install(self) -> DriverHealth:
+    async def install(self, generation: int) -> DriverHealth:
         options = self.telemetry.model_dump(mode="json") | {
             "nonce": self.nonce,
+            "generation": generation,
         }
         package_path = lua_package_path(self.lua_directory)
         body = (
-            f"package.path={lua_string(package_path)}..package.path;"
             f"local driver=require({lua_string(DRIVER_MODULE)});"
-            "return driver.install("
-            f"json.decode({lua_string(json_text(options))}))"
+            f"return driver.install({lua_value(options)})"
         )
-        result = await self.execute(lua_request(body))
+        result = await self.execute(
+            f"local path={lua_string(package_path)};"
+            "if not (';'..package.path..';'):find(';'..path,1,true) then "
+            "package.path=path..package.path end;" + lua_request(body)
+        )
         return self.parse(result, DRIVER_RESPONSE)
 
     async def request[DataT](
@@ -79,7 +84,7 @@ class GameClient:
             body = (
                 f"return require({lua_string(DRIVER_MODULE)}).call("
                 f"{lua_string(method)},"
-                f"json.decode({lua_string(json_text(arguments))}))"
+                f"{lua_value(arguments)})"
             )
             result = await self.execute_ready(lua_request(body))
             return self.parse(result, adapter)
@@ -99,7 +104,7 @@ class GameClient:
             body = (
                 f"return require({lua_string(DRIVER_MODULE)}).call("
                 f"{lua_string(method)},"
-                f"json.decode({lua_string(json_text(arguments))}))"
+                f"{lua_value(arguments)})"
             )
             result, generation, deadline = await self.execute_reload(
                 lua_request(body), completion_timeout
@@ -116,7 +121,7 @@ class GameClient:
         response = next(
             (
                 line.removeprefix(RESULT_PREFIX)
-                for line in reversed(result.splitlines())
+                for line in reversed(result.split("\n"))
                 if line.startswith(RESULT_PREFIX)
             ),
             None,
@@ -131,4 +136,7 @@ class GameClient:
         return envelope.data
 
     async def get_health(self) -> DriverHealth:
-        return await self.request("health", {}, DRIVER_RESPONSE)
+        health = await self.request("health", {}, DRIVER_RESPONSE)
+        if self.observe_health is not None:
+            self.observe_health(health.generation, health)
+        return health

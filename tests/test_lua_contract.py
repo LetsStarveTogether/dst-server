@@ -66,6 +66,7 @@ def run_lua_contract(script: str, luajit: str) -> list[str]:
             str(root / f"tests/lua/{script}"),
             str(root / "src/dst_server/lua"),
             str(root / "tests/lua"),
+            str(root / "dst-scripts/scripts"),
         ],
         capture_output=True,
         text=True,
@@ -94,9 +95,11 @@ def test_all_real_lua_event_producers_match_python_contract(luajit: str) -> None
         for definition in definitions
         if "event" in definition.get("properties", {})
     }
-    assert {event.event for event in events} == schema_events
-    assert [event.seq for event in events] == list(range(1, 59))
+    assert {event.event for event in events} == schema_events - {"dst.telemetry.error"}
+    assert [event.seq for event in events] == list(range(1, 61))
     assert all(event.nonce == "01ARZ3NDEKTSV4RRFFQ69G5FAV" for event in events)
+    assert all(event.v == 2 and event.generation == 1 for event in events)
+    assert all(event.session_id == "SESSION" for event in events)
 
 
 def test_all_real_lua_rpc_methods_match_python_contracts(luajit: str) -> None:

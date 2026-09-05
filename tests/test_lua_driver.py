@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from dst_server.events import GAME_EVENT_ADAPTER
+
 
 @pytest.mark.parametrize(
     "scenario",
@@ -11,11 +13,24 @@ import pytest
         "active",
         "empty_actions",
         "critical",
-        "telemetry_error_utf8",
-        "wrapper_failures",
-        "loot_limit",
+        "finite_positions",
+        "large_loot",
+        "native_action_scope",
+        "nested_action_scope",
+        "native_action_failures",
+        "action_truthiness",
+        "action_traceback",
+        "combat_causality",
+        "wrapper_results",
+        "diagnostics",
+        "capture_failure",
+        "encoding_failure",
+        "diagnostic_failure",
+        "oversized_event",
+        "print_partial_failure",
+        "print_reentrancy",
         "partial_failure",
-        "core_failure",
+        "invalid_options",
     ],
 )
 def test_lua_driver(scenario: str, luajit: str) -> None:
@@ -24,7 +39,7 @@ def test_lua_driver(scenario: str, luajit: str) -> None:
         [
             luajit,
             str(root / "tests/lua/driver_spec.lua"),
-            str(root / "src/dst_server/lua"),
+            str(root),
             scenario,
         ],
         capture_output=True,
@@ -34,4 +49,10 @@ def test_lua_driver(scenario: str, luajit: str) -> None:
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
-    assert result.stdout == "ok\n"
+    *lines, status = result.stdout.splitlines()
+    assert status == "ok"
+    for line in lines:
+        assert line.startswith("DST_OTEL|")
+        record = GAME_EVENT_ADAPTER.validate_json(line.removeprefix("DST_OTEL|"))
+        assert record.v == 2
+        assert record.generation == 7

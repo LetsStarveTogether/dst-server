@@ -1,8 +1,9 @@
 local lua_root = assert(arg[1], "Lua module root is required")
 local test_root = assert(arg[2], "Lua test module root is required")
-package.path = table.concat({ lua_root, test_root }, "/?.lua;") .. "/?.lua;" .. package.path
+local native_root = assert(arg[3], "Native Lua module root is required")
+package.path = lua_root .. "/?.lua;" .. native_root .. "/?.lua;" .. package.path
 
-json = require("json_contract")
+json = require("json")
 local observed = { world_events = {} }
 local blacklist = {
     { userid = "KU_BLOCKED", netid = "Steam_BLOCKED" },
@@ -263,7 +264,7 @@ c_regenerateshard = function(erase) observed.regenerated_shard = erase end
 c_rollback = function(count) observed.rollback = count end
 
 local driver = require("dst_server")
-driver.install({ nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV", profile = "off", actions = {} })
+driver.install({ nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV", generation = 1, profile = "off", actions = {} })
 
 local calls = {
     { "health", {} },
@@ -302,7 +303,7 @@ local calls = {
 }
 
 for _, call in ipairs(calls) do
-    print(call[1] .. "|" .. json.encode_compliant({
+    print(call[1] .. "|" .. require("dst_server.wire").encode({
         ok = true,
         data = driver.call(call[1], call[2]),
     }))
@@ -335,6 +336,41 @@ assert(observed.teleported[1] == 1 and observed.teleported[2] == 0
 assert(observed.given_prefab == "twigs")
 assert(observed.remove_query[1] == "twigs" and observed.remove_query[2] == 1)
 assert(observed.removed[1] == "twigs" and observed.removed[2] == 1)
+
+for _, invalid in ipairs({
+    { hunger = "bad" },
+    { sanity = "bad" },
+    { moisture = "bad" },
+    { temperature = "bad" },
+    { health = -0.1 },
+    { moisture = 1.1 },
+    { temperature = 0 / 0 },
+}) do
+    local args = {
+        userid = "KU_TEST", health = 0, hunger = 1, sanity = 0.25,
+        moisture = 0.5, temperature = -10,
+    }
+    for name, value in pairs(invalid) do args[name] = value end
+    assert(not pcall(driver.call, "set_player_vitals", args))
+    assert(observed.health == 0.5 and observed.hunger == nil and observed.sanity == nil
+        and observed.moisture == nil and observed.temperature == nil)
+end
+assert(driver.call("set_player_vitals", {
+    userid = "KU_TEST", health = 0, hunger = 1, sanity = 0.25,
+    moisture = 0.5, temperature = -10,
+}))
+assert(observed.health == 0 and observed.hunger == 1 and observed.sanity == 0.25
+    and observed.moisture == 0.5 and observed.temperature == -10)
+
+for _, nonfinite in ipairs({ math.huge, -math.huge, 0 / 0 }) do
+    assert(not pcall(driver.call, "rollback", { count = nonfinite }))
+    assert(observed.rollback == 1)
+    assert(not pcall(driver.call, "teleport_player", {
+        userid = "KU_TEST", x = nonfinite, y = 0, z = 2,
+    }))
+    assert(observed.teleported[1] == 1 and observed.teleported[2] == 0
+        and observed.teleported[3] == 2)
+end
 
 local spawned = observed.spawned
 assert(driver.call("give_item", {

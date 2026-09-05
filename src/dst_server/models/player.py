@@ -52,7 +52,7 @@ class PlayerState(FrozenModel):
     weapon: Entity | None
     mount: Entity | None
     follower_count: NonNegativeInt
-    followers: Annotated[tuple[Entity, ...], Field(max_length=256)]
+    followers: tuple[Entity, ...]
     skill_xp: NonNegativeInt | None
     available_skill_points: NonNegativeInt | None
     activated_skills: Annotated[

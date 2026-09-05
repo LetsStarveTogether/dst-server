@@ -107,5 +107,5 @@ class Runtime(FrozenModel):
 
 class Mod(FrozenModel):
     id: Annotated[str, Field(min_length=1, max_length=256)]
-    name: Name
-    version: Annotated[str, Field(max_length=128)]
+    name: str
+    version: str

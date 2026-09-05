@@ -49,10 +49,9 @@ function player_values.player(client, player)
     local value = {
         userid = client.userid,
         name = client.name or "",
-        prefab = player ~= nil
-            and player.prefab
-            or client.prefab
-            or client.lobbycharacter
+        prefab = (player ~= nil and player.prefab ~= "" and player.prefab)
+            or (client.prefab ~= "" and client.prefab)
+            or (client.lobbycharacter ~= "" and client.lobbycharacter)
             or json.null,
         admin = client.admin == true,
         moderator = client.moderator == true,

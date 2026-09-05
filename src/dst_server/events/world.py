@@ -10,7 +10,7 @@ from dst_server.models.base import (
     PositiveInt,
 )
 
-from .base import EntityRef, EventRecord
+from .base import DriverDiagnostic, EntityRef, EventRecord
 
 
 class EntityDeathData(FrozenModel):
@@ -86,6 +86,10 @@ class RiftChangedData(FrozenModel):
 
 class EntityDeathEvent(EventRecord[EntityDeathData]):
     event: Literal["dst.entity.death"]
+
+
+class TelemetryErrorEvent(EventRecord[DriverDiagnostic]):
+    event: Literal["dst.telemetry.error"]
 
 
 class StateChangedEvent(EventRecord[StateData]):

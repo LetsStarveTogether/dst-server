@@ -295,7 +295,7 @@ async def test_request_escapes_untrusted_text_before_lua_execution() -> None:
 
     (command,) = commands
     assert "\n" not in command
-    assert "json.decode" in command
+    assert "json.decode" not in command
     assert "c_announce" not in command
 
 
@@ -376,9 +376,14 @@ def test_item_percent_is_bounded(field: str, value: float) -> None:
     ("response", "error", "message"),
     [
         (
-            'DST_SERVER_RESULT|{"ok":false,"error":"boom"}',
+            'DST_SERVER_RESULT|{"ok":false,"error":"lua_error"}',
             RuntimeError,
-            "boom",
+            "lua_error",
+        ),
+        (
+            'DST_SERVER_RESULT|{"ok":false,"error":"boom"}',
+            ValidationError,
+            "literal_error",
         ),
         (
             'DST_SERVER_RESULT|{"ok":true,"data":1}',

@@ -82,10 +82,10 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
         )
         self._event_changed = asyncio.Condition()
         self._attempt_tasks: tuple[asyncio.Task[None], ...] = ()
+        self._fifo_task: asyncio.Task[None] | None = None
         self._pipeline: Pipeline | None = None
         self._activated = False
-        self._closed = False
-        self._close_lock = asyncio.Lock()
+        self._close_task: asyncio.Task[None] | None = None
         self._fatal_error: BaseException | None = None
         self._fatal = asyncio.Event()
         self._failure_id: ULID | None = None
@@ -148,6 +148,9 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
             telemetry_profile=self.config.telemetry.profile,
             telemetry_invalid=server.telemetry_invalid if server is not None else 0,
             telemetry_dropped=server.telemetry_dropped if server is not None else 0,
+            telemetry_delivery=(
+                self._pipeline.status() if self._pipeline is not None else None
+            ),
             external_port=self.external_port,
             error_id=self._failure_id,
             error="DST shard failed" if self._failure_id is not None else None,
@@ -408,29 +411,76 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
         return await self.failures.get()
 
     async def aclose(self) -> None:
-        async with self._close_lock:
-            if self._closed:
-                return
+        task = self._close_task
+        if task is None:
+            task = self._close_task = asyncio.create_task(
+                self._close(), name=f"dst-agent-close-{self.shard.name}"
+            )
+        try:
+            await asyncio.shield(task)
+        except Exception:
+            if self._close_task is task:
+                self._close_task = None
+            raise
+        if self._fatal_error is not None:
+            raise self._fatal_error
+
+    async def _close(self) -> None:
+        errors: list[BaseException] = []
+        try:
+            await self.supervisor.aclose()
+        except BaseException as error:
+            errors.append(error)
+        fifo, self._fifo_task = self._fifo_task, None
+        if fifo is not None:
+            fifo.cancel()
+            await asyncio.gather(fifo, return_exceptions=True)
+        tasks, self._attempt_tasks = self._attempt_tasks, ()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.logs.close()
+        self.lifecycle.close()
+        self.game_events.close()
+        self.failures.shutdown(immediate=True)
+        pipeline, self._pipeline = self._pipeline, None
+        if pipeline is not None:
             try:
-                await self.supervisor.aclose()
-            finally:
-                tasks, self._attempt_tasks = self._attempt_tasks, ()
-                for task in tasks:
-                    task.cancel()
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                self.logs.close()
-                self.lifecycle.close()
-                self.game_events.close()
-                self.failures.shutdown(immediate=True)
-                pipeline, self._pipeline = self._pipeline, None
-                if pipeline is not None:
-                    await pipeline.shutdown()
-            self._closed = True
+                await pipeline.shutdown()
+            except BaseException as error:
+                errors.append(error)
+        if self._fatal_error is not None and self._fatal_error not in errors:
+            errors.append(self._fatal_error)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            message = "failed to close shard agent"
+            raise BaseExceptionGroup(message, errors)
 
     def _new_server(self) -> Server:
         server = Server(self.config)
         server.log_handler = lambda line: self._log(server, line)
+        self._attempt_tasks = (
+            asyncio.create_task(
+                self._drain_lifecycle(server),
+                name=f"dst-lifecycle-relay-{self.shard.name}",
+            ),
+            asyncio.create_task(
+                self._drain_game_events(server),
+                name=f"dst-game-event-relay-{self.shard.name}",
+            ),
+            asyncio.create_task(
+                self._drain_operational(server),
+                name=f"dst-operational-relay-{self.shard.name}",
+            ),
+        )
+        for task in self._attempt_tasks:
+            task.add_done_callback(
+                lambda completed: self._background_done(
+                    server, completed, critical=True
+                )
+            )
         return server
 
     def _require_activated(self) -> None:
@@ -466,37 +516,21 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
     async def _started(self, server: Server) -> None:
         self._failure_id = None
         self._started_at_ns = time_ns()
-        tasks = (
-            asyncio.create_task(
-                console.forward(self.shard.console, server),
-                name=f"dst-fifo-{self.shard.name}",
-            ),
-            asyncio.create_task(
-                self._drain_lifecycle(server),
-                name=f"dst-lifecycle-relay-{self.shard.name}",
-            ),
-            asyncio.create_task(
-                self._drain_game_events(server),
-                name=f"dst-game-event-relay-{self.shard.name}",
-            ),
+        self._fifo_task = asyncio.create_task(
+            console.forward(self.shard.console, server),
+            name=f"dst-fifo-{self.shard.name}",
         )
-        self._attempt_tasks = tasks
-        for index, task in enumerate(tasks):
-            task.add_done_callback(
-                lambda completed, server=server, critical=index == 1: (
-                    self._background_done(
-                        server,
-                        completed,
-                        critical=critical,
-                    )
-                )
-            )
+        self._fifo_task.add_done_callback(
+            lambda completed: self._background_done(server, completed, critical=False)
+        )
 
     async def _stopped(self, _server: Server) -> None:
         self._started_at_ns = None
+        fifo, self._fifo_task = self._fifo_task, None
+        if fifo is not None:
+            fifo.cancel()
+            await asyncio.gather(fifo, return_exceptions=True)
         tasks, self._attempt_tasks = self._attempt_tasks, ()
-        if tasks and not tasks[0].done():
-            tasks[0].cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         async with self._event_changed:
@@ -513,14 +547,21 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
         *,
         critical: bool,
     ) -> None:
-        if task.cancelled() or self._fatal.is_set():
+        if task.cancelled():
             return
         error = task.exception()
-        if (
+        if self._fatal.is_set():
+            return
+        if not (critical and error is not None) and (
             self.supervisor.server is not server
-            or server.returncode is not None
-            or self.supervisor.status.phase
-            not in {ShardPhase.STARTING, ShardPhase.RUNNING}
+            or (
+                error is None
+                and (
+                    server.returncode is not None
+                    or self.supervisor.status.phase
+                    not in {ShardPhase.STARTING, ShardPhase.RUNNING}
+                )
+            )
         ):
             return
         if not critical:
@@ -538,7 +579,8 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
 
     async def _drain_lifecycle(self, server: Server) -> None:
         attempt = ULID.from_str(server.game_events.nonce)
-        while (event := await server.read_event()) is not None:
+        while (observed := await server.read_lifecycle_event()) is not None:
+            event = observed.event
             self._lifecycle_sequence += 1
             sequence = self._lifecycle_sequence
             self.lifecycle.publish(
@@ -546,7 +588,7 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
                     shard=self.shard.name,
                     game_attempt=attempt,
                     sequence=sequence,
-                    observed_timestamp_ns=time_ns(),
+                    observed_timestamp_ns=observed.observed_timestamp_ns,
                     event=event,
                 )
             )
@@ -559,23 +601,12 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
 
     async def _drain_game_events(self, server: Server) -> None:
         attempt = ULID.from_str(server.game_events.nonce)
-        event_logger = self._pipeline.logger if self._pipeline is not None else None
         while (observed := await server.read_game_event()) is not None:
-            if event_logger is not None:
-                from dst_server.telemetry.otel import emit
-
-                try:
-                    emit(
-                        event_logger, observed, attributes=server.recorder.attributes()
-                    )
-                except Exception:
-                    logger.exception(
-                        "{shard}: OpenTelemetry event export failed; "
-                        "using local event logging",
-                        shard=server.config.shard,
-                    )
-                    event_logger = None
-            if event_logger is None:
+            if self._pipeline is not None and self._pipeline.logs_enabled:
+                await self._pipeline.emit_event(
+                    observed, attributes=server.recorder.attributes()
+                )
+            else:
                 logger.info(
                     "{shard}: DST_EVENT|{event}",
                     shard=server.config.shard,
@@ -591,3 +622,25 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
                     event=observed.record,
                 )
             )
+
+    async def _drain_operational(self, server: Server) -> None:
+        while (record := await server.read_operational_event()) is not None:
+            if self._pipeline is not None and self._pipeline.logs_enabled:
+                await self._pipeline.emit_operational(
+                    event_name=record.event_name,
+                    body=record.body,
+                    observed_timestamp_ns=record.observed_timestamp_ns,
+                    severity_text=record.severity_text,
+                    attributes=server.recorder.attributes()
+                    | {
+                        "log.record.uid": record.uid,
+                        "dst.game.attempt.id": server.game_events.nonce,
+                    },
+                )
+            else:
+                logger.info(
+                    "{shard}: {event}: {body}",
+                    shard=server.config.shard,
+                    event=record.event_name,
+                    body=record.body,
+                )

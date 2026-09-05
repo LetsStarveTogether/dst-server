@@ -119,15 +119,23 @@ function commands.set_player_vitals(args)
     if player == nil or player:HasTag("playerghost") then
         return false
     end
-    local changed = false
+    local percentages = {}
     for _, name in ipairs({ "health", "hunger", "sanity", "moisture" }) do
         local value = values.optional_number(args, name)
+        if value ~= nil and (value < 0 or value > 1) then
+            error(name .. " must be between 0 and 1")
+        end
+        percentages[name] = value
+    end
+    local temperature = values.optional_number(args, "temperature")
+    local changed = false
+    for _, name in ipairs({ "health", "hunger", "sanity", "moisture" }) do
+        local value = percentages[name]
         if value ~= nil and player.components[name] ~= nil then
             player.components[name]:SetPercent(value)
             changed = true
         end
     end
-    local temperature = values.optional_number(args, "temperature")
     if temperature ~= nil and player.components.temperature ~= nil then
         player.components.temperature:SetTemperature(temperature)
         changed = true

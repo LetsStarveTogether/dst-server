@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from time import time_ns
 
 from logbook import Logger
 
@@ -11,6 +12,12 @@ from .fds import PROTOCOL_LINE_LIMIT
 logger = Logger(__name__)
 
 MAX_PENDING_EVENTS = 64
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedLifecycleEvent:
+    event: server.Event
+    observed_timestamp_ns: int
 
 
 @dataclass(slots=True)
@@ -76,7 +83,7 @@ async def read_line(reader: asyncio.StreamReader) -> bytes | None:
 
 class Lifecycle:
     def __init__(self) -> None:
-        self.queue: asyncio.Queue[server.Event | None] = asyncio.Queue(
+        self.queue: asyncio.Queue[ObservedLifecycleEvent] = asyncio.Queue(
             maxsize=MAX_PENDING_EVENTS
         )
         self.eof = False
@@ -97,13 +104,22 @@ class Lifecycle:
         self,
         reader: asyncio.StreamReader,
         on_session: Callable[[int], None],
+        on_event: Callable[[server.Event, int], Awaitable[None]] | None = None,
     ) -> None:
         try:
             while (line := await read_line(reader)) is not None:
+                if line.startswith(b"DST_Stats|"):
+                    continue
+                observed_timestamp_ns = time_ns()
                 event = server.parse_event(line.decode(errors="replace").rstrip("\r\n"))
                 if __debug__:
                     logger.debug("DST server event : {event}", event=event)
                 self.handle(event, on_session)
+                if on_event is not None:
+                    await on_event(event, observed_timestamp_ns)
+                await self.queue.put(
+                    ObservedLifecycleEvent(event, observed_timestamp_ns)
+                )
         finally:
             self.close()
 
@@ -114,7 +130,7 @@ class Lifecycle:
         self._resolve_save_barrier()
         self.ready_or_eof.set()
         self.saved.set()
-        self._publish(None)
+        self.queue.shutdown()
 
     def handle(
         self,
@@ -144,12 +160,6 @@ class Lifecycle:
             self.saved.set()
         if isinstance(event, server.StoppingEvent):
             self.stopping.set()
-        self._publish(event)
-
-    def _publish(self, event: server.Event | None) -> None:
-        if self.queue.full():
-            self.queue.get_nowait()
-        self.queue.put_nowait(event)
 
     def _resolve_save_barrier(self) -> None:
         if self._save_confirmation_barrier is not None:
@@ -173,9 +183,14 @@ class Lifecycle:
             raise EOFError(msg)
 
     async def read(self) -> server.Event | None:
-        if self.eof and self.queue.empty():
+        observed = await self.read_observed()
+        return observed.event if observed is not None else None
+
+    async def read_observed(self) -> ObservedLifecycleEvent | None:
+        try:
+            return await self.queue.get()
+        except asyncio.QueueShutDown:
             return None
-        return await self.queue.get()
 
     async def wait_for_save(
         self,

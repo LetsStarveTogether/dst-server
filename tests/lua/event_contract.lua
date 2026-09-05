@@ -1,8 +1,13 @@
 local lua_root = assert(arg[1], "Lua module root is required")
 local test_root = assert(arg[2], "Lua test module root is required")
-package.path = table.concat({ lua_root, test_root }, "/?.lua;") .. "/?.lua;" .. package.path
+local native_root = assert(arg[3], "Native Lua module root is required")
+package.path = lua_root .. "/?.lua;" .. native_root .. "/?.lua;" .. package.path
 
-json = require("json_contract")
+json = require("json")
+nolineprint = print
+require("class")
+require("vector3")
+require("util")
 
 local world_listeners = {}
 local world_watchers = {}
@@ -38,6 +43,8 @@ end
 
 TheWorld = {
     ismastersim = true,
+    Map = { GetPlatformAtPoint = function() end },
+    meta = { session_identifier = "SESSION" },
     state = { cycles = 2 },
     ListenForEvent = function(_, name, callback)
         world_listeners[name] = callback
@@ -59,6 +66,7 @@ GetTimeReal = function() return 20 end
 local driver = require("dst_server")
 local health = driver.install({
     nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    generation = 1,
     profile = "history",
     actions = { "CHOP" },
 })
@@ -74,7 +82,9 @@ local action = {
     target = target,
     initialtargetowner = redirected,
     invobject = spear,
-    GetActionPoint = function() return { x = 7, y = 0, z = 8 } end,
+    GetDynamicActionPoint = function()
+        return DynamicPosition(Vector3(7, 0, 8))
+    end,
     recipe = "axe",
     forced = true,
 }
@@ -95,10 +105,7 @@ world_listeners.ms_playerdespawnandmigrate(TheWorld, {
     y = 0,
     z = 10,
 })
-world_listeners.ms_newplayercharacterspawned(TheWorld, {
-    player = player,
-    mode = "survival",
-})
+world_listeners.ms_newplayerspawned(TheWorld, player)
 world_listeners.entity_death(TheWorld, {
     inst = player,
     cause = "hound",
@@ -139,13 +146,10 @@ player_listeners.ms_respawnedfromghost(player, {
     corpse = true,
     reviver = redirected,
 })
-player_listeners.onsink(player, {
-    boat = redirected,
-    shore_pt = { x = 13, y = 0, z = 14 },
-})
-player_listeners.onfallinvoid(player, {
-    teleport_pt = { x = 15, y = 0, z = 16 },
-})
+player_listeners.newstate(player, { statename = "idle" })
+player_listeners.newstate(player, { statename = "sink" })
+player_listeners.newstate(player, { statename = "sink_fast" })
+player_listeners.newstate(player, { statename = "abyss_fall" })
 
 local combat = {
     damage = 12.5,
@@ -190,6 +194,7 @@ local crafted = { item = loot, recipe = { name = "axe" }, skin = "classic" }
 player_listeners.builditem(player, crafted)
 player_listeners.buildstructure(player, crafted)
 player_listeners.oneat(player, { food = loot, feeder = redirected })
+player_listeners.oneatsoul(player, { soul = loot })
 player_listeners.picksomething(player, { object = target, loot = { loot } })
 player_listeners.harvestsomething(player, { object = target })
 player_listeners.finishedwork(player, {
@@ -202,4 +207,4 @@ player_listeners.unequip(player, { item = spear, eslot = "hands", slip = true })
 player_listeners.dropitem(player, { item = spear })
 
 health = driver.health()
-assert(health.events_emitted == 58 and health.errors == 0)
+assert(health.events_emitted == 60 and health.errors == 0)

@@ -9,6 +9,7 @@ from dst_server.game.rpc import DriverHealth
 from dst_server.models import Player
 from dst_server.models.base import FrozenModel, NonNegativeInt
 from dst_server.telemetry.config import TelemetryProfile
+from dst_server.telemetry.delivery import DeliveryStatus
 
 type ClusterPhase = Literal[
     "waitingAgents",
@@ -50,6 +51,7 @@ class ShardRuntimeStatus(FrozenModel):
     telemetry_profile: TelemetryProfile
     telemetry_invalid: NonNegativeInt = 0
     telemetry_dropped: NonNegativeInt = 0
+    telemetry_delivery: DeliveryStatus | None = None
     external_port: Annotated[int, Field(ge=1024, le=65535)] | None = None
     error_id: ULID | None = None
     error: str | None = None

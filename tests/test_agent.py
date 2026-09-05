@@ -1,9 +1,11 @@
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, Mock
 
+import logbook
 import pytest
 from ulid import ULID
 
@@ -16,9 +18,10 @@ from dst_server.cluster.supervisor import (
     ShardSupervisor,
     ShardSupervisorStatus,
 )
-from dst_server.events import GAME_EVENT_ADAPTER, ObservedGameEvent
 from dst_server.events.server import Event, SavedEvent, SessionEvent
 from dst_server.runtime import Server, ServerConfig
+from dst_server.runtime.lifecycle import ObservedLifecycleEvent
+from tests.helpers import FAKE_SERVER
 
 
 def supervisor_status(
@@ -57,25 +60,16 @@ async def relay_lifecycle(
     server: SimpleNamespace,
     *events: Event,
 ) -> None:
-    server.read_event = AsyncMock(side_effect=(*events, None))
-    await agent._drain_lifecycle(cast("Server", server))
-
-
-def observed_event(attempt: str, sequence: int) -> ObservedGameEvent:
-    record = GAME_EVENT_ADAPTER.validate_python(
-        {
-            "v": 1,
-            "nonce": attempt,
-            "seq": sequence,
-            "event": "dst.world.state_changed",
-            "tick": sequence,
-            "monotonic_ms": sequence,
-            "cycle": sequence,
-            "data": {"name": "cycles", "value": sequence},
-        },
-        strict=True,
+    server.read_lifecycle_event = AsyncMock(
+        side_effect=(
+            *(
+                ObservedLifecycleEvent(event, index)
+                for index, event in enumerate(events, 1)
+            ),
+            None,
+        )
     )
-    return ObservedGameEvent(record=record, observed_timestamp_ns=sequence)
+    await agent._drain_lifecycle(cast("Server", server))
 
 
 async def raise_error(error: Exception) -> None:
@@ -107,6 +101,45 @@ def running_server(agent: ShardAgent) -> SimpleNamespace:
         driver=SimpleNamespace(wait_ready=AsyncMock()),
         recorder=SimpleNamespace(attributes=Mock(return_value={})),
     )
+
+
+async def test_child_stdout_and_stderr_share_the_agent_log_output(
+    agent: ShardAgent,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-server"
+    executable.write_text(
+        FAKE_SERVER.replace(
+            "busy = True",
+            'os.write(1, b"merged-source\\n")\n'
+            'os.write(2, b"merged-source\\n")\n'
+            "busy = True",
+        ),
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    agent.config = replace(agent.config, executable=executable)
+    subscription = agent.logs.subscribe()
+    with logbook.TestHandler() as output:
+        server = agent._new_server()
+        try:
+            async with asyncio.timeout(3):
+                await server.start(startup_timeout=3)
+                records = [(await subscription.next(1))[0] for _ in range(2)]
+            assert [record.line for record in records] == ["merged-source"] * 2
+            assert [record.sequence for record in records] == [1, 2]
+            assert server.process.stderr is None
+        finally:
+            if server.child is not None and not server.closed:
+                await server.kill()
+            await agent._stopped(server)
+            subscription.close()
+    assert [
+        record.message
+        for record in output.records
+        if record.channel == agent_module.logger.name
+        and record.message == "Master: merged-source"
+    ] == ["Master: merged-source"] * 2
 
 
 @pytest.mark.parametrize(
@@ -184,6 +217,7 @@ async def test_markers_filter_the_current_attempt_and_publish_lifecycle(
         SessionEvent(session_id="SESSION"),
         saved,
     ]
+    assert [record.observed_timestamp_ns for record in records] == [1, 2]
     running_server.driver.wait_ready.assert_awaited_once()
 
 
@@ -273,40 +307,6 @@ async def test_generation_timeout_includes_driver_readiness(
     running_server.driver.wait_ready.assert_awaited_once()
 
 
-async def test_otel_failure_falls_back_without_losing_events(
-    agent: ShardAgent,
-    running_server: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from dst_server.telemetry import otel
-
-    pipeline = SimpleNamespace(logger=object(), shutdown=AsyncMock())
-    monkeypatch.setattr(agent_module.service, "activate_shard", Mock())
-    monkeypatch.setattr(
-        agent_module.service, "configure_otel", Mock(return_value=pipeline)
-    )
-    emit = Mock(side_effect=RuntimeError("export failed"))
-    monkeypatch.setattr(otel, "emit", emit)
-    await agent.activate()
-    subscription = agent.game_events.subscribe()
-    running_server.read_game_event = AsyncMock(
-        side_effect=(
-            observed_event(running_server.game_events.nonce, 1),
-            observed_event(running_server.game_events.nonce, 2),
-            None,
-        )
-    )
-
-    await agent._drain_game_events(cast("Server", running_server))
-
-    records = await subscription.next(2)
-    assert emit.call_count == 1
-    assert [record.sequence for record in records] == [1, 2]
-    assert {record.game_attempt for record in records} == {
-        ULID.from_str(running_server.game_events.nonce)
-    }
-
-
 async def test_failure_is_queued_and_public_status_is_sanitized(
     agent: ShardAgent,
 ) -> None:
@@ -326,7 +326,7 @@ async def test_failure_is_queued_and_public_status_is_sanitized(
     [
         (ShardPhase.RUNNING, True, True),
         (ShardPhase.RUNNING, False, False),
-        (ShardPhase.STOPPING, True, False),
+        (ShardPhase.STOPPING, True, True),
     ],
 )
 async def test_background_failure_boundary(

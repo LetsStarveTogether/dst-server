@@ -1,6 +1,7 @@
 local root = assert(arg[1], "repository root is required")
 local scripts = root .. "/dst-scripts/scripts/"
-local json = assert(dofile(root .. "/tests/lua/json_contract.lua"))
+package.path = scripts .. "?.lua;" .. package.path
+local json = require("json")
 
 local strings = setmetatable({}, {
     __index = function(value) return value end,

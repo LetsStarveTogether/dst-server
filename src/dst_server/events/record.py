@@ -38,6 +38,7 @@ from .world import (
     ShardBossDefeatedEvent,
     ShardConnectionChangedEvent,
     StateChangedEvent,
+    TelemetryErrorEvent,
 )
 
 type GameEvent = Annotated[
@@ -72,7 +73,8 @@ type GameEvent = Annotated[
     | SkillChangedEvent
     | HoundWarningEvent
     | RiftUnlockedEvent
-    | RiftChangedEvent,
+    | RiftChangedEvent
+    | TelemetryErrorEvent,
     Field(discriminator="event"),
 ]
 

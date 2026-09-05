@@ -22,12 +22,8 @@ class DisconnectedData(PlayerData):
 
 class MigrationStartedData(PlayerData):
     destination_shard_id: Identifier
-    portal_id: NonNegativeInt | None
+    portal_id: NonNegativeInt | Identifier | None
     destination: Position | None
-
-
-class SpawnedData(PlayerData):
-    mode: Identifier
 
 
 class GhostedData(PlayerData):
@@ -43,6 +39,7 @@ class ActionData(FrozenModel):
     action_sequence: PositiveInt
     success: bool
     reason: EventText | None
+    error: Literal["lua_error"] | None
     actor: EntityRef
     target: EntityRef | None
     initial_target_owner: EntityRef | None
@@ -106,7 +103,7 @@ class HarvestedData(CausedData):
 
 class FinishedWorkData(CausedData):
     target: EntityRef
-    action_id: Identifier
+    action_id: Identifier | None
 
 
 class DeployedData(CausedData):
@@ -118,7 +115,9 @@ class EquippedData(CausedData):
     slot: Identifier
 
 
-class UnequippedData(EquippedData):
+class UnequippedData(CausedData):
+    item: ItemRef | None
+    slot: Identifier
     slip: bool
 
 
@@ -150,8 +149,6 @@ type ConditionData = Annotated[
 
 class IncidentData(PlayerData):
     kind: Literal["sink", "fall_in_void"]
-    source: EntityRef | None
-    destination: Position | None
 
 
 class FishedData(CausedData):
@@ -188,7 +185,7 @@ class MigrationStartedEvent(EventRecord[MigrationStartedData]):
     event: Literal["dst.player.migration_started"]
 
 
-class SpawnedEvent(EventRecord[SpawnedData]):
+class SpawnedEvent(EventRecord[PlayerData]):
     event: Literal["dst.player.spawned"]
 
 

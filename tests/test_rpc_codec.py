@@ -165,7 +165,9 @@ def test_custom_world_and_event_discriminators_round_trip() -> None:
 
     event = GAME_EVENT_ADAPTER.validate_python(
         {
-            "v": 1,
+            "v": 2,
+            "generation": 1,
+            "session_id": "SESSION",
             "nonce": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "seq": 1,
             "event": "dst.world.state_changed",

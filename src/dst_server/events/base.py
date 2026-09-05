@@ -28,12 +28,25 @@ class CausedData(PlayerData):
     caused_by_action_sequence: PositiveInt | None
 
 
+class DriverDiagnostic(FrozenModel):
+    stage: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_.:]{0,127}$")]
+    message: Literal[
+        "callback_failed",
+        "encoding_failed",
+        "event_too_large",
+        "installation_failed",
+    ]
+    count: PositiveInt
+
+
 class EventRecord[DataT](FrozenModel):
-    v: Literal[1]
+    v: Literal[2]
     nonce: Annotated[
         str,
         Field(pattern=r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"),
     ]
+    generation: NonNegativeInt
+    session_id: Identifier | None
     seq: PositiveInt
     event: str
     tick: NonNegativeInt

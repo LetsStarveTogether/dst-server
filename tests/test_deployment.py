@@ -82,7 +82,7 @@ def test_netdata_deployment_contract_is_consistent() -> None:
     address = dict(application.master.environment)[
         "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
     ].removeprefix("http://")
-    base_dir = "/data/netdata/log/otel"
+    base_dir = "/srv/otel"
     otel = (deploy / "netdata/otel.yaml").read_text(encoding="utf-8")
 
     assert f'path: "{address}"' in otel

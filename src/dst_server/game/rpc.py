@@ -4,17 +4,20 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
+from dst_server.events.base import DriverDiagnostic
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
 from dst_server.models.base import FrozenModel, Identifier, NonNegativeInt
 
 RESULT_PREFIX = "DST_SERVER_RESULT|"
 MAX_RESULT_LINE_BYTES = 64 * 1024
+MAX_SAFE_INTEGER = 2**53 - 1
 
 
 class DriverHealth(FrozenModel):
-    protocol: Literal[1]
-    telemetry_status: Literal["disabled", "active", "failed"]
-    telemetry_error: str | None
+    protocol: Literal[2]
+    generation: NonNegativeInt
+    telemetry_status: Literal["disabled", "active", "degraded", "failed"]
+    last_error: DriverDiagnostic | None
     events_emitted: NonNegativeInt
     errors: NonNegativeInt
 
@@ -30,7 +33,9 @@ class Success[DataT](Envelope):
 
 class Failure(Envelope):
     ok: Literal[False]
-    error: str
+    error: Literal[
+        "lua_error", "invalid_json_value", "invalid_utf8", "response_too_large"
+    ]
 
 
 type ResponseAdapter[DataT] = TypeAdapter[Success[DataT] | Failure]
@@ -51,68 +56,7 @@ JSON_RESPONSE = TypeAdapter(Success[JsonValue] | Failure)
 
 
 def lua_request(body: str) -> str:
-    prefix = lua_string(RESULT_PREFIX)
-    failed = lua_string(json_text({"ok": False, "error": "Lua request failed"}))
-    invalid = lua_string(
-        json_text({"ok": False, "error": "RPC result is not valid JSON"})
-    )
-    success = lua_string('{"ok":true,"data":')
-    too_large = lua_string(
-        json_text({"ok": False, "error": "RPC result exceeds 64 KiB"})
-    )
-    return (
-        "local function valid_json_value(value,seen) "
-        "if value==nil or value==json.null then return true end;"
-        "local kind=type(value);"
-        'if kind=="boolean" or kind=="string" then return true end;'
-        'if kind=="number" then return value==value and value~=math.huge '
-        "and value~=-math.huge end;"
-        'if kind~="table" or seen[value] then return false end;seen[value]=true;'
-        "local mode,count,maximum=nil,0,0;"
-        "for key,item in pairs(value) do local key_mode;local key_kind=type(key);"
-        'if key_kind=="string" then key_mode="object";'
-        'elseif key_kind=="number" and key==key and key~=math.huge '
-        "and key~=-math.huge and key>=1 and key==math.floor(key) then "
-        'key_mode="array";count=count+1;maximum=math.max(maximum,key);'
-        "else seen[value]=nil;return false end;"
-        "if mode~=nil and mode~=key_mode then seen[value]=nil;return false end;"
-        "mode=key_mode;"
-        "if not valid_json_value(item,seen) then seen[value]=nil;return false end end;"
-        'seen[value]=nil;return mode~="array" or count==maximum end;'
-        "local function valid_utf8(value) local index=1;"
-        "while index<=#value do local byte=string.byte(value,index);local width;"
-        "if byte<128 then width=0;"
-        "elseif byte>=194 and byte<=223 then width=1;"
-        "elseif byte>=224 and byte<=239 then width=2;"
-        "elseif byte>=240 and byte<=244 then width=3;else return false end;"
-        "if index+width>#value then return false end;"
-        "local second=string.byte(value,index+1);"
-        "if (byte==224 and second<160) or (byte==237 and second>159) "
-        "or (byte==240 and second<144) or (byte==244 and second>143) "
-        "then return false end;"
-        "for offset=1,width do local continuation=string.byte(value,index+offset);"
-        "if continuation<128 or continuation>191 then return false end end;"
-        "index=index+width+1 end;return true end;"
-        "local function failure(value) local text_ok,text=pcall(tostring,value);"
-        'if not text_ok or type(text)~="string" then text="Lua request failed" end;'
-        'text=string.gsub(text,"[%z\\1-\\31]"," ");'
-        "local encode_ok,encoded=pcall(json.encode_compliant,"
-        "{ok=false,error=text});"
-        f'return encode_ok and type(encoded)=="string" and encoded or {failed} end;'
-        "local ok,payload=pcall(function() local data=(function() "
-        f"{body} end)();if data==nil then data=json.null end;"
-        "if not valid_json_value(data,{}) then "
-        'error("RPC result is not a JSON value",0) end;'
-        "local encoded=json.encode_compliant(data);"
-        'if type(encoded)~="string" then error("JSON encoder returned non-string") end;'
-        f'return {success}..encoded.."}}" end);'
-        "if not ok then payload=failure(payload) end;"
-        'if type(payload)~="string" or string.find(payload,"[%z\\1-\\31]") '
-        f"or not valid_utf8(payload) then payload={invalid} end;"
-        f"local prefix={prefix};"
-        f"if #prefix+#payload>{MAX_RESULT_LINE_BYTES} then payload={too_large} end;"
-        "print(prefix..payload)"
-    )
+    return f'require("dst_server.wire").reply(function() {body} end)'
 
 
 def lua_string(value: str) -> str:
@@ -134,13 +78,46 @@ def lua_string(value: str) -> str:
     return f'"{"".join(escaped)}"'
 
 
-def json_text(value: JsonValue) -> str:
-    return json.dumps(
-        value,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+def lua_value(value: JsonValue) -> str:
+    return _lua_value(value, set())
+
+
+def _lua_value(value: JsonValue, seen: set[int]) -> str:
+    if value is None:
+        return 'require("json").null'
+    if isinstance(value, str):
+        return lua_string(value)
+    if isinstance(value, (bool, int, float)):
+        if isinstance(value, int) and abs(value) > MAX_SAFE_INTEGER:
+            msg = "Lua integers must be within the exact IEEE 754 integer range"
+            raise ValueError(msg)
+        return json.dumps(value, allow_nan=False)
+    if not isinstance(value, (list, dict)):
+        msg = "Lua values must be JSON values"
+        raise TypeError(msg)
+    identity = id(value)
+    if identity in seen:
+        msg = "Lua value contains a cycle"
+        raise ValueError(msg)
+    seen.add(identity)
+    try:
+        if isinstance(value, list):
+            return "{" + ",".join(_lua_value(item, seen) for item in value) + "}"
+        if any(not isinstance(key, str) for key in value):
+            msg = "Lua object keys must be strings"
+            raise TypeError(msg)
+        if not value:
+            return 'require("dst_server.wire").object({})'
+        return (
+            "{"
+            + ",".join(
+                f"[{lua_string(key)}]={_lua_value(item, seen)}"
+                for key, item in value.items()
+            )
+            + "}"
+        )
+    finally:
+        seen.remove(identity)
 
 
 def lua_package_path(directory: Path) -> str:

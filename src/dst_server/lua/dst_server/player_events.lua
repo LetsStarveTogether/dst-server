@@ -2,9 +2,10 @@ local state = require("dst_server.state")
 local telemetry = require("dst_server.telemetry")
 local values = require("dst_server.values")
 local player_events = {}
+local incidents = { sink = "sink", sink_fast = "sink", abyss_fall = "fall_in_void" }
 
 local function listen(player, event_name, callback)
-    player:ListenForEvent(event_name, telemetry.guard(callback))
+    player:ListenForEvent(event_name, telemetry.guard("player." .. event_name, callback))
 end
 
 local function attach_lifecycle(player)
@@ -21,34 +22,29 @@ local function attach_lifecycle(player)
             reviver = values.entity_ref(data ~= nil and data.reviver or nil),
         })
     end)
-    listen(player, "onsink", function(_, data)
-        telemetry.emit("dst.player.incident", {
-            player = values.entity_ref(player),
-            kind = "sink",
-            source = values.entity_ref(data ~= nil and data.boat or nil),
-            destination = values.position(data ~= nil and data.shore_pt or nil),
-        })
-    end)
-    listen(player, "onfallinvoid", function(_, data)
-        telemetry.emit("dst.player.incident", {
-            player = values.entity_ref(player),
-            kind = "fall_in_void",
-            source = json.null,
-            destination = values.position(data ~= nil and data.teleport_pt or nil),
-        })
+    -- Sink and void requests can be rejected; newstate follows state entry.
+    listen(player, "newstate", function(_, data)
+        local kind = incidents[data.statename]
+        if kind ~= nil then
+            telemetry.emit("dst.player.incident", {
+                player = values.entity_ref(player),
+                kind = kind,
+            })
+        end
     end)
 end
 
 local function attach_combat(player)
     listen(player, "onhitother", function(_, data)
-        local event = values.combat_data(player, data)
+        local event = values.combat_data(player, data, player)
         event.target = values.entity_ref(data.target)
         event.damage_resolved = values.optional_json_number(data.damageresolved)
         event.redirected = values.entity_ref(data.redirected)
         telemetry.emit("dst.player.combat_hit", event)
     end)
     listen(player, "attacked", function(_, data)
-        local event = values.combat_data(player, data)
+        data = data or {}
+        local event = values.combat_data(player, data, data.attacker)
         event.attacker = values.entity_ref(data.attacker)
         event.damage_resolved = values.optional_json_number(data.damageresolved)
         event.original_damage = values.optional_json_number(data.original_damage)
@@ -56,7 +52,8 @@ local function attach_combat(player)
         telemetry.emit("dst.player.combat_received", event)
     end)
     listen(player, "blocked", function(_, data)
-        local event = values.combat_data(player, data)
+        data = data or {}
+        local event = values.combat_data(player, data, data.attacker)
         event.attacker = values.entity_ref(data.attacker)
         event.original_damage = values.optional_json_number(data.original_damage)
         telemetry.emit("dst.player.combat_blocked", event)
@@ -146,12 +143,14 @@ local function attach_inventory(player)
     end
     listen(player, "builditem", function(_, data) crafted("item", data) end)
     listen(player, "buildstructure", function(_, data) crafted("structure", data) end)
-    listen(player, "oneat", function(_, data)
+    local function ate(_, data)
         local event = values.player_data(player)
-        event.food = values.item_ref(data.food)
+        event.food = values.item_ref(data.food or data.soul)
         event.feeder = values.entity_ref(data.feeder)
         telemetry.emit("dst.player.ate", event)
-    end)
+    end
+    listen(player, "oneat", ate)
+    listen(player, "oneatsoul", ate)
     listen(player, "picksomething", function(_, data)
         local event = values.player_data(player)
         event.source = values.entity_ref(data.object)
@@ -166,7 +165,7 @@ local function attach_inventory(player)
     listen(player, "finishedwork", function(_, data)
         local event = values.player_data(player)
         event.target = values.entity_ref(data.target)
-        event.action_id = tostring(data.action.id)
+        event.action_id = data.action ~= nil and data.action.id or json.null
         telemetry.emit("dst.player.finished_work", event)
     end)
     listen(player, "deployitem", function(_, data)

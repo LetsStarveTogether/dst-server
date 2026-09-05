@@ -136,14 +136,19 @@ def configure_otel(
     if not otel_requested():
         return None
 
-    try:
-        from dst_server.telemetry.otel import configure
+    from dst_server.telemetry.otel import configure
 
-        name = config.telemetry_cluster or config.cluster
-        attributes = {"dst.cluster.name": name}
-        if instance_id is not None:
-            attributes["service.instance.id"] = instance_id
-        return configure(resource_attributes=attributes)
-    except Exception:
-        logger.exception("failed to configure OpenTelemetry; using local event logging")
-        return None
+    name = config.telemetry_cluster or config.cluster
+    attributes = {"dst.cluster.name": name}
+    if instance_id is not None:
+        attributes["service.instance.id"] = instance_id
+    return configure(
+        resource_attributes=attributes,
+        outbox_path=(
+            config.persistent_storage_root
+            / config.conf_dir
+            / config.cluster
+            / config.shard
+            / ".telemetry.sqlite3"
+        ),
+    )

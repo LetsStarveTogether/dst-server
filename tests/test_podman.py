@@ -8,7 +8,7 @@ import socket
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -224,10 +224,8 @@ def make_server(
         "--volume",
         f"{cluster / 'mods'}:/install/mods",
     ]
-    container_lua = Path("/app/src/dst_server/lua")
-    if lua_directory is not None:
-        command.extend(("--volume", f"{lua_directory}:/dst-server-lua:ro"))
-        container_lua = Path("/dst-server-lua")
+    lua_directory = lua_directory or ServerConfig(shard="forest").lua_directory
+    command.extend(("--volume", f"{lua_directory}:/dst-server-lua:ro"))
     command.extend(("--entrypoint", GAME_EXECUTABLE, IMAGE))
     wrapper.write_text(
         "#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n',
@@ -243,7 +241,7 @@ def make_server(
             cluster="cluster",
             ugc_directory=Path("/cluster/mods/ugc"),
             extra_args=("-skip_update_server_mods", "-offline"),
-            lua_directory=container_lua,
+            lua_directory=Path("/dst-server-lua"),
             telemetry=TelemetrySettings(profile="history"),
             monitor_parent_process=False,
         ),
@@ -251,14 +249,12 @@ def make_server(
     )
 
 
-async def reap_server(server: Server) -> None:
+async def reap_server(server: Server, container_name: str) -> None:
     if server.child is None or server.closed:
         return
     async with asyncio.timeout(CLEANUP_TIMEOUT):
-        if server.returncode is None:
-            await server.kill()
-        else:
-            await server.wait()
+        await remove_container(container_name)
+        await server.wait()
 
 
 async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(
@@ -362,7 +358,11 @@ async def test_sdk_real_game_core_contract(
             runtime = await server.game.world.runtime()
             assert runtime.session_id == server.session_id
             assert await server.game.players.list() == ()
-            with pytest.raises(RuntimeError, match="injected SDK request failure"):
+            text = "before\u0085middle\u2028after\u2029"
+            assert await server.game.world.execute(f"return {lua_string(text)}") == text
+            with pytest.raises(
+                RuntimeError, match=r"^DST Lua request failed: lua_error$"
+            ):
                 await server.game.world.execute(
                     'error("injected SDK request failure", 0)'
                 )
@@ -378,7 +378,80 @@ async def test_sdk_real_game_core_contract(
         error.add_note("recent game logs:\n" + "\n".join(logs))
         raise
     finally:
-        await reap_server(server)
+        await reap_server(server, container_name)
+
+
+async def test_real_game_driver_recovers_after_delayed_session(
+    tmp_path: Path,
+    container_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cluster = write_cluster(tmp_path)
+    logs: deque[str] = deque(maxlen=200)
+    server = make_server(tmp_path, cluster, container_name, log_handler=logs.append)
+    original_session = server._session_started
+    third_session = asyncio.Event()
+
+    def session_started(generation: int) -> None:
+        # Delay only the notification to Driver; keep reading the native FD5 pipe.
+        if generation == 3:
+            third_session.set()
+        else:
+            original_session(generation)
+
+    monkeypatch.setattr(server, "_session_started", session_started)
+
+    async def drain(reader: Callable[[], Awaitable[object | None]]) -> None:
+        while await reader() is not None:
+            pass
+
+    consumers = [
+        asyncio.create_task(drain(reader))
+        for reader in (
+            server.read_lifecycle_event,
+            server.read_game_event,
+            server.read_operational_event,
+        )
+    ]
+    resets: list[asyncio.Task[str]] = []
+    try:  # ruff: ignore[too-many-statements-in-try-clause]
+        await server.start(startup_timeout=STARTUP_TIMEOUT)
+        assert server.driver_health.generation == 1
+        async with asyncio.timeout(OPERATION_TIMEOUT):
+            # Queue both raw resets before the first reload installs its driver.
+            resets = [
+                asyncio.create_task(
+                    server.execute("c_reset()", completion_timeout=OPERATION_TIMEOUT)
+                )
+                for _ in range(2)
+            ]
+            await asyncio.gather(*resets)
+            await third_session.wait()
+            await server.driver.wait_ready()
+            assert server.lifecycle.session_generation == 3
+            assert server.driver.generation == 2
+            assert server.driver_health.generation == 2
+
+            original_session(3)
+            assert await server.driver.wait_ready() == 3
+            assert server.driver.installed_generation == 3
+            assert server.driver_error is None
+            health = await server.game.get_health()
+            assert health.generation == 3
+            assert health.telemetry_status == "active"
+            assert (await server.game.world.room()).is_dedicated is True
+            assert (await server.game.world.runtime()).session_id == server.session_id
+            assert server.returncode is None
+    except BaseException as error:
+        error.add_note("recent game logs:\n" + "\n".join(logs))
+        raise
+    finally:
+        try:
+            await reap_server(server, container_name)
+        finally:
+            for task in (*consumers, *resets):
+                task.cancel()
+            await asyncio.gather(*consumers, *resets, return_exceptions=True)
 
 
 @pytest.mark.parametrize("fault", ["telemetry", "core"])
@@ -422,26 +495,44 @@ async def test_real_game_driver_degrades_safely(
             if fault == "telemetry":
                 health = server.driver_health
                 assert health.telemetry_status == "failed"
-                assert health.telemetry_error is not None
-                assert "injected telemetry install failure" in health.telemetry_error
+                assert health.last_error is not None
+                assert health.last_error.stage == "install"
+                assert health.last_error.message == "installation_failed"
+                diagnostic = await server.read_game_event()
+                assert diagnostic is not None
+                assert diagnostic.record.event == "dst.telemetry.error"
+                assert server.driver_health.telemetry_status == "failed"
                 assert (await server.game.world.room()).is_dedicated is True
                 await server.save(completion_timeout=OPERATION_TIMEOUT)
             else:
                 assert server.driver_error is not None
-                assert "injected core driver failure" in server.driver_error
+                assert server.driver_error == "DST Lua request failed: lua_error"
                 with pytest.raises(RuntimeError, match="has not been installed"):
                     await server.game.world.room()
                 sentinel = str(ULID())
                 assert sentinel in await server.execute(
                     f'print(TheWorld~=nil and {lua_string(sentinel)} or "missing")'
                 )
+                shutil.copyfile(
+                    ServerConfig(shard="forest").lua_directory / "dst_server.lua",
+                    lua_directory / "dst_server.lua",
+                )
+                generation = server.lifecycle.session_generation
+                await server.execute("c_reset()")
+                await server.game.wait_reload(
+                    generation,
+                    asyncio.get_running_loop().time() + OPERATION_TIMEOUT,
+                )
+                assert server.driver_error is None
+                assert server.driver_health.telemetry_status == "active"
+                assert (await server.game.world.room()).is_dedicated is True
             assert server.returncode is None
         await server.stop(grace_period=OPERATION_TIMEOUT)
     except BaseException as error:
         error.add_note("recent game logs:\n" + "\n".join(logs))
         raise
     finally:
-        await reap_server(server)
+        await reap_server(server, container_name)
 
 
 def available_room_allocation(cluster: ClusterConfig) -> RoomPortAllocation:

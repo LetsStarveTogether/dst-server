@@ -9,6 +9,8 @@ from time import time_ns
 from typing import Self
 
 from logbook import Logger
+from pydantic import JsonValue
+from ulid import ULID
 
 from dst_server.events import ObservedGameEvent
 from dst_server.events import server as server_events
@@ -26,11 +28,18 @@ from .console import (
 )
 from .driver import Driver
 from .fds import open_pipes, open_reader, open_writer
-from .lifecycle import Lifecycle, RequestState, read_line
+from .lifecycle import Lifecycle, ObservedLifecycleEvent, RequestState, read_line
+from .operational import (
+    NATIVE_TIMESTAMP,
+    OperationalRecord,
+    classify_log,
+    lifecycle_body,
+)
 
 FD_LAUNCHER = Path(__file__).with_name("fds.py")
 SUBPROCESS_STREAM_LIMIT = 1024 * 1024
 DEFAULT_STARTUP_TIMEOUT = 300.0
+OUTPUT_DRAIN_TIMEOUT = 5.0
 logger = Logger(__name__)
 _operation_deadline = ContextVar[float | None](
     "dst_server_operation_deadline", default=None
@@ -71,6 +80,10 @@ class Server:  # ruff:ignore[too-many-public-methods]
         self.lifecycle_task: asyncio.Task[None] | None = None
         self.log_task: asyncio.Task[None] | None = None
         self.closed = False
+        self.operational: asyncio.Queue[OperationalRecord] = asyncio.Queue(maxsize=1024)
+        self._termination_requested = False
+        self._exit_observed = False
+        self._input_error: BaseException | None = None
         self.recorder = Recorder(
             config.telemetry_cluster or config.cluster,
             config.shard,
@@ -90,6 +103,7 @@ class Server:  # ruff:ignore[too-many-public-methods]
             recorder=self.recorder,
             session_id=lambda: self.session_id,
             nonce=self.game_events.nonce,
+            observe_health=self.driver.observe_health,
         )
 
     @property
@@ -142,6 +156,8 @@ class Server:  # ruff:ignore[too-many-public-methods]
                     await self.start_process()
             except BaseException:
                 self.recorder.set_process_up(False)
+                if self.child is None:
+                    await self.finish()
                 raise
             span.set_attribute("process.pid", self.process.pid)
             if self.session_id is not None:
@@ -181,6 +197,9 @@ class Server:  # ruff:ignore[too-many-public-methods]
                 pass_fds=server_fds,
             )
             self.recorder.set_process_up(True)
+            await self._observe_operational(
+                "dst.server.process_started", {"pid": self.child.pid}
+            )
         except BaseException:
             for transport in transports:
                 transport.close()
@@ -205,6 +224,8 @@ class Server:  # ruff:ignore[too-many-public-methods]
             self.pump_logs(stdout),
             name=f"dst-logs-{self.config.shard}",
         )
+        for task in (self.lifecycle_task, self.log_task):
+            task.add_done_callback(self._input_finished)
         try:  # ruff:ignore[too-many-statements-in-try-clause]
             await self.wait_ready()
             try:
@@ -227,9 +248,19 @@ class Server:  # ruff:ignore[too-many-public-methods]
 
     async def _pump_lifecycle(self, reader: asyncio.StreamReader) -> None:
         try:
-            await self.lifecycle.pump(reader, self._session_started)
+            await self.lifecycle.pump(
+                reader, self._session_started, self._observe_lifecycle
+            )
         finally:
             self._generation_changed.set()
+
+    def _input_finished(self, task: asyncio.Task[None] | None) -> None:
+        if task is None or task.cancelled() or (error := task.exception()) is None:
+            return
+        if self._input_error is None:
+            self._input_error = error
+        self.lifecycle.close()
+        self._generation_changed.set()
 
     def _session_started(self, generation: int) -> None:
         token = _operation_deadline.set(None)
@@ -331,14 +362,63 @@ class Server:  # ruff:ignore[too-many-public-methods]
     async def read_event(self) -> server_events.Event | None:
         return await self.lifecycle.read()
 
-    async def read_game_event(self) -> ObservedGameEvent | None:
-        return await self.game_events.read()
+    async def read_lifecycle_event(self) -> ObservedLifecycleEvent | None:
+        return await self.lifecycle.read_observed()
 
-    async def install_driver(self) -> DriverHealth:
+    async def read_game_event(self) -> ObservedGameEvent | None:
+        observed = await self.game_events.read()
+        if observed is not None:
+            self.driver.observe_event(observed.record)
+        return observed
+
+    async def read_operational_event(self) -> OperationalRecord | None:
         try:
-            health = await self.game.install()
+            return await self.operational.get()
+        except asyncio.QueueShutDown:
+            return None
+
+    async def _observe_operational(
+        self,
+        event_name: str,
+        body: dict[str, JsonValue],
+        severity_text: str = "INFO",
+        observed_timestamp_ns: int | None = None,
+    ) -> None:
+        await self.operational.put(
+            OperationalRecord(
+                uid=str(ULID()),
+                event_name=event_name,
+                body=body,
+                severity_text=severity_text,
+                observed_timestamp_ns=(
+                    time_ns()
+                    if observed_timestamp_ns is None
+                    else observed_timestamp_ns
+                ),
+            )
+        )
+
+    async def _observe_lifecycle(
+        self, event: server_events.Event, observed_timestamp_ns: int
+    ) -> None:
+        body = lifecycle_body(event)
+        if body is not None:
+            await self._observe_operational(
+                f"dst.server.{event.event}",
+                body,
+                observed_timestamp_ns=observed_timestamp_ns,
+            )
+
+    async def install_driver(self, generation: int) -> DriverHealth:
+        try:
+            health = await self.game.install(generation)
         except Exception as error:
             self._driver_error = str(error) or type(error).__name__
+            await self._observe_operational(
+                "dst.runtime.diagnostic",
+                {"kind": "driver_install_failed", "generation": generation},
+                "ERROR",
+            )
             raise
         self._driver_error = None
         if health.telemetry_status == "failed":
@@ -348,7 +428,12 @@ class Server:  # ruff:ignore[too-many-public-methods]
                 cluster=self.config.cluster,
                 shard=self.config.shard,
                 profile=self.config.telemetry.profile,
-                error=health.telemetry_error,
+                error=health.last_error,
+            )
+            await self._observe_operational(
+                "dst.runtime.diagnostic",
+                {"kind": "telemetry_install_failed", "generation": generation},
+                "ERROR",
             )
         return health
 
@@ -390,6 +475,7 @@ class Server:  # ruff:ignore[too-many-public-methods]
                 cluster=self.config.cluster,
                 shard=self.config.shard,
             )
+            self._termination_requested = True
             process.terminate()
             exited = asyncio.create_task(process.wait())
             stopping = asyncio.create_task(self.lifecycle.stopping.wait())
@@ -422,6 +508,7 @@ class Server:  # ruff:ignore[too-many-public-methods]
         with self.recorder.operation("kill", self.session_id):
             process = self.process
             if process.returncode is None:
+                self._termination_requested = True
                 process.kill()
             return await self._reap()
 
@@ -452,8 +539,16 @@ class Server:  # ruff:ignore[too-many-public-methods]
         while (raw_line := await read_line(reader)) is not None:
             observed_timestamp_ns = time_ns()
             raw_line = raw_line.rstrip(b"\r\n")
-            if self.game_events.accept(raw_line, observed_timestamp_ns):
+            message = NATIVE_TIMESTAMP.sub(b"", raw_line, count=1)
+            if message.startswith(b"DST_Stats|"):
                 continue
+            if await self.game_events.accept(raw_line, observed_timestamp_ns):
+                continue
+            diagnostic = classify_log(message.decode(errors="replace"))
+            if diagnostic is not None:
+                await self._observe_operational(
+                    *diagnostic, observed_timestamp_ns=observed_timestamp_ns
+                )
             line = raw_line.decode(errors="replace")
             if self.log_handler is not None:
                 try:
@@ -469,15 +564,42 @@ class Server:  # ruff:ignore[too-many-public-methods]
             elif __debug__:
                 logger.debug("DST server log : {line}", line=line)
 
+    async def _drain_output(self) -> None:
+        if self.child is None or self.child.returncode is None:
+            return
+        async with asyncio.timeout(OUTPUT_DRAIN_TIMEOUT):
+            pumps = [
+                task
+                for task in (
+                    self.lifecycle_task,
+                    self.log_task,
+                    self.console.pending_result if self.console is not None else None,
+                )
+                if task is not None
+            ]
+            if pumps:
+                await asyncio.gather(*pumps, return_exceptions=True)
+            if not self._exit_observed:
+                returncode = self.child.returncode
+                await self._observe_operational(
+                    "dst.server.process_exited",
+                    {
+                        "returncode": returncode,
+                        "requested": self._termination_requested,
+                    },
+                    "ERROR"
+                    if returncode and not self._termination_requested
+                    else "INFO",
+                )
+                self._exit_observed = True
+
     async def finish(self) -> None:
         async with self.finish_lock:
             if self.closed:
                 return
             driver_task = self.driver.task
             self.driver.close()
-            self.lifecycle.close()
             self._generation_changed.set()
-            self.game_events.close()
             tasks = [
                 task
                 for task in (
@@ -488,16 +610,30 @@ class Server:  # ruff:ignore[too-many-public-methods]
                 )
                 if task is not None
             ]
-            for transport in self.read_transports:
-                transport.close()
+            drain_error: TimeoutError | None = None
             try:
+                try:
+                    await self._drain_output()
+                except TimeoutError as error:
+                    drain_error = error
                 if self.console is not None:
                     await self.console.close()
-                await asyncio.sleep(0)
             finally:
                 for task in tasks:
                     if not task.done():
                         task.cancel()
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
+                self._input_finished(self.lifecycle_task)
+                self._input_finished(self.log_task)
+                for transport in self.read_transports:
+                    transport.close()
+                self.lifecycle.close()
+                self.game_events.close()
+                self.operational.shutdown()
             self.closed = True
+            if self._input_error is not None:
+                raise self._input_error
+            if drain_error is not None:
+                message = "DST output did not drain before the shutdown deadline"
+                raise TimeoutError(message) from drain_error

@@ -84,6 +84,7 @@ jobs:
       - name: Smoke test wheel
         env:
           OTEL_EXPORTER_OTLP_ENDPOINT: http://collector.invalid
+          OTEL_SDK_DISABLED: 'true'
         run: >-
           uv run --isolated --no-project --with dist/dst_server-*.whl python -I -c
           "import dst_server.cluster.cli;

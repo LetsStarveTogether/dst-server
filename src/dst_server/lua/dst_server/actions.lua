@@ -13,12 +13,11 @@ local function capture(action)
         return nil
     end
 
-    state.action_sequence = state.action_sequence + 1
-    action._dst_action_seq = state.action_sequence
-    local point = action.GetActionPoint ~= nil and action:GetActionPoint() or nil
-    return {
-        action_id = tostring(action_id),
-        action_sequence = action._dst_action_seq,
+    -- GetPosition clears invalid platform references; resolve a copy.
+    local point = action:GetDynamicActionPoint()
+    point = point ~= nil and point.GetPosition(shallowcopy(point)) or nil
+    local snapshot = {
+        action_id = action_id,
         actor = values.entity_ref(actor),
         target = values.entity_ref(action.target),
         initial_target_owner = values.entity_ref(action.initialtargetowner),
@@ -27,45 +26,52 @@ local function capture(action)
         recipe = values.text(action.recipe, 128),
         forced = action.forced == true,
     }
+    state.action_sequence = state.action_sequence + 1
+    snapshot.action_sequence = state.action_sequence
+    return snapshot
 end
 
-local function emit(snapshot, results)
-    snapshot.success = results[1] == true
-    snapshot.reason = values.text(results[2], 256)
-    telemetry.emit("dst.player.action", snapshot)
+local function trace_error(failure)
+    pcall(function() print(debug.traceback("DST action failed", 3)) end)
+    return failure
 end
 
 function actions.install()
     if BufferedAction == nil or type(BufferedAction.Do) ~= "function" then
         error("BufferedAction.Do is unavailable")
     end
-    if BufferedAction._dst_original_do ~= nil then
-        return
-    end
-
-    local original_do = BufferedAction.Do
-    BufferedAction._dst_original_do = original_do
+    local original = BufferedAction.Do
     BufferedAction.Do = function(...)
         if not state.telemetry_active then
-            return original_do(...)
+            return original(...)
         end
 
         local action = ...
         local captured, snapshot = pcall(capture, action)
         if not captured then
-            state.errors = state.errors + 1
-            return original_do(...)
+            telemetry.report("action.capture", "callback_failed")
+            snapshot = nil
         end
-        if snapshot == nil then
-            return original_do(...)
-        end
+        local previous = state.current_action
+        state.current_action = snapshot ~= nil and {
+            actor = action.doer,
+            sequence = snapshot.action_sequence,
+        } or nil
+        local results = telemetry.pack(xpcall(original, trace_error, ...))
+        state.current_action = previous
 
-        local results = telemetry.pack(original_do(...))
-        local emitted = pcall(emit, snapshot, results)
-        if not emitted then
-            state.errors = state.errors + 1
+        if snapshot ~= nil then
+            telemetry.guard("action.emit", function()
+                snapshot.success = results[1] and not not results[2]
+                snapshot.reason = results[1] and values.text(results[3], 256) or json.null
+                snapshot.error = results[1] and json.null or "lua_error"
+                telemetry.emit("dst.player.action", snapshot)
+            end)()
         end
-        return telemetry.unpack(results)
+        if not results[1] then
+            error(results[2], 0)
+        end
+        return telemetry.unpack(results, 2)
     end
 end
 

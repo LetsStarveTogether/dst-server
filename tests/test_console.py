@@ -477,3 +477,39 @@ async def test_wrapper_frames_lua_errors(
     assert stdout.startswith(start + b"\n")
     assert stdout.endswith(end + b"\n")
     assert expected in await task
+
+
+async def test_result_stream_awaits_ingress_without_decoding_or_exposing_event_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    console, writer, reader = make_console()
+    accepted = asyncio.Event()
+    release = asyncio.Event()
+    captured: list[bytes] = []
+
+    async def accept(line: bytes, observed_timestamp_ns: int) -> bool:
+        assert isinstance(line, bytes)
+        assert observed_timestamp_ns > 0
+        if line.rstrip(b"\r\n") != b"DST_OTEL|\xff":
+            return False
+        captured.append(line.rstrip(b"\r\n"))
+        accepted.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(console.game_events, "accept", accept)
+    task, start, end, _ = await start_command(console, writer, "read()")
+    feed_frame(reader, start, end, b"DST_OTEL|\xff", b"Server Paused", b"token=secret")
+    try:
+        await asyncio.wait_for(accepted.wait(), 1)
+        assert not task.done()
+        release.set()
+        assert await task == "Server Paused\ntoken=secret"
+        assert captured == [b"DST_OTEL|\xff"]
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if console.pending_result is not None:
+            console.pending_result.cancel()
+            await asyncio.gather(console.pending_result, return_exceptions=True)

@@ -3,15 +3,39 @@ import json
 import os
 import re
 import select
+import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from collections.abc import Callable
+from pathlib import Path
 from typing import Self
 
-from dst_server.game import DriverHealth
+from dst_server.game import DriverHealth, rpc
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.console import StaleGenerationError
 
 FRAME = re.compile(rb"DST_SERVER_FRAME\|([0-9A-HJKMNP-TV-Z]{26})\|START")
 COMMAND_DONE = b"DST_RemoteCommandDone"
+
+
+def run_lua(source: str, luajit: str, *, driver_path: bool = True) -> bytes:
+    root = Path(__file__).parents[1]
+    scripts = root / "dst-scripts/scripts"
+    assert (scripts / "json.lua").is_file(), "Real DST json.lua is required"
+    package_path = f"{scripts}/?.lua;"
+    if driver_path:
+        package_path = f"{root}/src/dst_server/lua/?.lua;" + package_path
+    setup = (
+        f"package.path={rpc.lua_string(package_path)}..package.path;"
+        'json=require("json");'
+    )
+    result = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]
+        [luajit, "-"],
+        input=(setup + source).encode(),
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    return result.stdout
 
 
 def process_stopped(process_id: int) -> bool:
@@ -121,24 +145,31 @@ for command in commands:
         if shard == "driver-eof":
             results.close()
             continue
-        match = re.search(r'nonce\\*"\\*:\\*"([^"\\]+)', command)
+        options = command.replace("\\", "")
+        match = re.search(r'\["nonce"\]="([^"]+)"', options)
         assert match is not None
         nonce = match.group(1)
+        match = re.search(r'\["generation"\]=(\d+)', options)
+        assert match is not None
+        generation = int(match.group(1))
         if shard == "core-failure":
             results.write(
                 "DST_SERVER_RESULT|"
-                + json.dumps({"ok": False, "error": "core install failed"})
+                + json.dumps({"ok": False, "error": "lua_error"})
                 + "\n"
             )
             finish_frame(token)
             continue
         failed = shard == "telemetry-failure"
         health = {
-            "protocol": 1,
+            "protocol": 2,
+            "generation": generation,
             "telemetry_status": "failed" if failed else "active",
-            "telemetry_error": "world hook unavailable" if failed else None,
+            "last_error": {
+                "stage": "install", "message": "installation_failed", "count": 1,
+            } if failed else None,
             "events_emitted": 0,
-            "errors": 0,
+            "errors": 1 if failed else 0,
         }
         results.write(
             "DST_SERVER_RESULT|"
@@ -148,8 +179,10 @@ for command in commands:
         finish_frame(token)
         if health["telemetry_status"] == "active":
             event = {
-                "v": 1,
+                "v": 2,
                 "nonce": nonce,
+                "generation": generation,
+                "session_id": "TEST",
                 "seq": 1,
                 "event": "dst.world.state_changed",
                 "tick": 10,
@@ -177,8 +210,10 @@ for command in commands:
         continue
     print("command received", flush=True)
     event = {
-        "v": 1,
+        "v": 2,
         "nonce": nonce,
+        "generation": generation,
+        "session_id": "TEST",
         "seq": 2,
         "event": "dst.entity.death",
         "tick": 11,
@@ -222,14 +257,15 @@ class StubServer(Server):
         await self.driver.install(0)
         return self
 
-    async def install_driver(self) -> DriverHealth:
+    async def install_driver(self, generation: int) -> DriverHealth:
         if not self.initial_install:
-            return await super().install_driver()
+            return await super().install_driver(generation)
         self.initial_install = False
         return DriverHealth(
-            protocol=1,
+            protocol=2,
+            generation=generation,
             telemetry_status="disabled",
-            telemetry_error=None,
+            last_error=None,
             events_emitted=0,
             errors=0,
         )

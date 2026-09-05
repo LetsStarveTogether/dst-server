@@ -22,13 +22,14 @@ class ReloadingServer(Server):
         super().__init__(ServerConfig(shard="test"))
         self.installs = 0
 
-    async def install_driver(self) -> DriverHealth:
+    async def install_driver(self, generation: int) -> DriverHealth:
         self.installs += 1
         return DriverHealth.model_validate(
             {
-                "protocol": 1,
+                "protocol": 2,
+                "generation": generation,
                 "telemetry_status": "active",
-                "telemetry_error": None,
+                "last_error": None,
                 "events_emitted": self.installs,
                 "errors": 0,
             },
@@ -144,7 +145,7 @@ async def test_core_driver_install_failure_degrades_without_stopping_game(
     )
 
     async with server:
-        assert server.driver_error == "DST Lua request failed: core install failed"
+        assert server.driver_error == "DST Lua request failed: lua_error"
         assert server.returncode is None
         with pytest.raises(RuntimeError, match="has not been installed"):
             _ = server.driver_health
@@ -164,6 +165,27 @@ async def test_driver_result_eof_degrades_without_stopping_game(tmp_path: Path) 
             "DST result stream closed before the command response completed"
         )
         assert server.returncode is None
+
+
+async def test_failed_stdout_wakes_lifecycle_observer_before_process_exit(
+    tmp_path: Path,
+) -> None:
+    server = make_fake_server(tmp_path, "forest")
+    await server.start()
+    assert isinstance(await server.read_event(), server_events.SessionEvent)
+    failure = OSError("injected stdout read failure")
+    stdout = server.process.stdout
+    assert stdout is not None
+    stdout.set_exception(failure)
+
+    try:
+        assert await asyncio.wait_for(server.read_event(), 1) is None
+        assert server.returncode is None
+    finally:
+        with pytest.raises(OSError, match="injected stdout read failure") as raised:
+            await server.kill()
+        assert raised.value is failure
+    assert server.closed
 
 
 async def test_startup_timeout_cleans_up_process(tmp_path: Path) -> None:
@@ -390,7 +412,6 @@ async def test_finish_closes_streams_when_pumps_never_started() -> None:
         assert await server.read_event() is None
         assert await server.read_game_event() is None
     assert server.lifecycle.eof is True
-    assert server.game_events.eof is True
 
 
 async def test_save_waits_for_fd5_completion() -> None:
@@ -684,44 +705,6 @@ async def test_incomplete_save_waits_for_late_event_before_next_request(
     assert requests == 2
 
 
-async def test_lifecycle_observation_queue_drops_oldest() -> None:
-    lifecycle = Lifecycle()
-    sessions: list[int] = []
-
-    lifecycle.handle(server_events.ReadyEvent(detail=""), sessions.append)
-    lifecycle.handle(server_events.SessionEvent(session_id="TEST"), sessions.append)
-    lifecycle.handle(
-        server_events.SavedEvent(path="session/TEST/1", snapshot=1),
-        sessions.append,
-    )
-    lifecycle.handle(server_events.StoppingEvent(), sessions.append)
-    for index in range(lifecycle.queue.maxsize):
-        lifecycle.handle(server_events.UnknownEvent(line=str(index)), sessions.append)
-
-    assert lifecycle.queue.qsize() == lifecycle.queue.maxsize
-    assert lifecycle.ready is True
-    assert lifecycle.session_id == "TEST"
-    assert lifecycle.save_count == 1
-    assert lifecycle.stopping.is_set()
-    assert sessions == [1]
-    assert await lifecycle.read() == server_events.UnknownEvent(line="0")
-
-
-async def test_lifecycle_eof_survives_full_observation_queue() -> None:
-    lifecycle = Lifecycle()
-    reader = asyncio.StreamReader()
-    for index in range(lifecycle.queue.maxsize + 1):
-        reader.feed_data(f"unknown-{index}\n".encode())
-    reader.feed_eof()
-
-    await lifecycle.pump(reader, lambda _: None)
-
-    observed = [await lifecycle.read() for _ in range(lifecycle.queue.maxsize)]
-    assert observed[0] == server_events.UnknownEvent(line="unknown-2")
-    assert observed[-1] is None
-    assert await lifecycle.read() is None
-
-
 async def test_readiness_followed_by_fd5_eof_is_not_startup_success() -> None:
     lifecycle = Lifecycle()
     reader = asyncio.StreamReader()
@@ -780,9 +763,7 @@ async def test_log_pump_survives_oversized_line_and_handler_failure() -> None:
 
     assert observed == ["handler-failure", "sentinel"]
     assert reader.at_eof()
-    assert server.game_events.eof is False
     await server.finish()
-    assert server.game_events.eof is True
 
 
 async def test_fd5_eof_interrupts_save_confirmation(
@@ -891,11 +872,11 @@ async def test_failed_reload_response_is_reported_without_waiting(
     server = ReloadingServer()
     await server.driver.install(0)
     execute = AsyncMock(
-        return_value='DST_SERVER_RESULT|{"ok":false,"error":"reload failed"}'
+        return_value='DST_SERVER_RESULT|{"ok":false,"error":"lua_error"}'
     )
     monkeypatch.setattr(server, "_execute", execute)
 
-    with pytest.raises(RuntimeError, match="reload failed"):
+    with pytest.raises(RuntimeError, match="lua_error"):
         await server.game.world.reset(completion_timeout=0.01)
 
     execute.assert_awaited_once()
