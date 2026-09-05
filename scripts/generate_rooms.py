@@ -181,7 +181,7 @@ _ROOM_PRESETS = {
                 overrides=ForestOverrides(
                     boons="never",
                     fruitfly="never",
-                    has_ocean=False,
+                    has_ocean=True,
                     world_size="small",
                 ),
             ),
@@ -264,7 +264,7 @@ def build(
     cluster_key: SecretStr | None = None,
 ) -> ClusterConfig:
     kind, label, max_players = room(number)
-    return _ROOM_PRESETS[kind].build(
+    cluster = _ROOM_PRESETS[kind].build(
         token=token,
         cluster_key=cluster_key,
         settings=ClusterSettings(
@@ -275,6 +275,8 @@ def build(
             max_players=max_players,
         ),
     )
+    # Re-Gorge-itated 1918927570 corrupts non-empty blocklists in Gorge rooms.
+    return cluster.replace(blocklist="") if kind is RoomType.GORGE else cluster
 
 
 def generate_configured_room(

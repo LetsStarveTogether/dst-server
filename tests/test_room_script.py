@@ -383,6 +383,7 @@ def test_world_templates_keep_only_real_overrides() -> None:
         "has_ocean",
         "world_size",
     }
+    assert world.overrides.model_dump(exclude_unset=True)["has_ocean"] is True
 
 
 @pytest.mark.parametrize("number", [-1, 140])
@@ -485,6 +486,20 @@ def test_event_rooms_preserve_their_game_mode(
         assert cluster.settings.autosaver_enabled is False
     cluster.save(tmp_path)
     assert ClusterConfig.load(tmp_path).files() == cluster.files()
+
+
+def test_gorge_rooms_force_an_empty_blocklist(tmp_path: Path) -> None:
+    for number in (132, 133, 134):
+        directory = tmp_path / str(number)
+        directory.mkdir()
+        (directory / "blocklist.txt").write_text("KU_blocked\n", encoding="utf-8")
+        build(number, token=TOKEN, cluster_key=CLUSTER_KEY).save(directory)
+
+    assert (tmp_path / "132" / "blocklist.txt").read_text(encoding="utf-8") == (
+        "KU_blocked\n"
+    )
+    assert (tmp_path / "133" / "blocklist.txt").read_bytes() == b""
+    assert (tmp_path / "134" / "blocklist.txt").read_bytes() == b""
 
 
 def test_generate_room_saves_cluster_and_quadlet_application(tmp_path: Path) -> None:
