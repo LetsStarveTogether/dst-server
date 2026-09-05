@@ -37,6 +37,10 @@ child = subprocess.Popen([
 ])
 print(f"READY|{os.getpid()}|{os.getpgrp()}|{child.pid}", flush=True)
 print("DONE", flush=True)
+print(
+    "FinishDownloadingServerMods Complete! Process trying to quit nicely..",
+    flush=True,
+)
 sys.exit(int(os.environ["FAKE_RETURN_CODE"]))
 """
 
@@ -154,6 +158,50 @@ def test_prepare_rejects_shard_override_symlink_before_mutation(
 
     assert not (cluster / "mods").exists()
     assert outside.read_text(encoding="utf-8").endswith("true } }")
+
+
+def test_strict_setup_accepts_static_calls_and_empty_template(tmp_path: Path) -> None:
+    setup = tmp_path / "setup.lua"
+    setup.write_text(
+        '-- ServerModSetup("100")\n'
+        "ServerModSetup(\"\"); ServerModSetup('42'); ServerModSetup([[7]])\n"
+        'return ServerModSetup("8"), ServerModCollectionSetup("99")\n',
+        encoding="utf-8",
+    )
+
+    assert mods.setup_downloads(setup, strict=True) == ((7, 8, 42), (99,))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'local id = "42"; ServerModSetup(id)',
+        'if false then ServerModSetup("42") end',
+        'ServerModSetup("4" .. "2")',
+        'OtherSetup("42")',
+        'ServerModSetup("42", "43")',
+        "return",
+    ],
+)
+def test_strict_setup_rejects_dynamic_or_unsupported_code(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    setup = tmp_path / "setup.lua"
+    setup.write_text(source, encoding="utf-8")
+
+    assert mods.setup_downloads(setup) == ((), ())
+    with pytest.raises(ValueError, match="requires only static"):
+        mods.setup_downloads(setup, strict=True)
+
+
+def test_strict_setup_rejects_non_ascii_ids(tmp_path: Path) -> None:
+    setup = tmp_path / "setup.lua"
+    setup.write_text('ServerModSetup("\uff14\uff12")\n', encoding="utf-8")
+
+    assert mods.setup_downloads(setup) == ((), ())
+    with pytest.raises(ValueError, match="invalid Workshop ID"):
+        mods.setup_downloads(setup, strict=True)
 
 
 def write_updater(
@@ -280,5 +328,8 @@ async def test_leader_exit_terminates_descendant_holding_stdout(
     else:
         await run()
 
-    assert lines[1:] == ["DONE"]
+    assert lines[1:] == [
+        "DONE",
+        "FinishDownloadingServerMods Complete! Process trying to quit nicely..",
+    ]
     await assert_stopped(parse_processes(lines[0]))

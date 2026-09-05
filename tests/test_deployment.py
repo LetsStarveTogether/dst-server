@@ -367,7 +367,9 @@ async def test_prepare_shared_validates_layout_before_replacing_mods(
 async def test_mod_updater_uses_isolated_config_ports(tmp_path: Path) -> None:
     executable = tmp_path / "fake-updater"
     executable.write_text(
-        "#!/usr/bin/env python3\nimport sys\nprint('ARGS|' + '|'.join(sys.argv[1:]))\n",
+        "#!/usr/bin/env python3\nimport sys\nprint('ARGS|' + '|'.join(sys.argv[1:]))\n"
+        "print('FinishDownloadingServerMods Complete! "
+        "Process trying to quit nicely..')\n",
         encoding="utf-8",
     )
     executable.chmod(0o755)

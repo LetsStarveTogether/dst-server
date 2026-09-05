@@ -431,23 +431,8 @@ class ClusterController:
             self._blocked.clear()
             self._require_complete()
             self._clear_error()
-            try:
-                await self._prepare()
-                await self._lifecycle_operation(
-                    "starting",
-                    lambda agent: agent.restart(),
-                    limit=AGENT_RESTART_TIMEOUT,
-                )
-            except Exception as error:
-                if self._closed:
-                    raise
-                cleanup = await self._fail_close("cluster restart failed", error)
-                if cleanup is not None:
-                    error = BaseExceptionGroup(
-                        "cluster restart and cleanup failed",
-                        (error, cleanup),
-                    )
-                raise self._operation_error(error, self._error_id) from None
+            await self._stop_registered(force=False)
+            await self._start_desired()
 
     async def kill(self) -> None:
         async with self._public_operation():
@@ -456,10 +441,6 @@ class ClusterController:
 
     async def update_mods(self) -> None:
         async with self._public_operation():
-            self._require_complete()
-            if not await self._all_stopped():
-                msg = "all game processes must be stopped"
-                raise RuntimeError(msg)
             await self._prepare(force=True)
 
     async def read_configuration(self) -> ConfigurationRead:
@@ -866,6 +847,13 @@ class ClusterController:
                 self._configuration.validate_deployment(read.configuration)
                 if not force and read.revision == self._prepared_revision:
                     break
+                if not await self._all_stopped():
+                    if not force and self._prepared_revision is None:
+                        # Adopt live games without rewriting their shared Mod files.
+                        break
+                    msg = "all game processes must be stopped"
+                    raise RuntimeError(msg)
+                self._prepared_revision = None
                 actual = await service.prepare_shared(
                     self.install_path,
                     self.cluster_path,
@@ -923,6 +911,7 @@ class ClusterController:
 
     async def _stop_registered(self, *, force: bool) -> None:
         self._require_open()
+        self._prepared_revision = None
         operation: _Operation[object]
         operation = (
             (lambda agent: agent.kill()) if force else (lambda agent: agent.stop())

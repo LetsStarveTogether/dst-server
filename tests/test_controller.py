@@ -311,11 +311,11 @@ async def test_complete_roster_starts_without_an_external_client(
         ]
         assert (await instance.status()).phase == "running"
 
-        await instance.restart()
+        await instance.start()
         assert prepare.await_count == 1
         assert calls.count("activate:Master") == 2
         assert calls.count("activate:Caves") == 2
-        assert calls[-2:] == ["restart:Master", "restart:Caves"]
+        assert calls[-2:] == ["start:Master", "start:Caves"]
     finally:
         await instance.aclose()
     assert master.phase == caves.phase == "stopped"
@@ -325,6 +325,110 @@ async def test_complete_roster_starts_without_an_external_client(
     with pytest.raises(RuntimeError, match="closed"):
         await instance.register(cast(AgentEndpoint, caves))
     assert calls.count("kill:Master") + calls.count("kill:Caves") == kills
+
+
+@pytest.mark.parametrize("operation", ["start", "restart"])
+async def test_cluster_start_updates_mods_after_stopping_all_games(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    instance, master, caves, prepare, calls = await controller(tmp_path, monkeypatch)
+    calls.clear()
+
+    def update(*_: object, **__: object) -> tuple[Shard, ...]:
+        assert master.phase == caves.phase == "stopped"
+        calls.append("prepare")
+        return layout(tmp_path / "cluster")
+
+    prepare.side_effect = update
+    try:
+        if operation == "start":
+            await instance.stop()
+            assert (await instance.status()).prepared_revision is None
+            await instance.start()
+        else:
+            await instance.restart()
+        assert prepare.await_count == 2
+        assert calls == [
+            "stop:Master",
+            "stop:Caves",
+            "prepare",
+            "activate:Master",
+            "activate:Caves",
+            "start:Master",
+            "start:Caves",
+        ]
+        assert (await instance.status()).phase == "running"
+        await instance.start()
+        assert prepare.await_count == 2
+    finally:
+        await instance.aclose()
+
+
+async def test_manual_mod_update_is_reused_by_start_and_shard_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, _, _, prepare, calls = await controller(tmp_path, monkeypatch)
+    try:
+        await instance.stop()
+        await instance.update_mods()
+        await instance.start()
+        await instance.shard("Caves").restart()
+        assert calls[-1] == "restart:Caves"
+        assert prepare.await_count == 2
+        assert (await instance.status()).phase == "running"
+    finally:
+        await instance.aclose()
+
+
+async def test_failed_mod_update_is_retried_before_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, _, _, prepare, _ = await controller(tmp_path, monkeypatch)
+    try:
+        await instance.stop()
+        await instance.update_mods()
+        prepare.side_effect = RuntimeError("mod update failed")
+        with pytest.raises(RuntimeError, match="mod update failed"):
+            await instance.update_mods()
+        assert (await instance.status()).prepared_revision is None
+        with pytest.raises(ControllerOperationError):
+            await instance.start()
+        assert prepare.await_count == 4
+    finally:
+        await instance.aclose()
+
+
+@pytest.mark.parametrize("stage", ["stop", "update"])
+async def test_restart_does_not_start_games_after_stop_or_update_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    instance, master, caves, prepare, calls = await controller(tmp_path, monkeypatch)
+    calls.clear()
+    if stage == "stop":
+        caves.fail_stop = True
+    else:
+        prepare.side_effect = RuntimeError("mod update failed")
+    try:
+        with pytest.raises(ControllerOperationError):
+            await instance.restart()
+        assert not any(call.startswith(("start:", "restart:")) for call in calls)
+        assert prepare.await_count == (1 if stage == "stop" else 2)
+        assert master.phase == caves.phase == "stopped"
+        assert (await instance.status()).phase == "failed"
+        caves.fail_stop = False
+        prepare.side_effect = None
+        previous_updates = prepare.await_count
+        await instance.start()
+        assert prepare.await_count == previous_updates + 1
+    finally:
+        caves.fail_stop = False
+        await instance.aclose()
 
 
 async def test_new_controller_adopts_already_running_agents(
@@ -354,7 +458,16 @@ async def test_new_controller_adopts_already_running_agents(
             "start:Master",
             "start:Caves",
         ]
-        assert prepare.await_count == 1
+        prepare.assert_not_awaited()
+        assert (await instance.status()).prepared_revision is None
+        await instance.start()
+        prepare.assert_not_awaited()
+        assert not any(call.startswith(("stop:", "kill:")) for call in calls)
+
+        await instance.stop()
+        await instance.start()
+        prepare.assert_awaited_once()
+        assert (await instance.status()).prepared_revision is not None
     finally:
         await instance.aclose()
 
@@ -891,10 +1004,13 @@ async def test_indeterminate_shard_outcomes_are_preserved(
         monkeypatch.setattr(caves, "pause", AsyncMock(side_effect=TimeoutError()))
         assert isinstance((await instance.pause(True))[1].error, TimeoutError)
 
-        master.fail_stop = True
+        def fail_start() -> None:
+            master.fail_stop = True
+            raise failure
+
         fail_kill = AsyncMock(side_effect=RuntimeError())
         monkeypatch.setattr(master, "kill", fail_kill)
-        monkeypatch.setattr(caves, "restart", AsyncMock(side_effect=failure))
+        monkeypatch.setattr(caves, "start", AsyncMock(side_effect=fail_start))
         with pytest.raises(IndeterminateError) as caught:
             await instance.restart()
         assert caught.value is failure
@@ -902,7 +1018,7 @@ async def test_indeterminate_shard_outcomes_are_preserved(
 
         master.fail_stop = False
         monkeypatch.setattr(master, "kill", original_kill)
-        monkeypatch.setattr(caves, "restart", AsyncMock(side_effect=TimeoutError()))
+        monkeypatch.setattr(caves, "start", AsyncMock(side_effect=TimeoutError()))
         with pytest.raises(IndeterminateError):
             await instance.restart()
     finally:
@@ -911,7 +1027,7 @@ async def test_indeterminate_shard_outcomes_are_preserved(
         await instance.aclose()
 
 
-async def test_restart_has_a_separate_stop_and_start_deadline(
+async def test_shard_restart_has_a_separate_stop_and_start_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -926,7 +1042,6 @@ async def test_restart_has_a_separate_stop_and_start_deadline(
     monkeypatch.setattr(controller_module, "AGENT_RESTART_TIMEOUT", 0.1)
     monkeypatch.setattr(caves, "restart", delayed_restart)
     try:
-        await instance.restart()
         await instance.shard("Caves").restart()
     finally:
         await instance.aclose()
@@ -975,6 +1090,31 @@ async def test_failed_shard_with_live_pid_is_not_treated_as_stopped(
             await instance.save_configuration(current.revision, current.configuration)
         with pytest.raises(RuntimeError, match="must be stopped"):
             await instance.update_mods()
+    finally:
+        await instance.aclose()
+
+
+async def test_start_rejects_configuration_drift_while_games_are_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, _, _, prepare, calls = await controller(tmp_path, monkeypatch)
+    calls.clear()
+    try:
+        current = await instance.read_configuration()
+        assert isinstance(current, ConfigurationSnapshot)
+        current.configuration.replace(
+            settings=current.configuration.settings.replace(max_players=12)
+        ).save(tmp_path / "cluster")
+
+        with pytest.raises(ControllerOperationError):
+            await instance.start()
+        assert prepare.await_count == 1
+        assert not any(call.startswith(("activate:", "start:")) for call in calls)
+
+        await instance.start()
+        assert prepare.await_count == 2
+        assert (await instance.status()).phase == "running"
     finally:
         await instance.aclose()
 

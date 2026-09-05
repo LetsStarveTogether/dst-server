@@ -1,4 +1,5 @@
 import os
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -6,6 +7,7 @@ from typing import TYPE_CHECKING
 from logbook import Logger
 
 from dst_server.runtime import ServerConfig
+from dst_server.steamcmd import SteamCMD
 from dst_server.telemetry import TelemetrySettings
 
 from . import console, layout, mods
@@ -52,6 +54,10 @@ async def prepare_shared(
     *,
     update_mods: bool = True,
 ) -> tuple[layout.Shard, ...]:
+    backend = os.environ.get("DST_SERVER_MOD_UPDATER", "native")
+    if backend not in {"native", "steamcmd"}:
+        msg = "DST_SERVER_MOD_UPDATER must be 'native' or 'steamcmd'"
+        raise ValueError(msg)
     install_path, cluster_path = install_path.resolve(), cluster_path.resolve()  # ruff: ignore[blocking-path-method-in-async-function]
     executable = install_path / EXECUTABLE
     if not executable.is_file():
@@ -66,12 +72,39 @@ async def prepare_shared(
     )
     setup = cluster_path / "mods" / "dedicated_server_mods_setup.lua"
     if update_mods and (mod_ids or mods.has_setup_code(setup)):
-        mods.activate(install_path, cluster_path)
-        await mods.update(
-            executable,
-            cluster_path / "mods" / "ugc",
-            log_handler=log_handler("[MOD_UPDATE]: "),
-        )
+        if backend == "steamcmd":
+            from dst_server.workshop import WorkshopUpdater
+
+            items, collections = mods.setup_downloads(setup, strict=True)
+            if not items and not collections:
+                return shards
+            steamcmd_executable = os.environ.get("DST_SERVER_STEAMCMD")
+            if not steamcmd_executable:
+                if directory := os.environ.get("STEAMCMDDIR"):
+                    steamcmd_executable = str(Path(directory) / "steamcmd.sh")
+                else:
+                    steamcmd_executable = "steamcmd"
+            resolved = shutil.which(steamcmd_executable)
+            if resolved is None:
+                msg = (
+                    f"SteamCMD executable not found: {steamcmd_executable}; "
+                    "set DST_SERVER_STEAMCMD "
+                    "or STEAMCMDDIR"
+                )
+                raise FileNotFoundError(msg)
+            updater = WorkshopUpdater(
+                SteamCMD(resolved, log_handler=log_handler("[MOD_UPDATE]: ")),
+                cluster_path / "mods",
+            )
+            await updater.update(items, collections=collections)
+            mods.activate(install_path, cluster_path)
+        else:
+            mods.activate(install_path, cluster_path)
+            await mods.update(
+                executable,
+                cluster_path / "mods" / "ugc",
+                log_handler=log_handler("[MOD_UPDATE]: "),
+            )
     return shards
 
 

@@ -12,11 +12,16 @@ from luaparser.astnodes import (
     Call,
     Name,
     Return,
+    SemiColon,
     Statement,
     String,
 )
 
-from dst_server.steamcmd import cleanup_process_tasks, terminate_process
+from dst_server.steamcmd import (
+    cleanup_process_tasks,
+    positive_integer,
+    terminate_process,
+)
 
 from .config import _atomic_write, _configuration_file_exists
 from .overrides import MAX_WORKSHOP_ID, ModOverrides
@@ -26,15 +31,39 @@ SETUP_FUNCTIONS = {
     "ServerModCollectionSetup": 1,
 }
 UPDATE_PROCESS_TIMEOUT = 30 * 60
+UPDATE_COMPLETE = (
+    "FinishDownloadingServerMods Complete! Process trying to quit nicely.."
+)
+DOWNLOAD_TIMEOUT = "DownloadServerMods timed out with no response from Workshop..."
+UPDATE_INCOMPLETE = "DST mod updater exited without reporting completion"
+SETUP_FAILURE = "#ERROR: Failure to load dedicated_server_mods_setup.lua:"
+DOWNLOAD_FAILURES = (
+    "[Workshop] ItemQuery failed entirely, unrecoverable.",
+    "[Workshop] CollectionQuery failed entirely, unrecoverable.",
+    "[Workshop] ODPF failed entirely: ",
+    "[Workshop] FAILED: DownloadPublishedFile [",
+)
 
 
 async def _stream_logs(
     stdout: asyncio.StreamReader,
     log_handler: Callable[[str], None] | None,
-) -> None:
+) -> str | None:
+    completed = False
+    failure = None
     while line := await stdout.readline():
+        text = line.decode(errors="replace").rstrip("\r\n")
         if log_handler is not None:
-            log_handler(line.decode(errors="replace").rstrip("\r\n"))
+            log_handler(text)
+        message = text.split("]: ", 1)[-1].rstrip()
+        if message == UPDATE_COMPLETE:
+            completed = True
+        if message.startswith(SETUP_FAILURE) or (
+            failure is None
+            and (message == DOWNLOAD_TIMEOUT or message.startswith(DOWNLOAD_FAILURES))
+        ):
+            failure = message
+    return failure or (None if completed else UPDATE_INCOMPLETE)
 
 
 def prepare_shared(
@@ -151,14 +180,18 @@ def _enabled_workshop_ids(path: Path) -> set[int]:
     return set(ModOverrides.load(path).workshop_items)
 
 
-def setup_downloads(path: Path) -> tuple[tuple[int, ...], tuple[int, ...]]:
+def setup_downloads(
+    path: Path,
+    *,
+    strict: bool = False,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
     if not path.is_file():
         return (), ()
     values = [set(), set()]
     statements = _setup_statements(path)
     for statement in statements:
         calls = statement.values if isinstance(statement, Return) else (statement,)
-        for call in calls:
+        for call in calls or (statement,):
             if (
                 not isinstance(call, Call)
                 or not isinstance(call.func, Name)
@@ -166,10 +199,15 @@ def setup_downloads(path: Path) -> tuple[tuple[int, ...], tuple[int, ...]]:
                 or len(call.args) != 1
                 or not isinstance(call.args[0], String)
             ):
+                if strict and not isinstance(call, SemiColon):
+                    msg = (
+                        "SteamCMD Mod setup requires only static ServerModSetup "
+                        "and ServerModCollectionSetup string calls"
+                    )
+                    raise ValueError(msg)
                 continue
-            try:
-                value = call.args[0].s.decode("ascii")
-            except UnicodeDecodeError:
+            value = call.args[0].s.decode("ascii", errors="replace")
+            if not strict and not value.isascii():
                 continue
             if not value and index == SETUP_FUNCTIONS["ServerModSetup"]:
                 continue
@@ -205,8 +243,10 @@ async def update(
     executable: Path,
     ugc_directory: Path,
     *,
+    attempts: int = 5,
     log_handler: Callable[[str], None] | None = None,
 ) -> None:
+    attempts = positive_integer("Mod update attempts", attempts)
     with TemporaryDirectory(prefix="dst-mod-update-") as temporary:
         root = Path(temporary)
         (root / "conf" / "cluster" / "shard").mkdir(parents=True)
@@ -231,45 +271,63 @@ async def update(
             "-shard",
             "shard",
         )
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=executable.parent,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
-        )
-        stdout = process.stdout
-        if stdout is None:
-            await terminate_process(process)
-            msg = "DST mod updater stdout pipe is unavailable"
-            raise RuntimeError(msg)
-        wait_task = asyncio.create_task(process.wait())
-        log_task = asyncio.create_task(_stream_logs(stdout, log_handler))
-        try:  # ruff:ignore[too-many-statements-in-try-clause]
-            async with asyncio.timeout(UPDATE_PROCESS_TIMEOUT):
-                done, _ = await asyncio.wait(
-                    (wait_task, log_task),
-                    return_when=asyncio.FIRST_COMPLETED,
+        async with asyncio.timeout(UPDATE_PROCESS_TIMEOUT):
+            for attempt in range(1, attempts + 1):
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    cwd=executable.parent,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
                 )
-                if log_task in done:
-                    log_task.result()
-                returncode = await wait_task
-                await terminate_process(process)
-                await log_task
-        except BaseException as primary:
-            cleanup_error = await cleanup_process_tasks(
-                process,
-                primary,
-                wait_task,
-                log_task,
-            )
-            if cleanup_error is not None:
-                raise primary from cleanup_error
-            raise
-        if returncode:
-            msg = f"DST mod updater exited with status {returncode}"
-            raise ChildProcessError(msg)
+                stdout = process.stdout
+                if stdout is None:
+                    await terminate_process(process)
+                    msg = "DST mod updater stdout pipe is unavailable"
+                    raise RuntimeError(msg)
+                wait_task = asyncio.create_task(process.wait())
+                log_task = asyncio.create_task(_stream_logs(stdout, log_handler))
+                try:  # ruff:ignore[too-many-statements-in-try-clause]
+                    done, _ = await asyncio.wait(
+                        (wait_task, log_task),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if log_task in done:
+                        log_task.result()
+                    returncode = await wait_task
+                    await terminate_process(process)
+                    failure = await log_task
+                except BaseException as primary:
+                    cleanup_error = await cleanup_process_tasks(
+                        process,
+                        primary,
+                        wait_task,
+                        log_task,
+                    )
+                    if cleanup_error is not None:
+                        raise primary from cleanup_error
+                    raise
+                if returncode:
+                    msg = f"DST mod updater exited with status {returncode}"
+                    raise ChildProcessError(msg)
+                if failure is None:
+                    return
+                if (
+                    failure == UPDATE_INCOMPLETE
+                    or failure.startswith(SETUP_FAILURE)
+                    or attempt == attempts
+                ):
+                    msg = (
+                        f"DST mod updater failed after {attempt} attempt(s): {failure}"
+                    )
+                    raise RuntimeError(msg)
+                if log_handler is not None:
+                    log_handler(
+                        "DST mod update incomplete; "
+                        f"retrying ({attempt + 1}/{attempts}): "
+                        f"{failure}"
+                    )
 
 
 def free_udp_ports(count: int) -> tuple[int, ...]:
