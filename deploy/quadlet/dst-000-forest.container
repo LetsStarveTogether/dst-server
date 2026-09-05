@@ -14,13 +14,11 @@ Environment=OTEL_TRACES_EXPORTER=none
 Volume=/srv/dst/000:/cluster
 ContainerName=dst-000-forest
 StopTimeout=40
-HealthCmd=/app/.venv/bin/dst-server healthcheck
-HealthInterval=5s
-HealthTimeout=3s
-HealthRetries=2
-HealthStartPeriod=15s
-HealthOnFailure=kill
+Notify=true
 
 [Service]
 Restart=on-failure
+KillMode=control-group
+WatchdogSec=300
+WatchdogSignal=SIGKILL
 TimeoutStopSec=50

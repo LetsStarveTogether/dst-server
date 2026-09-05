@@ -62,6 +62,18 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
     assert "DST_SERVER_TELEMETRY_PROFILE=history" in rendered
     assert "OTEL_METRICS_EXPORTER=none" in rendered
     assert "OTEL_TRACES_EXPORTER=none" in rendered
+    for unit in (master, secondary):
+        assert unit.notify is True
+        assert unit.watchdog_sec == 300
+        assert unit.restart == "on-failure"
+        assert unit.kill_mode == "control-group"
+        assert unit.watchdog_signal == "SIGKILL"
+        text = (quadlet / f"{unit.name}.container").read_text(encoding="utf-8")
+        assert "Notify=true" in text
+        assert "WatchdogSec=300" in text
+        assert "KillMode=control-group" in text
+        assert "WatchdogSignal=SIGKILL" in text
+        assert "Health" not in text
 
 
 def test_netdata_deployment_contract_is_consistent() -> None:

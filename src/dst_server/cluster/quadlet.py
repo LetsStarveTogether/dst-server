@@ -13,10 +13,6 @@ from .overrides import FrozenMapping
 
 type Port = Annotated[int, Field(ge=1024, le=65535)]
 type Seconds = Annotated[int, Field(ge=0)]
-type HealthDuration = Annotated[
-    str,
-    Field(pattern=r"^(?:0|(?:(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:ns|us|ms|s|m|h))+)$"),
-]
 type UnitValue = Annotated[str, Field(pattern=r"^[^\x00\r\n]*$")]
 type NonEmptyUnitValue = Annotated[
     str,
@@ -48,7 +44,6 @@ ROOM_PORTS_PER_SLOT = 10
 MAX_UNIT_NAME_BYTES = 240
 SERVE_COMMAND = ("/app/.venv/bin/dst-server", "serve")
 MASTER_COMMAND = ("/app/.venv/bin/dst-server", "master")
-HEALTHCHECK_COMMAND = ("/app/.venv/bin/dst-server", "healthcheck")
 CLUSTER_ENVIRONMENT = "DST_SERVER_CLUSTER_NAME"
 _UNIT_NAME = re.compile(r"(?:[A-Za-z0-9:_.-]|\\x[0-9a-f]{2})+\Z")
 _PORT_MAPPING = re.compile(r"([0-9]+):([0-9]+)/(udp|tcp)\Z")
@@ -231,18 +226,16 @@ _CONTAINER_SCHEMA: _Schema = {
         "ContainerName": False,
         "Network": True,
         "StopTimeout": False,
-        "HealthCmd": False,
-        "HealthInterval": False,
-        "HealthTimeout": False,
-        "HealthRetries": False,
-        "HealthStartPeriod": False,
-        "HealthOnFailure": False,
+        "Notify": False,
     },
     "Service": {
         "Type": False,
         "RemainAfterExit": False,
         "Nice": False,
         "Restart": False,
+        "KillMode": False,
+        "WatchdogSec": False,
+        "WatchdogSignal": False,
         "TimeoutStopSec": False,
     },
     "Install": _INSTALL_KEYS,
@@ -534,44 +527,6 @@ class PodUnit(RevalidatedFrozenModel):
         )
 
 
-class HealthCheck(RevalidatedFrozenModel):
-    command: tuple[NonEmptyUnitValue, ...] = Field(min_length=1)
-    interval: HealthDuration | None = None
-    timeout: HealthDuration | None = None
-    retries: Annotated[int, Field(ge=1)] | None = None
-    start_period: HealthDuration | None = None
-    on_failure: Literal["none", "kill", "restart", "stop"] | None = None
-
-
-DAEMON_HEALTHCHECK = HealthCheck(
-    command=HEALTHCHECK_COMMAND,
-    interval="5s",
-    timeout="3s",
-    retries=2,
-    start_period="15s",
-    on_failure="kill",
-)
-
-
-def _render_health(value: HealthCheck | None) -> list[str]:
-    if value is None:
-        return []
-    command = shlex.join(tuple(map(_escape_expansions, value.command)))
-    result = [f"HealthCmd={command}"]
-    result.extend(
-        f"{key}={field}"
-        for field, key in (
-            (value.interval, "HealthInterval"),
-            (value.timeout, "HealthTimeout"),
-            (value.retries, "HealthRetries"),
-            (value.start_period, "HealthStartPeriod"),
-            (value.on_failure, "HealthOnFailure"),
-        )
-        if field is not None
-    )
-    return result
-
-
 class ContainerUnit(RevalidatedFrozenModel):
     name: UnitName
     image: UnitToken
@@ -590,11 +545,14 @@ class ContainerUnit(RevalidatedFrozenModel):
     container_name: UnitToken | None = None
     networks: tuple[UnitToken, ...] = ()
     stop_timeout: Seconds | None = None
-    health: HealthCheck | None = None
+    notify: bool | None = None
     service_type: Literal["oneshot", "notify"] | None = None
     remain_after_exit: bool | None = None
     nice: Annotated[int, Field(ge=-20, le=19)] | None = None
     restart: RestartPolicy | None = None
+    kill_mode: Literal["control-group", "mixed", "process", "none"] | None = None
+    watchdog_sec: Seconds | None = None
+    watchdog_signal: Literal["SIGKILL"] | None = None
     timeout_stop_sec: Seconds | None = None
     wanted_by: tuple[UnitToken, ...] = ()
 
@@ -616,6 +574,9 @@ class ContainerUnit(RevalidatedFrozenModel):
             raise ValueError(msg)
         if self.service_type == "oneshot" and self.restart in {"always", "on-success"}:
             msg = "oneshot services cannot restart always or on success"
+            raise ValueError(msg)
+        if self.watchdog_sec and self.notify is not True:
+            msg = "positive WatchdogSec requires Notify=true"
             raise ValueError(msg)
         return self
 
@@ -649,28 +610,16 @@ class ContainerUnit(RevalidatedFrozenModel):
                 value,
                 "Container.ContainerName",
             )
-        health: dict[str, object] = {}
-        if (value := _one(parsed, "Container", "HealthCmd")) is not None:
-            health["command"] = _command(value)
+        if (value := _one(parsed, "Container", "Notify")) is not None:
+            values["notify"] = _boolean(value)
         for field, key in (
-            ("interval", "HealthInterval"),
-            ("timeout", "HealthTimeout"),
-            ("start_period", "HealthStartPeriod"),
-            ("on_failure", "HealthOnFailure"),
+            ("service_type", "Type"),
+            ("restart", "Restart"),
+            ("kill_mode", "KillMode"),
+            ("watchdog_signal", "WatchdogSignal"),
         ):
-            if (value := _one(parsed, "Container", key)) is not None:
-                health[field] = value
-        if (value := _one(parsed, "Container", "HealthRetries")) is not None:
-            health["retries"] = _integer(value, "HealthRetries")
-        if health:
-            if "command" not in health:
-                msg = "Quadlet health settings require HealthCmd"
-                raise ValueError(msg)
-            values["health"] = HealthCheck.model_validate(health)
-        if (value := _one(parsed, "Service", "Type")) is not None:
-            values["service_type"] = value
-        if (value := _one(parsed, "Service", "Restart")) is not None:
-            values["restart"] = value
+            if (value := _one(parsed, "Service", key)) is not None:
+                values[field] = value
         for field, section, key in (
             ("requires", "Unit", "Requires"),
             ("wants", "Unit", "Wants"),
@@ -694,6 +643,7 @@ class ContainerUnit(RevalidatedFrozenModel):
         for field, section, key in (
             ("stop_timeout", "Container", "StopTimeout"),
             ("nice", "Service", "Nice"),
+            ("watchdog_sec", "Service", "WatchdogSec"),
             ("timeout_stop_sec", "Service", "TimeoutStopSec"),
         ):
             if (value := _one(parsed, section, key)) is not None:
@@ -702,7 +652,7 @@ class ContainerUnit(RevalidatedFrozenModel):
             values["remain_after_exit"] = _boolean(value)
         return cls.model_validate(values)
 
-    def render(self) -> str:  # ruff: ignore[complex-structure]
+    def render(self) -> str:
         validated = type(self).model_validate(self)
         unit = []
         if validated.description:
@@ -744,7 +694,8 @@ class ContainerUnit(RevalidatedFrozenModel):
             )
         if validated.stop_timeout is not None:
             container.append(f"StopTimeout={validated.stop_timeout}")
-        container.extend(_render_health(validated.health))
+        if validated.notify is not None:
+            container.append(f"Notify={'true' if validated.notify else 'false'}")
         service = []
         if validated.service_type is not None:
             service.append(f"Type={validated.service_type}")
@@ -752,12 +703,18 @@ class ContainerUnit(RevalidatedFrozenModel):
             service.append(
                 f"RemainAfterExit={'yes' if validated.remain_after_exit else 'no'}"
             )
-        if validated.nice is not None:
-            service.append(f"Nice={validated.nice}")
-        if validated.restart is not None:
-            service.append(f"Restart={validated.restart}")
-        if validated.timeout_stop_sec is not None:
-            service.append(f"TimeoutStopSec={validated.timeout_stop_sec}")
+        service.extend(
+            f"{key}={value}"
+            for value, key in (
+                (validated.nice, "Nice"),
+                (validated.restart, "Restart"),
+                (validated.kill_mode, "KillMode"),
+                (validated.watchdog_sec, "WatchdogSec"),
+                (validated.watchdog_signal, "WatchdogSignal"),
+                (validated.timeout_stop_sec, "TimeoutStopSec"),
+            )
+            if value is not None
+        )
         install = [f"WantedBy={value}" for value in validated.wanted_by]
         return _render_sections((
             ("Unit", unit),
@@ -1019,8 +976,11 @@ class QuadletApplication(RevalidatedFrozenModel):
                 for name in secondary_names
             ),
             stop_timeout=40,
-            health=DAEMON_HEALTHCHECK,
+            notify=True,
             restart="on-failure",
+            kill_mode="control-group",
+            watchdog_sec=300,
+            watchdog_signal="SIGKILL",
             timeout_stop_sec=50,
         )
         secondaries = tuple(
@@ -1052,8 +1012,11 @@ class QuadletApplication(RevalidatedFrozenModel):
                 volumes=(volume,),
                 container_name=_podman_name(f"{base}-{_escape_unit_name(shard_name)}"),
                 stop_timeout=40,
-                health=DAEMON_HEALTHCHECK,
+                notify=True,
                 restart="on-failure",
+                kill_mode="control-group",
+                watchdog_sec=300,
+                watchdog_signal="SIGKILL",
                 timeout_stop_sec=50,
             )
             for shard_name in secondary_names

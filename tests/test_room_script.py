@@ -512,6 +512,12 @@ def test_generate_room_saves_cluster_and_quadlet_application(tmp_path: Path) -> 
     for unit in units:
         assert unit.environment["OTEL_SDK_DISABLED"] == "true"
         assert unit.environment["DST_SERVER_CLUSTER_NAME"] == "dst-007"
+        assert (unit.notify, unit.watchdog_sec, unit.restart) == (
+            True,
+            300,
+            "on-failure",
+        )
+        assert (unit.kill_mode, unit.watchdog_signal) == ("control-group", "SIGKILL")
 
 
 def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
@@ -570,6 +576,16 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
         }
         for shard_name, unit in named_units.items():
             shard = cluster.shards[shard_name]
+            assert (unit.notify, unit.watchdog_sec, unit.restart) == (
+                True,
+                300,
+                "on-failure",
+            )
+            assert (unit.kill_mode, unit.watchdog_signal) == (
+                "control-group",
+                "SIGKILL",
+            )
+            assert "Health" not in unit.render()
             assert unit.exec[3] == str(player_ports[shard.settings.server_port])
             assert all(
                 unit.environment[name] == value

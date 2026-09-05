@@ -13,7 +13,6 @@ from dst_server.cluster.config import (
 from dst_server.cluster.quadlet import (
     CLUSTER_ENVIRONMENT,
     ContainerUnit,
-    HealthCheck,
     PodUnit,
     PortMapping,
     QuadletApplication,
@@ -178,10 +177,10 @@ def test_quadlet_values_reject_unsafe_or_conflicting_input(
 
 
 @pytest.mark.parametrize(
-    "unit",
+    "factory",
     [
         pytest.param(
-            PodUnit(
+            lambda: PodUnit(
                 name="room",
                 description="Room %n ${HOME}",
                 requires=("network-online.target",),
@@ -198,7 +197,7 @@ def test_quadlet_values_reject_unsafe_or_conflicting_input(
             id="pod",
         ),
         pytest.param(
-            ContainerUnit(
+            lambda: ContainerUnit(
                 name="worker",
                 image="example.invalid/dst:$tag%n",
                 description="Worker %n ${HOME}",
@@ -216,14 +215,10 @@ def test_quadlet_values_reject_unsafe_or_conflicting_input(
                         read_only=True,
                     ),
                 ),
-                health=HealthCheck(
-                    command=("/app/dst-server", "healthcheck"),
-                    interval="5s",
-                    timeout="3s",
-                    retries=2,
-                    start_period="15s",
-                    on_failure="kill",
-                ),
+                notify=True,
+                watchdog_sec=300,
+                kill_mode="control-group",
+                watchdog_signal="SIGKILL",
                 stop_timeout=40,
                 restart="on-failure",
                 timeout_stop_sec=50,
@@ -235,8 +230,9 @@ def test_quadlet_values_reject_unsafe_or_conflicting_input(
 )
 def test_unit_save_load_round_trip(
     tmp_path: Path,
-    unit: PodUnit | ContainerUnit,
+    factory: Callable[[], PodUnit | ContainerUnit],
 ) -> None:
+    unit = factory()
     (path,) = unit.save(tmp_path)
     loaded = (
         PodUnit.load(path) if isinstance(unit, PodUnit) else ContainerUnit.load(path)
@@ -245,6 +241,148 @@ def test_unit_save_load_round_trip(
     assert loaded == unit
     assert "%%n" in path.read_text(encoding="utf-8")
     assert "$${HOME}" in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("seconds", [1, 300])
+def test_container_watchdog_uses_native_notify_and_service_seconds(
+    tmp_path: Path, seconds: int
+) -> None:
+    unit = ContainerUnit(
+        name="watchdog",
+        image="image",
+        notify=True,
+        watchdog_sec=seconds,
+        kill_mode="control-group",
+        watchdog_signal="SIGKILL",
+        restart="on-failure",
+    )
+    (path,) = unit.save(tmp_path)
+    rendered = path.read_text(encoding="utf-8")
+
+    assert "\nNotify=true\n" in rendered
+    assert f"\nWatchdogSec={seconds}\n" in rendered
+    assert "\nKillMode=control-group\n" in rendered
+    assert "\nWatchdogSignal=SIGKILL\n" in rendered
+    assert "Restart=on-failure" in rendered
+    assert "Health" not in rendered
+    assert ContainerUnit.load(path) == unit
+
+
+@pytest.mark.parametrize("notify", [None, False])
+def test_enabled_watchdog_requires_container_notifications(notify: bool | None) -> None:
+    with pytest.raises(ValidationError, match="Notify=true"):
+        ContainerUnit(name="watchdog", image="image", notify=notify, watchdog_sec=300)
+
+
+@pytest.mark.parametrize("notify", [None, False, True])
+def test_zero_watchdog_retains_native_disable_semantics(
+    tmp_path: Path, notify: bool | None
+) -> None:
+    unit = ContainerUnit(name="worker", image="image", notify=notify, watchdog_sec=0)
+    (path,) = unit.save(tmp_path)
+
+    assert "WatchdogSec=0" in path.read_text(encoding="utf-8")
+    assert ContainerUnit.load(path) == unit
+
+
+def test_default_container_does_not_add_unsolicited_notifications() -> None:
+    unit = ContainerUnit(name="worker", image="image")
+
+    assert unit.notify is None
+    assert unit.watchdog_sec is None
+    assert unit.kill_mode is None
+    assert unit.watchdog_signal is None
+    assert "Notify=" not in unit.render()
+    assert "WatchdogSec=" not in unit.render()
+    assert "KillMode=" not in unit.render()
+    assert "WatchdogSignal=" not in unit.render()
+
+
+@pytest.mark.parametrize("value", ["control-group", "mixed", "process", "none"])
+def test_container_kill_mode_preserves_native_values(
+    tmp_path: Path, value: str
+) -> None:
+    unit = ContainerUnit.model_validate({
+        "name": "worker",
+        "image": "image",
+        "kill_mode": value,
+    })
+    (path,) = unit.save(tmp_path)
+
+    assert f"\nKillMode={value}\n" in path.read_text(encoding="utf-8")
+    assert ContainerUnit.load(path) == unit
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("kill_mode", "unknown"), ("watchdog_signal", "SIGKILL\nExecStart=oops")],
+)
+def test_container_rejects_invalid_native_cleanup_values(
+    field: str, value: str
+) -> None:
+    with pytest.raises(ValidationError, match=field):
+        ContainerUnit.model_validate({"name": "worker", "image": "image", field: value})
+
+
+@pytest.mark.parametrize("value", [-1, True, "300", 1.5])
+def test_watchdog_seconds_require_a_nonnegative_integer(value: object) -> None:
+    with pytest.raises(ValidationError, match="watchdog_sec"):
+        ContainerUnit.model_validate({
+            "name": "watchdog",
+            "image": "image",
+            "notify": True,
+            "watchdog_sec": value,
+        })
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("true", True),
+        ("yes", True),
+        ("1", True),
+        ("on", True),
+        ("false", False),
+        ("no", False),
+        ("0", False),
+        ("off", False),
+    ],
+)
+def test_notify_loader_uses_existing_systemd_boolean_semantics(
+    tmp_path: Path, value: str, expected: bool
+) -> None:
+    path = tmp_path / "worker.container"
+    path.write_text(f"[Container]\nImage=image\nNotify={value}\n", encoding="utf-8")
+
+    assert ContainerUnit.load(path).notify is expected
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "HealthCmd=echo ok",
+        "HealthInterval=5s",
+        "HealthTimeout=3s",
+        "HealthRetries=2",
+        "HealthStartPeriod=15s",
+        "HealthOnFailure=kill",
+    ],
+)
+def test_obsolete_healthcheck_keys_are_rejected(tmp_path: Path, setting: str) -> None:
+    path = tmp_path / "worker.container"
+    path.write_text(f"[Container]\nImage=image\n{setting}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unknown Quadlet key"):
+        ContainerUnit.load(path)
+
+
+def test_obsolete_healthcheck_model_field_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="health"):
+        ContainerUnit.model_validate({
+            "name": "worker",
+            "image": "image",
+            "health": {"command": ("echo", "ok")},
+        })
 
 
 @pytest.mark.parametrize(
@@ -383,10 +521,13 @@ def test_application_builds_master_secondary_lifecycle(
             unit.restart,
             unit.stop_timeout,
             unit.timeout_stop_sec,
-            unit.health.on_failure if unit.health else None,
+            unit.notify,
+            unit.watchdog_sec,
+            unit.kill_mode,
+            unit.watchdog_signal,
         )
         for unit in (application.master, secondary)
-    } == {("on-failure", 40, 50, "kill")}
+    } == {("on-failure", 40, 50, True, 300, "control-group", "SIGKILL")}
 
 
 @pytest.mark.parametrize(

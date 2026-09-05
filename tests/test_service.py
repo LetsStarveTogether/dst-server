@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from dst_server.cluster import cli as cluster_cli
-from dst_server.cluster import service
+from dst_server.cluster import daemon, service
 from dst_server.runtime import ServerConfig
 from dst_server.telemetry import TelemetrySettings, otel
 
@@ -15,7 +15,7 @@ def test_cli_reads_telemetry_profile_from_environment(
 ) -> None:
     serving = AsyncMock(return_value=7)
     monkeypatch.setenv("DST_SERVER_TELEMETRY_PROFILE", profile)
-    monkeypatch.setattr(cluster_cli, "serve", serving)
+    monkeypatch.setattr(daemon, "serve", serving)
 
     assert cluster_cli.main(("serve", "forest")) == 7
     serving.assert_awaited_once_with(
@@ -52,7 +52,9 @@ def test_cli_routes_commands_once(
     expected: dict[str, object],
 ) -> None:
     action = AsyncMock(return_value=0)
-    monkeypatch.setattr(cluster_cli, target, action)
+    monkeypatch.setattr(
+        service if target == "prepare_shared" else daemon, target, action
+    )
 
     assert cluster_cli.main(command) == 0
     action.assert_awaited_once_with(**expected)

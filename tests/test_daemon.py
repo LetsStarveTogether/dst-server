@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 from ulid import ULID
 
-from dst_server.cluster import cli as cluster_cli
 from dst_server.cluster import daemon
 from dst_server.cluster.configuration import ConfigurationStore
 from dst_server.cluster.layout import Shard
@@ -152,63 +151,6 @@ async def test_preexisting_shutdown_skips_daemon_initialization(
 
     monkeypatch.setattr(daemon, "_run_agent", run)
     assert await daemon.serve(shard="Caves", shutdown=shutdown) == 0
-
-
-async def test_daemon_heartbeat_is_fresh_and_removed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = tmp_path / "run" / "heartbeat"
-    shutdown = asyncio.Event()
-    entered = asyncio.Event()
-
-    async def run(*arguments: object) -> None:
-        event = arguments[-1]
-        assert isinstance(event, asyncio.Event)
-        entered.set()
-        await event.wait()
-
-    monkeypatch.setattr(daemon, "_run_agent", run)
-    task = asyncio.create_task(
-        daemon.serve(
-            shard="Caves",
-            shutdown=shutdown,
-            heartbeat_path=path,
-            heartbeat_interval=0.01,
-        )
-    )
-    await asyncio.wait_for(entered.wait(), 1)
-
-    assert path.stat().st_mode & 0o777 == 0o600
-    assert daemon.heartbeat_is_fresh(path, 1)
-    shutdown.set()
-    assert await task == 0
-    assert not path.exists()
-
-
-@pytest.mark.parametrize("payload", ["0", "not-a-clock", "1" * 33])
-def test_heartbeat_rejects_invalid_payload(tmp_path: Path, payload: str) -> None:
-    path = tmp_path / "heartbeat"
-    path.write_text(payload, encoding="ascii")
-    assert not daemon.heartbeat_is_fresh(path, 1)
-
-
-def test_heartbeat_rejects_symlink(tmp_path: Path) -> None:
-    path = tmp_path / "heartbeat"
-    target = tmp_path / "target"
-    target.write_text("0", encoding="ascii")
-    path.symlink_to(target)
-    assert not daemon.heartbeat_is_fresh(path, 1)
-
-
-def test_cli_healthcheck_uses_the_daemon_heartbeat(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fresh = True
-    monkeypatch.setattr(cluster_cli, "heartbeat_is_fresh", lambda: fresh)
-    assert cluster_cli.main(("healthcheck",)) == 0
-    fresh = False
-    assert cluster_cli.main(("healthcheck",)) == 1
 
 
 async def test_secondary_agent_identity_comes_from_server_ini(

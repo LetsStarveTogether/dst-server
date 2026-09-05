@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import select
 import shlex
 import shutil
 import socket
@@ -71,6 +72,7 @@ GAME_EXECUTABLE = "/install/bin64/dontstarve_dedicated_server_nullrenderer_x64"
 STARTUP_TIMEOUT = 300
 OPERATION_TIMEOUT = 60
 CLEANUP_TIMEOUT = 30
+WATCHDOG_TEST_TIMEOUT = 90
 SYSTEM_QUADLET_ROOT = Path("/run/containers/systemd")
 QUADLET_GENERATOR = Path("/usr/lib/systemd/system-generators/podman-system-generator")
 SHARDS = ("cave", "forest")
@@ -561,6 +563,39 @@ async def wait_for_game_shards(client: ClusterClient, count: int) -> None:
             await asyncio.sleep(0.5)
 
 
+async def service_properties(service: str, *properties: str) -> dict[str, str]:
+    _, output = await run_command(
+        "systemctl",
+        "show",
+        service,
+        *(f"--property={name}" for name in properties),
+    )
+    return dict(line.split("=", maxsplit=1) for line in output.splitlines())
+
+
+async def verify_watchdog_notifications(service: str) -> None:
+    properties = await service_properties(
+        service, "ActiveState", "WatchdogTimestampMonotonic", "NRestarts"
+    )
+    assert properties["ActiveState"] == "active"
+    assert properties["NRestarts"] == "0"
+    previous = int(properties["WatchdogTimestampMonotonic"])
+    assert previous > 0
+    for _ in range(2):
+        async with asyncio.timeout(WATCHDOG_TEST_TIMEOUT):
+            while True:
+                properties = await service_properties(
+                    service, "WatchdogTimestampMonotonic", "NRestarts"
+                )
+                assert properties["NRestarts"] == "0"
+                current = int(properties["WatchdogTimestampMonotonic"])
+                if current > previous:
+                    assert 55_000_000 <= current - previous <= 75_000_000
+                    previous = current
+                    break
+                await asyncio.sleep(1)
+
+
 @dataclass(slots=True)
 class QuadletSystem:
     root: Path
@@ -603,6 +638,19 @@ class QuadletSystem:
         )
         quadlet_dir = root / "quadlet"
         application.save(quadlet_dir)
+        for unit in (application.master, *application.secondaries):
+            path = quadlet_dir / f"{unit.name}.container"
+            contents = path.read_text(encoding="utf-8")
+            for directive in (
+                "Notify=true",
+                "WatchdogSec=300",
+                "KillMode=control-group",
+                "WatchdogSignal=SIGKILL",
+            ):
+                assert directive in contents.splitlines()
+            assert "HealthCmd=" not in contents
+            # Keep the real 60-second notification cadence; only shorten recovery.
+            unit.replace(watchdog_sec=WATCHDOG_TEST_TIMEOUT).save(quadlet_dir)
         return cls(root, cluster, cluster_dir, quadlet_dir, application)
 
     @property
@@ -780,6 +828,7 @@ async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-str
     logs: Subscription[LogRecord] | None = None
     events: Subscription[GameEventRecord] | None = None
     lifecycle: Subscription[LifecycleRecord] | None = None
+    process_fds: list[int] = []
     try:  # ruff: ignore[too-many-statements-in-try-clause]
         await system.install(pod_source, master_source, *secondary_sources)
         await run_command(
@@ -800,15 +849,19 @@ async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-str
                 system.socket_path,
                 lambda status: status.phase == "waitingAgents",
             )
-            assert waiting.missing_shards == ("cave",)
-            _, processes = await run_command(
-                "podman",
-                "top",
-                system.container_name(MASTER),
-                "args",
-            )
-            assert GAME_EXECUTABLE not in processes
-            observer.close()
+            try:
+                assert waiting.missing_shards == ("cave",)
+                _, processes = await run_command(
+                    "podman",
+                    "top",
+                    system.container_name(MASTER),
+                    "args",
+                )
+                assert GAME_EXECUTABLE not in processes
+                await verify_watchdog_notifications(system.master_service)
+                assert (await observer.status()).phase == "waitingAgents"
+            finally:
+                observer.close()
 
             await run_command(
                 "systemctl",
@@ -1029,6 +1082,18 @@ async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-str
                 shard.name: shard.agent_incarnation for shard in current.shards
             }
             attempts = {shard.name: shard.game_attempt for shard in current.shards}
+            cave_service = f"{system.container_name('cave')}.service"
+            properties = await service_properties(cave_service, "NRestarts")
+            restarts = int(properties["NRestarts"])
+            _, processes = await run_command(
+                "podman", "top", system.container_name("cave"), "hpid"
+            )
+            process_fds.extend(
+                os.pidfd_open(int(process.strip()))
+                for process in processes.splitlines()[1:]
+            )
+            assert len(process_fds) >= 2
+            frozen_since = f"@{int(datetime.now(UTC).timestamp())}"
             await run_command(
                 "podman",
                 "kill",
@@ -1046,6 +1111,25 @@ async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-str
             assert await system.container_id("cave") != container_ids["cave"]
             assert await system.container_id(MASTER) == container_ids[MASTER]
             assert await system.pod_id() == pod_id
+            properties = await service_properties(cave_service, "NRestarts")
+            assert int(properties["NRestarts"]) == restarts + 1
+            assert all(select.select([fd], [], [], 0)[0] for fd in process_fds)
+            for fd in process_fds:
+                os.close(fd)
+            process_fds.clear()
+            _, journal = await run_command(
+                "journalctl",
+                "--unit",
+                cave_service,
+                "--since",
+                frozen_since,
+                "--output=cat",
+                "--no-pager",
+            )
+            assert "Watchdog timeout" in journal
+            assert "left-over" not in journal
+            assert "remains running" not in journal
+            assert "stop-post' timed out" not in journal
             assert _shard(current, MASTER).agent_incarnation == incarnations[MASTER]
             assert all(
                 _shard(current, shard).game_attempt != attempts[shard]
@@ -1148,6 +1232,8 @@ async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-str
         error.add_note(await system.diagnostics())
         raise
     finally:
+        for fd in process_fds:
+            os.close(fd)
         if logs is not None:
             with suppress(Exception):
                 await logs.close()

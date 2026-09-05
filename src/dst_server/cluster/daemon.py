@@ -1,14 +1,11 @@
 import asyncio
-import math
 import os
 import signal
-import stat
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AsyncExitStack
 from importlib import import_module
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from time import monotonic_ns
+from socket import AF_UNIX, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_NONBLOCK, socket
 from typing import Any, cast
 
 from logbook import Logger
@@ -39,10 +36,7 @@ from .controller import AgentEndpoint, ClusterController
 capnp: Any = import_module("capnp")
 logger = Logger(__name__)
 RECONNECT_DELAY = 1.0
-DEFAULT_HEARTBEAT_PATH = Path("/run/dst-server/heartbeat")
-DEFAULT_HEARTBEAT_INTERVAL = 5.0
-DEFAULT_HEARTBEAT_MAX_AGE = 15.0
-_MAX_HEARTBEAT_BYTES = 32
+WATCHDOG_INTERVAL = 60.0
 _SHARD_NAME = TypeAdapter(ShardName)
 
 type Shutdown = asyncio.Event
@@ -58,8 +52,6 @@ async def serve(
     external_port: int | None = None,
     telemetry: TelemetrySettings | None = None,
     shutdown: Shutdown | None = None,
-    heartbeat_path: Path | None = DEFAULT_HEARTBEAT_PATH,
-    heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
 ) -> int:
     """Run one shard agent until shutdown or an unrecoverable agent failure."""
     return await _daemon(
@@ -72,8 +64,6 @@ async def serve(
             event,
         ),
         shutdown,
-        heartbeat_path,
-        heartbeat_interval,
     )
 
 
@@ -84,8 +74,6 @@ async def master(
     external_port: int | None = None,
     telemetry: TelemetrySettings | None = None,
     shutdown: Shutdown | None = None,
-    heartbeat_path: Path | None = DEFAULT_HEARTBEAT_PATH,
-    heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
 ) -> int:
     """Run the cluster controller and its master shard agent."""
     return await _daemon(
@@ -97,16 +85,12 @@ async def master(
             event,
         ),
         shutdown,
-        heartbeat_path,
-        heartbeat_interval,
     )
 
 
 async def _daemon(
     operation: _Run,
     shutdown: Shutdown | None,
-    heartbeat_path: Path | None,
-    heartbeat_interval: float,
 ) -> int:
     own_shutdown = shutdown is None
     shutdown = shutdown or asyncio.Event()
@@ -115,15 +99,7 @@ async def _daemon(
     remove_signals = _install_signal_handlers(shutdown) if own_shutdown else None
     try:
         async with rpc_runtime():
-            if heartbeat_path is None:
-                await operation(shutdown)
-            else:
-                await _run_with_heartbeat(
-                    operation,
-                    shutdown,
-                    heartbeat_path,
-                    heartbeat_interval,
-                )
+            await _run_with_watchdog(operation, shutdown)
     except Exception as error:
         logger.error(  # ruff: ignore[error-instead-of-exception]
             "DST daemon stopped: {kind}",
@@ -137,108 +113,34 @@ async def _daemon(
             remove_signals()
 
 
-async def _run_with_heartbeat(
+async def _run_with_watchdog(
     operation: _Run,
     shutdown: Shutdown,
-    path: Path,
-    interval: float,
 ) -> None:
-    path = _validate_heartbeat(path, interval)
-    _write_heartbeat(path)
-    heartbeat = asyncio.create_task(
-        _heartbeat(path, interval),
-        name="dst-heartbeat",
-    )
-    runtime = asyncio.create_task(operation(shutdown), name="dst-daemon")
-    try:
-        done, _ = await asyncio.wait(
-            (runtime, heartbeat),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if runtime in done:
-            await runtime
-        else:
-            heartbeat.result()
-    finally:
-        for task in (runtime, heartbeat):
-            task.cancel()
-        await asyncio.gather(runtime, heartbeat, return_exceptions=True)
-        path.unlink(missing_ok=True)
+    address = os.environ.get("NOTIFY_SOCKET")
+    if address is None:
+        await operation(shutdown)
+        return
+    if len(address) <= 1 or address[0] not in "/@" or "\0" in address:
+        msg = "NOTIFY_SOCKET must be an absolute path or @abstract address"
+        raise ValueError(msg)
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    with socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK) as notifier:
+        notifier.connect(address)
+        notifier.sendall(b"READY=1")
+        async with asyncio.TaskGroup() as group:
+            watchdog = group.create_task(_watchdog(notifier), name="dst-watchdog")
+            try:
+                await operation(shutdown)
+            finally:
+                watchdog.cancel()
 
 
-async def _heartbeat(path: Path, interval: float) -> None:
+async def _watchdog(notifier: socket) -> None:
     while True:
-        await asyncio.sleep(interval)
-        _write_heartbeat(path)
-
-
-def _validate_heartbeat(path: Path, interval: float) -> Path:
-    if not path.is_absolute():
-        msg = "heartbeat path must be absolute"
-        raise ValueError(msg)
-    if not math.isfinite(interval) or interval <= 0:
-        msg = "heartbeat interval must be a positive finite number"
-        raise ValueError(msg)
-    parent = path.parent
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    metadata = parent.lstat()
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-        or metadata.st_mode & 0o022
-    ):
-        msg = f"heartbeat directory must be owner-controlled: {parent}"
-        raise PermissionError(msg)
-    return path
-
-
-def _write_heartbeat(path: Path) -> None:
-    temporary: Path | None = None
-    try:
-        with NamedTemporaryFile(
-            "w",
-            encoding="ascii",
-            prefix=f".{path.name}.",
-            dir=path.parent,
-            delete=False,
-        ) as stream:
-            temporary = Path(stream.name)
-            stream.write(str(monotonic_ns()))
-            os.fchmod(stream.fileno(), 0o600)
-        temporary.replace(path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-
-
-def heartbeat_is_fresh(
-    path: Path = DEFAULT_HEARTBEAT_PATH,
-    max_age: float = DEFAULT_HEARTBEAT_MAX_AGE,
-) -> bool:
-    if not math.isfinite(max_age) or max_age <= 0:
-        msg = "heartbeat max age must be a positive finite number"
-        raise ValueError(msg)
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
-        )
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.geteuid()
-            or metadata.st_size > _MAX_HEARTBEAT_BYTES
-        ):
-            return False
-        value = int(os.read(descriptor, 33))
-    except OSError, ValueError:
-        return False
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    age = monotonic_ns() - value
-    return 0 <= age <= max_age * 1_000_000_000
+        await asyncio.sleep(WATCHDOG_INTERVAL)
+        notifier.sendall(b"WATCHDOG=1")
 
 
 async def _run_agent(
