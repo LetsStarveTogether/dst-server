@@ -5,7 +5,7 @@ description = "Start and control a Don't Starve Together server process."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.14"
+requires-python = ">=3.14.7"
 dependencies = [
     "logbook>=1.9.2",
     "luaparser>=4.0.1,<5",

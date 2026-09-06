@@ -19,7 +19,7 @@ concurrency:
 jobs:
   validate-pr-title:
     name: Validate PR title
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       pull-requests: read
@@ -44,7 +44,7 @@ jobs:
 
   python:
     name: Python
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read

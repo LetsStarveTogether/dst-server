@@ -14,7 +14,7 @@ concurrency:
 jobs:
   verify-tag:
     name: Verify release tag
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -55,7 +55,7 @@ jobs:
 
   build:
     name: Build release distributions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     needs: verify-tag
     permissions:
@@ -101,7 +101,7 @@ jobs:
 
   publish-github-draft:
     name: Create GitHub draft release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     needs:
       - verify-tag
@@ -132,7 +132,7 @@ jobs:
 
   publish-testpypi:
     name: Publish package distributions to TestPyPI
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     needs:
       - verify-tag
@@ -158,7 +158,7 @@ jobs:
 
   publish-pypi:
     name: Publish package distributions to PyPI
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     needs:
       - verify-tag
