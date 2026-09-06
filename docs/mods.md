@@ -1,7 +1,7 @@
 # Mod 管理
 
 集群在启动游戏分片前准备共享 Mod，默认使用 DST 原生更新器。
-安装项目见 [README](../README.md)，目录和启用选项见[配置指南](configuration.md)。
+安装项目见 [README](../README.md)，目录和启用选项见 [配置指南](configuration.md)。
 
 ## 选择更新器
 
@@ -49,7 +49,7 @@ ServerModSetup("1803285852")
 `update_mods()` 要求全部分片 agent 已连接，且所有游戏进程均已停止。
 接管现有运行进程和恢复单个分片时复用已安装内容，不更新正在使用的共享 Mod。
 停止或更新失败会阻止本次重启继续启动游戏，下一次启动会重新准备尚未成功的更新。
-停止和重启不会隐式保存游戏，需要新快照时先保存；调用方式见[运行控制](runtime.md)。
+停止和重启不会隐式保存游戏，需要新快照时先保存；调用方式见 [运行控制](runtime.md)。
 
 ## 独立 Workshop SDK
 
@@ -84,7 +84,7 @@ SteamCMD 缓存位于 `mods/ugc/steamcmd`，ACF、manifest 和更新状态均由
 | legacy 文件，常见后缀为 `_legacy.bin`，内容实际为 ZIP | 校验并解压到 `mods/workshop-<ID>/`。 |
 | UGC 内容目录 | 完整复制到 `mods/workshop-<ID>/`，替换旧目录中的全部内容。 |
 
-格式取决于实际产物，`workshop-` 只是安装目录前缀；Valve 也[区分 legacy 文件与内容目录][ugc-install]。
+格式取决于实际产物，`workshop-` 只是安装目录前缀；Valve 也 [区分 legacy 文件与内容目录][ugc-install]。
 SDK 只安装 SteamCMD 明确确认完成的项目，并拒绝越界路径、符号链接和缺少 `modinfo.lua` 的内容。
 每项先在暂存目录准备，成功后切换安装目录；该项准备失败时保留旧安装。
 安装按条目提交，后续条目失败不会回退已经完成的条目。
@@ -102,8 +102,8 @@ SDK 只安装 SteamCMD 明确确认完成的项目，并拒绝越界路径、符
 | 仅 [Web API][webapi] + HTTP | 适合详情查询和合集展开，不能单独承担所有 Workshop 内容格式的下载。 |
 
 真实验证涵盖 legacy `466732225` 和 UGC `1803285852` 的匿名下载、缓存复用及离线游戏加载，不代表任意 Mod 或在线状态都兼容。
-回归边界见 [SDK 测试](../tests/test_workshop.py)、[原生更新测试](../tests/test_native_mod_update.py)和[启动控制测试](../tests/test_controller.py)。
-日志和运行状态的观测方式见[遥测指南](telemetry.md)。
+回归边界见 [SDK 测试](../tests/test_workshop.py)、[原生更新测试](../tests/test_native_mod_update.py) 和 [启动控制测试](../tests/test_controller.py)。
+日志和运行状态的观测方式见 [遥测指南](telemetry.md)。
 
 [webapi]: https://partner.steamgames.com/doc/webapi/ISteamRemoteStorage#GetCollectionDetails
 [ugc-install]: https://partner.steamgames.com/doc/api/ISteamUGC#GetItemInstallInfo

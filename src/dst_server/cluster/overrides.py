@@ -334,9 +334,9 @@ def _lua_value_node(  # ruff: ignore[complex-structure, too-many-branches]
     if isinstance(node, TrueExpr | FalseExpr):
         return isinstance(node, TrueExpr)
     if isinstance(node, Number):
-        return cast(int | float, node.n)
+        return node.n
     if isinstance(node, UMinusOp) and isinstance(node.operand, Number):
-        return -cast(int | float, node.operand.n)
+        return -node.operand.n
     if not isinstance(node, Table):
         msg = f"{description} must contain only literal Lua values"
         raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]

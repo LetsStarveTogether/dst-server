@@ -137,7 +137,7 @@ async def until(predicate: Callable[[], bool]) -> None:
             await asyncio.sleep(0.005)
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=True)  # ruff: ignore[pytest-fixture-autouse]
 def quick_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(otel, "RETRY_INITIAL_SECONDS", 0.01, raising=False)
     monkeypatch.setattr(otel, "RETRY_MAX_SECONDS", 0.02, raising=False)
@@ -869,13 +869,17 @@ def test_recorder_preserves_trace_parent_errors_and_metric_outcomes(
         operations = [span for span in spans if span.name == "dst.server.save"]
         assert len(operations) == 2
         assert all(
-            span.parent.span_id == parent.get_span_context().span_id
+            span.parent is not None
+            and span.parent.span_id == parent.get_span_context().span_id
             for span in operations
         )
         assert operations[1].status.status_code is StatusCode.ERROR
+        assert operations[1].attributes is not None
         assert operations[1].attributes["error.type"] == "builtins.RuntimeError"
+        assert operations[0].attributes is not None
         assert operations[0].attributes["dst.session.id"] == "session"
         data = reader.get_metrics_data()
+        assert data is not None
         names = {
             metric.name
             for resource in data.resource_metrics

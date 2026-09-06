@@ -2,7 +2,7 @@
 
 DST 服务端 Lua 产生游戏事件，所属分片的 Python Agent 校验后写入本地日志或通过 OTLP/gRPC 导出。
 游戏事件与运行诊断使用 OpenTelemetry Logs，管理操作使用 Traces，进程、玩家、动作和事件计数使用 Metrics。
-部署入口见 [README](../README.md)，目录与配置见[配置指南](configuration.md)，进程与 RPC 生命周期见[运行时架构](runtime.md)。
+部署入口见 [README](../README.md)，目录与配置见 [配置指南](configuration.md)，进程与 RPC 生命周期见 [运行时架构](runtime.md)。
 
 ## 选择采集范围
 
@@ -131,7 +131,7 @@ SteamCMD 和监督进程的文字只作为相似输出负例，不表示它们�
 | 缺少可选 Mod 文件 | [mods.lua](../dst-scripts/scripts/mods.lua) 的成功跳过分支，不是加载失败 |
 | 游戏 Workshop 超时 | [原始报错][game-workshop]；区别于 SteamCMD 下载进程 |
 | SteamCMD 超时 | [原始报错][steamcmd-timeout]；在游戏分类器中保留为普通日志 |
-| Worldgen 重试与放弃 | [原始报错][worldgen-error]及 [worldgen_main.lua](../dst-scripts/scripts/worldgen_main.lua)；重试不等于退出 |
+| Worldgen 重试与放弃 | [原始报错][worldgen-error] 及 [worldgen_main.lua](../dst-scripts/scripts/worldgen_main.lua)；重试不等于退出 |
 | Steam SDK 失败 / 段错误 | [原始报错][native-error]；以进程返回码或信号确认退出 |
 | 缺少共享库 | [原始记录][loader-error]；动态加载器在 Lua 启动前产生的 stderr |
 | 鉴权与 DNS | [token 报错][token-error]、[DNS 报错][dns-error]；保留旧格式，另按当前原生格式构造 CURL 诊断样例 |

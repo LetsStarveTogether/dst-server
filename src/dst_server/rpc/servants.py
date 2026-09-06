@@ -1108,9 +1108,7 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
             raise
 
     async def _open(self) -> None:
-        status = await self._call(
-            "status", decode=lambda value: decode_model(ShardRuntimeStatus, value)
-        )
+        status = await self._model("status", ShardRuntimeStatus)
         if status.agent_incarnation is None:
             msg = "remote agent status has no incarnation"
             raise ValueError(msg)
@@ -1158,9 +1156,7 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
         if self._initial_status is not None:
             status, self._initial_status = self._initial_status, None
             return status
-        return await self._call(
-            "status", decode=lambda value: decode_model(ShardRuntimeStatus, value)
-        )
+        return await self._model("status", ShardRuntimeStatus)
 
     async def activate(self) -> None:
         await self._call("activate", mutation=True)
@@ -1363,19 +1359,17 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
         method: str,
         *,
         mutation: bool = False,
-        decode: Callable[[Any], Any] | None = None,
         **arguments: object,
     ) -> Any:
         if self._closed:
             msg = "remote shard agent is closed"
             raise DisconnectedError(msg)
-        value = await self._invoke(
+        return await self._invoke(
             self.capability,
             method,
             mutation=mutation,
             **arguments,
         )
-        return value if decode is None else decode(value)
 
     async def _model[ModelT: BaseModel](
         self,
@@ -1385,32 +1379,19 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
         mutation: bool = False,
         **arguments: object,
     ) -> ModelT:
-        return await self._call(
-            method,
-            mutation=mutation,
-            decode=lambda value: decode_model(model, value),
-            **arguments,
+        return decode_model(
+            model, await self._call(method, mutation=mutation, **arguments)
         )
 
     async def _bool(
         self, method: str, *, mutation: bool = False, **arguments: object
     ) -> bool:
-        return await self._call(
-            method,
-            mutation=mutation,
-            decode=lambda value: bool(value.value),
-            **arguments,
-        )
+        return bool((await self._call(method, mutation=mutation, **arguments)).value)
 
     async def _uint(
         self, method: str, *, mutation: bool = False, **arguments: object
     ) -> int:
-        return await self._call(
-            method,
-            mutation=mutation,
-            decode=lambda value: int(value.value),
-            **arguments,
-        )
+        return int((await self._call(method, mutation=mutation, **arguments)).value)
 
     async def _subscribe[RecordT: BaseModel](
         self,

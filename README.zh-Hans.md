@@ -14,7 +14,7 @@
 ## 快速开始
 
 1. 安装 [Podman](https://docs.podman.io/en/latest/index.html)。
-2. 在 [Klei 服务端管理页面](https://accounts.klei.com/account/game/servers?game=DontStarveTogether)创建专服 token。
+2. 在 [Klei 服务端管理页面](https://accounts.klei.com/account/game/servers?game=DontStarveTogether) 创建专服 token。
 3. 导出 token，并生成房间配置和 Quadlet unit：
 
    ```shell
@@ -55,7 +55,7 @@ uv run python -m scripts.generate_rooms \
 idmapped mount 使宿主文件保持 root 所有，容器内显示为 UID/GID `1000`。
 其 systemctl 命令应省略 `--user`。
 映射选项默认留空，生成器不会自动选择。
-具体配置与运行要求见[容器用户与目录权限](docs/configuration.md#容器用户与目录权限)。
+具体配置与运行要求见 [容器用户与目录权限](docs/configuration.md#容器用户与目录权限)。
 rootful 容器复用宿主机 DNS over TLS 的配置见 [容器 DNS](docs/configuration.md#容器-dns)。
 Mod 下载默认使用游戏服务端原生更新器，最多尝试五次，共用 30 分钟总期限。
 设置 `DST_SERVER_MOD_UPDATER=steamcmd` 可在启动时使用独立 SteamCMD 后端。
@@ -90,7 +90,7 @@ FIFO 可以执行任意服务端 Lua，必须与游戏进程处于同一信任�
 
 ## 存档文件
 
-集群的整体配置布局见[配置文件](docs/configuration.md#配置文件)。
+集群的整体配置布局见 [配置文件](docs/configuration.md#配置文件)。
 每个分片都有自己的 `<shard>/save/`，世界 ID 标识该分片生成的世界，记录在 `shardindex.session_id` 中。
 森林和洞穴分别保存世界与人物状态；世界 ID 不表示玩家的一次登录。
 下面是启用玩家路径编码时的原版典型布局，文件和目录按需创建，数字文件只列一份快照：
@@ -137,7 +137,7 @@ FIFO 可以执行任意服务端 Lua，必须与游戏进程处于同一信任�
 数字文件名是快照序号，不是游戏天数；界面天数根据 `clock.cycles + 1` 计算，同一天可以产生多份快照。
 人物目录中的快照可能不连续，也不保证每份世界快照都有同号的人物文件。
 保存世界时会保存当时的 `AllPlayers`，人物生成等流程也会单独保存人物。
-恢复时由原生 `TheNet:GetUserSessionFile` 选择人物文件；[保存槽读取流程](dst-scripts/scripts/saveindex.lua)还会查询玩家所在分片。
+恢复时由原生 `TheNet:GetUserSessionFile` 选择人物文件；[保存槽读取流程](dst-scripts/scripts/saveindex.lua) 还会查询玩家所在分片。
 
 | 辅助路径 | 用途与内容 |
 | --- | --- |
@@ -182,7 +182,7 @@ SDK 默认使用 `encode_user_path = true`，并始终在 `server.ini` 中显式
 
 各 Agent 每 60 秒通过 Podman 的 systemd 通知 socket 发送一次原生 watchdog 通知。
 连续五分钟未收到通知时，systemd 会重启容器；无需心跳文件或定时启动检查进程。
-生命周期状态和故障边界见[运行时架构](docs/runtime.md)。
+生命周期状态和故障边界见 [运行时架构](docs/runtime.md)。
 
 ## 集群 RPC
 
@@ -218,7 +218,7 @@ asyncio.run(main())
 标准 `OTEL_EXPORTER_OTLP_*` 环境变量只配置导出传输，不会启用事件 Hook。
 
 安装 `dst-server[otel]` 可启用 OTLP 导出，安装 `dst-server[klei]` 可查询 Klei 构建和 Lobby 服务。
-数据与故障边界见[游戏事件与 OpenTelemetry](docs/telemetry.md)。
+数据与故障边界见 [游戏事件与 OpenTelemetry](docs/telemetry.md)。
 
 ## Lua 注解
 

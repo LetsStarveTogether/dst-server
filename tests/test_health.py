@@ -27,7 +27,7 @@ HEAVY_MODULES = {
 }
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=True)  # ruff: ignore[pytest-fixture-autouse]
 def clear_notification_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("NOTIFY_SOCKET", "WATCHDOG_USEC", "WATCHDOG_PID"):
         monkeypatch.delenv(name, raising=False)

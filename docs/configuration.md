@@ -1,6 +1,6 @@
 # 配置与部署
 
-首次部署从项目 [快速开始](../README.zh-Hans.md#快速开始)进入。
+首次部署从项目 [快速开始](../README.zh-Hans.md#快速开始) 进入。
 本文说明配置放在哪里、哪些设置必须保持一致，以及如何修改已有房间。
 
 ## 配置文件
@@ -39,7 +39,7 @@ cluster/
 | `<shard>/worldgenoverride.lua` | 世界生成与世界设置覆盖。 |
 | `<shard>/leveldataoverride.lua` | 可选的完整关卡基线，事件世界需要。 |
 | `<shard>/modoverrides.lua` | 当前分片启用的 Mod 和选项。 |
-| `<shard>/save/` | 分片存档索引、世界与人物快照，以及运行环境的辅助数据；完整路径和内容见[存档文件](../README.zh-Hans.md#存档文件)（[English](../README.md#save-files)）。 |
+| `<shard>/save/` | 分片存档索引、世界与人物快照，以及运行环境的辅助数据；完整路径和内容见 [存档文件](../README.zh-Hans.md#存档文件)（[English](../README.md#save-files)）。 |
 | `mods/` | 共享下载清单、Mod 行为配置、内容与缓存，详见 [Mod 更新](mods.md)。 |
 
 `cluster.ini`、`cluster_token.txt` 和每个分片的 `server.ini` 必须存在，且只能有一个主分片。
@@ -185,7 +185,7 @@ print(key)
 `upload()` 返回桶内对象 key，格式为 `<ULID>/<原 DST-id-UTC.7z 文件名>`，保留文件名并用独立前缀避免同秒上传覆盖。
 上传从流开头读取，异常直接传给调用者，离开 `with` 时仍会清理本地匿名临时文件。
 大文件的 multipart 上传由 [obstore 原生处理](https://developmentseed.org/obstore/latest/api/put/)。
-R2 默认在发起上传七天后清理未完成分片，具体时间可通过[桶生命周期规则](https://developers.cloudflare.com/r2/buckets/object-lifecycles/)修改，上传失败不保证远端分片立即清理。
+R2 默认在发起上传七天后清理未完成分片，具体时间可通过 [桶生命周期规则](https://developers.cloudflare.com/r2/buckets/object-lifecycles/) 修改，上传失败不保证远端分片立即清理。
 
 归档保留 SDK 支持的游戏配置和 `save/session/` 下的全部普通文件，包括玩家快照、元数据与 `savelocation`。
 必要的 `save/shardindex` 会保留世界、会话和 Mod 信息，同时清除其中的密码等凭据。
@@ -248,7 +248,7 @@ UserNS=keep-id:uid=1000,gid=1000
 
 ## 容器 DNS
 
-rootful Podman 可通过 [DNS 策略](../deploy/containers/podman-dns.json)将默认网络的查询交给宿主机 systemd-resolved。
+rootful Podman 可通过 [DNS 策略](../deploy/containers/podman-dns.json) 将默认网络的查询交给宿主机 systemd-resolved。
 前提是宿主机的 `127.0.0.53` stub 正常工作；若 resolved 已配置 DNS over TLS，容器查询会复用其上游策略。
 这是默认网络的宿主机级设置，会影响该网络上的其他容器。
 

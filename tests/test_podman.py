@@ -90,7 +90,7 @@ SHARDS = ("cave", "forest")
 MASTER = "forest"
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session", autouse=True)  # ruff: ignore[pytest-fixture-autouse]
 def image_matches_expected_build() -> None:
     expected_revision = os.environ.get("DST_SERVER_EXPECTED_REVISION")
     expected_version = os.environ.get("DST_SERVER_EXPECTED_VERSION")

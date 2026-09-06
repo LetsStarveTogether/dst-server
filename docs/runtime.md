@@ -1,8 +1,8 @@
 # 运行时与进程通信
 
 本文说明维护集群控制、分片进程和游戏管理接口时需要遵守的边界。
-部署入口见 [README](../README.md)，目录与配置见[配置指南](configuration.md)。
-Mod 下载策略见 [Mod 管理](mods.md)，事件模型与持久交付见[遥测指南](telemetry.md)。
+部署入口见 [README](../README.md)，目录与配置见 [配置指南](configuration.md)。
+Mod 下载策略见 [Mod 管理](mods.md)，事件模型与持久交付见 [遥测指南](telemetry.md)。
 
 ## 进程所有权
 
@@ -195,4 +195,4 @@ Supervisor 最多连续尝试五次，失败间隔一秒，稳定运行十分钟
 READY 表示管理进程开始运行，发生在等待完整注册和游戏就绪之前。
 生成的 Quadlet 使用 `WatchdogSec=300`，超时后由 systemd 清理服务进程并重启容器。
 watchdog 只检查 daemon event loop，不能证明游戏线程正常推进或遥测已成功交付。
-部署参数见 [quadlet.py](../src/dst_server/cluster/quadlet.py)，交付故障处理见[遥测指南](telemetry.md)。
+部署参数见 [quadlet.py](../src/dst_server/cluster/quadlet.py)，交付故障处理见 [遥测指南](telemetry.md)。

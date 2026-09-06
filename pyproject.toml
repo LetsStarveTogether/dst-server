@@ -7,11 +7,11 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.14.7"
 dependencies = [
-    "logbook>=1.9.2",
-    "luaparser>=4.0.1,<5",
+    "logbook>=1.10.1",
+    "luaparser>=4.2.0,<5",
     "opentelemetry-api~=1.44.0",
     "pycapnp>=2.2.4,<3",
-    "pydantic>=2.13.4",
+    "pydantic>=2.13.5",
     "python-ulid>=4.0.1",
 ]
 
@@ -26,22 +26,22 @@ dst-server = "dst_server.cluster.cli:main"
 
 [dependency-groups]
 dev = [
-    "prek>=0.4.10",
-    "pytest>=9.1.0",
+    "prek>=0.5.2",
+    "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.15.17",
-    "rumdl>=0.2.35",
-    "ty>=0.0.49",
+    "ruff>=0.16.6",
+    "rumdl>=0.2.68",
+    "ty>=0.0.79",
 ]
 
 [build-system]
-requires = ["uv_build~=0.12"]
+requires = ["uv_build~=0.12.10"]
 build-backend = "uv_build"
 
 [tool.ruff]
 fix = true
 preview = true
-required-version = '>=0.15'
+required-version = '>=0.16.6'
 
 [tool.ruff.lint]
 select = ['ALL']
@@ -81,7 +81,7 @@ ignore-one-line-docstrings = true
 python-platform = "linux"
 
 [tool.pytest]
-minversion = '9.1'
+minversion = '9.1.1'
 testpaths = ['tests']
 addopts = ['--import-mode=importlib', '-m', 'not system']
 strict = true
