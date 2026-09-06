@@ -246,6 +246,7 @@ def test_pod_userns_rejects_unsafe_values(userns: str) -> None:
             lambda: ContainerUnit(
                 name="worker",
                 image="example.invalid/dst:$tag%n",
+                pull="always",
                 description="Worker %n ${HOME}",
                 requires=("database.service",),
                 wants=("cache.service",),
@@ -268,6 +269,7 @@ def test_pod_userns_rejects_unsafe_values(userns: str) -> None:
                 watchdog_signal="SIGKILL",
                 stop_timeout=40,
                 restart="on-failure",
+                timeout_start_sec=1800,
                 timeout_stop_sec=50,
                 wanted_by=("default.target",),
             ),
@@ -360,13 +362,31 @@ def test_container_kill_mode_preserves_native_values(
     assert ContainerUnit.load(path) == unit
 
 
+@pytest.mark.parametrize("pull", [None, "always", "missing", "never", "newer"])
+def test_container_pull_policy_round_trip(tmp_path: Path, pull: str | None) -> None:
+    unit = ContainerUnit.model_validate({
+        "name": "worker",
+        "image": "image",
+        "pull": pull,
+    })
+    (path,) = unit.save(tmp_path)
+    rendered = path.read_text(encoding="utf-8")
+
+    assert ("\nPull=" in rendered) is (pull is not None)
+    if pull is not None:
+        assert f"\nPull={pull}\n" in rendered
+    assert ContainerUnit.load(path) == unit
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("kill_mode", "unknown"), ("watchdog_signal", "SIGKILL\nExecStart=oops")],
+    [
+        ("kill_mode", "unknown"),
+        ("watchdog_signal", "SIGKILL\nExecStart=oops"),
+        ("pull", "sometimes"),
+    ],
 )
-def test_container_rejects_invalid_native_cleanup_values(
-    field: str, value: str
-) -> None:
+def test_container_rejects_invalid_native_values(field: str, value: str) -> None:
     with pytest.raises(ValidationError, match=field):
         ContainerUnit.model_validate({"name": "worker", "image": "image", field: value})
 
@@ -452,6 +472,18 @@ def test_obsolete_healthcheck_model_field_is_rejected() -> None:
             "[Container]\nImage=image\nExec=echo %n\n",
             "dynamic systemd expansion",
             id="dynamic-expansion",
+        ),
+        pytest.param(
+            ".container",
+            "[Container]\nImage=image\nPull=sometimes\n",
+            "pull",
+            id="invalid-pull-policy",
+        ),
+        pytest.param(
+            ".container",
+            "[Container]\nImage=image\n[Service]\nTimeoutStartSec=-1\n",
+            "timeout_start_sec",
+            id="negative-start-timeout",
         ),
     ],
 )
@@ -567,6 +599,10 @@ def test_application_builds_master_secondary_lifecycle(
     assert application.master.environment[CLUSTER_ENVIRONMENT] == "dst-007"
     assert application.master.environment["DST_SERVER_TELEMETRY_PROFILE"] == "test"
     assert application.master.volumes == secondary.volumes
+    for unit in (application.master, secondary):
+        assert unit.image == "quay.io/wh2099/dst-server:latest"
+        assert unit.pull == "always"
+        assert unit.timeout_start_sec == 1800
     assert {
         (
             unit.restart,

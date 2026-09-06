@@ -767,7 +767,9 @@ class QuadletSystem:
                 assert directive in contents.splitlines()
             assert "HealthCmd=" not in contents
             # Keep the real 60-second notification cadence; only shorten recovery.
-            unit.replace(watchdog_sec=WATCHDOG_TEST_TIMEOUT).save(quadlet_dir)
+            unit.replace(watchdog_sec=WATCHDOG_TEST_TIMEOUT, pull="never").save(
+                quadlet_dir
+            )
         return cls(root, cluster, cluster_dir, quadlet_dir, application)
 
     @property

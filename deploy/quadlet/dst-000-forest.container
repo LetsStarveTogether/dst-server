@@ -3,7 +3,8 @@ Description=Don't Starve Together master shard forest
 Wants=dst-000-cave.container
 
 [Container]
-Image=quay.io/wh2099/dst-server
+Image=quay.io/wh2099/dst-server:latest
+Pull=always
 Pod=dst-000.pod
 Exec=/app/.venv/bin/dst-server master --external-port 30000
 Environment=DST_SERVER_CLUSTER_NAME=dst-000
@@ -21,4 +22,5 @@ Restart=on-failure
 KillMode=control-group
 WatchdogSec=300
 WatchdogSignal=SIGKILL
+TimeoutStartSec=1800
 TimeoutStopSec=50

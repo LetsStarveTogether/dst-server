@@ -4,7 +4,8 @@ BindsTo=dst-000-forest.container
 After=dst-000-forest.container
 
 [Container]
-Image=quay.io/wh2099/dst-server
+Image=quay.io/wh2099/dst-server:latest
+Pull=always
 Pod=dst-000.pod
 Exec=/app/.venv/bin/dst-server serve --external-port 30002 -- cave
 Environment=DST_SERVER_CLUSTER_NAME=dst-000
@@ -22,4 +23,5 @@ Restart=on-failure
 KillMode=control-group
 WatchdogSec=300
 WatchdogSignal=SIGKILL
+TimeoutStartSec=1800
 TimeoutStopSec=50

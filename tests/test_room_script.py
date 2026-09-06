@@ -558,6 +558,8 @@ def test_generate_room_saves_cluster_and_quadlet_application(
     assert application.pod.publish_ports[0].host == 30070
     assert application.pod.userns == userns
     for unit in units:
+        assert unit.pull == "always"
+        assert unit.timeout_start_sec == 1800
         assert all(volume.idmap == volume_idmap for volume in unit.volumes)
         assert unit.environment["OTEL_SDK_DISABLED"] == "true"
         assert unit.environment["DST_SERVER_CLUSTER_NAME"] == "dst-007"
@@ -627,6 +629,9 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
         }
         for shard_name, unit in named_units.items():
             shard = cluster.shards[shard_name]
+            assert unit.image == DEFAULT_IMAGE
+            assert unit.pull == "always"
+            assert unit.timeout_start_sec == 1800
             assert (unit.notify, unit.watchdog_sec, unit.restart) == (
                 True,
                 300,
@@ -755,7 +760,7 @@ def test_main_can_generate_selected_rooms(
     assert generated_token.stat().st_mode & 0o777 == 0o600
 
 
-def test_main_reads_token_from_environment(
+def test_main_reads_token_from_environment_and_preserves_beta_image(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -768,8 +773,14 @@ def test_main_reads_token_from_environment(
         str(cluster_root),
         "--quadlet-dir",
         str(tmp_path / "quadlet"),
+        "--image",
+        "quay.io/wh2099/dst-server:beta",
     ])
 
+    application = QuadletApplication.load(tmp_path / "quadlet")
+    for unit in (application.master, *application.secondaries):
+        assert unit.image == "quay.io/wh2099/dst-server:beta"
+        assert unit.pull == "always"
     token = cluster_root / "000" / "cluster_token.txt"
     assert token.read_text(encoding="utf-8") == "environment-token\n"
     assert token.stat().st_mode & 0o777 == 0o600

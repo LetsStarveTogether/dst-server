@@ -36,7 +36,7 @@ type RestartPolicy = Literal[
     "on-watchdog",
 ]
 
-DEFAULT_IMAGE = "quay.io/wh2099/dst-server"
+DEFAULT_IMAGE = "quay.io/wh2099/dst-server:latest"
 DEFAULT_TARGET = "default.target"
 MAX_ROOM_SLOT = 299
 MAX_ROOM_SHARDS = 4
@@ -241,6 +241,7 @@ _CONTAINER_SCHEMA: _Schema = {
     "Unit": _UNIT_KEYS | {"Wants": True, "BindsTo": True},
     "Container": {
         "Image": False,
+        "Pull": False,
         "Pod": False,
         "Exec": False,
         "Environment": True,
@@ -259,6 +260,7 @@ _CONTAINER_SCHEMA: _Schema = {
         "KillMode": False,
         "WatchdogSec": False,
         "WatchdogSignal": False,
+        "TimeoutStartSec": False,
         "TimeoutStopSec": False,
     },
     "Install": _INSTALL_KEYS,
@@ -558,6 +560,7 @@ class PodUnit(RevalidatedFrozenModel):
 class ContainerUnit(RevalidatedFrozenModel):
     name: UnitName
     image: UnitToken
+    pull: Literal["always", "missing", "never", "newer"] | None = None
     description: BareUnitValue = ""
     requires: tuple[UnitToken, ...] = ()
     wants: tuple[UnitToken, ...] = ()
@@ -581,6 +584,7 @@ class ContainerUnit(RevalidatedFrozenModel):
     kill_mode: Literal["control-group", "mixed", "process", "none"] | None = None
     watchdog_sec: Seconds | None = None
     watchdog_signal: Literal["SIGKILL"] | None = None
+    timeout_start_sec: Seconds | None = None
     timeout_stop_sec: Seconds | None = None
     wanted_by: tuple[UnitToken, ...] = ()
 
@@ -633,6 +637,8 @@ class ContainerUnit(RevalidatedFrozenModel):
             values["pod"] = _unit_reference(value, "Pod")
         if (value := _one(parsed, "Container", "AutoUpdate")) is not None:
             values["auto_update"] = value
+        if (value := _one(parsed, "Container", "Pull")) is not None:
+            values["pull"] = value
         if (value := _one(parsed, "Container", "ContainerName")) is not None:
             values["container_name"] = _literal_token(
                 value,
@@ -672,6 +678,7 @@ class ContainerUnit(RevalidatedFrozenModel):
             ("stop_timeout", "Container", "StopTimeout"),
             ("nice", "Service", "Nice"),
             ("watchdog_sec", "Service", "WatchdogSec"),
+            ("timeout_start_sec", "Service", "TimeoutStartSec"),
             ("timeout_stop_sec", "Service", "TimeoutStopSec"),
         ):
             if (value := _one(parsed, section, key)) is not None:
@@ -714,14 +721,19 @@ class ContainerUnit(RevalidatedFrozenModel):
             else f"Network={_escape_expansions(value)}"
             for value in validated.networks
         )
-        if validated.auto_update is not None:
-            container.append(f"AutoUpdate={validated.auto_update}")
+        container.extend(
+            f"{key}={value}"
+            for value, key in (
+                (validated.pull, "Pull"),
+                (validated.auto_update, "AutoUpdate"),
+                (validated.stop_timeout, "StopTimeout"),
+            )
+            if value is not None
+        )
         if validated.container_name is not None:
             container.append(
                 f"ContainerName={_escape_expansions(validated.container_name)}"
             )
-        if validated.stop_timeout is not None:
-            container.append(f"StopTimeout={validated.stop_timeout}")
         if validated.notify is not None:
             container.append(f"Notify={'true' if validated.notify else 'false'}")
         service = []
@@ -739,6 +751,7 @@ class ContainerUnit(RevalidatedFrozenModel):
                 (validated.kill_mode, "KillMode"),
                 (validated.watchdog_sec, "WatchdogSec"),
                 (validated.watchdog_signal, "WatchdogSignal"),
+                (validated.timeout_start_sec, "TimeoutStartSec"),
                 (validated.timeout_stop_sec, "TimeoutStopSec"),
             )
             if value is not None
@@ -1000,6 +1013,7 @@ class QuadletApplication(RevalidatedFrozenModel):
             ),
             environment=environment,
             image=image,
+            pull="always",
             pod=pod_source,
             volumes=(volume,),
             container_name=_podman_name(master_unit_name),
@@ -1013,6 +1027,7 @@ class QuadletApplication(RevalidatedFrozenModel):
             kill_mode="control-group",
             watchdog_sec=300,
             watchdog_signal="SIGKILL",
+            timeout_start_sec=1800,
             timeout_stop_sec=50,
         )
         secondaries = tuple(
@@ -1040,6 +1055,7 @@ class QuadletApplication(RevalidatedFrozenModel):
                 binds_to=(f"{master.name}.container",),
                 environment=environment,
                 image=image,
+                pull="always",
                 pod=pod_source,
                 volumes=(volume,),
                 container_name=_podman_name(f"{base}-{_escape_unit_name(shard_name)}"),
@@ -1049,6 +1065,7 @@ class QuadletApplication(RevalidatedFrozenModel):
                 kill_mode="control-group",
                 watchdog_sec=300,
                 watchdog_signal="SIGKILL",
+                timeout_start_sec=1800,
                 timeout_stop_sec=50,
             )
             for shard_name in secondary_names

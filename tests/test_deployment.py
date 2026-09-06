@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from dst_server.cluster import console, layout, mods, service
-from dst_server.cluster.quadlet import QuadletApplication
+from dst_server.cluster.quadlet import DEFAULT_IMAGE, QuadletApplication
 
 
 def write_shard(path: Path, *, is_master: bool, name: str) -> None:
@@ -63,12 +63,17 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
     assert "OTEL_METRICS_EXPORTER=none" in rendered
     assert "OTEL_TRACES_EXPORTER=none" in rendered
     for unit in (master, secondary):
+        assert unit.image == DEFAULT_IMAGE
+        assert unit.pull == "always"
+        assert unit.timeout_start_sec == 1800
         assert unit.notify is True
         assert unit.watchdog_sec == 300
         assert unit.restart == "on-failure"
         assert unit.kill_mode == "control-group"
         assert unit.watchdog_signal == "SIGKILL"
         text = (quadlet / f"{unit.name}.container").read_text(encoding="utf-8")
+        assert "Pull=always" in text
+        assert "TimeoutStartSec=1800" in text
         assert "Notify=true" in text
         assert "WatchdogSec=300" in text
         assert "KillMode=control-group" in text

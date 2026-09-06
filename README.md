@@ -5,7 +5,7 @@
 
 English | [简体中文](README.zh-Hans.md)
 
-Container image: `quay.io/wh2099/dst-server`
+Default image: `quay.io/wh2099/dst-server:latest`
 
 This project runs a DST cluster as one Pod with one long-lived Agent container per shard.
 The master container coordinates the cluster and exposes RPC.
@@ -61,8 +61,11 @@ Mod downloads use the native game-server updater by default, with up to five att
 Set `DST_SERVER_MOD_UPDATER=steamcmd` to use the independent SteamCMD backend during startup.
 See [Mod updaters](docs/mods.md) for SDK usage, compatibility checks, and backend selection.
 
-Images use `:<game-version>` as their stable version tag.
-`:latest` and `:beta` are moving channel aliases.
+Generated configurations default to `:latest`; use `--image quay.io/wh2099/dst-server:beta` for the beta channel.
+Both tags follow their release channels; the generator does not resolve or pin image digests or game versions.
+Container units use `Pull=always` to check the registry on every start.
+`TimeoutStartSec=1800` allows 30 minutes for downloads.
+`systemctl daemon-reload` reloads configuration; running rooms use the updated image on their next restart.
 
 ## Operations
 

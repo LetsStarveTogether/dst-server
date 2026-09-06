@@ -5,7 +5,7 @@
 
 [English](README.md) | 简体中文
 
-镜像地址：`quay.io/wh2099/dst-server`
+默认镜像：`quay.io/wh2099/dst-server:latest`
 
 本项目将一个 DST 集群运行成一个 Pod，并为每个分片提供一个长驻 Agent 容器。
 主分片容器负责集群协调和公开 RPC endpoint。
@@ -61,8 +61,10 @@ Mod 下载默认使用游戏服务端原生更新器，最多尝试五次，共�
 设置 `DST_SERVER_MOD_UPDATER=steamcmd` 可在启动时使用独立 SteamCMD 后端。
 SDK 用法、兼容性验证与后端选型见 [Mod 更新器](docs/mods.md)。
 
-镜像以 `:<游戏版本号>` 作为稳定版本标签。
-`:latest` 和 `:beta` 是滚动渠道别名。
+生成的配置默认使用 `:latest`，测试服使用 `--image quay.io/wh2099/dst-server:beta`。
+两个标签均跟随对应渠道更新，生成器不解析或固定镜像摘要、游戏版本号。
+容器配置使用 `Pull=always`，每次启动检查远端镜像；`TimeoutStartSec=1800` 为下载预留 30 分钟。
+`systemctl daemon-reload` 只重载配置，运行中的房间在下次重启时使用更新后的镜像。
 
 ## 日常维护
 
