@@ -168,7 +168,7 @@ jobs:
   image:
     name: ${{ matrix.build && 'Build' || 'Skip' }} ${{ matrix.image_tag }} ${{ matrix.version }}
     needs: [detect, test]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
       contents: read
