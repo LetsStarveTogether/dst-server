@@ -207,7 +207,7 @@ async def test_network_diagnostic_never_exports_host_or_error_details() -> None:
         assert private not in encoded
 
 
-# Short source signatures and their process origins: docs/telemetry.md.
+# Short source signatures and their process origins: README.md#log-boundaries.
 # Local names and the current CURL format are synthesized from build 747465.
 @pytest.mark.parametrize(
     ("corpus", "diagnostics"),
