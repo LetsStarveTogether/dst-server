@@ -14,6 +14,7 @@ from dst_server.events.server import SavedEvent
 from dst_server.game.rpc import DriverHealth
 from dst_server.game.validation import item_count, positive_timeout
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
+from dst_server.models.snapshot import Snapshot, SnapshotCatalog
 from dst_server.rpc.errors import DisconnectedError, IndeterminateError
 from dst_server.rpc.models import (
     ClusterPhase,
@@ -81,6 +82,10 @@ class AgentEndpoint(Protocol):
     async def world(self) -> World: ...
 
     async def runtime(self) -> Runtime: ...
+
+    async def list_snapshots(
+        self, limit: int = 100, *, before: int | None = None
+    ) -> SnapshotCatalog: ...
 
     async def mods(self) -> tuple[Mod, ...]: ...
 
@@ -173,6 +178,10 @@ class AgentEndpoint(Protocol):
     async def reset(self, completion_timeout: float) -> None: ...
 
     async def rollback(self, count: int, completion_timeout: float) -> None: ...
+
+    async def rollback_to_snapshot(
+        self, session_id: str, snapshot_id: int, completion_timeout: float
+    ) -> None: ...
 
     async def regenerate(self, completion_timeout: float) -> None: ...
 
@@ -528,6 +537,96 @@ class ClusterController:
             lambda master: master.rollback(count, completion_timeout),
             completion_timeout,
         )
+
+    async def list_snapshots(
+        self, limit: int = 100, *, before: int | None = None
+    ) -> SnapshotCatalog:
+        return await self.shard(self.master).list_snapshots(limit, before=before)
+
+    async def rollback_to_day(
+        self, day: int, completion_timeout: float = 30
+    ) -> Snapshot:
+        day = item_count(day)
+        completion_timeout = positive_timeout(completion_timeout)
+        sessions: dict[str, str] = {}
+
+        async def restore(master: AgentEndpoint) -> Snapshot:
+            runtimes = await self._gather(
+                self._ordered_agents, lambda agent: agent.runtime()
+            )
+            sessions.update(
+                (name, state.session_id) for name, state in runtimes.items()
+            )
+            snapshot = await self._snapshot_for_day(day, sessions)
+            await master.rollback_to_snapshot(
+                sessions[self.master], snapshot.snapshot_id, completion_timeout
+            )
+            return snapshot
+
+        async def verify(snapshot: Snapshot) -> None:
+            runtimes = await self._gather(
+                self._ordered_agents, lambda agent: agent.runtime()
+            )
+            worlds = await self._gather(
+                self._ordered_agents, lambda agent: agent.world()
+            )
+            if any(
+                state.session_id != sessions[name]
+                or state.snapshot != snapshot.snapshot_id + 1
+                or worlds[name].day != day
+                for name, state in runtimes.items()
+            ):
+                raise IndeterminateError
+
+        return await self._reload(restore, completion_timeout, verify=verify)
+
+    async def _snapshot_for_day(self, day: int, sessions: dict[str, str]) -> Snapshot:
+        before: int | None = None
+        selected: Snapshot | None = None
+        while True:
+            catalog = await self.list_snapshots(before=before)
+            if catalog.session_id != sessions[self.master]:
+                msg = "world session changed while selecting a snapshot"
+                raise ValueError(msg)
+            for snapshot in catalog.snapshots:
+                if (
+                    snapshot.snapshot_id == 0
+                    or snapshot.world_file is None
+                    or snapshot.metadata is None
+                    or snapshot.metadata.day != day
+                ):
+                    continue
+                copies = await self._gather(
+                    self._ordered_agents,
+                    lambda agent, snapshot=snapshot: agent.list_snapshots(
+                        1, before=snapshot.snapshot_id + 1
+                    ),
+                )
+                if any(
+                    copy.session_id != sessions[name] for name, copy in copies.items()
+                ):
+                    msg = "world session changed while selecting a snapshot"
+                    raise ValueError(msg)
+                if all(
+                    copy.snapshots
+                    and copy.snapshots[0].snapshot_id == snapshot.snapshot_id
+                    and copy.snapshots[0].world_file is not None
+                    and copy.snapshots[0].metadata is not None
+                    and copy.snapshots[0].metadata.day == day
+                    for copy in copies.values()
+                ):
+                    selected = snapshot
+            if not catalog.has_more:
+                if selected is not None:
+                    return selected
+                msg = f"no complete cluster snapshot for day {day}"
+                raise KeyError(msg)
+            if not catalog.snapshots or (
+                before is not None and catalog.snapshots[-1].snapshot_id >= before
+            ):
+                msg = "snapshot catalog did not advance"
+                raise ValueError(msg)
+            before = catalog.snapshots[-1].snapshot_id
 
     async def regenerate(self, completion_timeout: float = 30) -> None:
         completion_timeout = positive_timeout(completion_timeout)
@@ -985,21 +1084,23 @@ class ClusterController:
         finally:
             self._phase = None
 
-    async def _reload(
+    async def _reload[T](
         self,
-        operation: Callable[[AgentEndpoint], Awaitable[None]],
+        operation: _Operation[T],
         completion_timeout: float,
-    ) -> None:
+        *,
+        verify: Callable[[T], Awaitable[None]] | None = None,
+    ) -> T:
         async with self._public_operation():
             await self._require_ready()
             agents = self._ordered_agents
             mutation_completed = False
-            try:
+            try:  # ruff: ignore[too-many-statements-in-try-clause]
                 markers = await self._gather(
                     agents,
                     lambda agent: agent.generation_marker(),
                 )
-                await self._agent_call(
+                result = await self._agent_call(
                     lambda: operation(self.agent(self.master)),
                     limit=completion_timeout + 5,
                 )
@@ -1011,11 +1112,16 @@ class ClusterController:
                     ),
                     limit=completion_timeout + 5,
                 )
+                if verify is not None:
+                    await verify(result)
             except Exception as error:
+                if not mutation_completed and isinstance(error, KeyError | ValueError):
+                    raise
                 raise self._operation_error(
                     error,
                     mutation_completed=mutation_completed,
                 ) from None
+            return result
 
     async def _shard_results[T](
         self,
@@ -1251,6 +1357,13 @@ class ShardController:
 
     async def runtime(self) -> Runtime:
         return await self._call(lambda agent: agent.runtime())
+
+    async def list_snapshots(
+        self, limit: int = 100, *, before: int | None = None
+    ) -> SnapshotCatalog:
+        return await self._call(
+            lambda agent: agent.list_snapshots(limit, before=before)
+        )
 
     async def mods(self) -> tuple[Mod, ...]:
         return await self._call(lambda agent: agent.mods())

@@ -38,6 +38,47 @@ function commands.rollback(args)
     return true
 end
 
+function commands.rollback_to_snapshot(args)
+    local session_id = values.required_string(args, "session_id")
+    local snapshot_id = values.required_integer(args, "snapshot_id", 1)
+    if TheWorld == nil or not TheWorld.ismastershard or TheWorld.meta == nil
+        or TheWorld.meta.session_identifier ~= session_id then
+        error("snapshot rollback requires the current master session")
+    end
+
+    local target
+    local fetch = 100
+    while target == nil do
+        local snapshots, has_more = TheNet:ListSnapshots(session_id, TheNet:IsOnlineMode(), fetch)
+        for _, snapshot in ipairs(snapshots) do
+            if snapshot.snapshot_id == snapshot_id then
+                target = values.required_string(snapshot, "world_file")
+                break
+            end
+        end
+        if target == nil and not has_more then
+            error("snapshot is no longer available")
+        end
+        fetch = fetch * 2
+    end
+
+    local current_snapshot = TheNet:GetCurrentSnapshot()
+    if current_snapshot <= snapshot_id then
+        error("snapshot must precede the current snapshot")
+    end
+
+    local ok = pcall(function()
+        -- The live API resolves a negative argument relative to the current snapshot.
+        TheNet:TruncateSnapshots(session_id, snapshot_id - current_snapshot)
+        if TheNet:GetWorldSessionFile(session_id) ~= target then
+            error("snapshot truncation did not select the requested world file")
+        end
+        WorldRollbackFromSim(0)
+    end)
+    if not ok then require("dst_server.wire").indeterminate() end
+    return true
+end
+
 function commands.kick_player(args)
     TheNet:Kick(values.required_string(args, "userid"))
     return true

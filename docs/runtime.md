@@ -118,6 +118,39 @@ FD 5 的 Session 推进宿主记录的 generation，并使上一代 driver 健�
 原始 `Server.execute()` 不等待 driver 就绪，调用方需要自行处理世界重载时序。
 安装屏障见 [driver.py](../src/dst_server/runtime/driver.py)，保存确认见 [lifecycle.py](../src/dst_server/runtime/lifecycle.py)。
 
+## 查询快照与按天回档
+
+`ClusterClient.list_snapshots(limit=100, before=None)` 返回主分片当前 session 的 `SnapshotCatalog`。
+`cluster.shard(name).list_snapshots()` 使用同样的参数查询指定分片。
+目录包含 `session_id`、按 `snapshot_id` 从大到小排列的 `snapshots` 和是否还有更早记录的 `has_more`。
+每页 `limit` 为 1–100，`before` 是不包含边界的快照 ID；读取下一页时传入上一页最后一个 ID。
+
+```python
+catalog = await cluster.list_snapshots(limit=100)
+for snapshot in catalog.snapshots:
+    day = snapshot.metadata.day if snapshot.metadata is not None else None
+    print(snapshot.snapshot_id, day)
+
+if catalog.has_more and catalog.snapshots:
+    older = await cluster.list_snapshots(before=catalog.snapshots[-1].snapshot_id)
+```
+
+`Snapshot` 保留原生 `snapshot_id`、相对 `save/` 的 `world_file` 和类型化的 `metadata`。
+Agent 从对应世界 `.meta` 文件填充 `WorldSnapshotMetadata`，完整覆盖 `clock`、`seasons` 及其嵌套字段。
+模型保留原生键名和缺省信息，`day` 是只读属性；无法确定天数时返回 `None`。
+世界文件、元数据文件或原生文件路径缺失时，`metadata` 为 `None`。
+Agent 会拒绝路径逃逸、符号链接、无效元数据和查询期间的 session 变化。
+
+独立读取文件可使用 `dst_server.models.snapshot` 中的 `WorldSnapshotMetadata.load(path)` 和 `PlayerSnapshotMetadata.load(path)`。
+玩家元数据提供类型化的 `character`，支持 Mod 角色标识。
+加载器仅解析 UTF-8 Lua 字面量，支持原生文本文件头和末尾 NUL，不执行 Lua。
+未知字段、无效类型、动态表达式和符号链接会被拒绝。
+
+`ClusterClient.rollback_to_day(day, timeout=30)` 返回实际选中的 `Snapshot`。
+同一天有多份快照时，默认选择所有分片都有有效存档的最早一份，核对当前 session 后协调全服回档。
+无法确定天数的记录不参与选择；没有完整匹配时调用失败，不根据快照 ID 猜测游戏天数。
+快照目录受原生保留策略管理，回档后的未来记录会被截断；完成回档后应重新查询目录。
+
 ## 故障处理
 
 Supervisor 最多连续尝试五次，失败间隔一秒，稳定运行十分钟后清零连续失败计数。

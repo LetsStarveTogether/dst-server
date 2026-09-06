@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 from pydantic import JsonValue
 
 from dst_server.models import Mod, Room, Runtime, ShardStatus, World
+from dst_server.models.snapshot import SnapshotCatalog
 
 from .rpc import (
     BOOL_RESPONSE,
@@ -11,12 +12,15 @@ from .rpc import (
     ROOM_RESPONSE,
     RUNTIME_RESPONSE,
     SHARDS_RESPONSE,
+    SNAPSHOTS_RESPONSE,
     WORLD_RESPONSE,
 )
-from .validation import item_count, positive_timeout
+from .validation import item_count, positive_timeout, required_string
 
 if TYPE_CHECKING:
     from .client import GameClient
+
+MAX_SNAPSHOT_PAGE_SIZE = 100
 
 
 class WorldClient:
@@ -33,6 +37,19 @@ class WorldClient:
 
     async def runtime(self) -> Runtime:
         return await self.game.request("get_runtime", {}, RUNTIME_RESPONSE)
+
+    async def snapshots(
+        self, limit: int = MAX_SNAPSHOT_PAGE_SIZE, *, before: int | None = None
+    ) -> SnapshotCatalog:
+        """Return a page of retained snapshots, newest first."""
+        limit = item_count(limit)
+        if limit > MAX_SNAPSHOT_PAGE_SIZE:
+            msg = f"snapshot limit must not exceed {MAX_SNAPSHOT_PAGE_SIZE}"
+            raise ValueError(msg)
+        arguments: dict[str, JsonValue] = {"limit": limit}
+        if before is not None:
+            arguments["before"] = item_count(before, allow_zero=True)
+        return await self.game.request("get_snapshots", arguments, SNAPSHOTS_RESPONSE)
 
     async def mods(self) -> tuple[Mod, ...]:
         return await self.game.request("get_mods", {}, MODS_RESPONSE)
@@ -96,6 +113,23 @@ class WorldClient:
         await self.game.reload(
             "rollback",
             {"count": item_count(count, allow_zero=True)},
+            BOOL_RESPONSE,
+            positive_timeout(completion_timeout),
+        )
+
+    async def rollback_to_snapshot(
+        self,
+        session_id: str,
+        snapshot_id: int,
+        *,
+        completion_timeout: float = 30,
+    ) -> None:
+        await self.game.reload(
+            "rollback_to_snapshot",
+            {
+                "session_id": required_string("session_id", session_id),
+                "snapshot_id": item_count(snapshot_id),
+            },
             BOOL_RESPONSE,
             positive_timeout(completion_timeout),
         )

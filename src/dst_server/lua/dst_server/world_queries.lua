@@ -22,6 +22,40 @@ function queries.get_runtime()
     }
 end
 
+function queries.get_snapshots(args)
+    if TheWorld == nil or TheWorld.meta == nil then
+        error("world metadata unavailable")
+    end
+    local session_id = values.required_string(TheWorld.meta, "session_identifier")
+    local limit = values.required_integer(args, "limit", 1)
+    if limit > 100 then
+        error("snapshot limit must not exceed 100")
+    end
+    local before = args.before ~= nil and values.required_integer(args, "before", 0) or nil
+    local fetch = limit + 1
+    -- ponytail: native enumeration has no cursor; older pages reread a growing prefix.
+    while true do
+        local snapshots, has_more = TheNet:ListSnapshots(session_id, TheNet:IsOnlineMode(), fetch)
+        local result = {}
+        for _, snapshot in ipairs(snapshots) do
+            local snapshot_id = values.required_integer(snapshot, "snapshot_id", 0)
+            if before == nil or snapshot_id < before then
+                result[#result + 1] = {
+                    snapshot_id = snapshot_id,
+                    world_file = snapshot.world_file or json.null,
+                }
+            end
+        end
+        table.sort(result, function(a, b) return a.snapshot_id > b.snapshot_id end)
+        if before == nil or #result > limit or not has_more then
+            has_more = has_more == true or #result > limit
+            while #result > limit do table.remove(result) end
+            return { session_id = session_id, snapshots = result, has_more = has_more }
+        end
+        fetch = fetch * 2
+    end
+end
+
 function queries.get_mods()
     local result = {}
     for _, id in ipairs(ModManager:GetEnabledModNames()) do

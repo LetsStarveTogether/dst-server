@@ -110,7 +110,13 @@ class GameClient:
                 lua_request(body), completion_timeout
             )
             data = self.parse(result, adapter)
-            await self.wait_reload(generation, deadline)
+            try:
+                await self.wait_reload(generation, deadline)
+            except Exception as error:
+                from dst_server.runtime.console import IndeterminateCommandError
+
+                msg = "DST reload completion could not be confirmed"
+                raise IndeterminateCommandError(msg) from error
             return data
 
     def parse[DataT](
@@ -131,6 +137,11 @@ class GameClient:
             raise RuntimeError(msg)
         envelope = adapter.validate_json(response, strict=True)
         if isinstance(envelope, Failure):
+            if envelope.error == "indeterminate":
+                from dst_server.runtime.console import IndeterminateCommandError
+
+                msg = "DST mutation may have been applied"
+                raise IndeterminateCommandError(msg)
             msg = f"DST Lua request failed: {envelope.error}"
             raise RuntimeError(msg)  # ruff:ignore[type-check-without-type-error]
         return envelope.data

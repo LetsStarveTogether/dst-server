@@ -1,6 +1,6 @@
 import asyncio
 from collections import deque
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import time_ns
 from typing import TYPE_CHECKING
 
@@ -11,6 +11,7 @@ from ulid import ULID
 from dst_server.events.server import SavedEvent, SessionEvent
 from dst_server.game import DriverHealth
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
+from dst_server.models.snapshot import Snapshot, SnapshotCatalog, WorldSnapshotMetadata
 from dst_server.rpc.models import (
     GameEventRecord,
     LifecycleRecord,
@@ -205,6 +206,63 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
 
     async def runtime(self) -> Runtime:
         return await self.server.game.world.runtime()
+
+    async def list_snapshots(
+        self, limit: int = 100, before: int | None = None
+    ) -> SnapshotCatalog:
+        server = self.server
+        catalog = await server.game.world.snapshots(limit, before=before)
+        result = await asyncio.to_thread(self._read_snapshot_metadata, catalog)
+        if self.server is not server or server.session_id != catalog.session_id:
+            msg = "world session changed while reading snapshots"
+            raise RuntimeError(msg)
+        return result
+
+    def _read_snapshot_metadata(self, catalog: SnapshotCatalog) -> SnapshotCatalog:
+        snapshots: list[Snapshot] = []
+        root = self.cluster_path / self.name / "save"
+        for snapshot in catalog.snapshots:
+            if snapshot.world_file is None:
+                snapshots.append(snapshot.replace(metadata=None))
+                continue
+            path = PurePosixPath(snapshot.world_file)
+            if ".." in path.parts or path.parts != (
+                "session",
+                catalog.session_id,
+                f"{snapshot.snapshot_id:010d}",
+            ):
+                msg = "native snapshot path does not match its session and ID"
+                raise ValueError(msg)
+            source = root.joinpath(*path.parts)
+            metadata_path = source.with_suffix(".meta")
+            if any(
+                part.is_symlink()
+                for part in (
+                    self.cluster_path,
+                    root.parent,
+                    root,
+                    source.parent.parent,
+                    source.parent,
+                    source,
+                    metadata_path,
+                )
+            ):
+                msg = "snapshot paths cannot be symlinks"
+                raise ValueError(msg)
+            metadata = (
+                WorldSnapshotMetadata.load(metadata_path)
+                if source.is_file() and metadata_path.exists()
+                else None
+            )
+            snapshots.append(snapshot.replace(metadata=metadata))
+        return catalog.replace(snapshots=tuple(snapshots))
+
+    async def rollback_to_snapshot(
+        self, session_id: str, snapshot_id: int, completion_timeout: float = 30
+    ) -> None:
+        await self.server.game.world.rollback_to_snapshot(
+            session_id, snapshot_id, completion_timeout=completion_timeout
+        )
 
     async def mods(self) -> tuple[Mod, ...]:
         return await self.server.game.world.mods()

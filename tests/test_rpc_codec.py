@@ -22,6 +22,13 @@ from dst_server.cluster.overrides import (
 from dst_server.cluster.world import ForestOverrides, WorldOverrides
 from dst_server.events import GAME_EVENT_ADAPTER
 from dst_server.events.server import SavedEvent
+from dst_server.models.snapshot import (
+    Snapshot,
+    SnapshotCatalog,
+    SnapshotClock,
+    SnapshotSeasons,
+    WorldSnapshotMetadata,
+)
 from dst_server.rpc.codec import (
     _payload_contract,
     decode_json_value,
@@ -50,6 +57,36 @@ def test_rpc_schema_loads_and_has_a_stable_fingerprint() -> None:
     assert _schema_fingerprint(payload + b"changed") != SCHEMA_FINGERPRINT
     assert load_schema().Cluster is not None
     assert load_schema().Subscription is not None
+
+
+def test_snapshot_catalog_round_trip_preserves_nested_metadata_presence() -> None:
+    metadata = WorldSnapshotMetadata(
+        clock=SnapshotClock(cycles=20, phase="night", remainingtimeinphase=20.5),
+        seasons=SnapshotSeasons(season="winter", remainingdaysinseason=15),
+    )
+    snapshot = Snapshot(
+        snapshot_id=31,
+        world_file="session/SESSION/0000000031",
+        metadata=metadata,
+    )
+    catalog = SnapshotCatalog(
+        session_id="SESSION",
+        snapshots=(snapshot, Snapshot(snapshot_id=0)),
+        has_more=True,
+    )
+
+    restored = round_trip(catalog)
+
+    assert restored == catalog
+    assert round_trip(snapshot) == snapshot
+    assert restored.snapshots[1].model_fields_set == {"snapshot_id"}
+    restored_metadata = restored.snapshots[0].metadata
+    assert restored_metadata is not None
+    assert restored_metadata.clock.model_fields_set == metadata.clock.model_fields_set
+    assert (
+        restored_metadata.seasons.model_fields_set == metadata.seasons.model_fields_set
+    )
+    assert restored_metadata.day == 21
 
 
 def test_cluster_configuration_round_trip_preserves_presence_and_secrets() -> None:

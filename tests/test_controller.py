@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
@@ -34,6 +35,12 @@ from dst_server.cluster.layout import Shard
 from dst_server.cluster.subscriptions import Broadcast
 from dst_server.events.server import SavedEvent
 from dst_server.models import Player, PlayerState
+from dst_server.models.snapshot import (
+    Snapshot,
+    SnapshotCatalog,
+    SnapshotClock,
+    WorldSnapshotMetadata,
+)
 from dst_server.rpc.errors import DisconnectedError, IndeterminateError
 from dst_server.rpc.models import (
     GameEventRecord,
@@ -911,6 +918,134 @@ async def test_save_and_reload_coordinate_every_shard_from_master_once(
         assert not any(call.startswith("reset:Caves") for call in calls)
         assert calls.count("generation-marker:Master") == 3
         assert calls.count("generation-marker:Caves") == 3
+    finally:
+        await instance.aclose()
+
+
+@pytest.mark.parametrize(
+    ("scenario", "error"),
+    [
+        ("success", None),
+        ("missing_day", KeyError),
+        ("missing_shard_copy", KeyError),
+        ("session_changed", ValueError),
+        ("restore_failed", IndeterminateError),
+        ("wrong_day", IndeterminateError),
+        ("wrong_session", IndeterminateError),
+        ("wrong_snapshot_same_day", IndeterminateError),
+    ],
+)
+async def test_rollback_to_day_uses_earliest_complete_snapshot_and_verifies_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    error: type[Exception] | None,
+) -> None:
+    instance, master, caves, _, calls = await controller(tmp_path, monkeypatch)
+    catalogs: dict[str, tuple[Snapshot, ...]] = {}
+    for agent in (master, caves):
+        catalogs[agent.name] = tuple(
+            Snapshot(
+                snapshot_id=number,
+                world_file=f"session/{agent.name}/{number:010d}",
+                metadata=(
+                    None
+                    if number == 93
+                    else WorldSnapshotMetadata(
+                        clock=SnapshotClock(cycles=7 if number in {90, 91, 92} else 8)
+                    )
+                ),
+            )
+            for number in range(220, 0, -1)
+            if not (
+                agent is caves
+                and (
+                    number == 92
+                    or (scenario == "missing_shard_copy" and number in {90, 91})
+                )
+            )
+        )
+
+        def snapshots(
+            limit: int = 100,
+            *,
+            before: int | None = None,
+            endpoint: EndpointStub = agent,
+        ) -> SnapshotCatalog:
+            available = tuple(
+                item
+                for item in catalogs[endpoint.name]
+                if before is None or item.snapshot_id < before
+            )
+            return SnapshotCatalog(
+                session_id=(
+                    "changed"
+                    if scenario == "session_changed" and before is not None
+                    else endpoint.name
+                ),
+                snapshots=available[:limit],
+                has_more=len(available) > limit,
+            )
+
+        monkeypatch.setattr(agent, "list_snapshots", AsyncMock(side_effect=snapshots))
+        monkeypatch.setattr(
+            agent,
+            "runtime",
+            AsyncMock(return_value=SimpleNamespace(session_id=agent.name, snapshot=91)),
+        )
+        monkeypatch.setattr(
+            agent, "world", AsyncMock(return_value=SimpleNamespace(day=8))
+        )
+
+    def restore(session: str, snapshot: int, timeout: float) -> None:
+        assert instance._lock.locked()
+        assert (session, snapshot, timeout) == ("Master", 90, 12.0)
+        if scenario == "restore_failed":
+            raise IndeterminateError
+        if scenario == "wrong_day":
+            monkeypatch.setattr(
+                caves, "world", AsyncMock(return_value=SimpleNamespace(day=9))
+            )
+        if scenario == "wrong_session":
+            monkeypatch.setattr(
+                caves,
+                "runtime",
+                AsyncMock(return_value=SimpleNamespace(session_id="changed")),
+            )
+        if scenario == "wrong_snapshot_same_day":
+            monkeypatch.setattr(
+                caves,
+                "runtime",
+                AsyncMock(
+                    return_value=SimpleNamespace(session_id="Caves", snapshot=92)
+                ),
+            )
+
+    operation = AsyncMock(side_effect=restore)
+    monkeypatch.setattr(master, "rollback_to_snapshot", operation)
+    try:
+        assert len((await instance.list_snapshots(2)).snapshots) == 2
+        assert (await instance.shard("Caves").list_snapshots(1, before=93)).snapshots[
+            0
+        ].snapshot_id < 92
+        for invalid in (0, -1, True):
+            with pytest.raises(ValueError, match="positive"):
+                await instance.rollback_to_day(invalid)
+        if error is None:
+            selected = await instance.rollback_to_day(8, 12)
+            assert selected.snapshot_id == 90
+            assert "wait-generation:Master:30:12.0" in calls
+            assert "wait-generation:Caves:40:12.0" in calls
+        else:
+            with pytest.raises(error):
+                await instance.rollback_to_day(
+                    100 if scenario == "missing_day" else 8, 12
+                )
+        assert operation.await_count == (
+            0
+            if scenario in {"missing_day", "missing_shard_copy", "session_changed"}
+            else 1
+        )
     finally:
         await instance.aclose()
 

@@ -26,6 +26,7 @@ from dst_server.cluster.world import (
 from dst_server.events.server import SavedEvent
 from dst_server.game.rpc import DriverHealth
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
+from dst_server.models.snapshot import Snapshot, SnapshotCatalog
 
 from .models import (
     ClusterStatus,
@@ -62,6 +63,8 @@ _PAYLOAD_MODELS: tuple[type[BaseModel], ...] = (
     Mod,
     ShardStatus,
     SavedEvent,
+    Snapshot,
+    SnapshotCatalog,
     LogRecord,
     LifecycleRecord,
     GameEventRecord,

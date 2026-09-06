@@ -10,7 +10,7 @@ import pytest
 from dst_server.events import server as server_events
 from dst_server.events import world
 from dst_server.game import DriverHealth
-from dst_server.runtime import Server, ServerConfig
+from dst_server.runtime import IndeterminateCommandError, Server, ServerConfig
 from dst_server.runtime.console import Console, StaleGenerationError
 from dst_server.runtime.lifecycle import Lifecycle, RequestState, RequestStatus
 from dst_server.telemetry import TelemetryProfile, TelemetrySettings
@@ -859,8 +859,9 @@ async def test_reload_timeout_does_not_replay_written_command(
     execute = AsyncMock(return_value=structured_result(data=True))
     monkeypatch.setattr(server, "_execute", execute)
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(IndeterminateCommandError) as caught:
         await server.game.world.reset(completion_timeout=0.01)
+    assert isinstance(caught.value.__cause__, TimeoutError)
 
     execute.assert_awaited_once()
     assert server.driver.generation == 0

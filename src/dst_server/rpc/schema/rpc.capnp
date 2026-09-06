@@ -139,6 +139,11 @@ interface Cluster {
   subscribeLifecycle @21 () -> (result :Outcome(DataSubscription));
   subscribeEvents @22 () -> (result :Outcome(DataSubscription));
   shard @23 (shardName :Text) -> (result :Outcome(Shard));
+  listSnapshots @24 (
+    limit :UInt16,
+    before :Nullable(UInt64Value)
+  ) -> (result :Outcome(Data));
+  rollbackToDay @25 (day :UInt64, timeout :Float64) -> (result :Outcome(Data));
 }
 
 interface Shard {
@@ -197,6 +202,10 @@ interface Shard {
   subscribeLifecycle @33 () -> (result :Outcome(DataSubscription));
   subscribeEvents @34 () -> (result :Outcome(DataSubscription));
   save @35 (timeout :Float64) -> (result :Outcome(Data));
+  listSnapshots @36 (
+    limit :UInt16,
+    before :Nullable(UInt64Value)
+  ) -> (result :Outcome(Data));
 }
 
 interface Agent extends(Shard) {
@@ -219,6 +228,11 @@ interface Agent extends(Shard) {
   reset @9 (timeout :Float64) -> (result :Outcome(Unit));
   rollback @10 (count :UInt64, timeout :Float64) -> (result :Outcome(Unit));
   regenerate @11 (timeout :Float64) -> (result :Outcome(Unit));
+  rollbackToSnapshot @12 (
+    sessionId :Text,
+    snapshotId :UInt64,
+    timeout :Float64
+  ) -> (result :Outcome(Unit));
 }
 
 interface WorkerRegistry {

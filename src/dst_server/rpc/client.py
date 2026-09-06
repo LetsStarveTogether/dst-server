@@ -13,7 +13,10 @@ from ulid import ULID
 from dst_server.cluster.config import ClusterConfig
 from dst_server.events.server import SavedEvent
 from dst_server.game.rpc import DriverHealth
+from dst_server.game.validation import item_count, positive_timeout
+from dst_server.game.world import MAX_SNAPSHOT_PAGE_SIZE
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
+from dst_server.models.snapshot import Snapshot, SnapshotCatalog
 
 from .codec import decode_json_value, decode_model, encode_model
 from .errors import (
@@ -36,6 +39,7 @@ from .schema import SCHEMA_FINGERPRINT, load_schema
 
 DEFAULT_OPERATION_TIMEOUT = 30.0
 DEFAULT_BATCH_SIZE = 256
+MAX_UINT64 = 2**64 - 1
 capnp: Any = import_module("capnp")
 
 
@@ -68,6 +72,19 @@ def _nullable[ValueT](
 
 def _nullable_scalar(value: object | None) -> dict[str, object]:
     return {"none": None} if value is None else {"value": {"value": value}}
+
+
+def _snapshot_arguments(limit: int, before: int | None) -> tuple[int, int | None]:
+    limit = item_count(limit)
+    if limit > MAX_SNAPSHOT_PAGE_SIZE:
+        msg = f"snapshot limit must not exceed {MAX_SNAPSHOT_PAGE_SIZE}"
+        raise ValueError(msg)
+    if before is not None:
+        before = item_count(before, allow_zero=True)
+        if before > MAX_UINT64:
+            msg = "snapshot before must fit UInt64"
+            raise ValueError(msg)
+    return limit, before
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,6 +372,30 @@ class ClusterClient(_Remote):  # ruff: ignore[too-many-public-methods]
     async def regenerate(self, timeout: float = DEFAULT_OPERATION_TIMEOUT) -> None:
         _unit(await self._call("regenerate", mutation=True, timeout=timeout))
 
+    async def list_snapshots(
+        self, limit: int = 100, *, before: int | None = None
+    ) -> SnapshotCatalog:
+        limit, before = _snapshot_arguments(limit, before)
+        return decode_model(
+            SnapshotCatalog,
+            await self._call(
+                "listSnapshots", limit=limit, before=_nullable_scalar(before)
+            ),
+        )
+
+    async def rollback_to_day(
+        self, day: int, *, timeout: float = DEFAULT_OPERATION_TIMEOUT
+    ) -> Snapshot:
+        day = item_count(day)
+        if day > MAX_UINT64:
+            msg = "rollback day must fit UInt64"
+            raise ValueError(msg)
+        timeout = positive_timeout(timeout)
+        return decode_model(
+            Snapshot,
+            await self._call("rollbackToDay", mutation=True, day=day, timeout=timeout),
+        )
+
     async def list_players(self) -> tuple[LocatedPlayer, ...]:
         values = await self._call("listPlayers")
         return tuple(decode_model(LocatedPlayer, item) for item in values)
@@ -449,6 +490,17 @@ class _ShardClient(_Remote):
 
     async def runtime(self) -> Runtime:
         return decode_model(Runtime, await self._call("runtime"))
+
+    async def list_snapshots(
+        self, limit: int = 100, *, before: int | None = None
+    ) -> SnapshotCatalog:
+        limit, before = _snapshot_arguments(limit, before)
+        return decode_model(
+            SnapshotCatalog,
+            await self._call(
+                "listSnapshots", limit=limit, before=_nullable_scalar(before)
+            ),
+        )
 
     async def mods(self) -> tuple[Mod, ...]:
         values = await self._call("mods")

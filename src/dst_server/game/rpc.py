@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 from dst_server.events.base import DriverDiagnostic
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
 from dst_server.models.base import FrozenModel, Identifier, NonNegativeInt
+from dst_server.models.snapshot import SnapshotCatalog
 
 RESULT_PREFIX = "DST_SERVER_RESULT|"
 MAX_RESULT_LINE_BYTES = 64 * 1024
@@ -34,7 +35,11 @@ class Success[DataT](Envelope):
 class Failure(Envelope):
     ok: Literal[False]
     error: Literal[
-        "lua_error", "invalid_json_value", "invalid_utf8", "response_too_large"
+        "lua_error",
+        "invalid_json_value",
+        "invalid_utf8",
+        "response_too_large",
+        "indeterminate",
     ]
 
 
@@ -50,6 +55,7 @@ BOOL_RESPONSE = TypeAdapter(Success[bool] | Failure)
 INT_RESPONSE = TypeAdapter(Success[int] | Failure)
 DRIVER_RESPONSE = TypeAdapter(Success[DriverHealth] | Failure)
 RUNTIME_RESPONSE = TypeAdapter(Success[Runtime] | Failure)
+SNAPSHOTS_RESPONSE = TypeAdapter(Success[SnapshotCatalog] | Failure)
 MODS_RESPONSE = TypeAdapter(Success[tuple[Mod, ...]] | Failure)
 PLAYER_IDS_RESPONSE = TypeAdapter(Success[tuple[Identifier, ...]] | Failure)
 JSON_RESPONSE = TypeAdapter(Success[JsonValue] | Failure)

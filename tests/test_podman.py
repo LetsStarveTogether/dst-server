@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 from pydantic import JsonValue, SecretStr
@@ -21,6 +21,7 @@ from ulid import ULID
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
+from dst_server.cluster.agent import ShardAgent
 from dst_server.cluster.archive import export_cluster
 from dst_server.cluster.config import (
     ClusterConfig,
@@ -28,7 +29,10 @@ from dst_server.cluster.config import (
     ShardConfig,
     ShardSettings,
 )
+from dst_server.cluster.configuration import ConfigurationStore
+from dst_server.cluster.controller import AgentEndpoint, ClusterController
 from dst_server.cluster.overrides import WorldgenOverride
+from dst_server.cluster.presets import FOREST_CAVES
 from dst_server.cluster.quadlet import QuadletApplication, RoomPortAllocation
 from dst_server.cluster.supervisor import MAX_ATTEMPTS
 from dst_server.cluster.world import ForestOverrides
@@ -212,8 +216,10 @@ def make_server(
     lua_directory: Path | None = None,
     *,
     log_handler: Callable[[str], None] | None = None,
+    shard: str = "forest",
+    network: str = "none",
 ) -> Server:
-    wrapper = root / "podman-dst-server"
+    wrapper = root / f"podman-dst-server-{shard}"
     command = [
         "podman",
         "run",
@@ -223,7 +229,7 @@ def make_server(
         container_name,
         "--preserve-fds=3",
         "--network",
-        "none",
+        network,
         "--workdir",
         "/install/bin64",
         "--volume",
@@ -244,7 +250,7 @@ def make_server(
     wrapper.chmod(0o755)
     return Server(
         ServerConfig(
-            shard="forest",
+            shard=shard,
             executable=wrapper,
             persistent_storage_root=Path("/"),
             conf_dir="/",
@@ -380,6 +386,157 @@ async def test_export_restores_world_and_encoded_player_save(tmp_path: Path) -> 
                     break
                 await asyncio.sleep(0.1)
         assert restored_player == {"prefab": "wilson", "health": 63}
+
+
+@asynccontextmanager
+async def running_sharded_cluster(
+    root: Path,
+) -> AsyncIterator[tuple[ClusterController, dict[str, ShardAgent]]]:
+    cluster = root / "cluster"
+    FOREST_CAVES.build(
+        token=SecretStr(""),
+        cluster_key=SecretStr(str(ULID())),
+        settings=ClusterSettings(
+            cluster_name=str(ULID()),
+            offline_cluster=True,
+            lan_only_cluster=True,
+            pause_when_empty=False,
+            max_snapshots=20,
+        ),
+    ).save(cluster)
+    configuration = ConfigurationStore(cluster)
+    controller = ClusterController(configuration, install_path=root / "forest")
+    names = {
+        shard: f"dst-snapshot-{shard}-{str(ULID()).lower()}"
+        for shard in ("forest", "cave")
+    }
+    agents: dict[str, ShardAgent] = {}
+    try:
+        for shard in ("forest", "cave"):
+            config = make_server(
+                root,
+                cluster,
+                names[shard],
+                shard=shard,
+                network="none" if shard == "forest" else f"container:{names['forest']}",
+            ).config
+            install = root / shard
+            executable = install / "bin64" / Path(GAME_EXECUTABLE).name
+            executable.parent.mkdir(parents=True)
+            executable.symlink_to(config.executable)
+            agent = ShardAgent(
+                next(item for item in configuration.shards if item.name == shard),
+                install_path=install,
+                cluster_path=cluster,
+            )
+            agent.config = config
+            agents[shard] = agent
+            await agent.activate()
+            await agent.start()
+            await controller.register(cast("AgentEndpoint", agent))
+        await controller.start()
+        yield controller, agents
+    finally:
+        try:
+            await controller.aclose()
+        finally:
+            try:
+                async with asyncio.TaskGroup() as tasks:
+                    for agent in agents.values():
+                        tasks.create_task(agent.aclose())
+            finally:
+                for name in reversed(names.values()):
+                    await remove_container(name)
+
+
+async def test_rollback_to_day_restores_both_shards_and_player_saves(
+    tmp_path: Path,
+) -> None:
+    users = {"forest": "KU_1234567_", "cave": "KU_7654321_"}
+    health = {"forest": 63, "cave": 74}
+    async with running_sharded_cluster(tmp_path) as (controller, agents):
+        sessions = {
+            shard: (await agent.runtime()).session_id for shard, agent in agents.items()
+        }
+        for shard, agent in agents.items():
+            await agent.execute_json(
+                "TheWorld:PushEvent('ms_setautosaveenabled',false);"
+                "local clock=TheWorld.net.components.clock;"
+                "local data=clock:OnSave();data.cycles=9;clock:OnLoad(data);"
+                "DST_SNAPSHOT_PLAYER=SpawnPrefab('wilson');"
+                "local player=DST_SNAPSHOT_PLAYER;"
+                f"player.userid={lua_string(users[shard])};"
+                f"player.components.health:SetCurrentHealth({health[shard]});"
+                "player.Physics:Teleport(4,0,5);"
+                "local item=SpawnPrefab('goldnugget');"
+                "item.components.stackable:SetStackSize(7);"
+                "player.components.inventory:GiveItem(item);return true"
+            )
+        target = await controller.save(OPERATION_TIMEOUT)
+        for shard, later_health in {"forest": 41, "cave": 42}.items():
+            await agents[shard].execute_json(
+                "DST_SNAPSHOT_PLAYER.components.health:SetCurrentHealth("
+                f"{later_health});return true"
+            )
+        later_same_day = await controller.save(OPERATION_TIMEOUT)
+        for agent in agents.values():
+            await agent.execute_json(
+                "DST_SNAPSHOT_PLAYER.components.health:SetCurrentHealth(17);"
+                "local clock=TheWorld.net.components.clock;"
+                "local data=clock:OnSave();data.cycles=19;"
+                "clock:OnLoad(data);return true"
+            )
+        missing = await controller.save(OPERATION_TIMEOUT)
+        latest = await controller.save(OPERATION_TIMEOUT)
+        assert target.snapshot is not None
+        assert later_same_day.snapshot is not None
+        assert missing.snapshot is not None
+        assert latest.snapshot is not None
+        assert latest.snapshot > missing.snapshot > later_same_day.snapshot
+        assert later_same_day.snapshot > target.snapshot
+        for shard in agents:
+            for path in (tmp_path / "cluster" / shard / "save").rglob(
+                f"{missing.snapshot:010d}*"
+            ):
+                if path.is_file():
+                    path.unlink()
+        page = await controller.list_snapshots(1)
+        assert page.has_more
+        assert page.snapshots[0].snapshot_id == latest.snapshot
+        assert page.snapshots[0].metadata is not None
+        assert page.snapshots[0].metadata.day == 20
+        previous = await controller.list_snapshots(1, before=latest.snapshot)
+        assert previous.snapshots[0].snapshot_id == later_same_day.snapshot
+        assert previous.snapshots[0].metadata is not None
+        assert previous.snapshots[0].metadata.day == 10
+        earliest = await controller.list_snapshots(1, before=later_same_day.snapshot)
+        assert earliest.snapshots[0].snapshot_id == target.snapshot
+        assert earliest.snapshots[0].metadata is not None
+        assert earliest.snapshots[0].metadata.day == 10
+        # Schedule a native autosave at the exact point rollback begins truncating.
+        await agents["forest"].execute_json(
+            "local methods=getmetatable(TheNet).__index;"
+            "local original=methods.TruncateSnapshots;"
+            "methods.TruncateSnapshots=function(self,session,count)"
+            "methods.TruncateSnapshots=original;"
+            "TheWorld:PushEvent('ms_save');"
+            "return original(self,session,count) end;return true"
+        )
+        restored = await controller.rollback_to_day(10, OPERATION_TIMEOUT)
+        assert restored.snapshot_id == target.snapshot
+        for shard, agent in agents.items():
+            assert (await agent.runtime()).session_id == sessions[shard]
+            assert (await agent.world()).day == 10
+            saved_player = await read_player(agent.server, users[shard])
+            assert saved_player["health"] == health[shard]
+            assert saved_player["inventory"] == [
+                {
+                    "prefab": "goldnugget",
+                    "x": 4,
+                    "z": 5,
+                    "data": {"stackable": {"stack": 7}},
+                }
+            ]
 
 
 async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(

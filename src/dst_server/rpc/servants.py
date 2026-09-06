@@ -473,6 +473,16 @@ class _ShardMethods(_Responder):  # ruff: ignore[too-many-public-methods]
     async def runtime(self, _context: Any) -> None:
         await self._respond(_context, "runtime", self.target.runtime, encode_model)
 
+    async def listSnapshots(self, limit: int, before: Any, _context: Any) -> None:
+        await self._respond(
+            _context,
+            "listSnapshots",
+            lambda: self.target.list_snapshots(
+                limit, before=_decode_nullable(before, lambda value: int(value.value))
+            ),
+            encode_model,
+        )
+
     async def mods(self, _context: Any) -> None:
         await self._respond(_context, "mods", self.target.mods, _models)
 
@@ -809,6 +819,18 @@ class AgentServant(_ShardMethods, schema.Agent.Server):
             mutation=True,
         )
 
+    async def rollbackToSnapshot(
+        self, sessionId: str, snapshotId: int, timeout: float, _context: Any
+    ) -> None:
+        await self._respond(
+            _context,
+            "rollbackToSnapshot",
+            lambda: self.target.rollback_to_snapshot(
+                sessionId, snapshotId, completion_timeout=_timeout(timeout)
+            ),
+            mutation=True,
+        )
+
     async def regenerate(self, timeout: float, _context: Any) -> None:
         await self._respond(
             _context,
@@ -933,6 +955,27 @@ class ClusterServant(_Responder, schema.Cluster.Server):  # ruff: ignore[too-man
             _context,
             "rollback",
             lambda: self.controller.rollback(count, _timeout(timeout)),
+            mutation=True,
+        )
+
+    async def listSnapshots(self, limit: int, before: Any, _context: Any) -> None:
+        await self._respond(
+            _context,
+            "listSnapshots",
+            lambda: self.controller.list_snapshots(
+                limit, before=_decode_nullable(before, lambda value: int(value.value))
+            ),
+            encode_model,
+        )
+
+    async def rollbackToDay(self, day: int, timeout: float, _context: Any) -> None:
+        await self._respond(
+            _context,
+            "rollbackToDay",
+            lambda: self.controller.rollback_to_day(
+                day, completion_timeout=_timeout(timeout)
+            ),
+            encode_model,
             mutation=True,
         )
 
@@ -1245,6 +1288,17 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
     async def rollback(self, count: int, completion_timeout: float) -> None:
         await self._call(
             "rollback", mutation=True, count=count, timeout=completion_timeout
+        )
+
+    async def rollback_to_snapshot(
+        self, session_id: str, snapshot_id: int, completion_timeout: float = 30
+    ) -> None:
+        await self._call(
+            "rollbackToSnapshot",
+            mutation=True,
+            sessionId=session_id,
+            snapshotId=snapshot_id,
+            timeout=completion_timeout,
         )
 
     async def regenerate(self, completion_timeout: float) -> None:

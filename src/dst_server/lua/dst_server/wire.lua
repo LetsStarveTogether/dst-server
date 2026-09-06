@@ -1,6 +1,7 @@
 local json = require("json")
 local wire = {}
 local object_marker = {}
+local indeterminate = {}
 local prefix = "DST_SERVER_RESULT|"
 local maximum_line_bytes = 64 * 1024
 local escapes = { ['"'] = '\\"', ["\\"] = "\\\\" }
@@ -16,6 +17,10 @@ escapes["\t"] = "\\t"
 
 function wire.object(value)
     return setmetatable(value, object_marker)
+end
+
+function wire.indeterminate()
+    error(indeterminate, 0)
 end
 
 local function quote(value)
@@ -158,7 +163,7 @@ function wire.reply(callback)
             failure = data == "invalid_utf8" and "invalid_utf8" or "invalid_json_value"
         end
     else
-        failure = "lua_error"
+        failure = data == indeterminate and "indeterminate" or "lua_error"
     end
     if failure ~= nil then
         payload = '{"ok":false,"error":"' .. failure .. '"}'

@@ -15,20 +15,25 @@ from dst_server.game.rpc import (
     INT_RESPONSE,
     INVENTORY_RESPONSE,
     JSON_RESPONSE,
+    MAX_RESULT_LINE_BYTES,
     MODS_RESPONSE,
     PLAYER_IDS_RESPONSE,
     PLAYER_RESPONSE,
     PLAYERS_RESPONSE,
+    RESULT_PREFIX,
     ROOM_RESPONSE,
     RUNTIME_RESPONSE,
     SHARDS_RESPONSE,
+    SNAPSHOTS_RESPONSE,
     WORLD_RESPONSE,
     ResponseAdapter,
+    Success,
 )
 from dst_server.models import Item, Stat
+from dst_server.runtime import IndeterminateCommandError
 from dst_server.telemetry import TelemetrySettings
 from dst_server.telemetry.recorder import Recorder
-from tests.helpers import structured_result
+from tests.helpers import run_lua, structured_result
 
 type Invocation = Callable[[GameClient], Awaitable[object]]
 
@@ -74,6 +79,12 @@ ROUTES = [
     (lambda game: game.world.room(), "get_room", {}, ROOM_RESPONSE),
     (lambda game: game.world.state(), "get_world", {}, WORLD_RESPONSE),
     (lambda game: game.world.runtime(), "get_runtime", {}, RUNTIME_RESPONSE),
+    (
+        lambda game: game.world.snapshots(23, before=101),
+        "get_snapshots",
+        {"limit": 23, "before": 101},
+        SNAPSHOTS_RESPONSE,
+    ),
     (lambda game: game.world.mods(), "get_mods", {}, MODS_RESPONSE),
     (
         lambda game: game.world.shards(),
@@ -124,6 +135,12 @@ ROUTES = [
         lambda game: game.world.rollback(2),
         "rollback",
         {"count": 2},
+        BOOL_RESPONSE,
+    ),
+    (
+        lambda game: game.world.rollback_to_snapshot("SESSION", 3),
+        "rollback_to_snapshot",
+        {"session_id": "SESSION", "snapshot_id": 3},
         BOOL_RESPONSE,
     ),
     (
@@ -244,10 +261,17 @@ VOID_METHODS = {
     "regenerate_world",
     "regenerate_shard",
     "rollback",
+    "rollback_to_snapshot",
     "kick_player",
     "ban_player",
 }
-RELOAD_METHODS = {"reset", "regenerate_world", "regenerate_shard", "rollback"}
+RELOAD_METHODS = {
+    "reset",
+    "regenerate_world",
+    "regenerate_shard",
+    "rollback",
+    "rollback_to_snapshot",
+}
 
 
 @pytest.mark.parametrize(
@@ -297,6 +321,223 @@ async def test_request_escapes_untrusted_text_before_lua_execution() -> None:
     assert "\n" not in command
     assert "json.decode" not in command
     assert "c_announce" not in command
+
+
+def test_native_snapshot_pages_cover_long_history(lua_runtime: str) -> None:
+    output = run_lua(
+        """
+        TheWorld = { meta = { session_identifier = "SESSION" } }
+        local calls = {}
+        TheNet = {
+            IsOnlineMode = function() return false end,
+            ListSnapshots = function(_, session, online, count)
+                assert(session == "SESSION" and online == false)
+                calls[#calls + 1] = count
+                local result = {}
+                for index = 1, math.min(count, 237) do
+                    local id = (238 - index) * 3
+                    result[#result + 1] = {
+                        snapshot_id = id,
+                        world_file = string.format("session/SESSION/%010d", id),
+                    }
+                end
+                result[1], result[#result] = result[#result], result[1]
+                return result, count < 237
+            end,
+        }
+        local query = require("dst_server.world_queries").get_snapshots
+        local wire = require("dst_server.wire")
+        local before = nil
+        repeat
+            local page = query({ limit = 100, before = before })
+            wire.reply(function() return page end)
+            if not page.has_more then break end
+            before = page.snapshots[#page.snapshots].snapshot_id
+        until false
+        assert(calls[1] == 101 and calls[#calls] > 237)
+        """,
+        lua_runtime,
+    )
+    pages = []
+    for line in output.decode().splitlines():
+        assert len(line.encode()) <= MAX_RESULT_LINE_BYTES
+        assert line.startswith(RESULT_PREFIX)
+        result = SNAPSHOTS_RESPONSE.validate_json(line.removeprefix(RESULT_PREFIX))
+        assert isinstance(result, Success)
+        pages.append(result.data)
+    assert [len(page.snapshots) for page in pages] == [100, 100, 37]
+    assert [page.has_more for page in pages] == [True, True, False]
+    assert [item.snapshot_id for page in pages for item in page.snapshots] == list(
+        range(711, 0, -3)
+    )
+
+
+async def test_snapshot_catalog_retains_unavailable_world_files() -> None:
+    game, _ = make_game(
+        structured_result({
+            "session_id": "SESSION",
+            "snapshots": [{"snapshot_id": 0, "world_file": None}],
+            "has_more": False,
+        })
+    )
+
+    catalog = await game.world.snapshots()
+
+    assert catalog.session_id == "SESSION"
+    assert not catalog.has_more
+    assert len(catalog.snapshots) == 1
+    assert catalog.snapshots[0].snapshot_id == 0
+    assert catalog.snapshots[0].world_file is None
+    assert catalog.snapshots[0].metadata is None
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"limit": 0}, "positive"),
+        ({"limit": 101}, "must not exceed 100"),
+        ({"before": -1}, "non-negative"),
+    ],
+)
+async def test_snapshot_page_bounds(arguments: dict[str, int], message: str) -> None:
+    game, commands = make_game()
+
+    with pytest.raises(ValueError, match=message):
+        await game.world.snapshots(**arguments)
+
+    assert commands == []
+
+
+async def test_indeterminate_lua_mutation_does_not_wait_for_reload(
+    lua_runtime: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = run_lua(
+        'local wire=require("dst_server.wire");wire.reply(wire.indeterminate)',
+        lua_runtime,
+    )
+    game, _ = make_game(output.decode())
+    wait = AsyncMock()
+    monkeypatch.setattr(game, "wait_reload", wait)
+
+    with pytest.raises(IndeterminateCommandError, match="may have been applied"):
+        await game.world.rollback()
+
+    wait.assert_not_awaited()
+
+
+async def test_reload_wait_failure_is_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    game, _ = make_game(structured_result(True))
+    wait = AsyncMock(side_effect=EOFError("event stream closed"))
+    monkeypatch.setattr(game, "wait_reload", wait)
+
+    with pytest.raises(IndeterminateCommandError, match="could not be confirmed"):
+        await game.world.rollback()
+
+    wait.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "success",
+        "gapped",
+        "older",
+        "missing",
+        "session",
+        "shard",
+        "current",
+        "future",
+        "truncate",
+        "noop",
+        "reset",
+    ],
+)
+async def test_native_snapshot_rollback_checks_target_and_partial_mutation(
+    scenario: str, lua_runtime: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = run_lua(
+        f'local scenario="{scenario}";'
+        """
+        TheWorld = {
+            ismastershard = scenario ~= "shard",
+            meta = { session_identifier = "SESSION" },
+        }
+        local truncated, reset = 0, 0
+        local selected = "session/SESSION/0000000005"
+        local current_snapshot = scenario == "older" and 454
+            or scenario == "gapped" and 7
+            or scenario == "current" and 3
+            or scenario == "future" and 2 or 6
+        local expected_offset = scenario == "older" and -451
+            or scenario == "gapped" and -4 or -3
+        TheNet = {
+            IsOnlineMode = function() return true end,
+            GetCurrentSnapshot = function() return current_snapshot end,
+            ListSnapshots = function(_, session, online, count)
+                assert(session == "SESSION" and online == true)
+                local ids = { 5, 3, 2 }
+                if scenario == "older" then
+                    ids = {}
+                    for index = 1, 151 do ids[index] = (152-index)*3 end
+                elseif scenario == "gapped" then ids = { 6, 4, 3, 2 }
+                elseif scenario == "missing" then ids = { 5, 2 } end
+                local result = {}
+                for index = 1, math.min(count, #ids) do
+                    result[index] = {
+                        snapshot_id = ids[index],
+                        world_file = string.format("session/SESSION/%010d", ids[index]),
+                    }
+                end
+                result[1], result[#result] = result[#result], result[1]
+                return result, count < #ids
+            end,
+            TruncateSnapshots = function(_, session, offset)
+                assert(session == "SESSION" and offset == expected_offset)
+                truncated = truncated + 1
+                if scenario == "truncate" then error("partial native failure") end
+                if scenario ~= "noop" then selected = "session/SESSION/0000000003" end
+            end,
+            GetWorldSessionFile = function(_, session)
+                assert(session == "SESSION")
+                return selected
+            end,
+        }
+        WorldRollbackFromSim = function(count)
+            assert(count == 0 and selected == "session/SESSION/0000000003")
+            reset = reset + 1
+            if scenario == "reset" then error("reset failed after truncation") end
+        end
+        require("dst_server.wire").reply(function()
+            return require("dst_server.commands").rollback_to_snapshot({
+                session_id = scenario == "session" and "STALE" or "SESSION",
+                snapshot_id = 3,
+            })
+        end)
+        local rejected = scenario == "missing" or scenario == "session"
+            or scenario == "shard" or scenario == "current" or scenario == "future"
+        assert(truncated == (rejected and 0 or 1))
+        local restarted = scenario == "success" or scenario == "gapped"
+            or scenario == "older" or scenario == "reset"
+        assert(reset == (restarted and 1 or 0))
+        """,
+        lua_runtime,
+    )
+    game, _ = make_game(output.decode())
+    wait = AsyncMock()
+    monkeypatch.setattr(game, "wait_reload", wait)
+
+    if scenario in {"success", "gapped", "older"}:
+        await game.world.rollback_to_snapshot("SESSION", 3)
+        wait.assert_awaited_once()
+    else:
+        partial = scenario in {"truncate", "noop", "reset"}
+        expected = IndeterminateCommandError if partial else RuntimeError
+        message = "may have been applied" if partial else "lua_error"
+        with pytest.raises(expected, match=message):
+            await game.world.rollback_to_snapshot("SESSION", 3)
+        wait.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -419,6 +660,16 @@ async def test_response_contract_rejects_invalid_results(
             "boolean",
         ),
         (lambda game: game.world.rollback(-1), ValueError, "non-negative"),
+        (
+            lambda game: game.world.rollback_to_snapshot("", 3),
+            ValueError,
+            "session_id",
+        ),
+        (
+            lambda game: game.world.rollback_to_snapshot("SESSION", 0),
+            ValueError,
+            "positive",
+        ),
         (lambda game: game.world.execute(""), ValueError, "must not be empty"),
         (
             lambda game: game.players.set_vitals("KU_TEST"),
@@ -452,7 +703,7 @@ async def test_response_contract_rejects_invalid_results(
         ),
         (lambda game: game.players.get(""), ValueError, "userid"),
     ],
-    ids=range(11),
+    ids=range(13),
 )
 async def test_public_api_rejects_invalid_values(
     invoke: Invocation,

@@ -19,6 +19,7 @@ from dst_server.cluster.supervisor import (
     ShardSupervisorStatus,
 )
 from dst_server.events.server import Event, SavedEvent, SessionEvent
+from dst_server.models.snapshot import Snapshot, SnapshotCatalog, WorldSnapshotMetadata
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.lifecycle import ObservedLifecycleEvent
 from tests.helpers import FAKE_SERVER
@@ -101,6 +102,156 @@ def running_server(agent: ShardAgent) -> SimpleNamespace:
         driver=SimpleNamespace(wait_ready=AsyncMock()),
         recorder=SimpleNamespace(attributes=Mock(return_value={})),
     )
+
+
+@pytest.fixture
+def snapshot_catalog(
+    agent: ShardAgent, running_server: SimpleNamespace
+) -> SnapshotCatalog:
+    world_file = "session/SESSION/0000000031"
+    path = agent.cluster_path / agent.name / "save" / world_file
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"world snapshot")
+    path.with_suffix(".meta").write_bytes(
+        b'return {clock={cycles=20,phase="night"},'
+        b'seasons={season="winter",remainingdaysinseason=15}}\0'
+    )
+    catalog = SnapshotCatalog(
+        session_id="SESSION",
+        snapshots=(Snapshot(snapshot_id=31, world_file=world_file),),
+        has_more=True,
+    )
+    running_server.session_id = catalog.session_id
+    running_server.game = SimpleNamespace(
+        world=SimpleNamespace(snapshots=AsyncMock(return_value=catalog))
+    )
+    attach(agent, running_server)
+    return catalog
+
+
+async def test_list_snapshots_loads_native_metadata(
+    agent: ShardAgent,
+    running_server: SimpleNamespace,
+    snapshot_catalog: SnapshotCatalog,
+) -> None:
+    catalog = await agent.list_snapshots(3, before=50)
+
+    running_server.game.world.snapshots.assert_awaited_once_with(3, before=50)
+    assert catalog.session_id == snapshot_catalog.session_id
+    assert catalog.has_more
+    snapshot = catalog.snapshots[0]
+    assert snapshot.snapshot_id == 31
+    assert snapshot.world_file == snapshot_catalog.snapshots[0].world_file
+    assert snapshot.metadata is not None
+    assert snapshot.metadata.day == 21
+    assert snapshot.metadata.clock.phase == "night"
+    assert snapshot.metadata.seasons.season == "winter"
+    assert snapshot.metadata.seasons.remainingdaysinseason == 15
+    assert snapshot_catalog.snapshots[0].metadata is None
+
+
+@pytest.mark.parametrize("missing", ["world", "metadata", "world_file"])
+async def test_list_snapshots_missing_files_have_no_metadata(
+    agent: ShardAgent,
+    running_server: SimpleNamespace,
+    snapshot_catalog: SnapshotCatalog,
+    missing: str,
+) -> None:
+    snapshot = snapshot_catalog.snapshots[0].replace(metadata=WorldSnapshotMetadata())
+    path = agent.cluster_path / agent.name / "save/session/SESSION/0000000031"
+    if missing == "world_file":
+        snapshot = snapshot.replace(world_file=None)
+    else:
+        (path if missing == "world" else path.with_suffix(".meta")).unlink()
+    running_server.game.world.snapshots.return_value = snapshot_catalog.replace(
+        snapshots=(snapshot,)
+    )
+
+    catalog = await agent.list_snapshots()
+
+    assert catalog.snapshots[0].metadata is None
+
+
+@pytest.mark.parametrize(
+    ("session_id", "world_file"),
+    [
+        ("SESSION", "/session/SESSION/0000000031"),
+        ("SESSION", "session/SESSION/../0000000031"),
+        ("..", "session/../0000000031"),
+        ("SESSION", "session/OTHER/0000000031"),
+        ("SESSION", "session/SESSION/0000000032"),
+    ],
+)
+async def test_list_snapshots_rejects_paths_outside_native_snapshot(
+    agent: ShardAgent,
+    running_server: SimpleNamespace,
+    snapshot_catalog: SnapshotCatalog,
+    session_id: str,
+    world_file: str,
+) -> None:
+    running_server.game.world.snapshots.return_value = snapshot_catalog.replace(
+        session_id=session_id,
+        snapshots=(Snapshot(snapshot_id=31, world_file=world_file),),
+    )
+
+    with pytest.raises(ValueError, match="native snapshot path"):
+        await agent.list_snapshots()
+
+
+@pytest.mark.parametrize(
+    "component",
+    ["shard", "save", "session_root", "session", "world", "metadata", "dangling"],
+)
+async def test_list_snapshots_rejects_symlinks(
+    agent: ShardAgent,
+    snapshot_catalog: SnapshotCatalog,
+    component: str,
+) -> None:
+    source = agent.cluster_path / agent.name / "save/session/SESSION/0000000031"
+    path = {
+        "shard": agent.cluster_path / agent.name,
+        "save": source.parent.parent.parent,
+        "session_root": source.parent.parent,
+        "session": source.parent,
+        "world": source,
+        "metadata": source.with_suffix(".meta"),
+        "dangling": source.with_suffix(".meta"),
+    }[component]
+    target = path.with_name(path.name + ".real")
+    if component == "dangling":
+        path.unlink()
+    else:
+        path.rename(target)
+    path.symlink_to(target)
+    assert snapshot_catalog.snapshots[0].metadata is None
+
+    with pytest.raises(ValueError, match="symlink"):
+        await agent.list_snapshots()
+
+
+@pytest.mark.parametrize("changed", ["session", "attempt"])
+async def test_list_snapshots_rejects_world_changes_during_metadata_read(
+    agent: ShardAgent,
+    running_server: SimpleNamespace,
+    snapshot_catalog: SnapshotCatalog,
+    monkeypatch: pytest.MonkeyPatch,
+    changed: str,
+) -> None:
+    read = agent._read_snapshot_metadata
+
+    def change_world(catalog: SnapshotCatalog) -> SnapshotCatalog:
+        result = read(catalog)
+        if changed == "session":
+            running_server.session_id = "NEW-SESSION"
+        else:
+            attach(agent, SimpleNamespace(**vars(running_server)))
+        return result
+
+    monkeypatch.setattr(agent, "_read_snapshot_metadata", change_world)
+    assert snapshot_catalog.session_id == running_server.session_id
+
+    with pytest.raises(RuntimeError, match="world session changed"):
+        await agent.list_snapshots()
 
 
 async def test_child_stdout_and_stderr_share_the_agent_log_output(
