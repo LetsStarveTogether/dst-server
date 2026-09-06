@@ -9,7 +9,7 @@ from typing import BinaryIO
 import pytest
 from obstore.exceptions import PermissionDeniedError
 from py7zr import SevenZipFile
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from dst_server.cluster import archive
 from dst_server.cluster.config import ClusterConfig, ClusterSettings, ShardSettings
@@ -330,8 +330,19 @@ def test_consumer_failure_closes_export(saved_cluster: Path) -> None:
     assert exported.stream.closed
 
 
+@pytest.mark.parametrize(
+    ("object_prefix", "url_prefix"),
+    [
+        ("", None),
+        ("rooms/exports/", "https://downloads.example.test/"),
+        ("private/room-", "https://public.example.test/download?name="),
+    ],
+)
 def test_upload_uses_aws_environment_and_closes_stream_on_failure(
-    saved_cluster: Path, monkeypatch: pytest.MonkeyPatch
+    saved_cluster: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    object_prefix: str,
+    url_prefix: str | None,
 ) -> None:
     requests: list[tuple[str, bytes, dict[str, str]]] = []
     fail_upload = False
@@ -371,17 +382,31 @@ def test_upload_uses_aws_environment_and_closes_stream_on_failure(
             with archive.export_cluster(saved_cluster) as exported:
                 expected = exported.stream.read()
                 exported.stream.seek(6)
-                first = exported.upload()
-                second = exported.upload()
-                assert first != second
-                for key in (first, second):
-                    assert re.fullmatch(
-                        rf"[0-9A-HJKMNP-TV-Z]{{26}}/{re.escape(exported.filename)}",
-                        key,
+                first = exported.upload(
+                    object_prefix=object_prefix, url_prefix=url_prefix
+                )
+                second = exported.upload(
+                    object_prefix=object_prefix, url_prefix=url_prefix
+                )
+                assert first == second
+                for result in (first, second):
+                    assert result.key == object_prefix + exported.filename
+                    assert result.url == (
+                        None
+                        if url_prefix is None
+                        else url_prefix + result.key.rsplit("/", 1)[-1]
                     )
                 assert [path for path, _, _ in requests] == [
-                    f"/archive-test/{key}" for key in (first, second)
+                    f"/archive-test/{result.key}" for result in (first, second)
                 ]
+                for invalid in (
+                    {"object_prefix": 123},
+                    {"url_prefix": False},
+                    {"object_prefix": "/private/"},
+                ):
+                    with pytest.raises(ValidationError):
+                        exported.upload(**invalid)  # ty: ignore[invalid-argument-type]
+                assert len(requests) == 2
                 assert not exported.stream.closed
             assert exported.stream.closed
             fail_upload = True
@@ -389,7 +414,7 @@ def test_upload_uses_aws_environment_and_closes_stream_on_failure(
                 pytest.raises(PermissionDeniedError, match="403"),
                 archive.export_cluster(saved_cluster) as failed,
             ):
-                failed.upload()
+                failed.upload(object_prefix=object_prefix, url_prefix=url_prefix)
             assert failed.stream.closed
             assert len(requests) == 3
             assert [body for _, body, _ in requests[:2]] == [expected, expected]

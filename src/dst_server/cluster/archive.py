@@ -8,9 +8,9 @@ from datetime import UTC, datetime
 from ntpath import isreserved
 from pathlib import Path
 from tempfile import TemporaryFile
-from typing import BinaryIO
+from typing import Annotated, BinaryIO
 
-from ulid import ULID
+from pydantic import ConfigDict, Field, validate_call
 
 from dst_server.klei_id import encode_klei_id
 
@@ -23,23 +23,38 @@ CLAN_PRIVACY = 3
 
 
 @dataclass(frozen=True, slots=True)
+class ArchiveUploadResult:
+    key: str
+    url: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ClusterArchive:
     filename: str
     stream: BinaryIO
 
-    def upload(self) -> str:
-        """Upload to R2 using AWS environment variables and return the object key."""
+    @validate_call(config=ConfigDict(strict=True))
+    def upload(
+        self,
+        *,
+        object_prefix: Annotated[str, Field(pattern=r"^(?:[^/]|$)")] = "",
+        url_prefix: str | None = None,
+    ) -> ArchiveUploadResult:
+        """Upload using AWS environment variables and literal key/URL prefixes."""
         from obstore.store import S3Store
 
         store = S3Store(region="auto")
-        key = f"{ULID()}/{self.filename}"
+        key = f"{object_prefix}{self.filename}"
         self.stream.seek(0)
         store.put(
             key,
             self.stream,
             attributes={"Content-Type": "application/x-7z-compressed"},
         )
-        return key
+        return ArchiveUploadResult(
+            key=key,
+            url=None if url_prefix is None else url_prefix + key.rsplit("/", 1)[-1],
+        )
 
 
 @contextmanager

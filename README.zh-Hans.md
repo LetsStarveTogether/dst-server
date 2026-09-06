@@ -725,12 +725,25 @@ from pathlib import Path
 from dst_server.cluster.archive import export_cluster
 
 with export_cluster(Path("/srv/dst/000")) as archive:
-    key = archive.upload()
+    result = archive.upload(
+        object_prefix="rooms/exports/",
+        url_prefix="https://downloads.example.com/",
+    )
 
-print(key)
+print(result.key)
+print(result.url)
 ```
 
-`upload()` 从流开头上传，返回 `<ULID>/<归档文件名>`，独立前缀避免同秒覆盖。
+`upload()` 从流开头上传，返回含 `key` 和 `url` 字段的 `ArchiveUploadResult`。
+对象 key 为 `object_prefix + archive.filename`，`object_prefix` 默认为空字符串。
+归档文件名仍为 `DST-<room-id>-<UTC timestamp>.7z`，时间戳精确到秒。
+使用相同前缀再次上传同名归档时，key 和 URL 保持相同，并替换原对象。
+未传入 `url_prefix` 时，`url` 为 `None`；否则严格等于 `url_prefix + key.rsplit("/", 1)[-1]`。
+两个前缀都是显式 SDK 参数，按字面拼接。
+`object_prefix` 不能以 `/` 开头，避免存储后端将它剥离后导致返回 key 与实际对象不一致。
+所需的 `/` 或 `?file=` 等分隔符需自行包含。
+查询前缀和末尾分隔符都会保留，URL 不会根据桶名或 S3 endpoint 推导。
+S3 配置仍使用上述 AWS 环境变量，两个前缀没有对应的环境变量。
 `S3Store(region="auto")` 使用 [R2 的 `auto` 区域](https://developers.cloudflare.com/r2/api/s3/api/#bucket-region)，无需设置 `AWS_REGION`。
 [obstore 处理 multipart](https://developmentseed.org/obstore/latest/api/put/)，异常向调用方传播，本地临时文件仍会清理。
 失败上传的远端分片不保证立即清理；R2 默认七天后清理，可通过 [生命周期规则](https://developers.cloudflare.com/r2/buckets/object-lifecycles/) 修改。

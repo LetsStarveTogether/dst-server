@@ -781,13 +781,25 @@ from pathlib import Path
 from dst_server.cluster.archive import export_cluster
 
 with export_cluster(Path("/srv/dst/000")) as archive:
-    key = archive.upload()
+    result = archive.upload(
+        object_prefix="rooms/exports/",
+        url_prefix="https://downloads.example.com/",
+    )
 
-print(key)
+print(result.key)
+print(result.url)
 ```
 
-`upload()` reads from the start of the stream and returns `<ULID>/<archive filename>`.
-Separate prefixes prevent overwrites within the same second.
+`upload()` reads from the start of the stream and returns `ArchiveUploadResult` with `key` and `url` fields.
+The object key is `object_prefix + archive.filename`; `object_prefix` defaults to an empty string.
+The filename remains `DST-<room-id>-<UTC timestamp>.7z`, with the timestamp precise to seconds.
+Uploading the same filename with the same prefixes reuses the key and URL and replaces the existing object.
+`url` is `None` unless `url_prefix` is supplied; otherwise it is exactly `url_prefix + key.rsplit("/", 1)[-1]`.
+Both prefixes are explicit SDK arguments and are concatenated literally.
+`object_prefix` must not begin with `/`, which the storage backend would otherwise strip from the key.
+Supply any required separators, such as `/` or `?file=`, yourself.
+Query prefixes and trailing separators are preserved, and the URL is never inferred from the bucket or S3 endpoint.
+S3 configuration still uses the AWS environment variables above; there are no environment variables for these prefixes.
 `S3Store(region="auto")` uses [R2's `auto` region](https://developers.cloudflare.com/r2/api/s3/api/#bucket-region), so `AWS_REGION` is unnecessary.
 [obstore handles multipart uploads](https://developmentseed.org/obstore/latest/api/put/); errors propagate to the caller, and local temporary files are still cleaned up.
 Remote parts from failed uploads may remain; R2 removes them after seven days by default.
