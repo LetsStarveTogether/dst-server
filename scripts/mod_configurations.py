@@ -367,6 +367,15 @@ MOD_CONFIGURATIONS: dict[int, dict[str, LuaValue]] = {
         "sort_chest": True,
         "sort_dragonflychest": True,
     },
+    # Stacked Trade 1.2.1 defaults; antlion can hang: docs/stacked-trade-review.md.
+    3046339764: {
+        "antlion": True,
+        "birdcage": True,
+        "mermking": True,
+        "monkeyisland_portal": False,
+        "monkeyqueen": True,
+        "pigking": True,
+    },
     1981709850: {
         "character": "wendy",
         "clean_interval": 300,

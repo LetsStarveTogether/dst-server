@@ -47,13 +47,13 @@ TEMPLATES = (
         50,
         55,
         {"forest", "cave"},
-        frozenset({1803285852, 2189004162, 2950657933, 3223103565}),
+        frozenset({1803285852, 2189004162, 2950657933, 3223103565, 3046339764}),
     ),
     (
         70,
         55,
         {"forest", "cave"},
-        frozenset({1803285852, 2189004162, 2950657933, 3223103565}),
+        frozenset({1803285852, 2189004162, 2950657933, 3223103565, 3046339764}),
     ),
     (100, 90, {"afk"}, frozenset({1981709850})),
     (110, 26, {"forest", "cave"}, frozenset()),
@@ -207,9 +207,10 @@ def test_historical_mod_options_match_generated_script(
         historical = _historical_mod_overrides(
             root / str(legacy_number) / shard_name / "modoverrides.lua"
         )
-        assert set(generated.entries) == set(historical)
-        for mod_name, generated_override in generated.entries.items():
-            raw_override = cast(dict[str, LuaValue], historical[mod_name])
+        assert historical.keys() <= generated.entries.keys()
+        for mod_name, raw_value in historical.items():
+            generated_override = generated.entries[mod_name]
+            raw_override = cast(dict[str, LuaValue], raw_value)
             assert generated_override.enabled is raw_override["enabled"]
             raw_options = cast(
                 dict[str, LuaValue],
@@ -273,13 +274,30 @@ def test_room_configuration_round_trip(
     )
 
 
-def test_every_historical_mod_has_explicit_configuration() -> None:
+def test_every_template_mod_has_explicit_configuration() -> None:
     expected_ids = frozenset().union(*(template[3] for template in TEMPLATES))
 
     assert set(MOD_CONFIGURATIONS) == expected_ids
     assert MOD_CONFIGURATIONS[1467214795]["游戏功能"] is False
     assert MOD_CONFIGURATIONS[3223103565]["SIB"] is False
     assert MOD_CONFIGURATIONS[3223103565]["SSB"] is False
+
+
+@pytest.mark.parametrize("number", [50, 70])
+def test_semi_rooms_enable_stacked_trade_with_workshop_defaults(number: int) -> None:
+    cluster = build(number, token=TOKEN, cluster_key=CLUSTER_KEY)
+
+    for shard in cluster.shards.values():
+        override = shard.mods.entries["workshop-3046339764"]
+        assert override.enabled is True
+        assert override.configuration_options == {
+            "antlion": True,
+            "birdcage": True,
+            "mermking": True,
+            "monkeyisland_portal": False,
+            "monkeyqueen": True,
+            "pigking": True,
+        }
 
 
 def test_pure_survival_does_not_copy_room_nine_temporary_mod() -> None:
