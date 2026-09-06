@@ -343,17 +343,9 @@ async def test_export_restores_world_and_encoded_player_save(tmp_path: Path) -> 
     ):
         archive.extractall(tmp_path / "restored")
     restored = tmp_path / "restored" / "cluster"
-    source_player = (
-        source / "forest" / "save" / "session" / original.session_id / f"{userid}_"
-    )
-    restored_player_directory = (
-        restored
-        / "forest"
-        / "save"
-        / "session"
-        / original.session_id
-        / encode_klei_id(userid)
-    )
+    session = Path("forest/save/session") / original.session_id
+    source_player = source / session / f"{userid}_"
+    restored_player_directory = restored / session / encode_klei_id(userid)
     assert {path.name: path.read_bytes() for path in source_player.iterdir()} == {
         path.name: path.read_bytes() for path in restored_player_directory.iterdir()
     }

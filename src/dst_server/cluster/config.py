@@ -2,11 +2,10 @@ import os
 from collections.abc import Mapping
 from configparser import ConfigParser
 from configparser import Error as ConfigError
-from contextlib import AbstractContextManager
 from ipaddress import IPv4Address
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import TYPE_CHECKING, Annotated, ClassVar, Literal, Self
+from typing import Annotated, ClassVar, Literal, Self
 from warnings import warn
 
 from pydantic import (
@@ -28,9 +27,6 @@ from .overrides import (
     WorldgenOverride,
 )
 from .world import WorldOverrides
-
-if TYPE_CHECKING:
-    from .archive import ClusterArchive
 
 type Port = Annotated[int, Field(ge=1024, le=65535)]
 type IniText = Annotated[str, Field(pattern=r"^[^\x00\r\n]*$")]
@@ -687,22 +683,6 @@ class ClusterConfig(RevalidatedFrozenModel):
         return WorkshopDownloads(
             items=frozenset(workshop_items),
             collections=validated.downloads.collections,
-        )
-
-    def export(
-        self,
-        directory: Path,
-        *,
-        room_id: str | None = None,
-        encode_user_path: bool = True,
-    ) -> AbstractContextManager[ClusterArchive]:
-        from .archive import export_cluster
-
-        return export_cluster(
-            directory,
-            configuration=self,
-            room_id=room_id,
-            encode_user_path=encode_user_path,
         )
 
     def save(  # ruff: ignore[complex-structure, too-many-branches]

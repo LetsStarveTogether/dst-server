@@ -98,8 +98,8 @@ def test_export_round_trip_and_cleanup(
     }
     configuration = ClusterConfig.load(saved_cluster)
     destination = tmp_path / "extracted"
-    with configuration.export(
-        saved_cluster, encode_user_path=encode_user_path
+    with archive.export_cluster(
+        saved_cluster, configuration=configuration, encode_user_path=encode_user_path
     ) as exported:
         assert re.fullmatch(r"DST-001-\d{8}T\d{6}Z\.7z", exported.filename)
         assert exported.stream.read(6) == b"7z\xbc\xaf\x27\x1c"
@@ -246,7 +246,7 @@ def test_export_rejects_configuration_that_loses_saved_shards(
     subset = configuration.replace(shards={"forest": configuration.shards["forest"]})
     with (
         pytest.raises(ValueError, match="shard topology"),
-        subset.export(saved_cluster),
+        archive.export_cluster(saved_cluster, configuration=subset),
     ):
         pytest.fail("an existing shard was silently omitted")
 
@@ -261,7 +261,9 @@ def test_export_rejects_inconsistent_preserved_encoding(saved_cluster: Path) -> 
     )
     with (
         pytest.raises(ValueError, match=r"preserve.*encoding"),
-        changed.export(saved_cluster, encode_user_path=False),
+        archive.export_cluster(
+            saved_cluster, configuration=changed, encode_user_path=False
+        ),
     ):
         pytest.fail("player files were exported with incompatible settings")
 
@@ -296,11 +298,7 @@ def test_export_shard_index_preserves_world_and_removes_credentials(
     original_bytes = source.read_bytes()
     before = _literal_return_table(source, "test shard index")
 
-    exported = (
-        archive._export_shard_index(source)
-        if convert
-        else archive._export_shard_index(source, encode_user_path=False)
-    )
+    exported = archive._export_shard_index(source, encode_user_path=convert)
 
     assert source.read_bytes() == original_bytes
     assert exported.startswith(b"KLEI     1 return ")

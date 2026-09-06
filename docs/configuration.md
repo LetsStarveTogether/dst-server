@@ -145,7 +145,8 @@ SDK 内部使用匿名 `TemporaryFile`，`archive.stream` 支持读取和定位�
 默认文件名形如 `DST-001-20260908T010203Z.7z`，由目录名或指定的 `room_id` 与 UTC 时间组成。
 归档使用 ZSTD 级别 22 压缩，请用 `py7zr` 或 `7-Zip-zstd` 读取；原版 `7z` 不一定提供该解码器。
 
-也可先用 `config = ClusterConfig.load(directory)` 读取配置，再调用 `with config.export(directory) as archive:`。
+也可先用 `config = ClusterConfig.load(directory)` 读取配置。
+调用 `with export_cluster(directory, configuration=config) as archive:` 时可复用该配置对象。
 目录参数始终必填，因为配置模型不拥有磁盘中的存档文件。
 默认 `encode_user_path=True` 会将玩家目录转换为游戏使用的编码，并同步导出配置与 `shardindex` 中的标志。
 传入 `encode_user_path=False` 会保留原设置与玩家目录名。
