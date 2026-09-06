@@ -33,7 +33,6 @@ Every Agent owns one restartable game process.
    Each room number selects one ten-port host slot in `30000–32999`.
    A room supports at most four shards and publishes only the ports its shards use.
    Concurrent rooms must use distinct slots.
-
 4. Reload the rootless systemd manager and start a generated Pod:
 
    ```shell
@@ -43,6 +42,10 @@ Every Agent owns one restartable game process.
 
 For a rootful deployment, use `/srv/dst` as `--cluster-root` and `/etc/containers/systemd` as `--quadlet-dir`.
 Omit `--user` from its systemctl commands.
+For rootful containers that reuse the host's DNS over TLS, see [Container DNS](docs/configuration.md#容器-dns).
+Mod downloads use the native game-server updater by default, with up to five attempts sharing one 30-minute deadline.
+Set `DST_SERVER_MOD_UPDATER=steamcmd` to use the independent SteamCMD backend during startup.
+See [Mod updaters](docs/mods.md) for SDK usage, compatibility checks, and backend selection.
 
 Images use `:<game-version>` as their stable version tag.
 `:latest` and `:beta` are moving channel aliases.
@@ -78,16 +81,19 @@ All containers mount the same cluster directory at `/cluster` and use the image'
 The master exposes the cluster RPC socket at `/cluster/.dst-server.sock` with owner-only access.
 
 The controller waits for the complete configured shard roster before preparing or starting any game process.
-The first preparation of a configuration revision validates the shared tree and updates its required server Mods.
-An explicit Mod refresh requires `stop()`, `update_mods()`, then `start()`.
+Cluster startup updates the required server Mods before starting game processes.
+Cluster `restart()` stops every game process before updating their shared Mods and starting them again.
+An explicit Mod refresh uses `stop()`, `update_mods()`, then `start()`; the last call reuses that successful update.
+Adopting running Agents and recovering an individual shard reuse the installed Mods.
 
 Each Agent supervises its own game process and retries bounded transient failures.
 An exhausted retry budget or a lost Agent causes the controller to stop the remaining game processes.
 After retry-budget fail-close, the Agent daemons and public RPC stay available for diagnosis and recovery.
 Losing the master container disconnects RPC until systemd restarts the master and its bound secondaries.
 
-Container health checks monitor each Agent heartbeat, and systemd restarts failed containers.
-See [Runtime architecture](docs/python-sdk-telemetry-flow.md) for lifecycle states and failure boundaries.
+Each Agent sends a native watchdog notification every 60 seconds through Podman's systemd notification socket.
+Systemd restarts a container after five minutes without a notification; no heartbeat file or periodic check process is used.
+See [Runtime architecture](docs/runtime.md) for lifecycle states and failure boundaries.
 
 ## Cluster RPC
 
@@ -123,7 +129,7 @@ Set `DST_SERVER_TELEMETRY_PROFILE=off|critical|history` to select the event prof
 Standard `OTEL_EXPORTER_OTLP_*` variables configure export transport but do not enable event hooks.
 
 Install `dst-server[otel]` for OTLP export or `dst-server[klei]` for Klei build and lobby services.
-See [Game events and OpenTelemetry](docs/opentelemetry-game-events.md) for the data and failure boundaries.
+See [Game events and OpenTelemetry](docs/telemetry.md) for the data and failure boundaries.
 
 ## Lua Annotations
 
@@ -135,11 +141,5 @@ dst-annotations dst-scripts/scripts/components --output components_def.lua
 
 ## Documentation
 
-- [Cluster architecture and configuration](docs/dedicated-server-configuration.md)
-- [Dedicated server command-line options](docs/dedicated-server-options.md)
-- [`-cloudserver` IPC contract](docs/cloudserver-ipc.md)
-- [Runtime architecture](docs/python-sdk-telemetry-flow.md)
-- [Game events and OpenTelemetry](docs/opentelemetry-game-events.md)
+- [Guides: configuration, runtime, telemetry and Mods](docs/README.md)
 - [DST Lua source index](dst-scripts/index/README.md)
-
-Detailed project documentation is maintained in Simplified Chinese.

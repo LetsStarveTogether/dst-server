@@ -33,7 +33,6 @@
    每个房间编号会在 `30000–32999` 中选择一个包含十个宿主机端口的槽位。
    每个房间最多支持四个分片，并且只发布实际使用的端口。
    同时运行的房间必须使用不同槽位。
-
 4. 重载 rootless systemd 管理器并启动生成的 Pod：
 
    ```shell
@@ -43,6 +42,10 @@
 
 rootful 部署使用 `/srv/dst` 作为 `--cluster-root`，使用 `/etc/containers/systemd` 作为 `--quadlet-dir`。
 其 systemctl 命令应省略 `--user`。
+rootful 容器复用宿主机 DNS over TLS 的配置见 [容器 DNS](docs/configuration.md#容器-dns)。
+Mod 下载默认使用游戏服务端原生更新器，最多尝试五次，共用 30 分钟总期限。
+设置 `DST_SERVER_MOD_UPDATER=steamcmd` 可在启动时使用独立 SteamCMD 后端。
+SDK 用法、兼容性验证与后端选型见 [Mod 更新器](docs/mods.md)。
 
 镜像以 `:<游戏版本号>` 作为稳定版本标签。
 `:latest` 和 `:beta` 是滚动渠道别名。
@@ -78,16 +81,19 @@ FIFO 可以执行任意服务端 Lua，必须与游戏进程处于同一信任�
 主分片在 `/cluster/.dst-server.sock` 提供仅所有者可访问的集群 RPC。
 
 控制器会等待配置中的完整 shard roster，再准备或启动任何游戏进程。
-每个配置 revision 的首次准备会验证共享目录，并更新所需的服务端 Mod。
-显式刷新 Mod 时必须依次调用 `stop()`、`update_mods()` 和 `start()`。
+集群启动会先更新所需的服务端 Mod，再启动游戏进程。
+集群 `restart()` 会先停止全部游戏进程，更新共享 Mod 后再启动。
+显式刷新 Mod 可依次调用 `stop()`、`update_mods()` 和 `start()`；最后一步复用刚刚成功的更新。
+接管运行中的 Agent 或恢复单个分片时，会复用已安装的 Mod。
 
 每个 Agent 独立监督自己的游戏进程，并对短暂故障进行有界重试。
 重试预算耗尽或 Agent 丢失时，控制器会停止其余游戏进程。
 重试预算耗尽并 fail-close 后，Agent daemon 和公开 RPC 会保持可用，以便诊断和恢复。
 主分片容器丢失时 RPC 会暂时断开，直到 systemd 重启主分片及其绑定的次分片。
 
-容器健康检查监控各 Agent 的心跳，systemd 负责重启失败的容器。
-生命周期状态和故障边界见[运行时架构](docs/python-sdk-telemetry-flow.md)。
+各 Agent 每 60 秒通过 Podman 的 systemd 通知 socket 发送一次原生 watchdog 通知。
+连续五分钟未收到通知时，systemd 会重启容器；无需心跳文件或定时启动检查进程。
+生命周期状态和故障边界见[运行时架构](docs/runtime.md)。
 
 ## 集群 RPC
 
@@ -123,7 +129,7 @@ asyncio.run(main())
 标准 `OTEL_EXPORTER_OTLP_*` 环境变量只配置导出传输，不会启用事件 Hook。
 
 安装 `dst-server[otel]` 可启用 OTLP 导出，安装 `dst-server[klei]` 可查询 Klei 构建和 Lobby 服务。
-数据与故障边界见[游戏事件与 OpenTelemetry](docs/opentelemetry-game-events.md)。
+数据与故障边界见[游戏事件与 OpenTelemetry](docs/telemetry.md)。
 
 ## Lua 注解
 
@@ -135,9 +141,5 @@ dst-annotations dst-scripts/scripts/components --output components_def.lua
 
 ## 文档
 
-- [集群架构与配置](docs/dedicated-server-configuration.md)
-- [专用服务器启动参数](docs/dedicated-server-options.md)
-- [`-cloudserver` IPC 契约](docs/cloudserver-ipc.md)
-- [运行时架构](docs/python-sdk-telemetry-flow.md)
-- [游戏事件与 OpenTelemetry](docs/opentelemetry-game-events.md)
+- [使用指南：配置、运行机制、遥测与 Mod 更新](docs/README.md)
 - [DST Lua 源码索引](dst-scripts/index/README.md)
