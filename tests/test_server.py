@@ -457,6 +457,32 @@ async def test_save_timeout_includes_request(
     assert request_started.is_set()
 
 
+@pytest.mark.parametrize("phase", ["lock", "barrier", "request"])
+async def test_lifecycle_save_timeout_covers_every_wait(phase: str) -> None:
+    lifecycle = Lifecycle()
+    request = AsyncMock(side_effect=asyncio.Event().wait)
+    if phase == "lock":
+        await lifecycle.save_lock.acquire()
+    elif phase == "barrier":
+        lifecycle._save_confirmation_barrier = RequestState(RequestStatus(sent=True))
+    watchdog = asyncio.timeout(1)
+
+    try:
+        with pytest.raises(TimeoutError):
+            async with watchdog:
+                await lifecycle.wait_for_save(request, completion_timeout=0.01)
+        assert not watchdog.expired()
+    finally:
+        if lifecycle.save_lock.locked():
+            lifecycle.save_lock.release()
+        lifecycle.close()
+
+    if phase == "request":
+        request.assert_awaited_once()
+    else:
+        request.assert_not_awaited()
+
+
 async def test_save_prewrite_failure_does_not_create_confirmation_barrier() -> None:
     server = Server(ServerConfig(shard="save-prewrite-failure"))
 

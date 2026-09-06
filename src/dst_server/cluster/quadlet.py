@@ -1021,14 +1021,14 @@ class QuadletApplication(RevalidatedFrozenModel):
                 f"{base}-{_escape_unit_name(name)}.container"
                 for name in secondary_names
             ),
-            stop_timeout=40,
+            stop_timeout=360,
             notify=True,
             restart="on-failure",
             kill_mode="control-group",
             watchdog_sec=300,
             watchdog_signal="SIGKILL",
             timeout_start_sec=1800,
-            timeout_stop_sec=50,
+            timeout_stop_sec=420,
         )
         secondaries = tuple(
             ContainerUnit(
@@ -1059,14 +1059,14 @@ class QuadletApplication(RevalidatedFrozenModel):
                 pod=pod_source,
                 volumes=(volume,),
                 container_name=_podman_name(f"{base}-{_escape_unit_name(shard_name)}"),
-                stop_timeout=40,
+                stop_timeout=360,
                 notify=True,
                 restart="on-failure",
                 kill_mode="control-group",
                 watchdog_sec=300,
                 watchdog_signal="SIGKILL",
                 timeout_start_sec=1800,
-                timeout_stop_sec=50,
+                timeout_stop_sec=420,
             )
             for shard_name in secondary_names
         )

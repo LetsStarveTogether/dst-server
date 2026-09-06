@@ -2,7 +2,9 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from ulid import ULID
@@ -384,6 +386,60 @@ async def test_abstract_registry_registers_and_unregisters_remote_agent(
             assert controller.endpoint.name == "Caves"
         await task
         await controller.unregistered.wait()
+
+
+@pytest.mark.parametrize("phase", ["connect", "register", "failed"])
+async def test_registry_requests_time_out_and_release_connection(
+    phase: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def blocked(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        await asyncio.Event().wait()
+
+    agent = AgentStub([])
+    servant = SimpleNamespace(aclose=AsyncMock())
+    registry = SimpleNamespace(
+        register=AsyncMock(return_value=SimpleNamespace(result=None)),
+        failed=AsyncMock(return_value=SimpleNamespace(result=None)),
+    )
+    stream = Mock()
+    client = Mock()
+    client.bootstrap.return_value.cast_as.return_value = registry
+    client.on_disconnect.return_value = asyncio.get_running_loop().create_future()
+    connect = AsyncMock(return_value=stream)
+    operation = connect if phase == "connect" else getattr(registry, phase)
+    operation.side_effect = blocked
+    monkeypatch.setattr(
+        daemon,
+        "capnp",
+        SimpleNamespace(
+            AsyncIoStream=SimpleNamespace(create_unix_connection=connect),
+            TwoPartyClient=Mock(return_value=client),
+        ),
+    )
+    monkeypatch.setattr(daemon, "AgentServant", Mock(return_value=servant))
+    monkeypatch.setattr(daemon, "unwrap_outcome", Mock())
+    monkeypatch.setattr(daemon, "DEFAULT_CONNECT_TIMEOUT", 0.01)
+    monkeypatch.setattr(daemon, "DEFAULT_LIFECYCLE_TIMEOUT", 0.01)
+    monkeypatch.setattr(daemon, "REGISTRY_FAILURE_TIMEOUT", 0.01)
+    if phase == "failed":
+        agent.failures.put_nowait(object())
+    watchdog = asyncio.timeout(1)
+
+    with pytest.raises(TimeoutError):
+        async with watchdog:
+            await daemon._registered_cycle(agent, "registry")  # ty: ignore[invalid-argument-type]
+
+    assert not watchdog.expired()
+    operation.assert_awaited_once()
+    servant.aclose.assert_awaited_once()
+    if phase == "connect":
+        client.close.assert_not_called()
+        stream.close.assert_not_called()
+    else:
+        client.close.assert_called_once()
+        stream.close.assert_called_once()
 
 
 async def test_local_agent_failure_is_reported_without_rpc() -> None:

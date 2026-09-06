@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib import import_module
 from os import PathLike, fspath
-from typing import Any, Self
+from typing import Any, Self, cast
 
 from pydantic import JsonValue
 from ulid import ULID
@@ -17,6 +17,14 @@ from dst_server.game.validation import item_count, positive_timeout
 from dst_server.game.world import MAX_SNAPSHOT_PAGE_SIZE
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog
+from dst_server.timeouts import (
+    DEFAULT_COMMAND_TIMEOUT,
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_LIFECYCLE_TIMEOUT,
+    DEFAULT_RELOAD_TIMEOUT,
+    DEFAULT_SAVE_TIMEOUT,
+    RPC_TIMEOUT_MARGIN,
+)
 
 from .codec import decode_json_value, decode_model, encode_model
 from .errors import (
@@ -37,9 +45,15 @@ from .models import (
 )
 from .schema import SCHEMA_FINGERPRINT, load_schema
 
-DEFAULT_OPERATION_TIMEOUT = 30.0
 DEFAULT_BATCH_SIZE = 256
 MAX_UINT64 = 2**64 - 1
+_REQUEST_TIMEOUTS = {
+    "start": DEFAULT_LIFECYCLE_TIMEOUT,
+    "restart": DEFAULT_LIFECYCLE_TIMEOUT,
+    "updateMods": DEFAULT_LIFECYCLE_TIMEOUT,
+    "stop": 300.0,
+    "kill": 120.0,
+}
 capnp: Any = import_module("capnp")
 
 
@@ -141,7 +155,7 @@ class Subscription[RecordT]:
         capability: Any,
         decode: Callable[[Any], RecordT],
     ) -> None:
-        self._capability = capability
+        self._capability: Any = capability
         self._decode = decode
         self.closed = False
 
@@ -179,12 +193,14 @@ class Subscription[RecordT]:
         if self.closed:
             return
         try:
-            response = await self._capability.close()
+            async with asyncio.timeout(RPC_TIMEOUT_MARGIN):
+                response = await self._capability.close()
             _unit(unwrap_outcome(response.result))
         except capnp.KjException as error:
             raise DisconnectedError(str(error)) from error
         finally:
             self.closed = True
+            self._capability = None
 
 
 class _Remote:
@@ -196,8 +212,22 @@ class _Remote:
         mutation: bool = False,
         **arguments: object,
     ) -> Any:
+        timeout = _REQUEST_TIMEOUTS.get(
+            method, DEFAULT_COMMAND_TIMEOUT + 2 * RPC_TIMEOUT_MARGIN
+        )
+        if "timeout" in arguments:
+            duration = positive_timeout(cast("float", arguments["timeout"]))
+            arguments["timeout"] = duration
+            timeout = duration + 2 * RPC_TIMEOUT_MARGIN
         try:
-            response = await getattr(capability, method)(**arguments)
+            async with asyncio.timeout(timeout):
+                response = await getattr(capability, method)(**arguments)
+        except TimeoutError as error:
+            if mutation:
+                raise IndeterminateError from error
+            raise RemoteError(
+                ErrorInfo(ErrorCode.TIMEOUT, ULID(), "operation timed out")
+            ) from error
         except asyncio.CancelledError as error:
             if mutation:
                 raise IndeterminateError from error
@@ -218,20 +248,32 @@ class ClusterClient(_Remote):  # ruff: ignore[too-many-public-methods]
         self._closed = False
 
     @classmethod
-    async def connect(cls, path: str | PathLike[str]) -> Self:
+    async def connect(
+        cls,
+        path: str | PathLike[str],
+        *,
+        timeout: float = DEFAULT_CONNECT_TIMEOUT,
+    ) -> Self:
+        timeout = positive_timeout(timeout, "connection")
         address = fspath(path)
-        stream = await capnp.AsyncIoStream.create_unix_connection(address)
-        client = capnp.TwoPartyClient(stream)
+        stream = client = None
         try:
-            schema = load_schema()
-            bootstrap = client.bootstrap().cast_as(schema.Bootstrap)
-            response = await bootstrap.connect(schemaFingerprint=SCHEMA_FINGERPRINT)
-            capability = unwrap_outcome(response.result)
+            async with asyncio.timeout(timeout):
+                stream = await capnp.AsyncIoStream.create_unix_connection(address)
+                client = capnp.TwoPartyClient(stream)
+                response = (
+                    await client
+                    .bootstrap()
+                    .cast_as(load_schema().Bootstrap)
+                    .connect(schemaFingerprint=SCHEMA_FINGERPRINT)
+                )
+                return cls(stream, client, unwrap_outcome(response.result))
         except BaseException:
-            client.close()
-            stream.close()
+            if client is not None:
+                client.close()
+            if stream is not None:
+                stream.close()
             raise
-        return cls(stream, client, capability)
 
     async def __aenter__(self) -> Self:
         return self
@@ -318,7 +360,7 @@ class ClusterClient(_Remote):  # ruff: ignore[too-many-public-methods]
     async def execute_all(
         self,
         source: str,
-        timeout: float = DEFAULT_OPERATION_TIMEOUT,
+        timeout: float = DEFAULT_COMMAND_TIMEOUT,
     ) -> tuple[ShardResult[str], ...]:
         values = await self._call(
             "executeAll", mutation=True, source=source, timeout=timeout
@@ -332,9 +374,7 @@ class ClusterClient(_Remote):  # ruff: ignore[too-many-public-methods]
     async def announce(self, message: str) -> None:
         _unit(await self._call("announce", mutation=True, message=message))
 
-    async def save(
-        self, timeout: float = DEFAULT_OPERATION_TIMEOUT
-    ) -> ClusterSaveResult:
+    async def save(self, timeout: float = DEFAULT_SAVE_TIMEOUT) -> ClusterSaveResult:
         value = await self._call("save", mutation=True, timeout=timeout)
         snapshot = _nullable(value.snapshot, lambda raw: int(_scalar(raw)))
         shards = tuple(
@@ -351,14 +391,14 @@ class ClusterClient(_Remote):  # ruff: ignore[too-many-public-methods]
             result.append(ShardResult(str(item.shard), value, error))
         return tuple(result)
 
-    async def reset(self, timeout: float = DEFAULT_OPERATION_TIMEOUT) -> None:
+    async def reset(self, timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
         _unit(await self._call("reset", mutation=True, timeout=timeout))
 
     async def rollback(
         self,
         count: int = 1,
         *,
-        timeout: float = DEFAULT_OPERATION_TIMEOUT,
+        timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
         _unit(
             await self._call(
@@ -369,7 +409,7 @@ class ClusterClient(_Remote):  # ruff: ignore[too-many-public-methods]
             )
         )
 
-    async def regenerate(self, timeout: float = DEFAULT_OPERATION_TIMEOUT) -> None:
+    async def regenerate(self, timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
         _unit(await self._call("regenerate", mutation=True, timeout=timeout))
 
     async def list_snapshots(
@@ -384,7 +424,7 @@ class ClusterClient(_Remote):  # ruff: ignore[too-many-public-methods]
         )
 
     async def rollback_to_day(
-        self, day: int, *, timeout: float = DEFAULT_OPERATION_TIMEOUT
+        self, day: int, *, timeout: float = DEFAULT_RELOAD_TIMEOUT
     ) -> Snapshot:
         day = item_count(day)
         if day > MAX_UINT64:
@@ -458,7 +498,7 @@ class _ShardClient(_Remote):
     async def execute(
         self,
         source: str,
-        timeout: float = DEFAULT_OPERATION_TIMEOUT,
+        timeout: float = DEFAULT_COMMAND_TIMEOUT,
     ) -> str:
         return str(
             _scalar(
@@ -468,7 +508,7 @@ class _ShardClient(_Remote):
             )
         )
 
-    async def save(self, timeout: float = DEFAULT_OPERATION_TIMEOUT) -> SavedEvent:
+    async def save(self, timeout: float = DEFAULT_SAVE_TIMEOUT) -> SavedEvent:
         return decode_model(
             SavedEvent,
             await self._call("save", mutation=True, timeout=timeout),
@@ -556,7 +596,7 @@ class ShardClient(_ShardClient):
         self,
         *,
         preserve_settings: bool = True,
-        timeout: float = DEFAULT_OPERATION_TIMEOUT,
+        timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
         _unit(
             await self._call(

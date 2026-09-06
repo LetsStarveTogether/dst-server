@@ -26,17 +26,28 @@ from dst_server.rpc.transport import (
     filesystem_rpc_server,
 )
 from dst_server.telemetry import TelemetrySettings
+from dst_server.timeouts import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_LIFECYCLE_TIMEOUT,
+    RPC_TIMEOUT_MARGIN,
+)
 
 from . import service
 from .agent import ShardAgent
 from .config import ShardName
 from .configuration import ConfigurationStore
-from .controller import AgentEndpoint, ClusterController
+from .controller import (
+    AGENT_KILL_TIMEOUT,
+    AGENT_STOP_TIMEOUT,
+    AgentEndpoint,
+    ClusterController,
+)
 
 capnp: Any = import_module("capnp")
 logger = Logger(__name__)
 RECONNECT_DELAY = 1.0
 WATCHDOG_INTERVAL = 60.0
+REGISTRY_FAILURE_TIMEOUT = AGENT_STOP_TIMEOUT + AGENT_KILL_TIMEOUT + RPC_TIMEOUT_MARGIN
 _SHARD_NAME = TypeAdapter(ShardName)
 
 type Shutdown = asyncio.Event
@@ -336,15 +347,17 @@ async def _registered_cycle(agent: ShardAgent, internal_address: str) -> None:
     disconnected: asyncio.Future[object] | None = None
     failure: asyncio.Task[object] | None = None
     try:
-        stream = await capnp.AsyncIoStream.create_unix_connection(
-            f"\0{internal_address}"
-        )
-        client = capnp.TwoPartyClient(stream)
-        registry = client.bootstrap().cast_as(load_schema().WorkerRegistry)
-        response = await registry.register(
-            schemaFingerprint=SCHEMA_FINGERPRINT,
-            agent=servant,
-        )
+        async with asyncio.timeout(DEFAULT_CONNECT_TIMEOUT):
+            stream = await capnp.AsyncIoStream.create_unix_connection(
+                f"\0{internal_address}"
+            )
+            client = capnp.TwoPartyClient(stream)
+            registry = client.bootstrap().cast_as(load_schema().WorkerRegistry)
+        async with asyncio.timeout(DEFAULT_LIFECYCLE_TIMEOUT):
+            response = await registry.register(
+                schemaFingerprint=SCHEMA_FINGERPRINT,
+                agent=servant,
+            )
         unwrap_outcome(response.result)
         disconnected = asyncio.ensure_future(client.on_disconnect())
         while True:
@@ -359,7 +372,8 @@ async def _registered_cycle(agent: ShardAgent, internal_address: str) -> None:
             if disconnected in done:
                 return
             failure.result()
-            response = await registry.failed()
+            async with asyncio.timeout(REGISTRY_FAILURE_TIMEOUT):
+                response = await registry.failed()
             unwrap_outcome(response.result)
             failure = None
     finally:

@@ -1,23 +1,29 @@
-# ruff: file-ignore[blocking-path-method-in-async-function, missing-return-type-undocumented-public-function]
+# ruff: file-ignore[blocking-path-method-in-async-function, invalid-argument-name, missing-return-type-undocumented-public-function]
 import asyncio
 import gc
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from ulid import ULID
 
 from dst_server.cluster.subscriptions import Broadcast
+from dst_server.events.server import SavedEvent
 from dst_server.models.snapshot import (
     Snapshot,
     SnapshotCatalog,
     SnapshotClock,
     WorldSnapshotMetadata,
 )
+from dst_server.rpc import client as rpc_client_module
+from dst_server.rpc import servants as rpc_servants_module
 from dst_server.rpc.client import ClusterClient, rpc_runtime
+from dst_server.rpc.codec import decode_model
 from dst_server.rpc.errors import (
     DisconnectedError,
     ErrorCode,
@@ -34,6 +40,11 @@ from dst_server.rpc.servants import (
 )
 from dst_server.rpc.transport import abstract_rpc_server, filesystem_rpc_server
 from dst_server.runtime import IndeterminateCommandError
+from dst_server.timeouts import (
+    DEFAULT_COMMAND_TIMEOUT,
+    DEFAULT_RELOAD_TIMEOUT,
+    DEFAULT_SAVE_TIMEOUT,
+)
 
 capnp: Any = pytest.importorskip("capnp")
 
@@ -83,13 +94,20 @@ class FakeShard:
         self.snapshot_requests: list[tuple[int, int | None]] = []
         self.rollback_request: tuple[str, int, float] | None = None
         self.rollback_error: BaseException | None = None
+        self.command_timeout: float | None = None
+        self.save_timeout: float | None = None
 
     async def status(self) -> ShardRuntimeStatus:
         return self.value
 
     async def execute(self, source: str, completion_timeout: float) -> str:
         assert completion_timeout > 0
+        self.command_timeout = completion_timeout
         return source
+
+    async def save(self, completion_timeout: float) -> SavedEvent:
+        self.save_timeout = completion_timeout
+        return SavedEvent(path="session/SESSION/0000000031", snapshot=31)
 
     async def list_snapshots(
         self, limit: int = 100, *, before: int | None = None
@@ -255,7 +273,210 @@ async def test_snapshot_client_limits_and_timeouts_are_validated_before_sending(
             assert controller.master.snapshot_requests == []
 
             await client.rollback_to_day(2**64 - 1)
-            assert controller.rollback_request == (2**64 - 1, 30.0)
+            assert controller.rollback_request == (2**64 - 1, DEFAULT_RELOAD_TIMEOUT)
+
+
+async def test_sdk_and_wire_timeout_defaults_match() -> None:
+    controller = FakeController()
+    with TemporaryDirectory(prefix="dst-rpc-timeout-defaults-") as directory:
+        async with connected(Path(directory), controller) as client:
+            shard = client.shard("Master")
+            await shard.execute("return 1")
+            await shard.save()
+            await client.rollback_to_day(21)
+            assert controller.master.command_timeout == DEFAULT_COMMAND_TIMEOUT
+            assert controller.master.save_timeout == DEFAULT_SAVE_TIMEOUT
+            assert controller.rollback_request == (21, DEFAULT_RELOAD_TIMEOUT)
+
+            raw_shard = await client._get_shard("Master")
+            result = await raw_shard.execute(source="return 2")
+            assert unwrap_outcome(result.result).value == "return 2"
+            result = await raw_shard.save()
+            assert (
+                decode_model(SavedEvent, unwrap_outcome(result.result)).snapshot == 31
+            )
+            result = await client._capability.rollbackToDay(day=21)
+            assert (
+                decode_model(Snapshot, unwrap_outcome(result.result)).snapshot_id == 31
+            )
+            assert controller.master.command_timeout == DEFAULT_COMMAND_TIMEOUT
+            assert controller.master.save_timeout == DEFAULT_SAVE_TIMEOUT
+            assert controller.rollback_request == (21, DEFAULT_RELOAD_TIMEOUT)
+
+
+def test_every_wire_timeout_has_the_matching_default() -> None:
+    expected = {
+        "Cluster": {
+            "executeAll": DEFAULT_COMMAND_TIMEOUT,
+            "save": DEFAULT_SAVE_TIMEOUT,
+            "reset": DEFAULT_RELOAD_TIMEOUT,
+            "rollback": DEFAULT_RELOAD_TIMEOUT,
+            "regenerate": DEFAULT_RELOAD_TIMEOUT,
+            "rollbackToDay": DEFAULT_RELOAD_TIMEOUT,
+        },
+        "Shard": {
+            "execute": DEFAULT_COMMAND_TIMEOUT,
+            "regenerateShard": DEFAULT_RELOAD_TIMEOUT,
+            "save": DEFAULT_SAVE_TIMEOUT,
+        },
+        "Agent": {
+            "waitSaved": DEFAULT_SAVE_TIMEOUT,
+            "waitGeneration": DEFAULT_RELOAD_TIMEOUT,
+            "reset": DEFAULT_RELOAD_TIMEOUT,
+            "rollback": DEFAULT_RELOAD_TIMEOUT,
+            "regenerate": DEFAULT_RELOAD_TIMEOUT,
+            "rollbackToSnapshot": DEFAULT_RELOAD_TIMEOUT,
+        },
+    }
+    schema = load_schema()
+    for interface, methods in expected.items():
+        for method, timeout in methods.items():
+            fields = getattr(schema, interface).schema.methods[method].param_type.fields
+            assert fields["timeout"].proto.slot.defaultValue.float64 == timeout
+
+
+@pytest.mark.parametrize(
+    "invalid_timeout", [0, -1, True, "invalid", float("inf"), float("nan")]
+)
+async def test_public_timeouts_are_validated_before_serialization(
+    invalid_timeout: Any,
+) -> None:
+    controller = FakeController()
+    with TemporaryDirectory(prefix="dst-rpc-timeout-validation-") as directory:
+        async with connected(Path(directory), controller) as client:
+            shard = client.shard("Master")
+            actions = (
+                lambda: client.execute_all("return 1", timeout=invalid_timeout),
+                lambda: client.save(timeout=invalid_timeout),
+                lambda: client.reset(timeout=invalid_timeout),
+                lambda: client.rollback(timeout=invalid_timeout),
+                lambda: client.regenerate(timeout=invalid_timeout),
+                lambda: client.rollback_to_day(21, timeout=invalid_timeout),
+                lambda: shard.execute("return 1", timeout=invalid_timeout),
+                lambda: shard.save(timeout=invalid_timeout),
+                lambda: shard.regenerate_shard(timeout=invalid_timeout),
+            )
+            for action in actions:
+                with pytest.raises(ValueError, match="timeout"):
+                    await action()
+            assert controller.rollback_request is None
+            assert controller.master.command_timeout is None
+            assert controller.master.save_timeout is None
+
+
+async def test_connection_timeout_covers_socket_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def wait_for_socket(_address: str) -> None:
+        await asyncio.Event().wait()
+
+    create_connection = AsyncMock(side_effect=wait_for_socket)
+    monkeypatch.setattr(
+        rpc_client_module,
+        "capnp",
+        SimpleNamespace(
+            AsyncIoStream=SimpleNamespace(create_unix_connection=create_connection)
+        ),
+    )
+    with pytest.raises(ValueError, match="timeout"):
+        await ClusterClient.connect("unused", timeout=True)
+    create_connection.assert_not_awaited()
+    with pytest.raises(TimeoutError):
+        await ClusterClient.connect("unused", timeout=0.01)
+    create_connection.assert_awaited_once_with("unused")
+
+
+async def test_subscription_close_timeout_releases_remote_subscription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = FakeController()
+    entered = asyncio.Event()
+
+    async def delayed_close(
+        _self: rpc_servants_module._SubscriptionServant, _context: Any
+    ) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        rpc_servants_module._SubscriptionServant, "close", delayed_close
+    )
+    monkeypatch.setattr(rpc_client_module, "RPC_TIMEOUT_MARGIN", 0.02)
+    with TemporaryDirectory(prefix="dst-rpc-close-timeout-") as directory:
+        async with connected(Path(directory), controller) as client:
+            subscription = await client.subscribe_logs()
+            assert controller.master.logs._subscriptions
+            with pytest.raises(TimeoutError):
+                await subscription.close()
+            assert entered.is_set()
+            assert subscription.closed
+            await subscription.close()
+            gc.collect()
+            for _ in range(10):
+                if not controller.master.logs._subscriptions:
+                    break
+                await asyncio.sleep(0)
+            assert not controller.master.logs._subscriptions
+
+
+async def test_connection_timeout_closes_incomplete_handshake() -> None:
+    entered = asyncio.Event()
+    closed = asyncio.Event()
+
+    class DelayedBootstrap(BootstrapServant):
+        async def connect(self, schemaFingerprint: str, _context: Any) -> None:
+            assert schemaFingerprint == SCHEMA_FINGERPRINT
+            entered.set()
+            await asyncio.Event().wait()
+
+        async def aclose(self) -> None:
+            await super().aclose()
+            closed.set()
+
+    with TemporaryDirectory(prefix="dst-rpc-handshake-timeout-") as directory:
+        path = Path(directory) / "cluster.sock"
+        async with (
+            rpc_runtime(),
+            filesystem_rpc_server(
+                path,
+                lambda: DelayedBootstrap(FakeController()),  # ty: ignore[invalid-argument-type]
+            ) as server,
+        ):
+            with pytest.raises(TimeoutError):
+                await ClusterClient.connect(path, timeout=0.02)
+            assert entered.is_set()
+            async with asyncio.timeout(1):
+                await closed.wait()
+            assert not server.connections
+
+
+async def test_request_deadlines_preserve_query_and_mutation_error_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = FakeController()
+    started = asyncio.Event()
+
+    async def delayed_status() -> ClusterStatus:
+        started.set()
+        await asyncio.Event().wait()
+        return controller.value
+
+    monkeypatch.setattr(controller, "status", delayed_status)
+    monkeypatch.setattr(rpc_client_module, "DEFAULT_COMMAND_TIMEOUT", 0.02)
+    monkeypatch.setattr(rpc_client_module, "RPC_TIMEOUT_MARGIN", 0)
+    monkeypatch.setitem(rpc_client_module._REQUEST_TIMEOUTS, "start", 0.02)
+    with TemporaryDirectory(prefix="dst-rpc-request-timeout-") as directory:
+        async with connected(Path(directory), controller) as client:
+            with pytest.raises(RemoteError) as failed:
+                await client.status()
+            assert failed.value.error.code is ErrorCode.TIMEOUT
+            assert started.is_set()
+            with pytest.raises(IndeterminateError):
+                await client.start()
+            assert controller.started.is_set()
+            controller.release.set()
+            async with asyncio.timeout(1):
+                await controller.completed.wait()
 
 
 @pytest.mark.parametrize(

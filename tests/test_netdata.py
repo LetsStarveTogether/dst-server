@@ -116,6 +116,13 @@ async def test_query_timeout_kills_and_reaps_process(tmp_path: Path) -> None:
     assert process_stopped(int(process_id.read_text(encoding="utf-8")))
 
 
+async def test_query_timeout_includes_waiting_for_a_query_slot(tmp_path: Path) -> None:
+    logs = make_logs(tmp_path)
+    async with logs._semaphore:
+        with pytest.raises(TimeoutError):
+            await logs.query(request(), completion_timeout=0.01)
+
+
 def test_query_validates_stable_semantics() -> None:
     since = datetime(2026, 9, 1, tzinfo=UTC)
 

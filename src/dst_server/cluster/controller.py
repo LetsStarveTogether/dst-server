@@ -27,6 +27,16 @@ from dst_server.rpc.models import (
 )
 from dst_server.rpc.models import ShardDesired as RpcShardDesired
 from dst_server.runtime import IndeterminateCommandError
+from dst_server.timeouts import (
+    DEFAULT_COMMAND_TIMEOUT,
+    DEFAULT_RELOAD_TIMEOUT,
+    DEFAULT_SAVE_TIMEOUT,
+    DEFAULT_STARTUP_TIMEOUT,
+    DEFAULT_STOP_TIMEOUT,
+    OUTPUT_DRAIN_TIMEOUT,
+    RPC_TIMEOUT_MARGIN,
+    timeout_scope,
+)
 
 from . import service
 from .config import ClusterConfig
@@ -39,13 +49,20 @@ from .configuration import (
     InvalidConfigurationError,
 )
 from .subscriptions import Broadcast, Subscription, SubscriptionOverflowError
+from .supervisor import MAX_ATTEMPTS, RETRY_DELAY
 
 logger = Logger(__name__)
-AGENT_CALL_TIMEOUT = 35.0
-AGENT_STATUS_TIMEOUT = 10.0
-AGENT_START_TIMEOUT = 1515.0
-AGENT_STOP_TIMEOUT = 32.0
-AGENT_KILL_TIMEOUT = 5.0
+AGENT_CALL_TIMEOUT = DEFAULT_COMMAND_TIMEOUT + RPC_TIMEOUT_MARGIN
+AGENT_STATUS_TIMEOUT = 30.0
+AGENT_START_TIMEOUT = (
+    MAX_ATTEMPTS * (DEFAULT_STARTUP_TIMEOUT + 2 * OUTPUT_DRAIN_TIMEOUT)
+    + (MAX_ATTEMPTS - 1) * RETRY_DELAY
+    + RPC_TIMEOUT_MARGIN
+)
+AGENT_STOP_TIMEOUT = (
+    DEFAULT_STOP_TIMEOUT + 2 * OUTPUT_DRAIN_TIMEOUT + RPC_TIMEOUT_MARGIN
+)
+AGENT_KILL_TIMEOUT = OUTPUT_DRAIN_TIMEOUT + RPC_TIMEOUT_MARGIN
 AGENT_RESTART_TIMEOUT = AGENT_START_TIMEOUT + AGENT_STOP_TIMEOUT
 CONTROLLER_CANCEL_TIMEOUT = 1.0
 PREPARE_ATTEMPTS = 3
@@ -473,43 +490,46 @@ class ClusterController:
     async def execute_all(
         self,
         source: str,
-        completion_timeout: float = 30,
+        completion_timeout: float = DEFAULT_COMMAND_TIMEOUT,
     ) -> tuple[ShardResult[str], ...]:
         completion_timeout = positive_timeout(completion_timeout)
         return await self._shard_results(
             lambda agent: agent.execute(source, completion_timeout),
-            limit=completion_timeout + 5,
+            limit=completion_timeout + RPC_TIMEOUT_MARGIN,
         )
 
     async def announce(self, message: str) -> None:
         await self._require_ready()
         await self._agent_call(lambda: self.agent(self.master).announce(message))
 
-    async def save(self, completion_timeout: float = 30) -> ClusterSaveResult:
+    async def save(
+        self, completion_timeout: float = DEFAULT_SAVE_TIMEOUT
+    ) -> ClusterSaveResult:
         completion_timeout = positive_timeout(completion_timeout)
         async with self._public_operation():
             await self._require_ready()
             agents = self._ordered_agents
             mutation_completed = False
             try:
-                markers = await self._gather(
-                    agents,
-                    lambda agent: agent.save_marker(),
-                )
-                master_event = await self._agent_call(
-                    lambda: self.agent(self.master).save(completion_timeout),
-                    limit=completion_timeout + 5,
-                )
-                mutation_completed = True
-                events = await self._gather(
-                    agents,
-                    lambda agent: agent.wait_saved(
-                        markers[agent.name],
-                        master_event.snapshot,
-                        completion_timeout,
-                    ),
-                    limit=completion_timeout + 5,
-                )
+                async with timeout_scope(completion_timeout):
+                    markers = await self._gather(
+                        agents,
+                        lambda agent: agent.save_marker(),
+                    )
+                    master_event = await self._agent_call(
+                        lambda: self.agent(self.master).save(completion_timeout),
+                        limit=completion_timeout + RPC_TIMEOUT_MARGIN,
+                    )
+                    mutation_completed = True
+                    events = await self._gather(
+                        agents,
+                        lambda agent: agent.wait_saved(
+                            markers[agent.name],
+                            master_event.snapshot,
+                            completion_timeout,
+                        ),
+                        limit=completion_timeout + RPC_TIMEOUT_MARGIN,
+                    )
             except Exception as error:
                 raise self._operation_error(
                     error,
@@ -523,14 +543,16 @@ class ClusterController:
     async def pause(self, paused: bool) -> tuple[ShardResult[bool], ...]:
         return await self._shard_results(lambda agent: agent.pause(paused))
 
-    async def reset(self, completion_timeout: float = 30) -> None:
+    async def reset(self, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
         completion_timeout = positive_timeout(completion_timeout)
         await self._reload(
             lambda master: master.reset(completion_timeout),
             completion_timeout,
         )
 
-    async def rollback(self, count: int = 1, completion_timeout: float = 30) -> None:
+    async def rollback(
+        self, count: int = 1, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT
+    ) -> None:
         count = item_count(count, allow_zero=True)
         completion_timeout = positive_timeout(completion_timeout)
         await self._reload(
@@ -544,7 +566,7 @@ class ClusterController:
         return await self.shard(self.master).list_snapshots(limit, before=before)
 
     async def rollback_to_day(
-        self, day: int, completion_timeout: float = 30
+        self, day: int, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT
     ) -> Snapshot:
         day = item_count(day)
         completion_timeout = positive_timeout(completion_timeout)
@@ -628,7 +650,9 @@ class ClusterController:
                 raise ValueError(msg)
             before = catalog.snapshots[-1].snapshot_id
 
-    async def regenerate(self, completion_timeout: float = 30) -> None:
+    async def regenerate(
+        self, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT
+    ) -> None:
         completion_timeout = positive_timeout(completion_timeout)
         await self._reload(
             lambda master: master.regenerate(completion_timeout),
@@ -1096,24 +1120,25 @@ class ClusterController:
             agents = self._ordered_agents
             mutation_completed = False
             try:  # ruff: ignore[too-many-statements-in-try-clause]
-                markers = await self._gather(
-                    agents,
-                    lambda agent: agent.generation_marker(),
-                )
-                result = await self._agent_call(
-                    lambda: operation(self.agent(self.master)),
-                    limit=completion_timeout + 5,
-                )
-                mutation_completed = True
-                await self._gather(
-                    agents,
-                    lambda agent: agent.wait_generation(
-                        markers[agent.name], completion_timeout
-                    ),
-                    limit=completion_timeout + 5,
-                )
-                if verify is not None:
-                    await verify(result)
+                async with timeout_scope(completion_timeout):
+                    markers = await self._gather(
+                        agents,
+                        lambda agent: agent.generation_marker(),
+                    )
+                    result = await self._agent_call(
+                        lambda: operation(self.agent(self.master)),
+                        limit=completion_timeout + RPC_TIMEOUT_MARGIN,
+                    )
+                    mutation_completed = True
+                    await self._gather(
+                        agents,
+                        lambda agent: agent.wait_generation(
+                            markers[agent.name], completion_timeout
+                        ),
+                        limit=completion_timeout + RPC_TIMEOUT_MARGIN,
+                    )
+                    if verify is not None:
+                        await verify(result)
             except Exception as error:
                 if not mutation_completed and isinstance(error, KeyError | ValueError):
                     raise
@@ -1335,12 +1360,12 @@ class ShardController:
     async def execute(
         self,
         source: str,
-        completion_timeout: float = 30,
+        completion_timeout: float = DEFAULT_COMMAND_TIMEOUT,
     ) -> str:
         completion_timeout = positive_timeout(completion_timeout)
         return await self._call(
             lambda agent: agent.execute(source, completion_timeout),
-            limit=completion_timeout + 5,
+            limit=completion_timeout + RPC_TIMEOUT_MARGIN,
         )
 
     async def execute_json(self, source: str) -> JsonValue:
@@ -1371,11 +1396,13 @@ class ShardController:
     async def connected_shards(self) -> tuple[ShardStatus, ...]:
         return await self._call(lambda agent: agent.connected_shards())
 
-    async def save(self, completion_timeout: float = 30) -> SavedEvent:
+    async def save(
+        self, completion_timeout: float = DEFAULT_SAVE_TIMEOUT
+    ) -> SavedEvent:
         completion_timeout = positive_timeout(completion_timeout)
         return await self._call(
             lambda agent: agent.save(completion_timeout),
-            limit=completion_timeout + 5,
+            limit=completion_timeout + RPC_TIMEOUT_MARGIN,
         )
 
     async def pause(self, paused: bool) -> bool:
@@ -1385,7 +1412,7 @@ class ShardController:
         self,
         *,
         preserve_settings: bool = True,
-        completion_timeout: float = 30,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
         completion_timeout = positive_timeout(completion_timeout)
         async with self.cluster._public_operation():
@@ -1394,7 +1421,7 @@ class ShardController:
                     preserve_settings=preserve_settings,
                     completion_timeout=completion_timeout,
                 ),
-                limit=completion_timeout + 5,
+                limit=completion_timeout + RPC_TIMEOUT_MARGIN,
             )
 
     async def list_players(self) -> tuple[Player, ...]:

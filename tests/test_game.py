@@ -33,6 +33,7 @@ from dst_server.models import Item, Stat
 from dst_server.runtime import IndeterminateCommandError
 from dst_server.telemetry import TelemetrySettings
 from dst_server.telemetry.recorder import Recorder
+from dst_server.timeouts import DEFAULT_RELOAD_TIMEOUT
 from tests.helpers import run_lua, structured_result
 
 type Invocation = Callable[[GameClient], Awaitable[object]]
@@ -303,7 +304,9 @@ async def test_public_api_routes_typed_requests(
     result = await invoke(game)
 
     if method in RELOAD_METHODS:
-        reload.assert_awaited_once_with(method, arguments, adapter, 30.0)
+        reload.assert_awaited_once_with(
+            method, arguments, adapter, DEFAULT_RELOAD_TIMEOUT
+        )
         request.assert_not_awaited()
     else:
         request.assert_awaited_once_with(method, arguments, adapter)

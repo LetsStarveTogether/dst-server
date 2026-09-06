@@ -41,9 +41,14 @@ from dst_server.game.validation import number as _validate_number
 from dst_server.game.validation import positive_timeout as _timeout
 from dst_server.models import Inventory, Player
 from dst_server.runtime import IndeterminateCommandError
+from dst_server.timeouts import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_RELOAD_TIMEOUT,
+    DEFAULT_SAVE_TIMEOUT,
+    RPC_TIMEOUT_MARGIN,
+)
 
 from .client import (
-    DEFAULT_OPERATION_TIMEOUT,
     RemotePlayerClient,
     _ShardClient,
 )
@@ -71,8 +76,6 @@ capnp: Any = import_module("capnp")
 schema = load_schema()
 logger = Logger(__name__)
 _STREAM_COUNT = 3
-_HANDSHAKE_TIMEOUT = 30.0
-_CLOSE_TIMEOUT = 5.0
 _STREAM_RETRY_DELAY = 1.0
 
 type _Operation = Callable[[], object | Awaitable[object]]
@@ -1095,9 +1098,10 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
         self._pumps: list[asyncio.Task[None]] = []
         self._closed = False
 
-    async def open(self) -> None:
+    async def open(self, timeout: float = DEFAULT_CONNECT_TIMEOUT) -> None:
+        timeout = _timeout(timeout, "connection")
         try:
-            async with asyncio.timeout(_HANDSHAKE_TIMEOUT):
+            async with asyncio.timeout(timeout):
                 await self._open()
         except BaseException:
             await self.aclose()
@@ -1165,7 +1169,7 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
         self,
         *,
         preserve_settings: bool,
-        completion_timeout: float,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
         await self._call(
             "regenerateShard",
@@ -1250,14 +1254,14 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
     async def save_marker(self) -> int:
         return await self._uint("saveMarker")
 
-    async def save(self, timeout: float = DEFAULT_OPERATION_TIMEOUT) -> SavedEvent:
+    async def save(self, timeout: float = DEFAULT_SAVE_TIMEOUT) -> SavedEvent:
         return await self._model("save", SavedEvent, mutation=True, timeout=timeout)
 
     async def wait_saved(
         self,
         after_sequence: int,
         snapshot: int | None,
-        completion_timeout: float,
+        completion_timeout: float = DEFAULT_SAVE_TIMEOUT,
     ) -> SavedEvent:
         return await self._model(
             "waitSaved",
@@ -1271,7 +1275,9 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
         return await self._uint("generationMarker")
 
     async def wait_generation(
-        self, after_generation: int, completion_timeout: float
+        self,
+        after_generation: int,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> int:
         return await self._uint(
             "waitGeneration",
@@ -1282,16 +1288,21 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
     async def announce(self, message: str) -> None:
         await self._call("announce", mutation=True, message=message)
 
-    async def reset(self, completion_timeout: float) -> None:
+    async def reset(self, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
         await self._call("reset", mutation=True, timeout=completion_timeout)
 
-    async def rollback(self, count: int, completion_timeout: float) -> None:
+    async def rollback(
+        self, count: int, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT
+    ) -> None:
         await self._call(
             "rollback", mutation=True, count=count, timeout=completion_timeout
         )
 
     async def rollback_to_snapshot(
-        self, session_id: str, snapshot_id: int, completion_timeout: float = 30
+        self,
+        session_id: str,
+        snapshot_id: int,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
         await self._call(
             "rollbackToSnapshot",
@@ -1301,7 +1312,9 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
             timeout=completion_timeout,
         )
 
-    async def regenerate(self, completion_timeout: float) -> None:
+    async def regenerate(
+        self, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT
+    ) -> None:
         await self._call("regenerate", mutation=True, timeout=completion_timeout)
 
     async def is_whitelisted(self, userid: str) -> bool:
@@ -1320,7 +1333,7 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
         for task in self._pumps:
             task.cancel()
         try:
-            async with asyncio.timeout(_CLOSE_TIMEOUT):
+            async with asyncio.timeout(RPC_TIMEOUT_MARGIN):
                 await asyncio.gather(*self._pumps, return_exceptions=True)
                 await asyncio.gather(
                     *(self._close_subscription(item) for item in self._subscriptions)
@@ -1335,7 +1348,7 @@ class RemoteAgent(_ShardClient):  # ruff: ignore[too-many-public-methods]
     @staticmethod
     async def _close_subscription(subscription: RemoteSubscription[Any]) -> None:
         with suppress(Exception):
-            async with asyncio.timeout(_CLOSE_TIMEOUT):
+            async with asyncio.timeout(RPC_TIMEOUT_MARGIN):
                 await subscription.close()
 
     async def _release_subscription(

@@ -1,9 +1,7 @@
 import asyncio
 import os
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
-from contextvars import ContextVar
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from time import time_ns
 from typing import Self
@@ -18,10 +16,18 @@ from dst_server.game import DriverHealth, GameClient
 from dst_server.game.validation import positive_timeout
 from dst_server.telemetry.recorder import Recorder
 from dst_server.telemetry.stream import EventStream
+from dst_server.timeouts import (
+    DEFAULT_COMMAND_TIMEOUT,
+    DEFAULT_SAVE_TIMEOUT,
+    DEFAULT_STARTUP_TIMEOUT,
+    DEFAULT_STOP_TIMEOUT,
+    OUTPUT_DRAIN_TIMEOUT,
+)
+from dst_server.timeouts import operation_deadline as _operation_deadline
+from dst_server.timeouts import timeout_scope as _timeout_scope
 
 from .config import ServerConfig
 from .console import (
-    DEFAULT_COMMAND_TIMEOUT,
     Console,
     StaleGenerationError,
     track_request,
@@ -38,29 +44,9 @@ from .operational import (
 
 FD_LAUNCHER = Path(__file__).with_name("fds.py")
 SUBPROCESS_STREAM_LIMIT = 1024 * 1024
-DEFAULT_STARTUP_TIMEOUT = 300.0
-OUTPUT_DRAIN_TIMEOUT = 5.0
 logger = Logger(__name__)
-_operation_deadline = ContextVar[float | None](
-    "dst_server_operation_deadline", default=None
-)
 
 type LogHandler = Callable[[str], None]
-
-
-@asynccontextmanager
-async def _timeout_scope(duration: float) -> AsyncIterator[float]:
-    inherited = _operation_deadline.get()
-    if inherited is not None:
-        yield inherited
-        return
-    deadline = asyncio.get_running_loop().time() + duration
-    token = _operation_deadline.set(deadline)
-    try:
-        async with asyncio.timeout_at(deadline):
-            yield deadline
-    finally:
-        _operation_deadline.reset(token)
 
 
 class Server:  # ruff:ignore[too-many-public-methods]
@@ -411,7 +397,8 @@ class Server:  # ruff:ignore[too-many-public-methods]
 
     async def install_driver(self, generation: int) -> DriverHealth:
         try:
-            health = await self.game.install(generation)
+            async with _timeout_scope(DEFAULT_STARTUP_TIMEOUT):
+                health = await self.game.install(generation)
         except Exception as error:
             self._driver_error = str(error) or type(error).__name__
             await self._observe_operational(
@@ -437,7 +424,9 @@ class Server:  # ruff:ignore[too-many-public-methods]
             )
         return health
 
-    async def save(self, completion_timeout: float = 30) -> server_events.SavedEvent:
+    async def save(
+        self, completion_timeout: float = DEFAULT_SAVE_TIMEOUT
+    ) -> server_events.SavedEvent:
         return await self._save(
             self.game.world.request_save,
             completion_timeout,
@@ -463,7 +452,7 @@ class Server:  # ruff:ignore[too-many-public-methods]
                 span.set_attribute("dst.snapshot", event.snapshot)
             return event
 
-    async def stop(self, grace_period: float = 30) -> int:
+    async def stop(self, grace_period: float = DEFAULT_STOP_TIMEOUT) -> int:
         with self.recorder.operation("stop", self.session_id):
             process = self.process
             grace_period = positive_timeout(grace_period, "grace period")

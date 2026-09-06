@@ -4,6 +4,7 @@ from pydantic import JsonValue
 
 from dst_server.models import Mod, Room, Runtime, ShardStatus, World
 from dst_server.models.snapshot import SnapshotCatalog
+from dst_server.timeouts import DEFAULT_RELOAD_TIMEOUT
 
 from .rpc import (
     BOOL_RESPONSE,
@@ -77,7 +78,7 @@ class WorldClient:
             BOOL_RESPONSE,
         )
 
-    async def reset(self, completion_timeout: float = 30) -> None:
+    async def reset(self, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
         await self.game.reload(
             "reset",
             {},
@@ -85,7 +86,9 @@ class WorldClient:
             positive_timeout(completion_timeout),
         )
 
-    async def regenerate(self, completion_timeout: float = 30) -> None:
+    async def regenerate(
+        self, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT
+    ) -> None:
         await self.game.reload(
             "regenerate_world",
             {},
@@ -97,7 +100,7 @@ class WorldClient:
         self,
         *,
         preserve_settings: bool = True,
-        completion_timeout: float = 30,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
         if not isinstance(preserve_settings, bool):
             msg = "preserve_settings must be a boolean"
@@ -109,7 +112,12 @@ class WorldClient:
             positive_timeout(completion_timeout),
         )
 
-    async def rollback(self, count: int = 1, *, completion_timeout: float = 30) -> None:
+    async def rollback(
+        self,
+        count: int = 1,
+        *,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
+    ) -> None:
         await self.game.reload(
             "rollback",
             {"count": item_count(count, allow_zero=True)},
@@ -122,7 +130,7 @@ class WorldClient:
         session_id: str,
         snapshot_id: int,
         *,
-        completion_timeout: float = 30,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
         await self.game.reload(
             "rollback_to_snapshot",

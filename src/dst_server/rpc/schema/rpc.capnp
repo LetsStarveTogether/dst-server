@@ -122,14 +122,14 @@ interface Cluster {
   ) -> (result :Outcome(ConfigurationSnapshot));
   executeAll @8 (
     source :Text,
-    timeout :Float64
+    timeout :Float64 = 120
   ) -> (result :Outcome(List(ShardResult(TextValue))));
   announce @9 (message :Text) -> (result :Outcome(Unit));
-  save @10 (timeout :Float64) -> (result :Outcome(ClusterSaveResult));
+  save @10 (timeout :Float64 = 300) -> (result :Outcome(ClusterSaveResult));
   pause @11 (paused :Bool) -> (result :Outcome(List(ShardResult(BoolValue))));
-  reset @12 (timeout :Float64) -> (result :Outcome(Unit));
-  rollback @13 (count :UInt64, timeout :Float64) -> (result :Outcome(Unit));
-  regenerate @14 (timeout :Float64) -> (result :Outcome(Unit));
+  reset @12 (timeout :Float64 = 900) -> (result :Outcome(Unit));
+  rollback @13 (count :UInt64, timeout :Float64 = 900) -> (result :Outcome(Unit));
+  regenerate @14 (timeout :Float64 = 900) -> (result :Outcome(Unit));
   listPlayers @15 () -> (result :Outcome(List(Data)));
   getPlayer @16 (userid :Text) -> (result :Outcome(Nullable(Data)));
   isWhitelisted @17 (userid :Text) -> (result :Outcome(BoolValue));
@@ -143,7 +143,7 @@ interface Cluster {
     limit :UInt16,
     before :Nullable(UInt64Value)
   ) -> (result :Outcome(Data));
-  rollbackToDay @25 (day :UInt64, timeout :Float64) -> (result :Outcome(Data));
+  rollbackToDay @25 (day :UInt64, timeout :Float64 = 900) -> (result :Outcome(Data));
 }
 
 interface Shard {
@@ -152,7 +152,7 @@ interface Shard {
   stop @2 () -> (result :Outcome(Unit));
   restart @3 () -> (result :Outcome(Unit));
   kill @4 () -> (result :Outcome(Unit));
-  execute @5 (source :Text, timeout :Float64) -> (result :Outcome(TextValue));
+  execute @5 (source :Text, timeout :Float64 = 120) -> (result :Outcome(TextValue));
   executeJson @6 (source :Text) -> (result :Outcome(Data));
   health @7 () -> (result :Outcome(Data));
   room @8 () -> (result :Outcome(Data));
@@ -163,7 +163,7 @@ interface Shard {
   pause @13 (paused :Bool) -> (result :Outcome(BoolValue));
   regenerateShard @14 (
     preserveSettings :Bool,
-    timeout :Float64
+    timeout :Float64 = 900
   ) -> (result :Outcome(Unit));
   listPlayers @15 () -> (result :Outcome(List(Data)));
   getPlayer @16 (userid :Text) -> (result :Outcome(Nullable(Data)));
@@ -201,7 +201,7 @@ interface Shard {
   subscribeLogs @32 () -> (result :Outcome(DataSubscription));
   subscribeLifecycle @33 () -> (result :Outcome(DataSubscription));
   subscribeEvents @34 () -> (result :Outcome(DataSubscription));
-  save @35 (timeout :Float64) -> (result :Outcome(Data));
+  save @35 (timeout :Float64 = 300) -> (result :Outcome(Data));
   listSnapshots @36 (
     limit :UInt16,
     before :Nullable(UInt64Value)
@@ -213,25 +213,25 @@ interface Agent extends(Shard) {
   waitSaved @1 (
     afterSequence :UInt64,
     snapshot :Nullable(UInt64Value),
-    timeout :Float64
+    timeout :Float64 = 300
   ) -> (result :Outcome(Data));
   generationMarker @2 () -> (result :Outcome(UInt64Value));
   waitGeneration @3 (
     afterGeneration :UInt64,
-    timeout :Float64
+    timeout :Float64 = 900
   ) -> (result :Outcome(UInt64Value));
   isWhitelisted @4 (userid :Text) -> (result :Outcome(BoolValue));
   whitelist @5 (userid :Text) -> (result :Outcome(BoolValue));
   unwhitelist @6 (userid :Text) -> (result :Outcome(BoolValue));
   activate @7 () -> (result :Outcome(Unit));
   announce @8 (message :Text) -> (result :Outcome(Unit));
-  reset @9 (timeout :Float64) -> (result :Outcome(Unit));
-  rollback @10 (count :UInt64, timeout :Float64) -> (result :Outcome(Unit));
-  regenerate @11 (timeout :Float64) -> (result :Outcome(Unit));
+  reset @9 (timeout :Float64 = 900) -> (result :Outcome(Unit));
+  rollback @10 (count :UInt64, timeout :Float64 = 900) -> (result :Outcome(Unit));
+  regenerate @11 (timeout :Float64 = 900) -> (result :Outcome(Unit));
   rollbackToSnapshot @12 (
     sessionId :Text,
     snapshotId :UInt64,
-    timeout :Float64
+    timeout :Float64 = 900
   ) -> (result :Outcome(Unit));
 }
 

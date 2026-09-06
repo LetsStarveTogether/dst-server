@@ -922,6 +922,57 @@ async def test_save_and_reload_coordinate_every_shard_from_master_once(
         await instance.aclose()
 
 
+@pytest.mark.parametrize("method", ["save", "reset"])
+async def test_cluster_completion_timeout_covers_master_and_peer_waits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    instance, master, caves, _, _ = await controller(tmp_path, monkeypatch)
+    completed = False
+
+    async def command(_: float) -> SavedEvent | None:
+        await asyncio.sleep(0.04)
+        return SavedEvent(path="session/7", snapshot=7) if method == "save" else None
+
+    async def wait(*_: object) -> None:
+        nonlocal completed
+        await asyncio.sleep(0.04)
+        completed = True
+
+    monkeypatch.setattr(master, method, command)
+    monkeypatch.setattr(
+        caves, "wait_saved" if method == "save" else "wait_generation", wait
+    )
+    try:
+        with pytest.raises(IndeterminateError):
+            await getattr(instance, method)(0.06)
+        assert not completed
+    finally:
+        await instance.aclose()
+
+
+async def test_cluster_operation_defaults_allow_saving_and_reloading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance, _, _, _, calls = await controller(tmp_path, monkeypatch)
+    try:
+        await instance.execute_all("return true")
+        await instance.save()
+        await instance.reset()
+        await instance.rollback()
+        await instance.regenerate()
+        assert "execute:Master:return true:120.0" in calls
+        assert "save:Master:300.0" in calls
+        assert "wait-saved:Caves:20:7:300.0" in calls
+        assert "reset:Master:900.0" in calls
+        assert "rollback:Master:1:900.0" in calls
+        assert "regenerate:Master:900.0" in calls
+    finally:
+        await instance.aclose()
+
+
 @pytest.mark.parametrize(
     ("scenario", "error"),
     [

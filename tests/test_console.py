@@ -184,6 +184,23 @@ async def test_outer_deadline_after_write_breaks_console() -> None:
     assert console.pending_result is None
 
 
+async def test_explicit_deadline_is_enforced_without_an_outer_timer() -> None:
+    console, writer, _ = make_console()
+    watchdog = asyncio.timeout(1)
+
+    with pytest.raises(TimeoutError):
+        async with watchdog:
+            await console.execute(
+                "mutation()",
+                completion_deadline=asyncio.get_running_loop().time() + 0.01,
+            )
+
+    assert not watchdog.expired()
+    assert len(writer.commands) == 1
+    assert console.broken is True
+    assert console.pending_result is None
+
+
 async def test_stale_generation_is_not_written_after_waiting_for_lock() -> None:
     console, writer, _ = make_console()
     current = True

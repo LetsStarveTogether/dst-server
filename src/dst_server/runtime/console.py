@@ -9,6 +9,7 @@ from ulid import ULID
 from dst_server.game.rpc import MAX_RESULT_LINE_BYTES, lua_string
 from dst_server.game.validation import positive_timeout
 from dst_server.telemetry.stream import EventStream
+from dst_server.timeouts import DEFAULT_COMMAND_TIMEOUT
 
 from .lifecycle import RequestState
 
@@ -16,7 +17,6 @@ COMMAND_DONE = "DST_RemoteCommandDone"
 LUA_BUSY = "DST_LuaBusy"
 LUA_BUSY_RETRY_DELAY = 0.1
 FRAME_PREFIX = "DST_SERVER_FRAME"
-DEFAULT_COMMAND_TIMEOUT = 30.0
 MAX_RESULT_LINES = 1024
 _request_state = ContextVar[RequestState | None](
     "dst_server_request_state", default=None
@@ -76,30 +76,20 @@ class Console:
             raise ValueError(msg)
         timeout = positive_timeout(completion_timeout)
         command_state = RequestState()
-        if completion_deadline is not None:
-            try:
-                return await self._execute(
-                    command,
-                    generation_is_current,
-                    command_state,
-                )
-            except asyncio.CancelledError:
-                if (
-                    asyncio.get_running_loop().time() >= completion_deadline
-                    and command_state.sent
-                ):
-                    await self._discard_pending_result()
-                raise
-        deadline = asyncio.timeout(timeout)
+        deadline = (
+            completion_deadline
+            if completion_deadline is not None
+            else asyncio.get_running_loop().time() + timeout
+        )
         try:
-            async with deadline:
+            async with asyncio.timeout_at(deadline):
                 return await self._execute(
                     command,
                     generation_is_current,
                     command_state,
                 )
-        except TimeoutError:
-            if deadline.expired() and command_state.sent:
+        except TimeoutError, asyncio.CancelledError:
+            if asyncio.get_running_loop().time() >= deadline and command_state.sent:
                 await self._discard_pending_result()
             raise
 

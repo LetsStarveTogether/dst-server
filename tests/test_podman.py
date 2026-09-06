@@ -472,13 +472,13 @@ async def test_rollback_to_day_restores_both_shards_and_player_saves(
                 "item.components.stackable:SetStackSize(7);"
                 "player.components.inventory:GiveItem(item);return true"
             )
-        target = await controller.save(OPERATION_TIMEOUT)
+        target = await controller.save()
         for shard, later_health in {"forest": 41, "cave": 42}.items():
             await agents[shard].execute_json(
                 "DST_SNAPSHOT_PLAYER.components.health:SetCurrentHealth("
                 f"{later_health});return true"
             )
-        later_same_day = await controller.save(OPERATION_TIMEOUT)
+        later_same_day = await controller.save()
         for agent in agents.values():
             await agent.execute_json(
                 "DST_SNAPSHOT_PLAYER.components.health:SetCurrentHealth(17);"
@@ -486,8 +486,8 @@ async def test_rollback_to_day_restores_both_shards_and_player_saves(
                 "local data=clock:OnSave();data.cycles=19;"
                 "clock:OnLoad(data);return true"
             )
-        missing = await controller.save(OPERATION_TIMEOUT)
-        latest = await controller.save(OPERATION_TIMEOUT)
+        missing = await controller.save()
+        latest = await controller.save()
         assert target.snapshot is not None
         assert later_same_day.snapshot is not None
         assert missing.snapshot is not None
@@ -522,7 +522,7 @@ async def test_rollback_to_day_restores_both_shards_and_player_saves(
             "TheWorld:PushEvent('ms_save');"
             "return original(self,session,count) end;return true"
         )
-        restored = await controller.rollback_to_day(10, OPERATION_TIMEOUT)
+        restored = await controller.rollback_to_day(10)
         assert restored.snapshot_id == target.snapshot
         for shard, agent in agents.items():
             assert (await agent.runtime()).session_id == sessions[shard]

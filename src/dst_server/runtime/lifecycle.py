@@ -6,6 +6,7 @@ from time import time_ns
 from logbook import Logger
 
 from dst_server.events import server
+from dst_server.timeouts import DEFAULT_SAVE_TIMEOUT, timeout_scope
 
 from .fds import PROTOCOL_LINE_LIMIT
 
@@ -195,10 +196,10 @@ class Lifecycle:
     async def wait_for_save(
         self,
         request: Callable[[], Awaitable[None]],
-        completion_timeout: float,
+        completion_timeout: float = DEFAULT_SAVE_TIMEOUT,
         request_state: RequestState | None = None,
     ) -> server.SavedEvent:
-        async with self.save_lock:
+        async with timeout_scope(completion_timeout), self.save_lock:
             barrier = self._save_confirmation_barrier
             if barrier is not None:
                 await barrier.wait_resolved()
@@ -212,12 +213,11 @@ class Lifecycle:
             try:  # ruff: ignore[too-many-statements-in-try-clause]
                 await request()
                 self._discard_stale_confirmation(state)
-                async with asyncio.timeout(completion_timeout):
-                    while self._save_confirmation is None:
-                        self.saved.clear()
-                        self._raise_if_eof()
-                        if self._save_confirmation is None:
-                            await self.saved.wait()
+                while self._save_confirmation is None:
+                    self.saved.clear()
+                    self._raise_if_eof()
+                    if self._save_confirmation is None:
+                        await self.saved.wait()
             except BaseException:
                 self._discard_stale_confirmation(state)
                 if self._save_confirmation is None and state.sent:

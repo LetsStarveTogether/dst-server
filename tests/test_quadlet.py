@@ -10,6 +10,11 @@ from dst_server.cluster.config import (
     ShardConfig,
     ShardSettings,
 )
+from dst_server.cluster.controller import (
+    AGENT_KILL_TIMEOUT,
+    AGENT_STOP_TIMEOUT,
+    CONTROLLER_CANCEL_TIMEOUT,
+)
 from dst_server.cluster.quadlet import (
     CLUSTER_ENVIRONMENT,
     ContainerUnit,
@@ -19,6 +24,7 @@ from dst_server.cluster.quadlet import (
     RoomPortAllocation,
     VolumeMount,
 )
+from dst_server.timeouts import RPC_TIMEOUT_MARGIN
 
 
 def make_cluster(*, caves: bool = True) -> ClusterConfig:
@@ -603,6 +609,15 @@ def test_application_builds_master_secondary_lifecycle(
         assert unit.image == "quay.io/wh2099/dst-server:latest"
         assert unit.pull == "always"
         assert unit.timeout_start_sec == 1800
+        assert unit.stop_timeout is not None
+        assert unit.timeout_stop_sec is not None
+        assert unit.stop_timeout >= (
+            CONTROLLER_CANCEL_TIMEOUT
+            + AGENT_STOP_TIMEOUT
+            + AGENT_KILL_TIMEOUT
+            + 2 * RPC_TIMEOUT_MARGIN
+        )
+        assert unit.timeout_stop_sec >= unit.stop_timeout + 2 * RPC_TIMEOUT_MARGIN
     assert {
         (
             unit.restart,
@@ -614,7 +629,7 @@ def test_application_builds_master_secondary_lifecycle(
             unit.watchdog_signal,
         )
         for unit in (application.master, secondary)
-    } == {("on-failure", 40, 50, True, 300, "control-group", "SIGKILL")}
+    } == {("on-failure", 360, 420, True, 300, "control-group", "SIGKILL")}
 
 
 @pytest.mark.parametrize(

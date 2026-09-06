@@ -10,6 +10,7 @@ from typing import Annotated, Self
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from dst_server.models.base import FrozenModel, PositiveInt
+from dst_server.timeouts import DEFAULT_COMMAND_TIMEOUT
 
 type NetdataLogFilter = tuple[
     Annotated[str, Field(min_length=1)],
@@ -84,7 +85,7 @@ class NetdataLogs:
         self,
         request: NetdataLogQuery,
         *,
-        completion_timeout: float = 30,
+        completion_timeout: float = DEFAULT_COMMAND_TIMEOUT,
     ) -> NetdataLogResult:
         if (
             isinstance(completion_timeout, bool)
@@ -95,7 +96,7 @@ class NetdataLogs:
             msg = "Netdata query timeout must be a positive finite number"
             raise ValueError(msg)
         command = self._command(request)
-        async with self._semaphore:
+        async with asyncio.timeout(completion_timeout), self._semaphore:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -103,8 +104,7 @@ class NetdataLogs:
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                async with asyncio.timeout(completion_timeout):
-                    stdout, stderr = await process.communicate()
+                stdout, stderr = await process.communicate()
             except BaseException:
                 if process.returncode is None:
                     with suppress(ProcessLookupError):

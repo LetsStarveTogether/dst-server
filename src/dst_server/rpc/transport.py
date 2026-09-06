@@ -13,13 +13,15 @@ from typing import Any
 
 from logbook import Logger
 
+from dst_server.timeouts import RPC_TIMEOUT_MARGIN
+
 capnp: Any = import_module("capnp")
 logger = Logger(__name__)
 
 INTERNAL_RPC_ADDRESS = "dst-server-registry"
 PUBLIC_RPC_SOCKET = Path("/cluster/.dst-server.sock")
 _UNIX_PATH_BYTES = 107
-_CLOSE_TIMEOUT = 5.0
+_CLOSE_TIMEOUT = RPC_TIMEOUT_MARGIN
 _CANCEL_REAP_TIMEOUT = 0.1
 
 

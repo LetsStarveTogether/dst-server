@@ -5,6 +5,7 @@ from pydantic import JsonValue
 
 from dst_server.telemetry import TelemetrySettings
 from dst_server.telemetry.recorder import Recorder
+from dst_server.timeouts import DEFAULT_RELOAD_TIMEOUT
 
 from .players import PlayerClient
 from .rpc import (
@@ -94,7 +95,7 @@ class GameClient:
         method: str,
         arguments: dict[str, JsonValue],
         adapter: ResponseAdapter[DataT],
-        completion_timeout: float,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> DataT:
         with self.recorder.operation(
             f"lua.{method}",

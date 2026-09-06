@@ -10,6 +10,7 @@ from ulid import ULID
 
 from dst_server.events.server import SavedEvent, SessionEvent
 from dst_server.game import DriverHealth
+from dst_server.game.validation import positive_timeout
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog, WorldSnapshotMetadata
 from dst_server.rpc.models import (
@@ -21,6 +22,12 @@ from dst_server.rpc.models import (
 from dst_server.rpc.models import ShardPhase as RpcShardPhase
 from dst_server.runtime import Server, ServerConfig
 from dst_server.telemetry import TelemetrySettings
+from dst_server.timeouts import (
+    DEFAULT_COMMAND_TIMEOUT,
+    DEFAULT_RELOAD_TIMEOUT,
+    DEFAULT_SAVE_TIMEOUT,
+    timeout_scope,
+)
 
 from . import console, service
 from .layout import Shard
@@ -186,7 +193,9 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
     async def kill(self) -> ShardSupervisorStatus:
         return await self.supervisor.kill()
 
-    async def execute(self, command: str, completion_timeout: float = 30) -> str:
+    async def execute(
+        self, command: str, completion_timeout: float = DEFAULT_COMMAND_TIMEOUT
+    ) -> str:
         return await self.server.execute(
             command,
             completion_timeout=completion_timeout,
@@ -258,7 +267,10 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
         return catalog.replace(snapshots=tuple(snapshots))
 
     async def rollback_to_snapshot(
-        self, session_id: str, snapshot_id: int, completion_timeout: float = 30
+        self,
+        session_id: str,
+        snapshot_id: int,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
         await self.server.game.world.rollback_to_snapshot(
             session_id, snapshot_id, completion_timeout=completion_timeout
@@ -277,7 +289,7 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
         self,
         *,
         preserve_settings: bool = True,
-        completion_timeout: float = 30,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
         await self.server.game.world.regenerate_shard(
             preserve_settings=preserve_settings,
@@ -374,16 +386,20 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
     async def announce(self, message: str) -> None:
         await self.server.game.world.announce(message)
 
-    async def reset(self, completion_timeout: float = 30) -> None:
+    async def reset(self, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
         await self.server.game.world.reset(completion_timeout=completion_timeout)
 
-    async def rollback(self, count: int = 1, completion_timeout: float = 30) -> None:
+    async def rollback(
+        self, count: int = 1, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT
+    ) -> None:
         await self.server.game.world.rollback(
             count,
             completion_timeout=completion_timeout,
         )
 
-    async def regenerate(self, completion_timeout: float = 30) -> None:
+    async def regenerate(
+        self, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT
+    ) -> None:
         await self.server.game.world.regenerate(
             completion_timeout=completion_timeout,
         )
@@ -393,14 +409,16 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
         self._save_markers.append((marker, self.server.game_events.nonce))
         return marker
 
-    async def save(self, completion_timeout: float = 30) -> SavedEvent:
+    async def save(
+        self, completion_timeout: float = DEFAULT_SAVE_TIMEOUT
+    ) -> SavedEvent:
         return await self.server.save(completion_timeout=completion_timeout)
 
     async def wait_saved(
         self,
         after_sequence: int,
         snapshot: int | None,
-        completion_timeout: float = 30,
+        completion_timeout: float = DEFAULT_SAVE_TIMEOUT,
     ) -> SavedEvent:
         attempt = next(
             (
@@ -413,7 +431,10 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
         if attempt is None:
             msg = "unknown save marker"
             raise ValueError(msg)
-        async with asyncio.timeout(completion_timeout), self._event_changed:
+        async with (
+            timeout_scope(positive_timeout(completion_timeout)),
+            self._event_changed,
+        ):
             while True:
                 match = next(
                     (
@@ -438,7 +459,7 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
     async def wait_generation(
         self,
         after_sequence: int,
-        completion_timeout: float = 30,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> int:
         attempt = next(
             (
@@ -451,7 +472,7 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
         if attempt is None:
             msg = "unknown generation marker"
             raise ValueError(msg)
-        async with asyncio.timeout(completion_timeout):
+        async with timeout_scope(positive_timeout(completion_timeout)):
             async with self._event_changed:
                 while self._generation_sequence <= after_sequence:
                     self._require_attempt(attempt)

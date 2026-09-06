@@ -11,6 +11,7 @@ from dst_server.game import DriverHealth
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.console import Console
 from dst_server.runtime.driver import Driver
+from dst_server.timeouts import timeout_scope
 from tests.helpers import (
     StubServer,
     StubWriter,
@@ -113,6 +114,34 @@ async def test_typed_request_waits_for_current_driver_generation() -> None:
     assert server.driver.task.done()
     assert server.driver_health.events_emitted == 2
     assert len(server.commands) == 2
+
+
+async def test_session_install_uses_startup_budget_without_inheriting_caller_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = await GatedReloadServer([
+        structured_result(health(2, generation=1).model_dump(mode="json")),
+    ]).initialize()
+
+    async def short_command_budget(command: str) -> str:
+        return await server.execute(command, completion_timeout=0.01)
+
+    monkeypatch.setattr(server.game, "execute", short_command_budget)
+    async with timeout_scope(0):
+        server._session_started(1)
+    task = server.driver.task
+    assert task is not None
+
+    try:
+        async with asyncio.timeout(1):
+            await server.install_started.wait()
+            await asyncio.sleep(0.02)
+            assert not task.done()
+            server.release_install.set()
+            assert await server.driver.wait_ready() == 1
+    finally:
+        server.driver.close()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_failed_reload_blocks_requests_without_retrying() -> None:
