@@ -57,7 +57,10 @@ function actions.install()
             actor = action.doer,
             sequence = snapshot.action_sequence,
         } or nil
-        local results = telemetry.pack(xpcall(original, trace_error, ...))
+        local arguments = telemetry.pack(...)
+        local results = telemetry.pack(xpcall(function()
+            return original(telemetry.unpack(arguments))
+        end, trace_error))
         state.current_action = previous
 
         if snapshot ~= nil then

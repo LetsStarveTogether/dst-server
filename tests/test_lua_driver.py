@@ -33,11 +33,11 @@ from dst_server.events import GAME_EVENT_ADAPTER
         "invalid_options",
     ],
 )
-def test_lua_driver(scenario: str, luajit: str) -> None:
+def test_lua_driver(scenario: str, lua_runtime: str) -> None:
     root = Path(__file__).parents[1]
     result = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]
         [
-            luajit,
+            lua_runtime,
             str(root / "tests/lua/driver_spec.lua"),
             str(root),
             scenario,

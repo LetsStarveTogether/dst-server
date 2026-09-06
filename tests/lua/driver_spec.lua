@@ -288,19 +288,22 @@ end
 function scenarios.wrapper_results()
     local calls = 0
     local failure = {}
+    local current
     BufferedAction.Do = function(...)
         calls = calls + 1
-        assert(select("#", ...) == 3 and select(2, ...) == nil)
+        assert(select("#", ...) == 4 and select(1, ...) == current)
+        assert(select(2, ...) == nil and select(4, ...) == nil)
         if select(3, ...) == "raise" then error(failure, 0) end
         return nil, "result", nil
     end
     install()
-    local current = action("CHOP", function() end)
+    current = action("CHOP", function() end)
     local function pack(...) return { n = select("#", ...), ... } end
-    local result = pack(current:Do(nil, "extra"))
+    local result = pack(current:Do(nil, "extra", nil))
     assert(result.n == 3 and result[1] == nil and result[2] == "result" and result[3] == nil)
-    local ok, observed = pcall(current.Do, current, nil, "raise")
+    local ok, observed = pcall(current.Do, current, nil, "raise", nil)
     assert(not ok and observed == failure and calls == 2)
+    assert(require("dst_server.state").current_action == nil)
 end
 
 function scenarios.diagnostics()

@@ -378,6 +378,13 @@ async def test_sdk_real_game_core_contract(
             runtime = await server.game.world.runtime()
             assert runtime.session_id == server.session_id
             assert await server.game.players.list() == ()
+            assert await server.game.world.execute(
+                "local action; "
+                'action=BufferedAction(TheWorld,nil,{id="CHOP",fn=function(self) '
+                "assert(self==action and self.doer==TheWorld); "
+                'return true,"native-action" end}); '
+                "local ok,reason=action:Do(); return {ok=ok,reason=reason}"
+            ) == {"ok": True, "reason": "native-action"}
             text = "before\u0085middle\u2028after\u2029"
             assert await server.game.world.execute(f"return {lua_string(text)}") == text
             with pytest.raises(

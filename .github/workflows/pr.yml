@@ -61,10 +61,10 @@ jobs:
       - name: Setup just
         uses: extractions/setup-just@v4
 
-      - name: Install LuaJIT
+      - name: Install Lua runtimes
         run: |
           sudo apt-get update
-          sudo apt-get install --yes luajit
+          sudo apt-get install --yes lua5.1 luajit
 
       - name: Check
         run: uv run --locked prek run --all-files
