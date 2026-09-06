@@ -9,18 +9,19 @@ import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
 import pytest
-from pydantic import SecretStr
+from pydantic import JsonValue, SecretStr
 from ulid import ULID
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
+from dst_server.cluster.archive import export_cluster
 from dst_server.cluster.config import (
     ClusterConfig,
     ClusterSettings,
@@ -34,6 +35,7 @@ from dst_server.cluster.world import ForestOverrides
 from dst_server.events import player
 from dst_server.events import server as server_events
 from dst_server.game.rpc import lua_string
+from dst_server.klei_id import encode_klei_id
 from dst_server.netdata import NetdataLogQuery, NetdataLogs
 from dst_server.rpc import (
     ClusterClient,
@@ -263,6 +265,129 @@ async def reap_server(server: Server, container_name: str) -> None:
     async with asyncio.timeout(CLEANUP_TIMEOUT):
         await remove_container(container_name)
         await server.wait()
+
+
+async def read_player(server: Server, userid: str) -> dict[str, JsonValue]:
+    await server.game.world.execute(
+        "DST_EXPORT_READ=nil;"
+        "local file=TheNet:GetUserSessionFile("
+        f"TheWorld.meta.session_identifier,{lua_string(userid)});"
+        "assert(file~=nil,'player session file missing');"
+        "TheNet:DeserializeUserSession(file,function(success,str)"
+        "assert(success and str~=nil,'player session unreadable');"
+        "local data,prefab=ParseUserSessionData(str);"
+        "assert(data~=nil and prefab~='','invalid player save');"
+        "DST_EXPORT_READ={file=file,prefab=prefab,x=data.x,z=data.z,"
+        "health=data.data.health.health,hunger=data.data.hunger.hunger,"
+        "inventory=data.data.inventory.items}"
+        "end);return true"
+    )
+    async with asyncio.timeout(OPERATION_TIMEOUT):
+        while True:
+            value = await server.game.world.execute("return DST_EXPORT_READ")
+            if isinstance(value, dict):
+                return value
+            await asyncio.sleep(0.1)
+
+
+async def shutdown_without_save(server: Server) -> None:
+    await server.game.world.execute(
+        "TheWorld:DoStaticTaskInTime(0,function() c_shutdown(false) end);return true"
+    )
+    async with asyncio.timeout(OPERATION_TIMEOUT):
+        assert await server.wait() == 0
+
+
+@asynccontextmanager
+async def running_server(root: Path, cluster: Path) -> AsyncIterator[Server]:
+    name = f"dst-export-{str(ULID()).lower()}"
+    logs: deque[str] = deque(maxlen=100)
+    server = make_server(root, cluster, name, log_handler=logs.append)
+    try:
+        await server.start(startup_timeout=STARTUP_TIMEOUT)
+        yield server
+        await shutdown_without_save(server)
+    except BaseException as error:
+        error.add_note("recent game logs:\n" + "\n".join(logs))
+        raise
+    finally:
+        await reap_server(server, name)
+
+
+async def test_export_restores_world_and_encoded_player_save(tmp_path: Path) -> None:
+    py7zr = pytest.importorskip("py7zr")
+    source = write_cluster(tmp_path / "source")
+    userid = "KU_1234567_"
+    async with running_server(tmp_path, source) as server:
+        original = await server.game.world.runtime()
+        await server.game.world.execute(
+            "local player=SpawnPrefab('wilson');"
+            f"player.userid={lua_string(userid)};"
+            "player.Physics:Teleport(4,0,5);"
+            "player.components.health:SetCurrentHealth(63);"
+            "player.components.hunger:SetCurrent(71);"
+            "local item=SpawnPrefab('goldnugget');"
+            "item.components.stackable:SetStackSize(7);"
+            "player.components.inventory:GiveItem(item);"
+            "SerializeUserSession(player,true);return true"
+        )
+        await server.save(completion_timeout=OPERATION_TIMEOUT)
+        before = await read_player(server, userid)
+        assert f"/{userid}_/" in str(before["file"])
+        assert before["health"] == 63
+        assert before.pop("hunger") == pytest.approx(71, abs=1)
+
+    with (
+        export_cluster(source, room_id="cluster") as exported,
+        py7zr.SevenZipFile(exported.stream) as archive,
+    ):
+        archive.extractall(tmp_path / "restored")
+    restored = tmp_path / "restored" / "cluster"
+    source_player = (
+        source / "forest" / "save" / "session" / original.session_id / f"{userid}_"
+    )
+    restored_player_directory = (
+        restored
+        / "forest"
+        / "save"
+        / "session"
+        / original.session_id
+        / encode_klei_id(userid)
+    )
+    assert {path.name: path.read_bytes() for path in source_player.iterdir()} == {
+        path.name: path.read_bytes() for path in restored_player_directory.iterdir()
+    }
+    (restored / "cluster_token.txt").write_text("", encoding="utf-8")
+    async with running_server(tmp_path, restored) as server:
+        runtime = await server.game.world.runtime()
+        assert runtime.session_id == original.session_id
+        assert runtime.seed == original.seed
+        assert await server.game.world.execute(
+            "return TheNet:GetDefaultEncodeUserPath()"
+        )
+        after = await read_player(server, userid)
+        assert f"/{encode_klei_id(userid)}/" in str(after.pop("file"))
+        assert after.pop("hunger") == pytest.approx(71, abs=1)
+        before.pop("file")
+        assert after == before
+        await server.game.world.execute(
+            f"RestoreSnapshotUserSession(TheWorld.meta.session_identifier,{lua_string(userid)});"
+            "return true"
+        )
+        async with asyncio.timeout(OPERATION_TIMEOUT):
+            while True:
+                restored_player = await server.game.world.execute(
+                    "for _,player in pairs(Ents) do "
+                    f"if player.userid=={lua_string(userid)} "
+                    "and player.is_snapshot_user_session then "
+                    "return {prefab=player.prefab,"
+                    "health=player.components.health.currenthealth} "
+                    "end end;return nil"
+                )
+                if restored_player is not None:
+                    break
+                await asyncio.sleep(0.1)
+        assert restored_player == {"prefab": "wilson", "health": 63}
 
 
 async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(

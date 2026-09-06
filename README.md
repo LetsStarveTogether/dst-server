@@ -159,4 +159,5 @@ dst-annotations dst-scripts/scripts/components --output components_def.lua
 ## Documentation
 
 - [Guides: configuration, runtime, telemetry and Mods](docs/README.md)
+- [Save archive exports](docs/configuration.md#导出存档)
 - [DST Lua source index](dst-scripts/index/README.md)

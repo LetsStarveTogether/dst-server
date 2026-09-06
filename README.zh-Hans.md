@@ -158,4 +158,5 @@ dst-annotations dst-scripts/scripts/components --output components_def.lua
 ## 文档
 
 - [使用指南：配置、运行机制、遥测与 Mod 更新](docs/README.md)
+- [存档导出](docs/configuration.md#导出存档)
 - [DST Lua 源码索引](dst-scripts/index/README.md)

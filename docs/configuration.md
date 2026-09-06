@@ -120,6 +120,48 @@ RPC 写入要求所有游戏进程停止，并拒绝修改分片拓扑、`server
 内部 `master_port` 可在所有分片保持一致的前提下修改，不需要更改 Pod 的端口发布。
 停服和重启不会隐式保存游戏。
 
+## 导出存档
+
+安装导出依赖后，可将已有配置和存档打包为 `.7z`：
+
+```shell
+pip install 'dst-server[export]'
+```
+
+```python
+import shutil
+from pathlib import Path
+
+from dst_server.cluster.archive import export_cluster
+
+with export_cluster(Path("/srv/dst/001")) as archive:
+    destination = Path("/path/to/exports") / archive.filename
+    with destination.open("xb") as output:
+        shutil.copyfileobj(archive.stream, output)
+```
+
+将示例导出目录替换为自己的已有目录，持久文件的路径和后续删除由调用者负责。
+SDK 内部使用匿名 `TemporaryFile`，`archive.stream` 支持读取和定位，离开 `with` 后自动关闭并清理。
+默认文件名形如 `DST-001-20260908T010203Z.7z`，由目录名或指定的 `room_id` 与 UTC 时间组成。
+归档使用 ZSTD 级别 22 压缩，请用 `py7zr` 或 `7-Zip-zstd` 读取；原版 `7z` 不一定提供该解码器。
+
+也可先用 `config = ClusterConfig.load(directory)` 读取配置，再调用 `with config.export(directory) as archive:`。
+目录参数始终必填，因为配置模型不拥有磁盘中的存档文件。
+默认 `encode_user_path=True` 会将玩家目录转换为游戏使用的编码，并同步导出配置与 `shardindex` 中的标志。
+传入 `encode_user_path=False` 会保留原设置与玩家目录名。
+
+归档保留 SDK 支持的游戏配置和 `save/session/` 下的全部普通文件，包括玩家快照、元数据与 `savelocation`。
+必要的 `save/shardindex` 会保留世界、会话和 Mod 信息，同时清除其中的密码等凭据。
+额外进度文件 `save/recipebook`、`save/reforged_achievements_server` 和 `save/mod_config_data/mod_worldjump_data_*` 也会保留。
+日志、权限名单、专服令牌、Mod 内容与 UGC 缓存、临时文件及其余辅助索引不进入归档。
+导出配置清除 `cluster_password`，并以新生成的共享 `cluster_key` 替换原部署密钥，供导出的分片互相连接。
+归档不包含 `cluster_token.txt`，通过配置 SDK 读取或部署前需自行补充对应凭据。
+旧版仅含 `saveindex` 的存档需先由游戏迁移，损坏或非受支持格式的 `shardindex` 会使导出失败。
+
+输入目录必须已经保存并保持静止，导出不会自动保存或停止游戏。
+检测到文件变化时会失败，但变化检测不能保证在线多分片的原子快照。
+目前仅提供导出，导入、S3 上传和环境凭据读取尚未实现；后续上传可直接消费同一组 `archive.filename` 与可定位的 `archive.stream`。
+
 ## 游戏启动参数
 
 常规部署由 Agent 构造游戏命令，用户不需要手写以下参数：
