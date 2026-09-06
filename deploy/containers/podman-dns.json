@@ -1,0 +1,6 @@
+{
+  "dns_enabled": true,
+  "network_dns_servers": [
+    "127.0.0.53"
+  ]
+}
