@@ -88,6 +88,79 @@ echo 'c_save()' > "${HOME}/.local/share/dst/000/cave/console"
 
 FIFO 可以执行任意服务端 Lua，必须与游戏进程处于同一信任边界。
 
+## 存档文件
+
+集群的整体配置布局见[配置文件](docs/configuration.md#配置文件)。
+每个分片都有自己的 `<shard>/save/`，世界 ID 标识该分片生成的世界，记录在 `shardindex.session_id` 中。
+森林和洞穴分别保存世界与人物状态；世界 ID 不表示玩家的一次登录。
+下面是启用玩家路径编码时的原版典型布局，文件和目录按需创建，数字文件只列一份快照：
+
+```text
+<shard>/save/
+├── shardindex
+├── shardindex_time
+├── session/
+│   └── <session-id>/
+│       ├── 0000000001
+│       ├── 0000000001.meta
+│       └── <encoded-user-id>/
+│           ├── 0000000001
+│           ├── 0000000001.meta
+│           └── savelocation
+├── profile
+├── modindex
+├── boot_modindex
+├── cached_userid
+├── server_temp/
+│   └── server_save
+├── client_temp/
+├── event_match_stats/
+├── world_presets/
+└── mod_config_data/
+```
+
+| 路径（相对 `save/`） | 保存的内容 |
+| --- | --- |
+| `shardindex` | 分片存档索引：`world` 保存位置、预设和覆盖等世界选项，`server` 保存服务设置，`session_id` 指向世界目录，`enabled_mods` 保存启用的 Mod 及配置，`version` 记录索引格式版本。 |
+| `shardindex_time` | `created` 和 `saved` 分别记录创建与最近保存的现实时间，使用 Unix 秒数。 |
+| `session/<session-id>/<snapshot>` | 世界快照主体：地图地块、道路、尺寸、拓扑、持久实体、世界与网络组件状态、Mod 记录，以及可选的在线玩家清单。 |
+| `session/<session-id>/<snapshot>.meta` | 世界摘要，包含 `clock` 和 `seasons`，用于读取天数、昼夜阶段、季节等信息。 |
+| `session/<session-id>/<encoded-user-id>/<snapshot>` | 人物快照主体：角色、位置、年龄、皮肤和组件状态，例如生命、饥饿、理智、物品栏、装备、背包内容及已学配方。 |
+| `session/<session-id>/<encoded-user-id>/<snapshot>.meta` | 人物摘要，原版仅写入 `character = player.prefab`。 |
+| `session/<session-id>/<encoded-user-id>/savelocation` | 原生二进制位置历史，按快照记录玩家所在的分片，供读取人物存档时定位分片。 |
+
+索引的字段由 [ShardIndex](dst-scripts/scripts/shardindex.lua) 定义。
+世界主体与摘要在 [SaveGame](dst-scripts/scripts/mainfunctions.lua) 中生成。
+人物主体与摘要由 [SerializeUserSession](dst-scripts/scripts/networking.lua) 保存。
+世界主体内部的 `meta` 记录构建版本、随机种子、世界类型和存档版本等，与独立的世界 `.meta` 摘要不同。
+
+数字文件名是快照序号，不是游戏天数；界面天数根据 `clock.cycles + 1` 计算，同一天可以产生多份快照。
+人物目录中的快照可能不连续，也不保证每份世界快照都有同号的人物文件。
+保存世界时会保存当时的 `AllPlayers`，人物生成等流程也会单独保存人物。
+恢复时由原生 `TheNet:GetUserSessionFile` 选择人物文件；[保存槽读取流程](dst-scripts/scripts/saveindex.lua)还会查询玩家所在分片。
+
+| 辅助路径 | 用途与内容 |
+| --- | --- |
+| `profile` | 当前运行环境的档案和偏好，逻辑内容为 JSON，包含控制设置、启动信息、收藏 Mod、预设和提示状态等。 |
+| `modindex` | Mod 管理状态的 Lua 表，包含已知 Mod、启用或临时禁用状态、API 版本等。 |
+| `boot_modindex` | Mod 启动过程标记，内容为 `loading` 或 `done`，用于判断前次加载是否完成。 |
+| `cached_userid` | 原生引擎维护的服务器账号 Klei ID 缓存；它保存身份标识，不是专服令牌或人物快照。 |
+| `server_temp/server_save` | 世界初始化时生成的精简临时地图副本，写入前去掉实体、快照、地块、导航等数据，不能替代完整世界快照。 |
+| `client_temp/` | 原生引擎管理的客户端临时目录，具体文件由引擎按需维护。 |
+| `event_match_stats/` | 活动玩法统计，逻辑内容为 CSV，包含胜负、回合、时间和分数等；原版写入分支排除 Dedicated。 |
+| `world_presets/` | 用户保存的预设，`.wsp` 保存世界设置，`.wgp` 保存生成设置，内容包含基础预设、覆盖项、名称、描述和版本。 |
+| `mod_config_data/` | Mod 配置选项及所选值，常见文件名为 `modconfiguration_<modname>`；Mod 也可能在这里保存额外数据。 |
+
+这些 Mod 管理文件和目录属于原版的 Mod 支持系统，纯净服也可能创建。
+实体和组件通过 `OnSave()` 提供保存数据，Mod 可以扩展世界或人物字段，也可以另写持久文件。
+表中的 Lua、JSON 和 CSV 指逻辑内容，磁盘文件还可能带有 KLEI 封装、压缩或末尾空字节，具体取决于写入接口。
+
+SDK 默认使用 `encode_user_path = true`，并始终在 `server.ini` 中显式写入当前设置值。
+显式 `false` 会保留；启用编码时，在线玩家的目录名使用 Klei ID 对应的 12 位编码。
+已有存档切换路径方式时，需要同步人物目录、`server.ini` 和 `shardindex.server.encode_user_path`。
+迁移时保留人物目录内的全部快照、`.meta` 与 `savelocation`。
+路径编码不改变账号身份，因此不会转换 `cached_userid` 等文件中的 Klei ID。
+
 ## 运行时架构
 
 主分片容器运行 `dst-server master`。

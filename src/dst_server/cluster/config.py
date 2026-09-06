@@ -187,15 +187,12 @@ class _IniSettings(RevalidatedFrozenModel):
                 values[field] = value
         return cls.model_validate_strings(values)
 
-    def _render(self, forced: dict[str, object] | None = None) -> str:
+    def _render(self, *, include: set[str] | None = None) -> str:
         validated = type(self).model_validate(self)
-        values = {
-            field: getattr(validated, field)
-            for field in validated.model_fields_set
-            if getattr(validated, field) is not None
-        }
-        if forced is not None:
-            values.update(forced)
+        values = validated.model_dump(
+            include=validated.model_fields_set | (include or set()),
+            exclude_none=True,
+        )
 
         sections = []
         for section, fields in self._SECTIONS:
@@ -325,10 +322,9 @@ class ClusterSettings(_IniSettings):
         return self
 
     def render(self, *, multi_shard: bool = False) -> str:
-        forced = None
         if multi_shard and "shard_enabled" not in self.model_fields_set:
-            forced = {"shard_enabled": True}
-        return self._render(forced)
+            return self.replace(shard_enabled=True).render()
+        return self._render()
 
 
 class ShardSettings(_IniSettings):
@@ -342,7 +338,7 @@ class ShardSettings(_IniSettings):
 
     master_server_port: Port = 27016
     server_port: Port = 10999
-    encode_user_path: bool = False
+    encode_user_path: bool = True
 
     _SECTIONS = (
         (
@@ -373,10 +369,10 @@ class ShardSettings(_IniSettings):
         return self
 
     def render(self, *, multi_shard: bool = False) -> str:
-        forced = {"encode_user_path": self.encode_user_path}
+        include = {"encode_user_path"}
         if multi_shard:
-            forced["is_master"] = self.is_master
-        return self._render(forced)
+            include.add("is_master")
+        return self._render(include=include)
 
 
 def _validate_configuration_directory(path: Path) -> None:

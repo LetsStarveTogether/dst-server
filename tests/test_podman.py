@@ -181,7 +181,9 @@ async def container_name() -> AsyncIterator[str]:
     await remove_container(name)
 
 
-def write_cluster(root: Path, *, configured: bool = False) -> Path:
+def write_cluster(
+    root: Path, *, configured: bool = False, encode_user_path: bool = True
+) -> Path:
     cluster = root / "cluster"
     ClusterConfig(
         settings=ClusterSettings(
@@ -197,6 +199,7 @@ def write_cluster(root: Path, *, configured: bool = False) -> Path:
                     id=1,
                     server_port=10999,
                     master_server_port=27018,
+                    encode_user_path=encode_user_path,
                 ),
                 world=(
                     WorldgenOverride(overrides=ForestOverrides(day="onlyday"))
@@ -322,7 +325,7 @@ async def running_server(root: Path, cluster: Path) -> AsyncIterator[Server]:
 
 async def test_export_restores_world_and_encoded_player_save(tmp_path: Path) -> None:
     py7zr = pytest.importorskip("py7zr")
-    source = write_cluster(tmp_path / "source")
+    source = write_cluster(tmp_path / "source", encode_user_path=False)
     userid = "KU_1234567_"
     async with running_server(tmp_path, source) as server:
         original = await server.game.world.runtime()
@@ -645,7 +648,7 @@ async def test_sdk_real_game_core_contract(
                 "}"
             ) == {
                 "day": "onlyday",
-                "encode_user_path": False,
+                "encode_user_path": True,
                 "game_mode": "survival",
                 "max_players": 16,
             }

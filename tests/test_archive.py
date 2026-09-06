@@ -21,10 +21,16 @@ from dst_server.klei_id import encode_klei_id
 @pytest.fixture
 def saved_cluster(tmp_path: Path) -> Path:
     root = tmp_path / "001"
-    FOREST_CAVES.build(
+    configuration = FOREST_CAVES.build(
         token=SecretStr("private-token"),
         cluster_key=SecretStr("private-shard-key"),
         settings=ClusterSettings(cluster_password=SecretStr("private-password")),
+    )
+    configuration.replace(
+        shards={
+            name: shard.replace(settings=shard.settings.replace(encode_user_path=False))
+            for name, shard in configuration.shards.items()
+        }
     ).save(root)
     for shard in ("forest", "cave"):
         session = root / shard / "save/session/0123456789ABCDEF"
@@ -165,6 +171,47 @@ def test_export_round_trip_and_cleanup(
         path.relative_to(saved_cluster): path.read_bytes()
         for path in saved_cluster.rglob("*")
         if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("source_encoded", [True, False])
+def test_export_uses_source_encoding_for_player_paths(
+    saved_cluster: Path, monkeypatch: pytest.MonkeyPatch, source_encoded: bool
+) -> None:
+    configuration = ClusterConfig.load(saved_cluster)
+    configuration.replace(
+        shards={
+            name: shard.replace(
+                settings=shard.settings.replace(encode_user_path=source_encoded)
+            )
+            for name, shard in configuration.shards.items()
+        }
+    ).save(saved_cluster)
+    configuration = configuration.replace(
+        shards={
+            name: shard.replace(
+                settings=shard.settings.replace(encode_user_path=not source_encoded)
+            )
+            for name, shard in configuration.shards.items()
+        }
+    )
+
+    def encode(userid: str) -> str:
+        assert not source_encoded, "already-encoded shards must preserve player paths"
+        return encode_klei_id(userid)
+
+    monkeypatch.setattr(archive, "encode_klei_id", encode)
+    with (
+        archive.export_cluster(saved_cluster, configuration=configuration) as exported,
+        SevenZipFile(exported.stream) as compressed,
+    ):
+        players = {
+            name for name in compressed.getnames() if name.endswith("/savelocation")
+        }
+    player = "KU_ABCDEFG__" if source_encoded else encode_klei_id("KU_ABCDEFG_")
+    assert players == {
+        f"001/{shard}/save/session/0123456789ABCDEF/{player}/savelocation"
+        for shard in configuration.shards
     }
 
 

@@ -101,27 +101,37 @@ def schema_types(
     return {cast(str, definition["type"])}
 
 
-def test_ini_defaults_are_omitted_except_raw_klei_user_paths(
+def test_ini_defaults_are_omitted_except_encoded_user_paths(
     tmp_path: Path,
 ) -> None:
-    assert ClusterSettings().render() == ""
+    cluster_settings = ClusterSettings()
+    assert cluster_settings.render() == ""
+    assert cluster_settings.render(multi_shard=True) == (
+        "[SHARD]\nshard_enabled = true\n"
+    )
+    assert cluster_settings.shard_enabled is False
+    assert cluster_settings.model_dump(exclude_unset=True) == {}
     server_ini = tmp_path / "server.ini"
     server_ini.write_text("", encoding="utf-8")
     loaded_shard = ShardSettings.load(server_ini)
     assert loaded_shard.is_master is True
     assert loaded_shard.model_fields_set == set()
-    account = "[ACCOUNT]\nencode_user_path = false\n"
+    account = "[ACCOUNT]\nencode_user_path = true\n"
     assert loaded_shard.render() == account
+    assert loaded_shard.model_dump(exclude_unset=True) == {}
     assert ShardSettings().render(multi_shard=True) == (
         "[SHARD]\nis_master = true\n\n" + account
     )
-    assert ShardSettings(is_master=True).encode_user_path is False
+    assert ShardSettings(is_master=True).encode_user_path is True
     assert ShardSettings(is_master=True).render() == (
         "[SHARD]\nis_master = true\n\n" + account
     )
-    assert ShardSettings(encode_user_path=True).render() == (
-        "[ACCOUNT]\nencode_user_path = true\n"
-    )
+    raw_user_paths = "[ACCOUNT]\nencode_user_path = false\n"
+    assert ShardSettings(encode_user_path=False).render() == raw_user_paths
+    server_ini.write_text(raw_user_paths, encoding="utf-8")
+    loaded_shard = ShardSettings.load(server_ini)
+    assert loaded_shard.encode_user_path is False
+    assert loaded_shard.render() == raw_user_paths
     settings = ClusterSettings(
         max_snapshots=6,
         offline_cluster=False,
@@ -150,6 +160,25 @@ def test_ini_defaults_are_omitted_except_raw_klei_user_paths(
     assert loaded == settings
     assert loaded.model_fields_set == settings.model_fields_set
     assert loaded.render() == expected
+
+
+def test_required_ini_fields_do_not_override_preset_values() -> None:
+    patch = ShardSettings(server_port=12000)
+    patch.render(multi_shard=True)
+
+    settings = (
+        compose(
+            shard("forest", settings=ShardSettings(encode_user_path=False)),
+            shard("forest", settings=patch),
+        )
+        .shards["forest"]
+        .settings
+    )
+
+    assert patch.model_fields_set == {"server_port"}
+    assert settings.server_port == 12000
+    assert settings.encode_user_path is False
+    assert settings.render().endswith("[ACCOUNT]\nencode_user_path = false\n")
 
 
 def test_ini_loader_rejects_unknown_input(tmp_path: Path) -> None:
@@ -194,7 +223,7 @@ def test_shard_loader_discards_legacy_authentication_port(tmp_path: Path) -> Non
     settings = ShardSettings.load(path)
 
     assert settings.model_fields_set == set()
-    assert settings.render() == "[ACCOUNT]\nencode_user_path = false\n"
+    assert settings.render() == "[ACCOUNT]\nencode_user_path = true\n"
     assert "authentication_port" not in settings.model_dump()
 
 

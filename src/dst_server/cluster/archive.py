@@ -169,6 +169,10 @@ def _save_files(  # ruff: ignore[complex-structure, too-many-branches]
                 raise NotADirectoryError(parent)
         if not (directory / name).is_dir():
             raise FileNotFoundError(directory / name)
+        convert_user_path = (
+            encode_user_path
+            and not ShardSettings.load(directory / name / "server.ini").encode_user_path
+        )
         if (root.parent / "saveindex").exists() and not (
             root.parent / "shardindex"
         ).exists():
@@ -189,11 +193,11 @@ def _save_files(  # ruff: ignore[complex-structure, too-many-branches]
                 raise ValueError(msg)
             target = source.relative_to(directory)
             _validate_archive_path(target)
-            if not source.is_relative_to(root):
+            if not convert_user_path or not source.is_relative_to(root):
                 files[source] = target, _file_state(state)
                 continue
             parts = list(source.relative_to(root).parts)
-            if encode_user_path and parts[2:] and parts[1].startswith("KU_"):
+            if parts[2:] and parts[1].startswith("KU_"):
                 # DST appends one underscore to an unencoded online player ID.
                 userid = (
                     parts[1][:-1]

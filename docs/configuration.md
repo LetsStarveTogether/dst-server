@@ -22,6 +22,10 @@ cluster/
 │   ├── worldgenoverride.lua
 │   ├── modoverrides.lua
 │   └── save/
+│       ├── shardindex
+│       ├── shardindex_time
+│       ├── session/
+│       └── …
 └── cave/
     └── 与 forest 相同的分片文件
 ```
@@ -31,10 +35,11 @@ cluster/
 | `cluster.ini` | 集群名称、访问限制、人数、玩法与分片连接设置。 |
 | `cluster_token.txt` | Klei 专服令牌。 |
 | 三个权限名单 | 管理员、封禁和白名单，每行一个标识符。 |
-| `<shard>/server.ini` | 分片身份、玩家端口和 Steam 查询端口。 |
+| `<shard>/server.ini` | 分片身份、玩家端口、Steam 查询端口和玩家存档路径编码方式。 |
 | `<shard>/worldgenoverride.lua` | 世界生成与世界设置覆盖。 |
 | `<shard>/leveldataoverride.lua` | 可选的完整关卡基线，事件世界需要。 |
 | `<shard>/modoverrides.lua` | 当前分片启用的 Mod 和选项。 |
+| `<shard>/save/` | 分片存档索引、世界与人物快照，以及运行环境的辅助数据；完整路径和内容见[存档文件](../README.zh-Hans.md#存档文件)（[English](../README.md#save-files)）。 |
 | `mods/` | 共享下载清单、Mod 行为配置、内容与缓存，详见 [Mod 更新](mods.md)。 |
 
 `cluster.ini`、`cluster_token.txt` 和每个分片的 `server.ini` 必须存在，且只能有一个主分片。
@@ -59,7 +64,9 @@ cluster/
 
 `cluster.ini` 的 `[NETWORK]` 控制名称与访问限制，`[GAMEPLAY]` 控制人数、PVP 和空房暂停等玩法。
 完整字段、范围及 SDK 默认值以 [ClusterSettings 与 ShardSettings](../src/dst_server/cluster/config.py) 为准。
-`encode_user_path` 会改变玩家存档目录的编码方式，已有存档后不要随意切换。
+`encode_user_path` 默认为 `True`，生成的 `server.ini` 总会显式写入该设置；显式传入或读取的 `False` 仍会保留。
+INI 渲染通过 Pydantic 的 `model_dump(include=..., exclude_none=True)` 选择输出字段，不改变模型记录的显式字段，因此不会影响配置片段的合并。
+此设置必须与玩家存档目录的编码方式一致，已有存档后不能只改配置而不迁移目录。
 
 ## 世界设置
 
@@ -148,7 +155,8 @@ SDK 内部使用匿名 `TemporaryFile`，`archive.stream` 支持读取和定位�
 也可先用 `config = ClusterConfig.load(directory)` 读取配置。
 调用 `with export_cluster(directory, configuration=config) as archive:` 时可复用该配置对象。
 目录参数始终必填，因为配置模型不拥有磁盘中的存档文件。
-默认 `encode_user_path=True` 会将玩家目录转换为游戏使用的编码，并同步导出配置与 `shardindex` 中的标志。
+默认 `encode_user_path=True` 按源分片 `server.ini` 的设置决定是否转换玩家目录：已启用编码的分片直接保留路径，其余分片转换为游戏使用的编码。
+导出配置与 `shardindex` 中的标志会同步为 `True`。
 传入 `encode_user_path=False` 会保留原设置与玩家目录名。
 
 上传至 R2 时，在调用进程中设置以下环境变量：

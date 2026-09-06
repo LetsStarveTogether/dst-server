@@ -89,6 +89,106 @@ echo 'c_save()' > "${HOME}/.local/share/dst/000/cave/console"
 
 The FIFO can execute arbitrary server Lua and must remain in the same trust boundary as the game process.
 
+## Save Files
+
+See [Configuration files](docs/configuration.md#配置文件) for the overall cluster layout.
+Each shard has its own `save/` directory containing world and player snapshots, indexes, settings, and temporary data.
+The `forest` and `cave` shards save their worlds and players separately, using different world session IDs.
+A session ID identifies a shard's generated world, not a player's login.
+The following vanilla layout uses encoded player paths, placeholder IDs, and one example snapshot per directory.
+Some auxiliary files and directories are optional or empty.
+
+```text
+<shard>/save/
+├── shardindex
+├── shardindex_time
+├── session/
+│   └── <session-id>/
+│       ├── 0000000001
+│       ├── 0000000001.meta
+│       └── <encoded-user-id>/
+│           ├── 0000000001
+│           ├── 0000000001.meta
+│           └── savelocation
+├── profile
+├── modindex
+├── boot_modindex
+├── cached_userid
+├── server_temp/
+│   └── server_save
+├── client_temp/
+├── event_match_stats/
+├── world_presets/
+└── mod_config_data/
+```
+
+`shardindex` identifies the saved world and its settings; the actual world and player states live in `session/`.
+Vanilla saves five fields in this index:
+
+| Field | Contents |
+| --- | --- |
+| `world` | World options, including location, presets, and overrides; it does not contain the map itself. |
+| `server` | Saved server settings, such as game mode, player limit, name, password, online mode, and `encode_user_path`. |
+| `session_id` | The world identifier used by `session/<session-id>/`. |
+| `enabled_mods` | Mods enabled for this save and their configuration. |
+| `version` | Index schema version, distinct from the game build version. |
+
+`shardindex_time` stores `created` and `saved`, the creation and most recent save times in Unix seconds.
+Saving preserves the existing `created` value and updates `saved` to the current real time.
+Neither value represents an in-game day.
+
+Files with numeric names and no extension are the core snapshots.
+World snapshots sit directly under the world session directory, while player snapshots sit in its player subdirectories.
+Each accompanying `.meta` file provides a small summary:
+
+| File | Contents |
+| --- | --- |
+| World snapshot, such as `<session-id>/0000000001` | Tiles, roads, map dimensions and topology; persistent entities such as structures, creatures, and ground items; world and network component state; Mod records; and an optional list of online players. |
+| World `.meta` | `clock` and `seasons` summaries, including the day counter, day phase, season, and season progress, for rollback listings. |
+| Player snapshot, such as `<encoded-user-id>/0000000001` | Character, position, age, skins, and saved component state, such as health, hunger, sanity, inventory, equipment, backpack contents, learned recipes, and character-specific data. |
+| Player `.meta` | Vanilla writes only `character = player.prefab`; the full player state remains in the snapshot. |
+| Player `savelocation` | An optional native binary file recording snapshot numbers and shard IDs to locate the player's save on the appropriate shard. |
+
+The world snapshot's internal `savedata.meta` records the game build, random seed, world type, and save version.
+It differs from the external `.meta` summary.
+Numeric filenames are save sequence numbers, not day numbers; the displayed day is `clock.cycles + 1`.
+Manual saves can advance the sequence without advancing a day.
+Player snapshot numbers can have gaps and need not match every world snapshot.
+World saves serialize the current `AllPlayers`, and some player events save separately.
+The engine selects the appropriate player session file during loading.
+
+The auxiliary paths serve different purposes:
+
+| Path | Purpose and contents |
+| --- | --- |
+| `profile` | A runtime profile whose logical contents are JSON, including controls, startup information, favorite Mods, custom presets, and hint state; player characters are saved in `session/`. |
+| `modindex` | A Lua table of Mod management state, including known Mods, enabled and temporarily disabled states, and API versions; this file can exist even when no Mods are enabled. |
+| `boot_modindex` | A Mod startup marker containing `loading` or `done`, tracking whether loading completed. |
+| `cached_userid` | The native engine's cache of the server account's `KU_…` user ID, distinct from the cluster token and encoded player directory names. |
+| `server_temp/server_save` | A temporary map copy created during world initialization with entities, snapshots, tiles, navigation, and some network state removed; it cannot restore a complete world. |
+| `client_temp/` | A native client temporary directory whose files are managed by the engine as needed. |
+| `event_match_stats/` | Event match statistics in CSV form, including results, rounds, time, and scores; the vanilla writing branch excludes dedicated servers. |
+| `world_presets/` | Saved custom presets: `.wsp` files hold world settings and `.wgp` files hold world generation settings, including the base preset, overrides, name, description, and version. |
+| `mod_config_data/` | Mod configuration options and selected values, usually in `modconfiguration_<mod-name>` files; Mods may also add their own data. |
+
+The SDK defaults to `encode_user_path = true` and always writes the configured value to `server.ini`.
+An explicit `false` is preserved.
+When encoding is enabled, online player directories use 12-character encoded Klei IDs.
+When changing existing saves, keep `[ACCOUNT].encode_user_path` in `server.ini` consistent with the player directory names.
+Also update `server.encode_user_path` in `shardindex` to match.
+Preserve all player snapshots, `.meta` files, and `savelocation` records when migrating player directories.
+Enabling path encoding changes the directory name used to locate a save, not the player's Klei user ID.
+Klei IDs stored as account identities, such as `cached_userid`, remain unchanged.
+The tables describe logical contents; KLEI wrappers, compression, and trailing null bytes depend on the writing interface.
+These Mod management files and directories belong to vanilla Mod support and may exist even when no Mods are enabled.
+Entities and components supply saved data through `OnSave()`; Mods can extend records and create additional files.
+
+Index fields are defined by [ShardIndex](dst-scripts/scripts/shardindex.lua).
+World snapshots and summaries are generated by [SaveGame](dst-scripts/scripts/mainfunctions.lua).
+Player snapshots and summaries are written by [SerializeUserSession](dst-scripts/scripts/networking.lua).
+Component data is collected in [entity save records](dst-scripts/scripts/entityscript.lua).
+Cross-shard player lookup is handled by the [save-slot loading flow](dst-scripts/scripts/saveindex.lua).
+
 ## Runtime Architecture
 
 The master container runs `dst-server master`.
