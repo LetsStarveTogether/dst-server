@@ -122,7 +122,7 @@ RPC 写入要求所有游戏进程停止，并拒绝修改分片拓扑、`server
 
 ## 导出存档
 
-安装导出依赖后，可将已有配置和存档打包为 `.7z`：
+安装包含 `py7zr` 和 `obstore` 的导出依赖后，可将已有配置和存档打包为 `.7z`：
 
 ```shell
 pip install 'dst-server[export]'
@@ -151,6 +151,34 @@ SDK 内部使用匿名 `TemporaryFile`，`archive.stream` 支持读取和定位�
 默认 `encode_user_path=True` 会将玩家目录转换为游戏使用的编码，并同步导出配置与 `shardindex` 中的标志。
 传入 `encode_user_path=False` 会保留原设置与玩家目录名。
 
+上传至 R2 时，在调用进程中设置以下环境变量：
+
+```shell
+export AWS_ENDPOINT='https://<account-id>.r2.cloudflarestorage.com'
+export AWS_BUCKET='your-bucket'
+export AWS_ACCESS_KEY_ID='your-access-key-id'
+export AWS_SECRET_ACCESS_KEY='your-secret-access-key'
+```
+
+内部的 `S3Store(region="auto")` 直接读取这些 [obstore 原生环境变量](https://developmentseed.org/obstore/latest/api/store/aws/#obstore.store.S3Config)。
+区域固定为 R2 使用的 [`auto`](https://developers.cloudflare.com/r2/api/s3/api/#bucket-region)，无需设置 `AWS_REGION`。
+
+```python
+from pathlib import Path
+
+from dst_server.cluster.archive import export_cluster
+
+with export_cluster(Path("/srv/dst/001")) as archive:
+    key = archive.upload()
+
+print(key)
+```
+
+`upload()` 返回桶内对象 key，格式为 `<ULID>/<原 DST-id-UTC.7z 文件名>`，保留文件名并用独立前缀避免同秒上传覆盖。
+上传从流开头读取，异常直接传给调用者，离开 `with` 时仍会清理本地匿名临时文件。
+大文件的 multipart 上传由 [obstore 原生处理](https://developmentseed.org/obstore/latest/api/put/)。
+R2 默认在发起上传七天后清理未完成分片，具体时间可通过[桶生命周期规则](https://developers.cloudflare.com/r2/buckets/object-lifecycles/)修改，上传失败不保证远端分片立即清理。
+
 归档保留 SDK 支持的游戏配置和 `save/session/` 下的全部普通文件，包括玩家快照、元数据与 `savelocation`。
 必要的 `save/shardindex` 会保留世界、会话和 Mod 信息，同时清除其中的密码等凭据。
 额外进度文件 `save/recipebook`、`save/reforged_achievements_server` 和 `save/mod_config_data/mod_worldjump_data_*` 也会保留。
@@ -161,7 +189,7 @@ SDK 内部使用匿名 `TemporaryFile`，`archive.stream` 支持读取和定位�
 
 输入目录必须已经保存并保持静止，导出不会自动保存或停止游戏。
 检测到文件变化时会失败，但变化检测不能保证在线多分片的原子快照。
-目前仅提供导出，导入、S3 上传和环境凭据读取尚未实现；后续上传可直接消费同一组 `archive.filename` 与可定位的 `archive.stream`。
+目前提供导出与 R2 上传，导入尚未实现。
 
 ## 游戏启动参数
 

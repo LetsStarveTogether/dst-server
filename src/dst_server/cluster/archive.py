@@ -12,6 +12,7 @@ from tempfile import TemporaryFile
 from typing import BinaryIO
 
 from pydantic import SecretStr
+from ulid import ULID
 
 from dst_server.klei_id import encode_klei_id
 
@@ -24,6 +25,20 @@ from .overrides import _literal_return_table, _lua_literal
 class ClusterArchive:
     filename: str
     stream: BinaryIO
+
+    def upload(self) -> str:
+        """Upload to R2 using AWS environment variables and return the object key."""
+        from obstore.store import S3Store
+
+        store = S3Store(region="auto")
+        key = f"{ULID()}/{self.filename}"
+        self.stream.seek(0)
+        store.put(
+            key,
+            self.stream,
+            attributes={"Content-Type": "application/x-7z-compressed"},
+        )
+        return key
 
 
 @contextmanager

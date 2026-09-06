@@ -1,10 +1,13 @@
 import os
 import re
 import struct
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from threading import Thread
 from typing import BinaryIO
 
 import pytest
+from obstore.exceptions import PermissionDeniedError
 from py7zr import SevenZipFile
 from pydantic import SecretStr
 
@@ -225,6 +228,81 @@ def test_consumer_failure_closes_export(saved_cluster: Path) -> None:
     ):
         raise RuntimeError(message)
     assert exported.stream.closed
+
+
+def test_upload_uses_aws_environment_and_closes_stream_on_failure(
+    saved_cluster: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[tuple[str, bytes, dict[str, str]]] = []
+    fail_upload = False
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_PUT(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            requests.append((
+                self.path,
+                body,
+                {key.lower(): value for key, value in self.headers.items()},
+            ))
+            self.send_response(403 if fail_upload else 200)
+            self.send_header("Content-Length", "0")
+            self.send_header("ETag", '"test-etag"')
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    for name in os.environ:
+        if name.startswith("AWS_"):
+            monkeypatch.delenv(name)
+    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+        for name, value in {
+            "AWS_ENDPOINT": f"http://127.0.0.1:{server.server_port}",
+            "AWS_BUCKET": "archive-test",
+            "AWS_ACCESS_KEY_ID": "test-access",
+            "AWS_SECRET_ACCESS_KEY": "test-secret",
+            "AWS_REGION": "unused-region",
+            "AWS_ALLOW_HTTP": "true",
+        }.items():
+            monkeypatch.setenv(name, value)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with archive.export_cluster(saved_cluster) as exported:
+                expected = exported.stream.read()
+                exported.stream.seek(6)
+                first = exported.upload()
+                second = exported.upload()
+                assert first != second
+                for key in (first, second):
+                    assert re.fullmatch(
+                        rf"[0-9A-HJKMNP-TV-Z]{{26}}/{re.escape(exported.filename)}",
+                        key,
+                    )
+                assert [path for path, _, _ in requests] == [
+                    f"/archive-test/{key}" for key in (first, second)
+                ]
+                assert not exported.stream.closed
+            assert exported.stream.closed
+            fail_upload = True
+            with (
+                pytest.raises(PermissionDeniedError, match="403"),
+                archive.export_cluster(saved_cluster) as failed,
+            ):
+                failed.upload()
+            assert failed.stream.closed
+            assert len(requests) == 3
+            assert [body for _, body, _ in requests[:2]] == [expected, expected]
+            for _, body, headers in requests:
+                assert body.startswith(b"7z\xbc\xaf\x27\x1c")
+                assert headers["content-type"] == "application/x-7z-compressed"
+                assert re.search(
+                    r"Credential=test-access/\d{8}/auto/s3/aws4_request",
+                    headers["authorization"],
+                )
+        finally:
+            server.shutdown()
+            thread.join()
 
 
 @pytest.mark.parametrize(
