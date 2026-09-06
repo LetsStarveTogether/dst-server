@@ -279,7 +279,7 @@ async def test_update_unions_collection_items_with_explicit_items(
 
     assert await updater.update([2], collections=[100, 100]) == (1, 2)
 
-    collection_items.assert_awaited_once_with({100})
+    collection_items.assert_awaited_once_with({100}, None)
     execute.assert_awaited_once_with(
         [
             ("workshop_download_item", "322330", "1"),
@@ -289,13 +289,22 @@ async def test_update_unions_collection_items_with_explicit_items(
     )
 
 
+@pytest.mark.parametrize("proxy", [None, "http://user:secret@proxy.invalid:1080"])
 async def test_collections_expand_recursively_without_duplicate_requests(
     monkeypatch: pytest.MonkeyPatch,
+    proxy: str | None,
 ) -> None:
+    monkeypatch.setenv("https_proxy", "http://inherited.invalid")
+    monkeypatch.setenv("no_proxy", "*")
     collections = {100: [(200, 2), (1, 0)], 200: [(100, 2), (1, 0), (2, 0)]}
     requested = []
 
-    def urlopen(request: urllib.request.Request, *, timeout: int) -> io.BytesIO:
+    def urlopen(
+        _opener: urllib.request.OpenerDirector,
+        request: urllib.request.Request,
+        *,
+        timeout: int,
+    ) -> io.BytesIO:
         assert isinstance(request.data, bytes)
         data = urllib.parse.parse_qs(request.data.decode())
         collection = int(data["publishedfileids[0]"][0])
@@ -303,6 +312,12 @@ async def test_collections_expand_recursively_without_duplicate_requests(
         assert request.full_url == workshop.COLLECTION_URL
         assert request.method == "POST"
         assert timeout == 30
+        assert request.host == (
+            "proxy.invalid:1080" if proxy else "api.steampowered.com"
+        )
+        assert request.get_header("Proxy-authorization") == (
+            "Basic dXNlcjpzZWNyZXQ=" if proxy else None
+        )
         payload = {
             "response": {
                 "collectiondetails": [
@@ -319,9 +334,9 @@ async def test_collections_expand_recursively_without_duplicate_requests(
         }
         return io.BytesIO(json.dumps(payload).encode())
 
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", urlopen)
 
-    assert await workshop._collection_items({100, 200}) == {1, 2}
+    assert await workshop._collection_items({100, 200}, proxy) == {1, 2}
     assert sorted(requested) == [100, 200]
 
 
@@ -344,7 +359,9 @@ async def test_collections_reject_unavailable_or_malformed_details(
     response = io.BytesIO(
         json.dumps({"response": {"collectiondetails": [detail]}}).encode()
     )
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+    monkeypatch.setattr(
+        urllib.request.OpenerDirector, "open", lambda *_args, **_kwargs: response
+    )
 
     with pytest.raises(
         ValueError, match="invalid or unavailable Workshop collection: 100"

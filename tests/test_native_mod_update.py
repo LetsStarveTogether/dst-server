@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -44,6 +46,34 @@ def native_updater(
         + f"time.sleep({delay!r})\nsys.exit({returncode!r})\n"
     )
     return write_updater(tmp_path, source)
+
+
+@pytest.mark.parametrize("proxy", [None, "http://user:secret@127.0.0.1:1080"])
+async def test_native_download_uses_only_explicit_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, proxy: str | None
+) -> None:
+    variables = ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy", "no_proxy")
+    for name in (*variables, *(name.upper() for name in variables)):
+        monkeypatch.setenv(name, "http://inherited.invalid")
+    monkeypatch.setenv("DST_KEEP_ENV", "retained")
+    executable, ugc = write_updater(
+        tmp_path,
+        UPDATER + "\nimport json\n"
+        '(ugc / "environment").write_text(json.dumps(dict(os.environ)))\n'
+        + 'print(os.environ.get("http_proxy", "direct"))\n'
+        + f"print({COMPLETE!r})\n",
+    )
+    lines: list[str] = []
+
+    await mods.update(executable, ugc, proxy=proxy, log_handler=lines.append)
+
+    environment = json.loads((ugc / "environment").read_text())
+    assert environment["DST_KEEP_ENV"] == "retained"
+    assert {
+        name: value for name, value in environment.items() if name.lower() in variables
+    } == ({"http_proxy": proxy, "https_proxy": proxy} if proxy else {})
+    assert "secret" not in "\n".join(lines)
+    assert os.environ["http_proxy"] == "http://inherited.invalid"
 
 
 @pytest.mark.parametrize("with_handler", [False, True])

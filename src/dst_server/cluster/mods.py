@@ -19,7 +19,9 @@ from luaparser.astnodes import (
 
 from dst_server.steamcmd import (
     cleanup_process_tasks,
+    download_environment,
     positive_integer,
+    redact,
     terminate_process,
 )
 
@@ -48,11 +50,12 @@ DOWNLOAD_FAILURES = (
 async def _stream_logs(
     stdout: asyncio.StreamReader,
     log_handler: Callable[[str], None] | None,
+    secrets: tuple[str, ...] = (),
 ) -> str | None:
     completed = False
     failure = None
     while line := await stdout.readline():
-        text = line.decode(errors="replace").rstrip("\r\n")
+        text = redact(line.decode(errors="replace").rstrip("\r\n"), secrets)
         if log_handler is not None:
             log_handler(text)
         message = text.split("]: ", 1)[-1].rstrip()
@@ -244,9 +247,11 @@ async def update(
     ugc_directory: Path,
     *,
     attempts: int = 5,
+    proxy: str | None = None,
     log_handler: Callable[[str], None] | None = None,
 ) -> None:
     attempts = positive_integer("Mod update attempts", attempts)
+    environment = download_environment(proxy)
     with TemporaryDirectory(prefix="dst-mod-update-") as temporary:
         root = Path(temporary)
         (root / "conf" / "cluster" / "shard").mkdir(parents=True)
@@ -276,18 +281,20 @@ async def update(
                 process = await asyncio.create_subprocess_exec(
                     *command,
                     cwd=executable.parent,
+                    env=environment,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                     start_new_session=True,
                 )
-                stdout = process.stdout
-                if stdout is None:
+                if process.stdout is None:
                     await terminate_process(process)
                     msg = "DST mod updater stdout pipe is unavailable"
                     raise RuntimeError(msg)
                 wait_task = asyncio.create_task(process.wait())
-                log_task = asyncio.create_task(_stream_logs(stdout, log_handler))
+                log_task = asyncio.create_task(
+                    _stream_logs(process.stdout, log_handler, (proxy,) if proxy else ())
+                )
                 try:  # ruff:ignore[too-many-statements-in-try-clause]
                     done, _ = await asyncio.wait(
                         (wait_task, log_task),

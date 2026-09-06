@@ -6,6 +6,7 @@ from collections.abc import Callable, Collection, Iterable, Sequence
 from contextlib import suppress
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from urllib.parse import urlsplit
 
 type LogHandler = Callable[[str], None]
 type SteamCMDCommand = Sequence[str]
@@ -17,7 +18,7 @@ PROXY_VARIABLES = ("http_proxy", "https_proxy")
 
 
 class SteamCMD:  # ruff:ignore[too-many-public-methods]
-    """Run SteamCMD, optionally proxying it via ``DST_SERVER_STEAMCMD_PROXY``."""
+    """Run SteamCMD with an explicitly configured download proxy."""
 
     def __init__(
         self,
@@ -25,6 +26,7 @@ class SteamCMD:  # ruff:ignore[too-many-public-methods]
         *,
         steam_home: str | Path | None = None,
         username: str = "anonymous",
+        proxy: str | None = None,
         log_handler: LogHandler | None = None,
     ) -> None:
         executable_value = os.fspath(executable)
@@ -36,6 +38,7 @@ class SteamCMD:  # ruff:ignore[too-many-public-methods]
             None if steam_home is None else absolute_path("SteamCMD home", steam_home)
         )
         self.username = validate_argument("username", username)
+        self.proxy = validate_proxy(proxy)
         self.log_handler = log_handler
         self.execution_lock = asyncio.Lock()
 
@@ -349,10 +352,9 @@ class SteamCMD:  # ruff:ignore[too-many-public-methods]
         script: Path,
         secrets: tuple[str, ...],
     ) -> str:
-        environment = os.environ.copy()
-        if proxy := environment.get("DST_SERVER_STEAMCMD_PROXY"):
-            environment.update(dict.fromkeys(PROXY_VARIABLES, proxy))
-            secrets += (proxy,)
+        environment = download_environment(self.proxy)
+        if self.proxy is not None:
+            secrets += (self.proxy,)
         working_directory = None
         if self.steam_home is not None:
             environment["HOME"] = str(self.steam_home)
@@ -530,6 +532,36 @@ def absolute_path(name: str, value: str | Path) -> Path:
         msg = f"{name} must be an absolute path"
         raise ValueError(msg)
     return path
+
+
+def validate_proxy(proxy: str | None) -> str | None:
+    if proxy is not None:
+        try:
+            address = urlsplit(validate_argument("download proxy", proxy))
+            valid = (
+                address.scheme in {"http", "https"}
+                and bool(address.hostname)
+                and (address.port is None or address.port > 0)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            msg = "download proxy must be an HTTP(S) URL with a valid host and port"
+            raise ValueError(msg)
+    return proxy
+
+
+def download_environment(proxy: str | None = None) -> dict[str, str]:
+    proxy = validate_proxy(proxy)
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name.lower()
+        not in {"http_proxy", "https_proxy", "all_proxy", "ftp_proxy", "no_proxy"}
+    }
+    if proxy is not None:
+        environment.update(dict.fromkeys(PROXY_VARIABLES, proxy))
+    return environment
 
 
 def normalize_secrets(values: Collection[str]) -> tuple[str, ...]:

@@ -131,11 +131,13 @@ async def test_prepare_keeps_native_as_default_and_accepts_dynamic_setup(
     else:
         monkeypatch.setenv("DST_SERVER_MOD_UPDATER", backend)
     update = AsyncMock()
+    monkeypatch.setenv("DST_SERVER_MOD_PROXY", "http://download.invalid:1080")
     monkeypatch.setattr(mods, "update", update)
 
     shards = await service.prepare_shared(install, cluster)
 
     update.assert_awaited_once()
+    assert update.call_args.kwargs["proxy"] == "http://download.invalid:1080"
     assert update.call_args.args == (
         install / service.EXECUTABLE,
         cluster / "mods" / "ugc",
@@ -167,6 +169,7 @@ async def test_prepare_selects_steamcmd_and_passes_items_and_collections(
         tmp_path, 'ServerModSetup("42"); return ServerModCollectionSetup("99")'
     )
     monkeypatch.setenv("DST_SERVER_MOD_UPDATER", "steamcmd")
+    monkeypatch.setenv("DST_SERVER_MOD_PROXY", "http://download.invalid:1080")
     for name, value in (
         ("DST_SERVER_STEAMCMD", explicit),
         ("STEAMCMDDIR", directory),
@@ -195,6 +198,7 @@ async def test_prepare_selects_steamcmd_and_passes_items_and_collections(
         updater.update.assert_awaited_once_with((7, 42), collections=(99,))
         client, destination = call.args
         assert client.executable == expected
+        assert client.proxy == "http://download.invalid:1080"
         assert callable(client.log_handler)
         assert destination == cluster / "mods"
     native.assert_not_awaited()

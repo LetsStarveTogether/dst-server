@@ -27,6 +27,10 @@ print("HOME|" + os.environ.get("HOME", ""), flush=True)
 print("PROXY|" + "|".join(os.environ.get(name, "") for name in (
     "http_proxy", "https_proxy"
 )), flush=True)
+print("OTHER_PROXY|" + "|".join(os.environ.get(name, "") for name in (
+    "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY",
+    "ftp_proxy", "FTP_PROXY", "no_proxy", "NO_PROXY"
+)), flush=True)
 print(f"MODE|{script.stat().st_mode & 0o777:o}", flush=True)
 print("SCRIPT-BEGIN", flush=True)
 print(content, end="", flush=True)
@@ -66,6 +70,7 @@ def make_client(
     tmp_path: Path,
     *,
     log_handler: Callable[[str], None] | None = None,
+    proxy: str | None = None,
 ) -> SteamCMD:
     executable = tmp_path / "fake-steamcmd"
     executable.write_text(FAKE_STEAMCMD, encoding="utf-8")
@@ -74,6 +79,7 @@ def make_client(
         executable,
         steam_home=tmp_path / "steam home",
         log_handler=log_handler,
+        proxy=proxy,
     )
 
 
@@ -103,25 +109,52 @@ async def test_execute_uses_isolated_home_script_and_streaming_log(
     assert "SCRIPT-BEGIN" in lines
 
 
-async def test_dedicated_proxy_is_scoped_to_steamcmd(
+@pytest.mark.parametrize("proxy", [None, "http://user:secret@127.0.0.1:1080"])
+async def test_explicit_proxy_is_scoped_to_steamcmd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    proxy: str | None,
 ) -> None:
-    proxy_variables = ("http_proxy", "https_proxy")
+    proxy_variables = (
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "ftp_proxy",
+        "no_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "FTP_PROXY",
+        "NO_PROXY",
+    )
     for name in proxy_variables:
         monkeypatch.setenv(name, "http://inherited.invalid")
-    monkeypatch.setenv(
-        "DST_SERVER_STEAMCMD_PROXY",
-        "http://user:secret@127.0.0.1:1080",
-    )
+    output = await make_client(tmp_path, proxy=proxy).execute([("noop",)])
 
-    output = await make_client(tmp_path).execute([("noop",)])
-
-    assert "PROXY|***|***" in output
+    assert ("PROXY|***|***" if proxy else "PROXY||\n") in output
+    assert "inherited.invalid" not in output
     assert "secret" not in output
     assert all(
         os.environ[name] == "http://inherited.invalid" for name in proxy_variables
     )
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        "",
+        "socks5://localhost:1080",
+        "http://",
+        "http://secret@host:bad",
+        "http://host\n",
+    ],
+)
+def test_download_proxy_rejects_invalid_urls_without_echoing_credentials(
+    proxy: str,
+) -> None:
+    with pytest.raises(ValueError, match="download proxy") as error:
+        SteamCMD("steamcmd", proxy=proxy)
+    assert "secret" not in str(error.value)
 
 
 async def test_query_commands(tmp_path: Path) -> None:

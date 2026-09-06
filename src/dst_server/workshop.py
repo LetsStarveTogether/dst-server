@@ -10,6 +10,7 @@ import stat
 import urllib.parse
 import urllib.request
 import zipfile
+from base64 import b64encode
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
@@ -17,7 +18,12 @@ from typing import Any
 
 from dst_server.cluster.mods import _validate_directory
 from dst_server.cluster.overrides import MAX_WORKSHOP_ID
-from dst_server.steamcmd import SteamCMD, absolute_path, positive_integer
+from dst_server.steamcmd import (
+    SteamCMD,
+    absolute_path,
+    positive_integer,
+    validate_proxy,
+)
 
 APP_ID = 322330
 COLLECTION_FILE_TYPE = 2
@@ -60,7 +66,9 @@ class WorkshopUpdater:
             _restore_missing(directory)
             async with asyncio.timeout(UPDATE_TIMEOUT):
                 if collection_ids:
-                    pending.update(await _collection_items(collection_ids))
+                    pending.update(
+                        await _collection_items(collection_ids, self.steamcmd.proxy)
+                    )
                 selected = tuple(sorted(pending))
                 if not selected:
                     return ()
@@ -128,14 +136,16 @@ def _workshop_id(value: int) -> int:
     return value
 
 
-async def _collection_items(collections: set[int]) -> set[int]:
+async def _collection_items(
+    collections: set[int], proxy: str | None = None
+) -> set[int]:
     pending = set(collections)
     visited: set[int] = set()
     items: set[int] = set()
     while pending:
         collection = pending.pop()
         visited.add(collection)
-        payload = await asyncio.to_thread(_get_collection, collection)
+        payload = await asyncio.to_thread(_get_collection, collection, proxy)
         try:  # ruff: ignore[too-many-statements-in-try-clause]
             (detail,) = payload["response"]["collectiondetails"]
             if detail["result"] != 1 or detail["publishedfileid"] != str(collection):
@@ -158,13 +168,30 @@ async def _collection_items(collections: set[int]) -> set[int]:
     return items
 
 
-def _get_collection(collection: int) -> Any:
+def _get_collection(collection: int, proxy: str | None = None) -> Any:
     data = urllib.parse.urlencode({
         "collectioncount": "1",
         "publishedfileids[0]": str(collection),
     }).encode("ascii")
     request = urllib.request.Request(COLLECTION_URL, data=data, method="POST")
-    with urllib.request.urlopen(request, timeout=30) as response:  # ruff: ignore[suspicious-url-open-usage]
+    if proxy is not None:
+        validate_proxy(proxy)
+        address = urllib.parse.urlsplit(proxy)
+        request.set_proxy(address.netloc.rsplit("@", 1)[-1], address.scheme)
+        if address.username is not None:
+            credentials = ":".join(
+                urllib.parse.unquote(value or "")
+                for value in (address.username, address.password)
+            )
+            authorization = b64encode(credentials.encode()).decode("ascii")
+            request.add_unredirected_header(
+                "Proxy-Authorization", f"Basic {authorization}"
+            )
+    opener = urllib.request.OpenerDirector()
+    opener.add_handler(urllib.request.HTTPSHandler())
+    opener.add_handler(urllib.request.HTTPDefaultErrorHandler())
+    opener.add_handler(urllib.request.HTTPErrorProcessor())
+    with opener.open(request, timeout=30) as response:
         return json.load(response)
 
 

@@ -72,6 +72,7 @@ async def prepare_shared(
     )
     setup = cluster_path / "mods" / "dedicated_server_mods_setup.lua"
     if update_mods and (mod_ids or mods.has_setup_code(setup)):
+        proxy = os.environ.get("DST_SERVER_MOD_PROXY") or None
         if backend == "steamcmd":
             from dst_server.workshop import WorkshopUpdater
 
@@ -93,7 +94,9 @@ async def prepare_shared(
                 )
                 raise FileNotFoundError(msg)
             updater = WorkshopUpdater(
-                SteamCMD(resolved, log_handler=log_handler("[MOD_UPDATE]: ")),
+                SteamCMD(
+                    resolved, proxy=proxy, log_handler=log_handler("[MOD_UPDATE]: ")
+                ),
                 cluster_path / "mods",
             )
             await updater.update(items, collections=collections)
@@ -103,6 +106,7 @@ async def prepare_shared(
             await mods.update(
                 executable,
                 cluster_path / "mods" / "ugc",
+                proxy=proxy,
                 log_handler=log_handler("[MOD_UPDATE]: "),
             )
     return shards
