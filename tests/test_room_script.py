@@ -520,7 +520,19 @@ def test_gorge_rooms_force_an_empty_blocklist(tmp_path: Path) -> None:
     assert (tmp_path / "134" / "blocklist.txt").read_bytes() == b""
 
 
-def test_generate_room_saves_cluster_and_quadlet_application(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("volume_idmap", "userns"),
+    [
+        (None, None),
+        ("uids=0-1000-1;gids=0-1000-1", None),
+        (None, "keep-id:uid=1000,gid=1000"),
+    ],
+)
+def test_generate_room_saves_cluster_and_quadlet_application(
+    tmp_path: Path,
+    volume_idmap: str | None,
+    userns: str | None,
+) -> None:
     cluster_dir = tmp_path / "007"
     quadlet_dir = tmp_path / "quadlet"
 
@@ -531,6 +543,8 @@ def test_generate_room_saves_cluster_and_quadlet_application(tmp_path: Path) -> 
         cluster_dir=cluster_dir,
         quadlet_dir=quadlet_dir,
         environment={"OTEL_SDK_DISABLED": "true"},
+        volume_idmap=volume_idmap,
+        userns=userns,
     )
 
     assert written
@@ -542,7 +556,9 @@ def test_generate_room_saves_cluster_and_quadlet_application(tmp_path: Path) -> 
     assert len(units) == 2
     assert all(unit.image == DEFAULT_IMAGE for unit in units)
     assert application.pod.publish_ports[0].host == 30070
+    assert application.pod.userns == userns
     for unit in units:
+        assert all(volume.idmap == volume_idmap for volume in unit.volumes)
         assert unit.environment["OTEL_SDK_DISABLED"] == "true"
         assert unit.environment["DST_SERVER_CLUSTER_NAME"] == "dst-007"
         assert (unit.notify, unit.watchdog_sec, unit.restart) == (
@@ -581,7 +597,9 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
             name=f"dst-{number:03d}",
         )
         mappings = application.pod.publish_ports
+        assert application.pod.userns is None
         units = (application.master, *application.secondaries)
+        assert all(volume.idmap is None for unit in units for volume in unit.volumes)
         shard_count += len(units)
         ports.extend(mapping.host for mapping in mappings)
         assert len(mappings) == 2 * len(units)
@@ -633,7 +651,18 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
     assert max(ports) == 31391
 
 
-def test_explicit_configurations_cover_remaining_port_slots(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("volume_idmap", "userns"),
+    [
+        ("uids=0-1000-1;gids=0-1000-1", None),
+        (None, "keep-id:uid=1000,gid=1000"),
+    ],
+)
+def test_explicit_configurations_cover_remaining_port_slots(
+    tmp_path: Path,
+    volume_idmap: str | None,
+    userns: str | None,
+) -> None:
     template = build(0, token=TOKEN, cluster_key=CLUSTER_KEY)
     configurations = {
         number: template.replace(
@@ -646,6 +675,8 @@ def test_explicit_configurations_cover_remaining_port_slots(tmp_path: Path) -> N
         configurations,
         cluster_root=tmp_path / "clusters",
         quadlet_dir=tmp_path / "quadlet",
+        volume_idmap=volume_idmap,
+        userns=userns,
     )
 
     for number, base in ((140, 31400), (299, 32990)):
@@ -658,11 +689,32 @@ def test_explicit_configurations_cover_remaining_port_slots(tmp_path: Path) -> N
         assert tuple(
             mapping.host for mapping in application.pod.publish_ports
         ) == tuple(range(base, base + 4))
+        assert application.pod.userns == userns
+        assert all(
+            volume.idmap == volume_idmap
+            for unit in (application.master, *application.secondaries)
+            for volume in unit.volumes
+        )
 
 
+@pytest.mark.parametrize(
+    ("mapping_options", "volume_idmap", "userns"),
+    [
+        ((), None, None),
+        (
+            ("--volume-idmap", "uids=0-1000-1;gids=0-1000-1"),
+            "uids=0-1000-1;gids=0-1000-1",
+            None,
+        ),
+        (("--userns", "keep-id:uid=1000,gid=1000"), None, "keep-id:uid=1000,gid=1000"),
+    ],
+)
 def test_main_can_generate_selected_rooms(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    mapping_options: tuple[str, ...],
+    volume_idmap: str | None,
+    userns: str | None,
 ) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("template-test-token\n", encoding="utf-8")
@@ -679,6 +731,7 @@ def test_main_can_generate_selected_rooms(
         str(quadlet_dir),
         "--token-file",
         str(token_file),
+        *mapping_options,
     ])
 
     assert {path.name for path in cluster_root.iterdir()} == {
@@ -689,6 +742,14 @@ def test_main_can_generate_selected_rooms(
         "dst-000.pod",
         "dst-139.pod",
     }
+    for number in (0, 139):
+        application = QuadletApplication.load(quadlet_dir, name=f"dst-{number:03d}")
+        assert application.pod.userns == userns
+        assert all(
+            volume.idmap == volume_idmap
+            for unit in (application.master, *application.secondaries)
+            for volume in unit.volumes
+        )
     generated_token = cluster_root / "000" / "cluster_token.txt"
     assert generated_token.read_text(encoding="utf-8") == "template-test-token\n"
     assert generated_token.stat().st_mode & 0o777 == 0o600

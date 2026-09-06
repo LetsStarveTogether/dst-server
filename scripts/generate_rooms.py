@@ -287,6 +287,8 @@ def generate_configured_room(
     quadlet_dir: Path,
     image: str = DEFAULT_IMAGE,
     environment: Mapping[str, str] | None = None,
+    volume_idmap: str | None = None,
+    userns: str | None = None,
 ) -> tuple[Path, ...]:
     for label, directory in (
         ("cluster_dir", cluster_dir),
@@ -303,6 +305,8 @@ def generate_configured_room(
         image=image,
         allocation=allocation,
         telemetry_environment=environment,
+        volume_idmap=volume_idmap,
+        userns=userns,
     )
     return (*cluster.save(cluster_dir), *application.save(quadlet_dir))
 
@@ -316,6 +320,8 @@ def generate_room(
     quadlet_dir: Path,
     image: str = DEFAULT_IMAGE,
     environment: Mapping[str, str] | None = None,
+    volume_idmap: str | None = None,
+    userns: str | None = None,
 ) -> tuple[Path, ...]:
     return generate_configured_room(
         number,
@@ -324,6 +330,8 @@ def generate_room(
         quadlet_dir=quadlet_dir,
         image=image,
         environment=environment,
+        volume_idmap=volume_idmap,
+        userns=userns,
     )
 
 
@@ -334,6 +342,8 @@ def generate_configured_rooms(
     quadlet_dir: Path,
     image: str = DEFAULT_IMAGE,
     environments: Mapping[int, Mapping[str, str]] | None = None,
+    volume_idmap: str | None = None,
+    userns: str | None = None,
 ) -> tuple[Path, ...]:
     """Generate explicitly configured rooms in any port slot from 000 through 299."""
     written = []
@@ -346,6 +356,8 @@ def generate_configured_rooms(
                 quadlet_dir=quadlet_dir,
                 image=image,
                 environment=(environments or {}).get(number),
+                volume_idmap=volume_idmap,
+                userns=userns,
             )
         )
     return tuple(written)
@@ -358,6 +370,8 @@ def generate_rooms(
     cluster_root: Path,
     quadlet_dir: Path,
     image: str = DEFAULT_IMAGE,
+    volume_idmap: str | None = None,
+    userns: str | None = None,
 ) -> tuple[Path, ...]:
     selected = tuple((number, room(number)[0]) for number in dict.fromkeys(numbers))
 
@@ -377,6 +391,8 @@ def generate_rooms(
                     if kind in _HISTORY_ROOM_TYPES
                     else {}
                 ),
+                volume_idmap=volume_idmap,
+                userns=userns,
             )
         )
     return tuple(written)
@@ -389,6 +405,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--quadlet-dir", required=True, type=Path)
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--image", default=DEFAULT_IMAGE)
+    parser.add_argument("--volume-idmap")
+    parser.add_argument("--userns")
     arguments = parser.parse_args(argv)
     if arguments.token_file is None:
         token = os.environ.get(TOKEN_ENVIRONMENT)
@@ -407,6 +425,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         cluster_root=arguments.cluster_root.resolve(),
         quadlet_dir=arguments.quadlet_dir.resolve(),
         image=arguments.image,
+        volume_idmap=arguments.volume_idmap,
+        userns=arguments.userns,
     )
 
 

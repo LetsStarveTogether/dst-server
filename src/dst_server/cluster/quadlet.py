@@ -47,6 +47,14 @@ MASTER_COMMAND = ("/app/.venv/bin/dst-server", "master")
 CLUSTER_ENVIRONMENT = "DST_SERVER_CLUSTER_NAME"
 _UNIT_NAME = re.compile(r"(?:[A-Za-z0-9:_.-]|\\x[0-9a-f]{2})+\Z")
 _PORT_MAPPING = re.compile(r"([0-9]+):([0-9]+)/(udp|tcp)\Z")
+_ID_MAP_RANGES = r"[0-9]+-[0-9]+-[1-9][0-9]*(?:#[0-9]+-[0-9]+-[1-9][0-9]*)*"
+type IDMap = Annotated[
+    str,
+    Field(
+        pattern=rf"\A(?:uids={_ID_MAP_RANGES}(?:;gids={_ID_MAP_RANGES})?"
+        rf"|gids={_ID_MAP_RANGES}(?:;uids={_ID_MAP_RANGES})?)\z",
+    ),
+]
 
 
 def _validate_unit_name(value: str) -> str:
@@ -155,6 +163,7 @@ class VolumeMount(RevalidatedFrozenModel):
     source: Path
     target: PurePosixPath
     read_only: bool = False
+    idmap: IDMap | None = None
 
     @model_validator(mode="after")
     def _validate_paths(self) -> Self:
@@ -178,11 +187,21 @@ class VolumeMount(RevalidatedFrozenModel):
             raise ValueError(msg)
         source, target, *option_parts = parts
         options = option_parts[0].split(",") if option_parts else []
-        unknown = set(options).difference({"ro", "rw"})
+        idmaps = [
+            option.removeprefix("idmap=")
+            for option in options
+            if option.startswith("idmap=")
+        ]
+        unknown = {
+            option
+            for option in options
+            if option not in {"ro", "rw"} and not option.startswith("idmap=")
+        }
         if (
             unknown
             or len(options) != len(set(options))
             or {"ro", "rw"}.issubset(options)
+            or len(idmaps) > 1
         ):
             msg = f"invalid Quadlet volume options: {value!r}"
             raise ValueError(msg)
@@ -190,11 +209,14 @@ class VolumeMount(RevalidatedFrozenModel):
             source=Path(source),
             target=PurePosixPath(target),
             read_only="ro" in options,
+            idmap=idmaps[0] if idmaps else None,
         )
 
     def render(self) -> str:
         validated = type(self).model_validate(self)
         options = ["ro"] if validated.read_only else []
+        if validated.idmap is not None:
+            options.append(f"idmap={validated.idmap}")
         suffix = f":{','.join(options)}" if options else ""
         return f"{validated.source}:{validated.target}{suffix}"
 
@@ -211,6 +233,7 @@ _POD_SCHEMA: _Schema = {
         "ExitPolicy": False,
         "Network": True,
         "PublishPort": True,
+        "UserNS": False,
     },
     "Install": _INSTALL_KEYS,
 }
@@ -444,6 +467,7 @@ class PodUnit(RevalidatedFrozenModel):
     requires: tuple[UnitToken, ...] = ()
     after: tuple[UnitToken, ...] = ()
     pod_name: UnitToken | None = None
+    userns: UnitToken | None = None
     exit_policy: Literal["stop", "continue"] = "stop"
     networks: tuple[UnitToken, ...] = ()
     publish_ports: tuple[PortMapping, ...] = ()
@@ -475,6 +499,8 @@ class PodUnit(RevalidatedFrozenModel):
             values["description"] = _literal_expansions(value, "Unit.Description")
         if (value := _one(parsed, "Pod", "PodName")) is not None:
             values["pod_name"] = _literal_token(value, "Pod.PodName")
+        if (value := _one(parsed, "Pod", "UserNS")) is not None:
+            values["userns"] = _literal_token(value, "Pod.UserNS")
         if (value := _one(parsed, "Pod", "ExitPolicy")) is not None:
             values["exit_policy"] = value
         for field, section, key in (
@@ -503,6 +529,8 @@ class PodUnit(RevalidatedFrozenModel):
         pod = []
         if validated.pod_name is not None:
             pod.append(f"PodName={_escape_expansions(validated.pod_name)}")
+        if validated.userns is not None:
+            pod.append(f"UserNS={_escape_expansions(validated.userns)}")
         if "exit_policy" in validated.model_fields_set:
             pod.append(f"ExitPolicy={validated.exit_policy}")
         pod.extend(
@@ -916,6 +944,8 @@ class QuadletApplication(RevalidatedFrozenModel):
         image: str = DEFAULT_IMAGE,
         allocation: RoomPortAllocation | None = None,
         telemetry_environment: Mapping[str, str] | None = None,
+        volume_idmap: str | None = None,
+        userns: str | None = None,
     ) -> Self:
         validated = ClusterConfig.model_validate(cluster)
         logical_name = name or f"dst-{cluster_path.name.removeprefix('dst-')}"
@@ -924,6 +954,7 @@ class QuadletApplication(RevalidatedFrozenModel):
         volume = VolumeMount(
             source=cluster_path.absolute(),
             target=PurePosixPath("/cluster"),
+            idmap=volume_idmap,
         )
         publish_ports = allocation.mappings(validated) if allocation else ()
         published_hosts = {mapping.container: mapping.host for mapping in publish_ports}
@@ -931,6 +962,7 @@ class QuadletApplication(RevalidatedFrozenModel):
             name=base,
             description=f"Don't Starve Together {logical_name}",
             pod_name=_podman_name(base),
+            userns=userns,
             exit_policy="continue",
             publish_ports=publish_ports,
             wanted_by=(DEFAULT_TARGET,),

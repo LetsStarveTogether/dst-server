@@ -20,6 +20,7 @@ Every Agent owns one restartable game process.
    ```shell
    export DST_SERVER_CLUSTER_TOKEN='replace-with-cluster-token'
    uv run python -m scripts.generate_rooms \
+     --userns 'keep-id:uid=1000,gid=1000' \
      --cluster-root "${HOME}/.local/share/dst" \
      --quadlet-dir "${HOME}/.config/containers/systemd"
    ```
@@ -40,8 +41,21 @@ Every Agent owns one restartable game process.
    systemctl --user start dst-000-pod.service
    ```
 
-For a rootful deployment, use `/srv/dst` as `--cluster-root` and `/etc/containers/systemd` as `--quadlet-dir`.
+Run the rootless commands above as the regular user who owns the cluster directory.
+The `--userns` option maps that user to the container's `steam` user (UID/GID `1000`) through the Pod's `UserNS` setting.
+For a rootful deployment, run the generator as root:
+
+```shell
+uv run python -m scripts.generate_rooms \
+  --volume-idmap 'uids=0-1000-1;gids=0-1000-1' \
+  --cluster-root /srv/dst \
+  --quadlet-dir /etc/containers/systemd
+```
+
+The idmapped mounts preserve root ownership on the host while containers see UID/GID `1000`.
 Omit `--user` from its systemctl commands.
+Mapping options are empty by default; the generator does not choose them automatically.
+See [Container users and directory permissions](docs/configuration.md#容器用户与目录权限) for the generated settings and requirements.
 For rootful containers that reuse the host's DNS over TLS, see [Container DNS](docs/configuration.md#容器-dns).
 Mod downloads use the native game-server updater by default, with up to five attempts sharing one 30-minute deadline.
 Set `DST_SERVER_MOD_UPDATER=steamcmd` to use the independent SteamCMD backend during startup.

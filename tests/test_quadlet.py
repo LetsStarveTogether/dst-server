@@ -81,6 +81,25 @@ def application(tmp_path: Path, cluster: ClusterConfig) -> QuadletApplication:
             "/srv/dst data:/cluster:ro",
             id="read-only-volume",
         ),
+        pytest.param(
+            VolumeMount(
+                source=Path("/srv/dst"),
+                target=PurePosixPath("/cluster"),
+                idmap="uids=0-1000-1;gids=0-1000-1",
+            ),
+            "/srv/dst:/cluster:idmap=uids=0-1000-1;gids=0-1000-1",
+            id="idmapped-volume",
+        ),
+        pytest.param(
+            VolumeMount(
+                source=Path("/srv/dst"),
+                target=PurePosixPath("/cluster"),
+                read_only=True,
+                idmap="gids=0-1000-1;uids=0-1000-1#1-2000-2",
+            ),
+            "/srv/dst:/cluster:ro,idmap=gids=0-1000-1;uids=0-1000-1#1-2000-2",
+            id="read-only-multiple-idmaps",
+        ),
     ],
 )
 def test_quadlet_values_round_trip(
@@ -177,6 +196,32 @@ def test_quadlet_values_reject_unsafe_or_conflicting_input(
 
 
 @pytest.mark.parametrize(
+    "idmap",
+    [
+        "",
+        "uids=0-1000",
+        "uids=-1-1000-1",
+        "uids=0-1000-0",
+        "uids=0-1000-1;uids=1-1001-1",
+        "uids=0-1000-1,ro,idmap=gids=0-1000-1",
+        "uids=0-1000-1;other=0-1000-1",
+        "uids=0-1000-1\nExec=unsafe",
+    ],
+)
+def test_volume_idmap_rejects_invalid_mappings(idmap: str) -> None:
+    with pytest.raises(ValueError, match=r"idmap|volume options"):
+        VolumeMount.parse(f"/srv/dst:/cluster:idmap={idmap}")
+
+
+@pytest.mark.parametrize(
+    "userns", ["", "keep-id uid=1000", "keep-id\nNetwork=host", "keep-id\0"]
+)
+def test_pod_userns_rejects_unsafe_values(userns: str) -> None:
+    with pytest.raises(ValidationError, match="userns"):
+        PodUnit(name="room", userns=userns)
+
+
+@pytest.mark.parametrize(
     "factory",
     [
         pytest.param(
@@ -186,6 +231,7 @@ def test_quadlet_values_reject_unsafe_or_conflicting_input(
                 requires=("network-online.target",),
                 after=("network-online.target",),
                 pod_name="room%n",
+                userns="keep-id:uid=1000,gid=1000",
                 exit_policy="continue",
                 networks=("dst-server.network", "bridge"),
                 publish_ports=(
@@ -213,6 +259,7 @@ def test_quadlet_values_reject_unsafe_or_conflicting_input(
                         source=Path("/srv/dst data"),
                         target=PurePosixPath("/cluster"),
                         read_only=True,
+                        idmap="uids=0-1000-1;gids=0-1000-1",
                     ),
                 ),
                 notify=True,
@@ -491,6 +538,10 @@ def test_application_builds_master_secondary_lifecycle(
     master_source = f"{application.master.name}.container"
 
     assert application.pod.pod_name == application.pod.name == "dst-007"
+    assert application.pod.userns is None
+    assert "UserNS=" not in application.pod.render()
+    assert all(volume.idmap is None for volume in application.master.volumes)
+    assert "idmap=" not in application.master.render()
     assert application.master.container_name == application.master.name
     assert secondary.container_name == secondary.name
     assert application.master.wants == (f"{secondary.name}.container",)
@@ -528,6 +579,36 @@ def test_application_builds_master_secondary_lifecycle(
         )
         for unit in (application.master, secondary)
     } == {("on-failure", 40, 50, True, 300, "control-group", "SIGKILL")}
+
+
+@pytest.mark.parametrize(
+    ("volume_idmap", "userns"),
+    [
+        ("uids=0-1000-1;gids=0-1000-1", None),
+        (None, "keep-id:uid=1000,gid=1000"),
+    ],
+)
+def test_application_preserves_explicit_user_mapping(
+    tmp_path: Path,
+    cluster: ClusterConfig,
+    volume_idmap: str | None,
+    userns: str | None,
+) -> None:
+    application = QuadletApplication.for_cluster(
+        cluster,
+        tmp_path / "cluster",
+        volume_idmap=volume_idmap,
+        userns=userns,
+    )
+    application.save(tmp_path / "quadlet")
+    loaded = QuadletApplication.load(tmp_path / "quadlet")
+
+    assert loaded == application
+    assert loaded.pod.userns == userns
+    for unit in (loaded.master, *loaded.secondaries):
+        (volume,) = unit.volumes
+        assert volume.target == PurePosixPath("/cluster")
+        assert volume.idmap == volume_idmap
 
 
 @pytest.mark.parametrize(

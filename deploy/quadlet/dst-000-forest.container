@@ -11,7 +11,7 @@ Environment=DST_SERVER_TELEMETRY_PROFILE=history
 Environment=OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://10.255.255.254:4317
 Environment=OTEL_METRICS_EXPORTER=none
 Environment=OTEL_TRACES_EXPORTER=none
-Volume=/srv/dst/000:/cluster
+Volume=/srv/dst/000:/cluster:idmap=uids=0-1000-1;gids=0-1000-1
 ContainerName=dst-000-forest
 StopTimeout=40
 Notify=true

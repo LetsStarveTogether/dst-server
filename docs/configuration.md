@@ -136,6 +136,37 @@ RPC 写入要求所有游戏进程停止，并拒绝修改分片拓扑、`server
 自行管理游戏进程时，可通过 [ServerConfig](../src/dst_server/runtime/config.py) 设置路径与 `extra_args`。
 其他原生参数见 [Klei 命令行指南](https://support.klei.com/hc/en-us/articles/360029556192-Dedicated-Server-Command-Line-Options-Guide)。
 
+## 容器用户与目录权限
+
+镜像以 `steam` 用户运行，UID/GID 均为 `1000`。
+房间生成器的映射选项默认留空，部署时应显式指定。
+
+rootful 部署以 root 生成和维护配置，传入 `--volume-idmap 'uids=0-1000-1;gids=0-1000-1'`，每个分片的 `.container` 使用以下挂载：
+
+```ini
+[Container]
+Volume=/srv/dst/000:/cluster:idmap=uids=0-1000-1;gids=0-1000-1
+```
+
+该映射保留宿主目录和文件的 `root:root` 属主，容器内显示为 `1000:1000`。
+容器新建的文件在宿主上也属于 root，因此以 root 生成的 `0600` 配置始终可由容器读取。
+宿主内核和数据目录所在文件系统必须支持 [idmapped mount](https://docs.podman.io/en/latest/markdown/podman-run.1.html#volume-v-source-volume-host-dir-container-dir-options)。
+
+rootless 部署由拥有集群目录的普通用户生成配置，传入 `--userns 'keep-id:uid=1000,gid=1000'`，通过用户 systemd 管理器启动。
+挂载保持普通 bind mount，映射设置在 `.pod` 的 `[Pod]` 中，由所有分片容器继承：
+
+```ini
+[Pod]
+UserNS=keep-id:uid=1000,gid=1000
+```
+
+该设置将宿主部署用户映射为容器内的 `1000:1000`，宿主文件仍由该部署用户拥有。
+集群目录必须由对应部署用户拥有，且不能允许组或其他用户写入，以满足 RPC socket 的目录检查。
+映射配置修改后，应重新生成 Quadlet 并重建对应 Pod。
+
+`QuadletApplication.for_cluster` 与四个 `generate_*` 函数接受 `volume_idmap` 和 `userns` 参数。
+两者默认均为 `None`，不生成 idmap 或 `UserNS` 设置，也不根据执行用户自动选择。
+
 ## 容器 DNS
 
 rootful Podman 可通过 [DNS 策略](../deploy/containers/podman-dns.json)将默认网络的查询交给宿主机 systemd-resolved。

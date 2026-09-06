@@ -55,6 +55,7 @@ from scripts.generate_rooms import NETDATA_ENVIRONMENT, build
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
 IMAGE = os.environ.get("DST_SERVER_IMAGE", "")
+VOLUME_IDMAP = "uids=0-1000-1;gids=0-1000-1"
 
 pytestmark = [
     pytest.mark.system,
@@ -65,6 +66,10 @@ pytestmark = [
     pytest.mark.skipif(
         not IMAGE,
         reason="set DST_SERVER_IMAGE to the exact local image ID or tag",
+    ),
+    pytest.mark.skipif(
+        os.geteuid() != 0,
+        reason="rootful Podman is required for the idmapped test volumes",
     ),
 ]
 
@@ -83,8 +88,6 @@ MASTER = "forest"
 def image_matches_expected_build() -> None:
     expected_revision = os.environ.get("DST_SERVER_EXPECTED_REVISION")
     expected_version = os.environ.get("DST_SERVER_EXPECTED_VERSION")
-    if expected_revision is None and expected_version is None:
-        return
     podman = shutil.which("podman")
     assert podman is not None
     inspected = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
@@ -94,6 +97,7 @@ def image_matches_expected_build() -> None:
             "inspect",
             "--format",
             (
+                "{{.Config.User}}|"
                 '{{ index .Labels "org.opencontainers.image.revision" }}|'
                 '{{ index .Labels "org.opencontainers.image.version" }}'
             ),
@@ -105,7 +109,8 @@ def image_matches_expected_build() -> None:
         check=False,
     )
     assert inspected.returncode == 0, inspected.stderr or inspected.stdout
-    revision, version = inspected.stdout.strip().split("|", maxsplit=1)
+    user, revision, version = inspected.stdout.strip().split("|", maxsplit=2)
+    assert user == "steam"
     if expected_revision is not None:
         assert revision == expected_revision
     if expected_version is not None:
@@ -220,12 +225,15 @@ def make_server(
         "--workdir",
         "/install/bin64",
         "--volume",
-        f"{cluster}:/cluster",
+        f"{cluster}:/cluster:idmap={VOLUME_IDMAP}",
         "--volume",
-        f"{cluster / 'mods'}:/install/mods",
+        f"{cluster / 'mods'}:/install/mods:idmap={VOLUME_IDMAP}",
     ]
     lua_directory = lua_directory or ServerConfig(shard="forest").lua_directory
-    command.extend(("--volume", f"{lua_directory}:/dst-server-lua:ro"))
+    command.extend((
+        "--volume",
+        f"{lua_directory}:/dst-server-lua:ro,idmap={VOLUME_IDMAP}",
+    ))
     command.extend(("--entrypoint", GAME_EXECUTABLE, IMAGE))
     wrapper.write_text(
         "#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n',
@@ -275,7 +283,7 @@ async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(
             "--network",
             "none",
             "--volume",
-            f"{cluster}:/cluster",
+            f"{cluster}:/cluster:idmap={VOLUME_IDMAP}",
             IMAGE,
             "dst-server",
             "master",
@@ -287,6 +295,18 @@ async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(
             )
             assert len(status.shards) == 1
             assert status.shards[0].ready
+            _, process_status = await run_command(
+                "podman", "exec", container_name, "cat", "/proc/1/status"
+            )
+            for field in ("Uid:", "Gid:"):
+                identity = next(
+                    line
+                    for line in process_status.splitlines()
+                    if line.startswith(field)
+                )
+                assert identity.split()[1:] == ["1000"] * 4
+            socket_metadata = (cluster / ".dst-server.sock").stat()
+            assert (socket_metadata.st_uid, socket_metadata.st_gid) == (0, 0)
             _, processes = await run_command("podman", "top", container_name, "args")
             assert GAME_EXECUTABLE in processes
             lifecycle = await client.subscribe_lifecycle()
@@ -726,6 +746,7 @@ class QuadletSystem:
             image=IMAGE,
             allocation=available_room_allocation(cluster),
             telemetry_environment=environment,
+            volume_idmap=VOLUME_IDMAP,
         )
         quadlet_dir = root / "quadlet"
         application.save(quadlet_dir)

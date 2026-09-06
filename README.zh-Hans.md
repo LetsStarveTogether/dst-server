@@ -20,6 +20,7 @@
    ```shell
    export DST_SERVER_CLUSTER_TOKEN='replace-with-cluster-token'
    uv run python -m scripts.generate_rooms \
+     --userns 'keep-id:uid=1000,gid=1000' \
      --cluster-root "${HOME}/.local/share/dst" \
      --quadlet-dir "${HOME}/.config/containers/systemd"
    ```
@@ -40,8 +41,21 @@
    systemctl --user start dst-000-pod.service
    ```
 
-rootful 部署使用 `/srv/dst` 作为 `--cluster-root`，使用 `/etc/containers/systemd` 作为 `--quadlet-dir`。
+以上 rootless 命令应由拥有集群目录的普通用户执行。
+`--userns` 通过 Pod 的 `UserNS` 将该用户映射为容器内的 `steam` 用户（UID/GID `1000`）。
+rootful 部署以 root 运行生成器：
+
+```shell
+uv run python -m scripts.generate_rooms \
+  --volume-idmap 'uids=0-1000-1;gids=0-1000-1' \
+  --cluster-root /srv/dst \
+  --quadlet-dir /etc/containers/systemd
+```
+
+idmapped mount 使宿主文件保持 root 所有，容器内显示为 UID/GID `1000`。
 其 systemctl 命令应省略 `--user`。
+映射选项默认留空，生成器不会自动选择。
+具体配置与运行要求见[容器用户与目录权限](docs/configuration.md#容器用户与目录权限)。
 rootful 容器复用宿主机 DNS over TLS 的配置见 [容器 DNS](docs/configuration.md#容器-dns)。
 Mod 下载默认使用游戏服务端原生更新器，最多尝试五次，共用 30 分钟总期限。
 设置 `DST_SERVER_MOD_UPDATER=steamcmd` 可在启动时使用独立 SteamCMD 后端。
