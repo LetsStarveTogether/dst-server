@@ -31,7 +31,6 @@ from dst_server.cluster.world import CaveOverrides, ForestOverrides
 from scripts.mod_configurations import MOD_CONFIGURATIONS
 
 CLUSTER_DESCRIPTION = "朗诵团：924715341 频道：饥荒联机版 Let's Starve Together!"  # ruff: ignore[ambiguous-unicode-character-string]
-DEFAULT_CLUSTER_KEY = SecretStr("lst")
 TOKEN_ENVIRONMENT = "DST_SERVER_CLUSTER_TOKEN"  # ruff: ignore[hardcoded-password-string]
 NETDATA_ENVIRONMENT = {
     "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
@@ -381,7 +380,6 @@ def generate_rooms(
             generate_room(
                 number,
                 token=token,
-                cluster_key=DEFAULT_CLUSTER_KEY,
                 cluster_dir=cluster_root / f"{number:03d}",
                 quadlet_dir=quadlet_dir,
                 image=image,

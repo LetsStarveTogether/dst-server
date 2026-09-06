@@ -1562,7 +1562,8 @@ def test_cluster_save_preflights_managed_paths_before_replacing_files(
     cluster = tmp_path / "cluster"
     mods_path = cluster / "mods"
     mods_path.mkdir(parents=True)
-    (cluster / "cluster.ini").write_text("original", encoding="utf-8")
+    original = "[NETWORK]\ncluster_name = original\n"
+    (cluster / "cluster.ini").write_text(original, encoding="utf-8")
     (mods_path / "ugc").write_text("conflict", encoding="utf-8")
 
     with pytest.raises(ValueError, match="not a directory"):
@@ -1570,7 +1571,7 @@ def test_cluster_save_preflights_managed_paths_before_replacing_files(
             shards={"Master": ShardConfig(settings=ShardSettings(is_master=True))}
         ).save(cluster)
 
-    assert (cluster / "cluster.ini").read_text(encoding="utf-8") == "original"
+    assert (cluster / "cluster.ini").read_text(encoding="utf-8") == original
 
 
 def test_cluster_save_rejects_shard_symlink_without_touching_target(
@@ -1616,14 +1617,16 @@ def test_multi_shard_requires_explicit_non_conflicting_network() -> None:
     master = ShardConfig(settings=ShardSettings(is_master=True))
     caves = ShardConfig(settings=ShardSettings(is_master=False, name="Caves"))
 
-    with pytest.raises(ValidationError, match="cluster_key"):
+    with pytest.raises(ValidationError, match="master_ip"):
         ClusterConfig(shards={"Master": master, "Caves": caves})
 
-    with pytest.raises(ValidationError, match="cluster_key"):
+    assert (
         ClusterConfig(
             settings=ClusterSettings(shard_enabled=True),
             shards={"Master": master},
-        )
+        ).settings.cluster_key
+        is None
+    )
 
     with pytest.raises(ValidationError, match="UDP port"):
         ClusterConfig(
@@ -1647,6 +1650,86 @@ def test_multi_shard_requires_explicit_non_conflicting_network() -> None:
                 ),
             },
         )
+
+    with pytest.raises(ValidationError, match="cluster_key"):
+        ClusterConfig(
+            settings=ClusterSettings(master_ip="127.0.0.1"),
+            shards={
+                "Master": master,
+                "Caves": caves.replace(
+                    settings=caves.settings.replace(cluster_key=SecretStr("key"))
+                ),
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("root_key", "override_key"),
+    [(None, None), ("existing", None), (None, "override"), ("unused", "override")],
+)
+def test_cluster_save_materializes_and_preserves_shared_key(
+    tmp_path: Path, root_key: str | None, override_key: str | None
+) -> None:
+    template = FOREST_CAVES.build(token=SecretStr(""))
+    original = template.replace(
+        settings=template.settings.replace(
+            cluster_key=SecretStr(root_key) if root_key is not None else None
+        ),
+        shards={
+            name: shard.replace(
+                settings=shard.settings.replace(
+                    cluster_key=(
+                        SecretStr(override_key) if override_key is not None else None
+                    )
+                )
+            )
+            for name, shard in template.shards.items()
+        },
+    )
+    original.save(tmp_path / "first")
+    persisted = ClusterConfig.load(tmp_path / "first")
+    key = override_key or root_key
+    if key is None:
+        assert persisted.settings.cluster_key is not None
+        key = persisted.settings.cluster_key.get_secret_value()
+        assert len(key) >= 32
+    template.save(tmp_path / "first")
+    loaded = ClusterConfig.load(tmp_path / "first")
+    assert loaded.settings.cluster_key == SecretStr(key)
+    assert all(shard.settings.cluster_key is None for shard in loaded.shards.values())
+    template.replace(settings=template.settings.replace(pvp=True)).save(
+        tmp_path / "first"
+    )
+    assert ClusterConfig.load(tmp_path / "first").settings.cluster_key == SecretStr(key)
+    template.save(tmp_path / "second")
+    assert ClusterConfig.load(tmp_path / "second").settings.cluster_key not in {
+        None,
+        SecretStr(key),
+    }
+    assert template.settings.cluster_key is None
+    assert "cluster_key" not in template.files()[Path("cluster.ini")]
+
+
+@pytest.mark.parametrize("unsafe_path", [".", "cluster.ini", "forest/server.ini"])
+def test_cluster_key_lookup_rejects_symlinks(
+    tmp_path: Path, unsafe_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cluster"
+    target = tmp_path / "outside"
+    if unsafe_path == ".":
+        target.mkdir()
+    else:
+        target.write_text("unreadable configuration", encoding="utf-8")
+    link = root / unsafe_path
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target, target_is_directory=True)
+
+    def unexpected_load(path: Path) -> ClusterSettings:
+        pytest.fail(f"read unsafe configuration: {path}")
+
+    monkeypatch.setattr(ClusterSettings, "load", unexpected_load)
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        FOREST_CAVES.build(token=SecretStr("")).save(root)
 
 
 def test_shard_ids_follow_master_and_secondary_roles() -> None:

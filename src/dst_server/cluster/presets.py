@@ -83,9 +83,7 @@ class RoomPreset(RevalidatedFrozenModel):
             if settings is not None
             else preset.settings
         )
-        if cluster_key is not None and (
-            len(preset.shards) > 1 or cluster_settings.shard_enabled
-        ):
+        if cluster_key is not None:
             cluster_settings = cluster_settings.replace(cluster_key=cluster_key)
         shards = {
             name: shard.replace(mods=_merge_mods(preset.mods, shard.mods))

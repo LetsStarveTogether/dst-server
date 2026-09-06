@@ -1,6 +1,5 @@
 import os
 import re
-import secrets
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -11,14 +10,16 @@ from pathlib import Path
 from tempfile import TemporaryFile
 from typing import BinaryIO
 
-from pydantic import SecretStr
 from ulid import ULID
 
 from dst_server.klei_id import encode_klei_id
 
-from .config import ClusterConfig, ShardSettings
+from .config import ClusterConfig, ClusterSettings, ShardSettings
 from .layout import PERMISSION_FILES, discover
 from .overrides import _literal_return_table, _lua_literal
+
+PUBLIC_PRIVACY = 0
+CLAN_PRIVACY = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,11 +81,17 @@ def export_cluster(  # ruff: ignore[complex-structure, too-many-branches]
             msg = "export configuration must preserve the source player path encoding"
             raise ValueError(msg)
     exported = configuration.replace(
-        settings=configuration.settings.replace(
-            cluster_password=None,
-            cluster_key=SecretStr(secrets.token_urlsafe(24))
-            if len(configuration.shards) > 1 or configuration.settings.shard_enabled
-            else None,
+        settings=ClusterSettings.model_validate(
+            configuration.settings.model_dump(
+                exclude_unset=True,
+                exclude={
+                    "cluster_password",
+                    "cluster_key",
+                    "steam_group_id",
+                    "steam_group_only",
+                    "steam_group_admins",
+                },
+            )
         ),
         shards={
             name: shard.replace(
@@ -223,7 +230,7 @@ def _validate_archive_path(path: Path) -> None:
 
 
 def _export_shard_index(path: Path, *, encode_user_path: bool = True) -> bytes:
-    """Keep the saved world index while removing server credentials."""
+    """Keep the world index while removing credentials and Steam group settings."""
     if not path.is_file():
         msg = f"shard index must be a regular file: {path}"
         raise ValueError(msg)
@@ -238,8 +245,11 @@ def _export_shard_index(path: Path, *, encode_user_path: bool = True) -> bytes:
         "cluster_key",
         "cluster_token",
         "token",
+        "clan",
     ):
         server.pop(key, None)
+    if server.get("privacy_type") == CLAN_PRIVACY:
+        server["privacy_type"] = PUBLIC_PRIVACY
     if encode_user_path:
         server["encode_user_path"] = True
     return f"KLEI     1 return {_lua_literal(index)}\n".encode()

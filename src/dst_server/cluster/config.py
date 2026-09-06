@@ -1,5 +1,6 @@
 import os
-from collections.abc import Mapping
+import secrets
+from collections.abc import Iterable, Mapping
 from configparser import ConfigParser
 from configparser import Error as ConfigError
 from ipaddress import IPv4Address
@@ -12,6 +13,8 @@ from pydantic import (
     AfterValidator,
     Field,
     SecretStr,
+    ValidationInfo,
+    field_validator,
     model_validator,
 )
 
@@ -216,7 +219,7 @@ class ClusterSettings(_IniSettings):
     bind_ip: IPv4 = IPv4Address("127.0.0.1")
     master_ip: Host | None = None
     master_port: Port = 10888
-    cluster_key: IniSecret | None = None
+    cluster_key: IniSecret | None = Field(default=None, validate_default=True)
 
     steam_group_only: bool = False
     steam_group_id: Annotated[int, Field(ge=0, le=2**64 - 1)] = 0
@@ -241,6 +244,19 @@ class ClusterSettings(_IniSettings):
     game_mode: NonEmptyIniText = "survival"
     pause_when_empty: bool = False
     vote_enabled: bool = True
+
+    @field_validator("cluster_key")
+    @classmethod
+    def _materialize_cluster_key(
+        cls, key: SecretStr | None, info: ValidationInfo
+    ) -> SecretStr | None:
+        if (
+            key is None
+            and isinstance(info.context, dict)
+            and "cluster_key" in info.context
+        ):
+            return info.context["cluster_key"] or SecretStr(secrets.token_urlsafe(32))
+        return key
 
     @classmethod
     def load(cls, path: Path) -> Self:
@@ -323,8 +339,8 @@ class ClusterSettings(_IniSettings):
 
     def render(self, *, multi_shard: bool = False) -> str:
         if multi_shard and "shard_enabled" not in self.model_fields_set:
-            return self.replace(shard_enabled=True).render()
-        return self._render()
+            return self.model_copy(update={"shard_enabled": True}).render()
+        return self._render(include={"cluster_key"})
 
 
 class ShardSettings(_IniSettings):
@@ -373,6 +389,19 @@ class ShardSettings(_IniSettings):
         if multi_shard:
             include.add("is_master")
         return self._render(include=include)
+
+
+def _shared_cluster_key(
+    settings: ClusterSettings, shards: Iterable[ShardSettings]
+) -> SecretStr | None:
+    keys = {
+        shard.cluster_key if shard.cluster_key is not None else settings.cluster_key
+        for shard in shards
+    } or {settings.cluster_key}
+    if len(keys) != 1 or SecretStr("") in keys:
+        msg = "all shards must use the same non-empty cluster_key or omit it"
+        raise ValueError(msg)
+    return keys.pop()
 
 
 def _validate_configuration_directory(path: Path) -> None:
@@ -616,18 +645,9 @@ class ClusterConfig(RevalidatedFrozenModel):
         return self
 
     def _validate_shard_network(self) -> None:
-        keys = set()
-        for shard in self.shards.values():
-            key = shard.settings.cluster_key
-            if key is None:
-                key = self.settings.cluster_key
-            if key is None or not key.get_secret_value():
-                msg = "a shared cluster_key is required when sharding is enabled"
-                raise ValueError(msg)
-            keys.add(key.get_secret_value())
-        if len(keys) != 1:
-            msg = "a shared cluster_key is required when sharding is enabled"
-            raise ValueError(msg)
+        _shared_cluster_key(
+            self.settings, (shard.settings for shard in self.shards.values())
+        )
 
         ports = {
             shard.settings.master_port or self.settings.master_port
@@ -681,12 +701,11 @@ class ClusterConfig(RevalidatedFrozenModel):
             collections=validated.downloads.collections,
         )
 
-    def save(  # ruff: ignore[complex-structure, too-many-branches]
+    def save(  # ruff: ignore[complex-structure, too-many-branches, too-many-locals]
         self,
         directory: Path,
     ) -> tuple[Path, ...]:
         validated = type(self).model_validate(self)
-        files = validated.files()
         if directory.is_symlink():
             msg = f"configuration root cannot be a symlink: {directory}"
             raise ValueError(msg)
@@ -711,6 +730,33 @@ class ClusterConfig(RevalidatedFrozenModel):
                 if path.exists() and not path.is_dir():
                     msg = f"managed DST directory is not a directory: {path}"
                     raise ValueError(msg)
+        if (
+            _shared_cluster_key(
+                validated.settings,
+                (shard.settings for shard in validated.shards.values()),
+            )
+            is None
+        ):
+            cluster_ini = directory / "cluster.ini"
+            existing_settings = (
+                ClusterSettings.load(cluster_ini)
+                if _configuration_file_exists(cluster_ini)
+                else ClusterSettings()
+            )
+            existing_shards = [
+                ShardSettings.load(path)
+                for name in validated.shards
+                if _configuration_file_exists(path := directory / name / "server.ini")
+            ]
+            validated = type(self).model_validate(
+                validated,
+                context={
+                    "cluster_key": _shared_cluster_key(
+                        existing_settings, existing_shards
+                    )
+                },
+            )
+        files = validated.files()
         token_path = Path("cluster_token.txt")
         preserved = [token_path, *(Path(name) for name in PERMISSION_FILES)]
         setup = Path("mods/dedicated_server_mods_setup.lua")

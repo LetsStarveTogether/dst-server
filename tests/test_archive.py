@@ -24,11 +24,21 @@ def saved_cluster(tmp_path: Path) -> Path:
     configuration = FOREST_CAVES.build(
         token=SecretStr("private-token"),
         cluster_key=SecretStr("private-shard-key"),
-        settings=ClusterSettings(cluster_password=SecretStr("private-password")),
+        settings=ClusterSettings(
+            cluster_password=SecretStr("private-password"),
+            steam_group_id=12345678,
+            steam_group_only=True,
+            steam_group_admins=True,
+        ),
     )
     configuration.replace(
         shards={
-            name: shard.replace(settings=shard.settings.replace(encode_user_path=False))
+            name: shard.replace(
+                settings=shard.settings.replace(
+                    cluster_key=configuration.settings.cluster_key,
+                    encode_user_path=False,
+                )
+            )
             for name, shard in configuration.shards.items()
         }
     ).save(root)
@@ -43,7 +53,8 @@ def saved_cluster(tmp_path: Path) -> Path:
         (player / "savelocation").write_bytes(b"\x81" + struct.pack(">II", 1, 2))
         (root / shard / "save/shardindex").write_text(
             'KLEI     1 return {session_id="0123456789ABCDEF",world={},'
-            'server={password="private-index-password",encode_user_path=false}}',
+            'server={password="private-index-password",encode_user_path=false,'
+            'clan={id="12345678",only=true,admin=true},privacy_type=3}}',
             encoding="utf-8",
         )
     for name in (
@@ -151,14 +162,25 @@ def test_export_round_trip_and_cleanup(
     for path in root.rglob("*"):
         if path.is_file():
             assert b"private-" not in path.read_bytes()
-    assert ClusterSettings.load(root / "cluster.ini").cluster_password is None
+    settings = ClusterSettings.load(root / "cluster.ini")
+    assert settings.cluster_password is None
+    assert settings.cluster_key is None
+    assert settings.steam_group_id == 0
+    assert settings.steam_group_only is False
+    assert settings.steam_group_admins is False
+    assert settings.model_fields_set.isdisjoint({
+        "steam_group_id",
+        "steam_group_only",
+        "steam_group_admins",
+    })
+    assert "[STEAM]" not in (root / "cluster.ini").read_text(encoding="utf-8")
     for shard in ("forest", "cave"):
-        assert (
-            ShardSettings.load(root / shard / "server.ini").encode_user_path is encoded
-        )
+        shard_settings = ShardSettings.load(root / shard / "server.ini")
+        assert shard_settings.encode_user_path is encoded
+        assert shard_settings.cluster_key is None
         index = _literal_return_table(root / shard / "save/shardindex", "test")
         assert index["session_id"] == "0123456789ABCDEF"
-        assert index["server"] == {"encode_user_path": encoded}
+        assert index["server"] == {"encode_user_path": encoded, "privacy_type": 0}
         base = root / shard / "save/session/0123456789ABCDEF"
         assert (base / "0000000001").read_bytes() == b"world\x00\xff"
         assert (base / player / "0000000001").read_bytes() == b"player\x00\xff"
@@ -172,6 +194,37 @@ def test_export_round_trip_and_cleanup(
         for path in saved_cluster.rglob("*")
         if path.is_file()
     }
+
+
+def test_export_generates_keys_only_when_recipient_saves(
+    saved_cluster: Path, tmp_path: Path
+) -> None:
+    with (
+        archive.export_cluster(saved_cluster) as exported,
+        SevenZipFile(exported.stream) as compressed,
+    ):
+        compressed.extractall(tmp_path / "extracted")
+    root = tmp_path / "extracted/001"
+    (root / "cluster_token.txt").write_text("recipient-token\n", encoding="utf-8")
+    recipient = ClusterConfig.load(root)
+    assert recipient.settings.cluster_key is None
+    assert all(
+        shard.settings.cluster_key is None for shard in recipient.shards.values()
+    )
+    keys = set()
+    for name in ("recipient-a", "recipient-b"):
+        destination = tmp_path / name
+        recipient.save(destination)
+        saved = ClusterConfig.load(destination)
+        key = saved.settings.cluster_key
+        assert key is not None
+        assert key.get_secret_value() != "private-shard-key"
+        assert saved.token == SecretStr("recipient-token")
+        keys.add(key.get_secret_value())
+        recipient.save(destination)
+        assert ClusterSettings.load(destination / "cluster.ini").cluster_key == key
+    assert len(keys) == 2
+    assert recipient.settings.cluster_key is None
 
 
 @pytest.mark.parametrize("source_encoded", [True, False])
@@ -394,18 +447,20 @@ def test_export_rejects_inconsistent_preserved_encoding(saved_cluster: Path) -> 
 
 
 @pytest.mark.parametrize(
-    ("convert", "original", "expected"),
+    ("convert", "original", "expected", "privacy"),
     [
-        (True, False, True),
-        (True, True, True),
-        (False, False, False),
-        (False, True, True),
+        (True, False, True, None),
+        (True, False, True, 0),
+        (True, True, True, 1),
+        (False, False, False, 2),
+        (False, True, True, 3),
     ],
 )
 def test_export_shard_index_preserves_world_and_removes_credentials(
-    tmp_path: Path, convert: bool, original: bool, expected: bool
+    tmp_path: Path, convert: bool, original: bool, expected: bool, privacy: int | None
 ) -> None:
     source = tmp_path / "shardindex"
+    privacy_field = "" if privacy is None else f"privacy_type={privacy},"
     source.write_text(
         "KLEI     1 return {\n"
         'version=5, session_id="0123456789ABCDEF",\n'
@@ -414,10 +469,11 @@ def test_export_shard_index_preserves_world_and_removes_credentials(
         'password="mod setting", values={1,2,3}}}},\n'
         "server={\n"
         f"encode_user_path={str(original).lower()},\n"
+        f"{privacy_field}\n"
         'password="private-password", cluster_password="private-cluster-password",\n'
         'cluster_key="private-cluster-key", cluster_token="private-cluster-token",\n'
         'token="private-token", online_mode=true, name="Room",\n'
-        'clan={id="123",only=false,admin=false}}}\n',
+        'clan={id="123",only=true,admin=true}}}\n',
         encoding="utf-8",
     )
     original_bytes = source.read_bytes()
@@ -436,7 +492,11 @@ def test_export_shard_index_preserves_world_and_removes_credentials(
             "encode_user_path": expected,
             "online_mode": True,
             "name": "Room",
-            "clan": {"id": "123", "only": False, "admin": False},
+            **(
+                {}
+                if privacy is None
+                else {"privacy_type": 0 if privacy == 3 else privacy}
+            ),
         }
     }
 

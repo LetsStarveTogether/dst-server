@@ -416,17 +416,20 @@ def test_room_number_requires_an_integer(number: object) -> None:
         build(cast(int, number), token=TOKEN, cluster_key=CLUSTER_KEY)
 
 
-def test_cluster_key_is_required_only_when_sharding_is_enabled() -> None:
-    single = build(100, token=TOKEN)
+@pytest.mark.parametrize("number", [0, 100, 130, 133])
+def test_cluster_key_is_generated_only_on_save(tmp_path: Path, number: int) -> None:
+    cluster = build(number, token=TOKEN)
 
-    assert single.settings.cluster_key is None
-    for number in (0, 130, 133):
-        with pytest.raises(ValueError, match="shared cluster_key"):
-            build(number, token=TOKEN)
+    assert cluster.settings.cluster_key is None
+    assert "cluster_key" not in cluster.files()[Path("cluster.ini")]
+
+    cluster.save(tmp_path)
+
+    assert ClusterConfig.load(tmp_path).settings.cluster_key
 
 
 def test_script_configuration_can_be_loaded_edited_and_saved(tmp_path: Path) -> None:
-    cluster = build(100, token=TOKEN)
+    cluster = build(100, token=TOKEN, cluster_key=CLUSTER_KEY)
     shard = cluster.shards["afk"]
     mod_name = "workshop-1981709850"
     configured = cluster.replace(
@@ -654,6 +657,30 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
     assert len(ports) == len(set(ports)) == 510
     assert min(ports) == 30000
     assert max(ports) == 31391
+
+
+def test_generate_rooms_uses_distinct_persistent_cluster_keys(tmp_path: Path) -> None:
+    cluster_root = tmp_path / "clusters"
+    keys = []
+    for _ in range(2):
+        generate_rooms(
+            (0, 100),
+            token=TOKEN,
+            cluster_root=cluster_root,
+            quadlet_dir=tmp_path / "quadlet",
+        )
+        keys.append(
+            tuple(
+                ClusterSettings.load(
+                    cluster_root / f"{number:03d}/cluster.ini"
+                ).cluster_key
+                for number in (0, 100)
+            )
+        )
+
+    assert all(keys[0])
+    assert len(set(keys[0])) == 2
+    assert keys[0] == keys[1]
 
 
 @pytest.mark.parametrize(
