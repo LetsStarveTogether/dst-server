@@ -734,11 +734,9 @@ class QuadletSystem:
             )
         )
         cluster.save(cluster_dir)
-        environment = (
-            NETDATA_ENVIRONMENT
-            if os.environ.get("DST_SERVER_NETDATA_TEST") == "1"
-            else {"OTEL_SDK_DISABLED": "true"}
-        ) | {"DST_SERVER_TELEMETRY_PROFILE": "history"}
+        environment = NETDATA_ENVIRONMENT | {"DST_SERVER_TELEMETRY_PROFILE": "history"}
+        if os.environ.get("DST_SERVER_NETDATA_TEST") != "1":
+            environment["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = "http://127.0.0.1:9"
         application = QuadletApplication.for_cluster(
             cluster,
             cluster_dir,
@@ -996,6 +994,7 @@ async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-str
             )
             assert all(shard.ready for shard in status.shards)
             assert all(shard.telemetry_profile == "history" for shard in status.shards)
+            assert all(shard.telemetry_delivery is not None for shard in status.shards)
             assert {shard.external_port for shard in status.shards} == {
                 mapping.host for mapping in system.application.pod.publish_ports[::2]
             }
@@ -1109,6 +1108,16 @@ async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-str
                 assert fields["body.player.userid"] == userid
                 assert fields["attributes.dst.cluster.name"] == system.prefix
                 assert fields["attributes.dst.shard.name"] == MASTER
+            else:
+                await wait_for_status(
+                    client,
+                    lambda value: (
+                        (delivery := _shard(value, MASTER).telemetry_delivery)
+                        is not None
+                        and delivery.pending > 0
+                        and delivery.last_error == "export_unavailable"
+                    ),
+                )
 
             before = status = await client.status()
             master_before = _shard(before, MASTER)

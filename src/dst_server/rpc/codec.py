@@ -1,6 +1,7 @@
 import json
 import math
 from collections.abc import Mapping
+from dataclasses import asdict, is_dataclass
 from ipaddress import IPv4Address
 from types import NoneType, UnionType
 from typing import Annotated, Any, TypeAliasType, Union, cast, get_args, get_origin
@@ -78,7 +79,9 @@ def _annotation(annotation: object) -> object:
             return annotation
 
 
-def _json_value(value: object) -> object:  # ruff: ignore[complex-structure]
+def _json_value(  # ruff: ignore[complex-structure, too-many-branches]
+    value: object,
+) -> object:
     if isinstance(value, WorldOverrides):
         try:
             kind = _WORLD_TAGS[type(value)]
@@ -88,6 +91,8 @@ def _json_value(value: object) -> object:  # ruff: ignore[complex-structure]
         return [kind, _model_value(value)]
     if isinstance(value, BaseModel):
         return _model_value(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return _json_value(asdict(value))
     if isinstance(value, SecretStr):
         return value.get_secret_value()
     if isinstance(value, IPv4Address | ULID):
@@ -221,13 +226,20 @@ def _restore_world(annotation: type[WorldOverrides], value: object) -> WorldOver
     return _restore_model(model, fields)
 
 
-def _restore(annotation: object, value: object) -> object:  # ruff: ignore[complex-structure]
+def _restore(  # ruff: ignore[complex-structure, too-many-branches]
+    annotation: object,
+    value: object,
+) -> object:
     original = annotation
     annotation = _annotation(annotation)
     if isinstance(annotation, type) and issubclass(annotation, WorldOverrides):
         return _restore_world(annotation, value)
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return _restore_model(annotation, value)
+    if isinstance(annotation, type) and is_dataclass(annotation):
+        return TypeAdapter(original).validate_json(
+            _dump(value), strict=True, extra="forbid"
+        )
     if annotation is SecretStr:
         return SecretStr(_text(value))
     if annotation is IPv4Address:
