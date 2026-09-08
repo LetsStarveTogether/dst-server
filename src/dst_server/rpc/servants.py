@@ -260,13 +260,15 @@ class _EndpointMethods(_Responder):
         self.scope = scope
         self._sources = sources
 
-    async def call(self, request: bytes, _context: Any) -> None:
+    async def call_context(self, _context: Any) -> None:
         try:
-            command = c.parse_request(request, scope=self.scope)
+            command = c.parse_request(_context.params.request, scope=self.scope)
             spec = c.operation(self.scope, command)
         except Exception as error:
             _context.results.result = failure(error_info(error))
             return
+        finally:
+            _context.release_params()
 
         async def invoke() -> object:
             async with asyncio.timeout(command.timeout + RPC_TIMEOUT_MARGIN):
@@ -443,6 +445,10 @@ class RemoteAgent(RemoteEndpoint):
         except TimeoutError:
             logger.warning("remote agent cleanup timed out: {shard}", shard=self.name)
         finally:
+            self._pumps.clear()
+            self._subscriptions.clear()
+            self._initial_status = None
+            self.capability = None
             self.logs.close()
             self.lifecycle.close()
             self.game_events.close()
@@ -485,13 +491,13 @@ class RemoteAgent(RemoteEndpoint):
                     )
                     continue
                 self._subscriptions.append(current)
-            failure: Exception | None = None
+            failure = "closed"
             try:
                 await self._relay_stream(current, target, model)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                failure = error
+                failure = type(error).__name__
             finally:
                 await self._release_subscription(current)
                 current = None
@@ -501,7 +507,7 @@ class RemoteAgent(RemoteEndpoint):
                     "{shard}: {stream}: {kind}",
                     shard=self.name,
                     stream=model.__name__,
-                    kind="closed" if failure is None else type(failure).__name__,
+                    kind=failure,
                 )
 
     async def _relay_stream[RecordT: BaseModel](
@@ -527,6 +533,7 @@ class RemoteAgent(RemoteEndpoint):
                 return
             for record in records:
                 target.publish(record)
+            del records, record
 
 
 class WorkerRegistryServant(_Responder, schema.WorkerRegistry.Server):

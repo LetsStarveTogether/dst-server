@@ -121,6 +121,45 @@ def test_acknowledgement_only_removes_the_confirmed_batch(tmp_path: Path) -> Non
         outbox.close()
 
 
+@pytest.mark.parametrize(
+    ("limit", "max_bytes", "batches"),
+    [
+        (2, None, ((b"aaa", b"bb"), (b"c",))),
+        (128, 5, ((b"aaa", b"bb"), (b"c",))),
+        (128, 4, ((b"aaa",), (b"bb", b"c"))),
+        (128, 1, ((b"aaa",), (b"bb",), (b"c",))),
+        (128, 6, ((b"aaa", b"bb", b"c"),)),
+        (1, 6, ((b"aaa",), (b"bb",), (b"c",))),
+    ],
+)
+def test_read_batch_respects_count_and_byte_budgets_without_stalling(
+    tmp_path: Path,
+    limit: int,
+    max_bytes: int | None,
+    batches: tuple[tuple[bytes, ...], ...],
+) -> None:
+    with closing(delivery.Outbox(tmp_path / "events.sqlite3")) as outbox:
+        for payload in (b"aaa", b"bb", b"c"):
+            outbox.append(payload)
+        for expected in batches:
+            rows = outbox.read_batch(limit, max_bytes=max_bytes)
+            assert tuple(row.payload for row in rows) == expected
+            outbox.acknowledge(tuple(row.id for row in rows))
+        assert outbox.read_batch() == ()
+
+
+@pytest.mark.parametrize("max_bytes", [0, -1, True])
+def test_read_batch_rejects_invalid_byte_budgets(
+    tmp_path: Path,
+    max_bytes: int,
+) -> None:
+    with (
+        closing(delivery.Outbox(tmp_path / "events.sqlite3")) as outbox,
+        pytest.raises(ValueError, match="positive integer"),
+    ):
+        outbox.read_batch(max_bytes=max_bytes)
+
+
 def test_unacknowledged_export_is_replayed_after_reopen(tmp_path: Path) -> None:
     path = tmp_path / "events.sqlite3"
     outbox = delivery.Outbox(path)

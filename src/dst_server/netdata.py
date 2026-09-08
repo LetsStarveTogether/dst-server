@@ -4,6 +4,7 @@ import os
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 from contextlib import suppress
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Self
 
@@ -147,7 +148,7 @@ class NetdataLogs:
                 stderr,
             )
         records: list[NetdataLogRecord] = []
-        for number, line in enumerate(stdout.splitlines(), 1):
+        for number, line in enumerate(BytesIO(stdout), 1):
             try:
                 records.append(NetdataLogRecord.model_validate_json(line))
             except ValueError as error:

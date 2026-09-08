@@ -94,9 +94,10 @@ class WorkshopUpdater:
                     raise
             else:
                 downloaded = {
-                    int(item): Path(path)
-                    for item, path in DOWNLOAD_SUCCESS.findall(output)
+                    int(match[1]): Path(match[2])
+                    for match in DOWNLOAD_SUCCESS.finditer(output)
                 }
+                del output
                 for item in sorted(pending.intersection(downloaded)):
                     source = downloaded[item]
                     expected = (
@@ -162,6 +163,7 @@ async def _collection_items(
                         items.add(item)
                     elif item not in visited:
                         pending.add(item)
+                del response
         except BaseException as error:
             primary = error
         try:

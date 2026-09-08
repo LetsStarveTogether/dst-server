@@ -1,8 +1,8 @@
-from asyncio import Semaphore, TaskGroup
-from collections.abc import Iterable
+from asyncio import TaskGroup
+from collections.abc import Awaitable, Callable, Iterable
 from itertools import chain, product
 from types import TracebackType
-from typing import Self
+from typing import Self, cast
 
 import httpx2
 from logbook import Logger
@@ -111,18 +111,12 @@ class KleiClient:
         regions: Iterable[Region | str] = Region,
         platforms: Iterable[Platform] = Platform,
     ) -> tuple[Lobby, ...]:
-        semaphore = Semaphore(self.lobby_concurrency)
-
-        async def load(region: Region | str, platform: Platform) -> tuple[Lobby, ...]:
-            async with semaphore:
-                return await self.lobby(region, platform)
-
-        async with TaskGroup() as group:
-            tasks = [
-                group.create_task(load(region, platform))
-                for region, platform in product(regions, platforms)
-            ]
-        return tuple(chain.from_iterable(task.result() for task in tasks))
+        batches = await _map(
+            product(regions, platforms),
+            lambda pair: self.lobby(*pair),
+            self.lobby_concurrency,
+        )
+        return tuple(chain.from_iterable(batches))
 
     async def get_rooms(
         self,
@@ -132,17 +126,13 @@ class KleiClient:
             msg = "a Klei access token is required to query room details"
             raise ValueError(msg)
         if rooms is None:
-            lobbies = await self.get_lobbies()
-            rooms = ((lobby.row_id, lobby.region) for lobby in lobbies)
-        semaphore = Semaphore(self.room_concurrency)
-
-        async def load(row_id: str, region: Region | str) -> Room | None:
-            async with semaphore:
-                return await self.room(row_id, region)
-
-        async with TaskGroup() as group:
-            tasks = [group.create_task(load(*room)) for room in rooms]
-        return tuple(room for task in tasks if (room := task.result()) is not None)
+            rooms = tuple(
+                (lobby.row_id, lobby.region) for lobby in await self.get_lobbies()
+            )
+        results = await _map(
+            rooms, lambda pair: self.room(*pair), self.room_concurrency
+        )
+        return tuple(room for room in results if room is not None)
 
     async def lobby(
         self,
@@ -201,6 +191,25 @@ class KleiClient:
             context={"region": region},
         )
         return data.rows[0] if data.rows else None
+
+
+async def _map[ItemT, ResultT](
+    items: Iterable[ItemT],
+    load: Callable[[ItemT], Awaitable[ResultT]],
+    concurrency: int,
+) -> tuple[ResultT, ...]:
+    pending = enumerate(items)
+    results: list[ResultT | None] = []
+
+    async def worker() -> None:
+        for index, item in pending:
+            results.append(None)
+            results[index] = await load(item)
+
+    async with TaskGroup() as group:
+        for _ in range(concurrency):
+            group.create_task(worker())
+    return cast("tuple[ResultT, ...]", tuple(results))
 
 
 def positive(name: str, value: int) -> int:

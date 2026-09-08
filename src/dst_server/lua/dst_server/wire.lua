@@ -3,6 +3,7 @@ local wire = {}
 local object_marker = {}
 local indeterminate = {}
 local prefix = "DST_SERVER_RESULT|"
+local success_prefix = '{"ok":true,"data":'
 local maximum_line_bytes = 64 * 1024
 local escapes = { ['"'] = '\\"', ["\\"] = "\\\\" }
 
@@ -23,7 +24,9 @@ function wire.indeterminate()
     error(indeterminate, 0)
 end
 
-local function quote(value)
+local function quote(value, remaining)
+    local size = #value + 2
+    if size > remaining then error("response_too_large", 0) end
     local index = 1
     while true do
         index = string.find(value, "[\128-\255]", index)
@@ -59,13 +62,21 @@ local function quote(value)
         end
         index = index + width + 1
     end
-    return '"' .. string.gsub(value, '[%z\1-\31\\"]', escapes) .. '"'
+    return '"' .. string.gsub(value, '[%z\1-\31\\"]', function(character)
+        local escaped = escapes[character]
+        size = size + #escaped - 1
+        if size > remaining then error("response_too_large", 0) end
+        return escaped
+    end) .. '"'
 end
 
-function wire.encode(value)
+function wire.encode(value, limit)
     local parts, seen = {}, {}
+    local remaining = limit or maximum_line_bytes
 
     local function append(text)
+        remaining = remaining - #text
+        if remaining < 0 then error("response_too_large", 0) end
         parts[#parts + 1] = text
     end
 
@@ -76,7 +87,7 @@ function wire.encode(value)
         end
         local kind = type(item)
         if kind == "string" then
-            append(quote(item))
+            append(quote(item, remaining))
             return
         elseif kind == "boolean" then
             append(item and "true" or "false")
@@ -127,7 +138,7 @@ function wire.encode(value)
                     append(",")
                 end
                 first = false
-                append(quote(key))
+                append(quote(key, remaining))
                 append(":")
                 encode(child)
             end
@@ -153,14 +164,15 @@ function wire.reply(callback)
     local ok, data = pcall(callback)
     local payload, failure
     if ok then
-        ok, data = pcall(wire.encode, data)
+        ok, data = pcall(wire.encode, data, maximum_line_bytes - #prefix - #success_prefix - 1)
         if ok then
-            payload = '{"ok":true,"data":' .. data .. "}"
+            payload = success_prefix .. data .. "}"
             if #prefix + #payload > maximum_line_bytes then
                 failure = "response_too_large"
             end
         else
-            failure = data == "invalid_utf8" and "invalid_utf8" or "invalid_json_value"
+            failure = (data == "invalid_utf8" or data == "response_too_large")
+                and data or "invalid_json_value"
         end
     else
         failure = data == indeterminate and "indeterminate" or "lua_error"
@@ -168,6 +180,7 @@ function wire.reply(callback)
     if failure ~= nil then
         payload = '{"ok":false,"error":"' .. failure .. '"}'
     end
+    data = nil
     print(prefix .. payload)
 end
 

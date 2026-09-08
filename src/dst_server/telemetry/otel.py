@@ -25,6 +25,7 @@ from dst_server.concurrency import cancel_tasks, complete
 from dst_server.models.telemetry import DeliveryStatus
 
 from .exporter import (
+    MAX_EXPORT_BYTES,
     RETRYABLE_CODES,
     LogsExporter,
     OTLPSettings,
@@ -227,7 +228,9 @@ class Pipeline:
         while True:
             self._wake.clear()
             try:
-                rows = await complete(asyncio.to_thread(outbox.read_batch))
+                rows = await complete(
+                    asyncio.to_thread(outbox.read_batch, max_bytes=MAX_EXPORT_BYTES)
+                )
             except Exception:
                 self._last_error = "storage_read_failed"
                 await self._wait_retry(RETRY_INITIAL_SECONDS)
@@ -236,14 +239,15 @@ class Pipeline:
                 await self._wake.wait()
                 continue
             identities, payload, invalid = batch(rows)
+            del rows
             if invalid:
                 await self._persist_result(
                     outbox, invalid, "invalid_stored_payload", None
                 )
-            if identities:
-                await self._persist_result(
-                    outbox, identities, *await self._send(sender, payload)
-                )
+            result = await self._send(sender, payload) if identities else None
+            del payload
+            if result is not None:
+                await self._persist_result(outbox, identities, *result)
 
     async def shutdown(self) -> None:
         if self._shutdown_task is None:

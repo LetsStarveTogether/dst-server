@@ -86,7 +86,7 @@ class ShardAgent:
         self._fatal = asyncio.Event()
         self._failure_id: ULID | None = None
         self._started_at_ns: int | None = None
-        self.failures: asyncio.Queue[ShardSupervisorStatus] = asyncio.Queue()
+        self.failures: asyncio.Queue[ShardSupervisorStatus] = asyncio.Queue(maxsize=1)
         self.supervisor = ShardSupervisor(
             shard.name,
             self._new_server,
@@ -474,6 +474,9 @@ class ShardAgent:
 
     async def _failed(self, status: ShardSupervisorStatus) -> None:
         self._failure_id = ULID()
+        # Failure reports wake reconciliation, which reads the current status.
+        if self.failures.full():
+            self.failures.get_nowait()
         self.failures.put_nowait(status)
 
     def _background_done(
@@ -536,6 +539,7 @@ class ShardAgent:
                 if isinstance(event, SessionEvent):
                     self._generation_sequence += 1
                 self._event_changed.notify_all()
+            del observed, event
 
     async def _drain_game_events(self, server: Server) -> None:
         attempt = ULID.from_str(server.game_events.nonce)
@@ -560,6 +564,7 @@ class ShardAgent:
                     event=observed.record,
                 )
             )
+            del observed
 
     async def _drain_operational(self, server: Server) -> None:
         while (record := await server.read_operational_event()) is not None:
@@ -582,3 +587,4 @@ class ShardAgent:
                     event=record.event_name,
                     body=record.body,
                 )
+            del record

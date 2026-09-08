@@ -1,9 +1,55 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import cache
 from time import perf_counter
 
 from opentelemetry import metrics, trace
 from opentelemetry.trace import Span
+
+type _Instruments = tuple[
+    metrics.Histogram,
+    metrics.UpDownCounter,
+    metrics.UpDownCounter,
+    metrics.Counter,
+    metrics.Counter,
+]
+
+
+def _instruments(meter: metrics.Meter) -> _Instruments:
+    return (
+        meter.create_histogram(
+            "dst.server.operation.duration",
+            unit="s",
+            description="Duration of DST server SDK operations.",
+        ),
+        meter.create_up_down_counter(
+            "dst.server.process.count",
+            unit="{process}",
+            description="Managed DST server processes currently running.",
+        ),
+        meter.create_up_down_counter(
+            "dst.server.player.count",
+            unit="{player}",
+            description="Players currently attached to this DST shard.",
+        ),
+        meter.create_counter(
+            "dst.telemetry.event.count",
+            unit="{event}",
+            description="DST game telemetry events by processing outcome.",
+        ),
+        meter.create_counter(
+            "dst.player.action.count",
+            unit="{action}",
+            description="Completed player actions by action name and outcome.",
+        ),
+    )
+
+
+@cache
+def _default_instruments() -> _Instruments:
+    # The default proxy provider retains every registered instrument until a
+    # real provider is installed, so reuse one set across server attempts.
+    return _instruments(metrics.get_meter("dst-server"))
 
 
 class Recorder:
@@ -22,31 +68,18 @@ class Recorder:
         self.player_count = 0
         self.process_up = False
         self.tracer = trace.get_tracer("dst-server", tracer_provider=tracer_provider)
-        meter = metrics.get_meter("dst-server", meter_provider=meter_provider)
-        self.operation_duration = meter.create_histogram(
-            "dst.server.operation.duration",
-            unit="s",
-            description="Duration of DST server SDK operations.",
-        )
-        self.process_count = meter.create_up_down_counter(
-            "dst.server.process.count",
-            unit="{process}",
-            description="Managed DST server processes currently running.",
-        )
-        self.player_count_metric = meter.create_up_down_counter(
-            "dst.server.player.count",
-            unit="{player}",
-            description="Players currently attached to this DST shard.",
-        )
-        self.telemetry_event_count = meter.create_counter(
-            "dst.telemetry.event.count",
-            unit="{event}",
-            description="DST game telemetry events by processing outcome.",
-        )
-        self.player_action_count = meter.create_counter(
-            "dst.player.action.count",
-            unit="{action}",
-            description="Completed player actions by action name and outcome.",
+        (
+            self.operation_duration,
+            self.process_count,
+            self.player_count_metric,
+            self.telemetry_event_count,
+            self.player_action_count,
+        ) = (
+            _default_instruments()
+            if meter_provider is None
+            else _instruments(
+                metrics.get_meter("dst-server", meter_provider=meter_provider)
+            )
         )
 
     def attributes(self, session_id: str | None = None) -> dict[str, str]:

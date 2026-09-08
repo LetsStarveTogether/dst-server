@@ -1,6 +1,7 @@
 import asyncio
 import math
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
+import tracemalloc
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -24,8 +25,14 @@ query = arguments[arguments.index("--query") + 1] if "--query" in arguments else
 print("ARGV|" + "|".join(arguments), file=sys.stderr, flush=True)
 
 if query == "fail":
+    print("partial output", flush=True)
     print("query failed", file=sys.stderr, flush=True)
     raise SystemExit(7)
+if query == "large":
+    record = json.dumps({"timestamp_ns": 42, "fields": [["message", "x" * 32768]]})
+    for _ in range(int(arguments[arguments.index("--limit") + 1])):
+        print(record)
+    raise SystemExit(0)
 if query == "invalid":
     print('{"timestamp_ns":', flush=True)
     raise SystemExit(0)
@@ -104,6 +111,35 @@ async def test_query_rejects_process_and_protocol_errors(
 ) -> None:
     with pytest.raises(error, match=match):
         await make_logs(tmp_path).query(request(query=query))
+
+
+async def test_large_query_does_not_copy_all_lines_while_parsing(
+    tmp_path: Path,
+) -> None:
+    logs = make_logs(tmp_path)
+    count = 128
+    tracemalloc.start()
+    try:
+        result = await logs.query(request(query="large", limit=count))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert len(result.records) == count
+    assert all(
+        record.fields == (("message", "x" * 32768),) for record in result.records
+    )
+    # The retained wire bytes and decoded strings each need one payload-sized
+    # allocation; parsing must not keep an additional complete set of raw lines.
+    assert peak < count * 32768 * 2.5
+
+
+async def test_process_error_preserves_complete_output(tmp_path: Path) -> None:
+    with pytest.raises(subprocess.CalledProcessError) as failure:
+        await make_logs(tmp_path).query(request(query="fail"))
+
+    assert failure.value.stdout == b"partial output\n"
+    assert failure.value.stderr.endswith(b"query failed\n")
 
 
 async def test_query_timeout_kills_and_reaps_process(tmp_path: Path) -> None:

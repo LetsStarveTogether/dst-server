@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
 from typing import BinaryIO
+from weakref import ref
 
 import pytest
 from obstore.exceptions import PermissionDeniedError
@@ -20,6 +21,29 @@ from dst_server.configuration.models import (
 )
 from dst_server.configuration.presets import FOREST_CAVES
 from dst_server.klei_id import encode_klei_id
+
+
+def test_export_releases_file_catalog_before_yielding(
+    saved_cluster: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FileMap(dict[Path, tuple[Path, tuple[int, ...]]]):
+        pass
+
+    catalogs: list[ref[FileMap]] = []
+    scan = archive._save_files
+
+    def track(
+        directory: Path, configuration: ClusterConfig, encode_user_path: bool
+    ) -> FileMap:
+        files = FileMap(scan(directory, configuration, encode_user_path))
+        catalogs.append(ref(files))
+        return files
+
+    monkeypatch.setattr(archive, "_save_files", track)
+    with archive.export_cluster(saved_cluster) as exported:
+        assert exported.stream.read(6) == b"7z\xbc\xaf\x27\x1c"
+        assert len(catalogs) == 2
+        assert all(catalog() is None for catalog in catalogs)
 
 
 @pytest.fixture

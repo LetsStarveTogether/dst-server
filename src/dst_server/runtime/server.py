@@ -522,20 +522,25 @@ class Server:  # ruff:ignore[too-many-public-methods]
             if raw_line is None:
                 break
             if oversized:
+                del raw_line
                 continue
             observed_timestamp_ns = time_ns()
             raw_line = raw_line.rstrip(b"\r\n")
             message = NATIVE_TIMESTAMP.sub(b"", raw_line, count=1)
             if message.startswith(b"DST_Stats|"):
+                del raw_line, message
                 continue
             if await self.game_events.accept(raw_line, observed_timestamp_ns):
+                del raw_line, message
                 continue
             diagnostic = classify_log(message.decode(errors="replace"))
+            del message
             if diagnostic is not None:
                 await self._observe_operational(
                     *diagnostic, observed_timestamp_ns=observed_timestamp_ns
                 )
             line = raw_line.decode(errors="replace")
+            del raw_line
             if self.log_handler is not None:
                 try:
                     self.log_handler(line)
@@ -549,6 +554,7 @@ class Server:  # ruff:ignore[too-many-public-methods]
                         handler_failed = True
             elif __debug__:
                 logger.debug("DST server log : {line}", line=line)
+            del line
 
     async def _drain_output(self) -> None:
         if self.child is None or self.child.returncode is None:

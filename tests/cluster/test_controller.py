@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
+from weakref import ref
 
 import pytest
 from pydantic import SecretStr
@@ -939,6 +940,71 @@ async def test_internal_relay_resubscribes_after_overflow(
         assert "stop:Master" not in calls
     finally:
         subscription.close()
+        await instance.aclose()
+
+
+async def test_internal_relay_releases_delivered_batch(tmp_path: Path) -> None:
+    root = tmp_path / "cluster"
+    configuration().save(root)
+    instance = ClusterController(ConfigurationStore(root))
+    source, target = Broadcast[LogRecord](), Broadcast[LogRecord]()
+    subscription = target.subscribe()
+    relay = instance._start_relay("Master", source, target)
+    await asyncio.sleep(0)
+    references = []
+    for sequence in range(3):
+        record = LogRecord(
+            shard="Master",
+            game_attempt=ULID(),
+            sequence=sequence,
+            observed_timestamp_ns=sequence,
+            line="x" * 1024 * 1024,
+        )
+        references.append(ref(record))
+        source.publish(record)
+    del record
+    try:
+        async with asyncio.timeout(1):
+            batch = await subscription.next(3)
+        assert len(batch) == 3
+        del batch
+        assert all(reference() is None for reference in references)
+    finally:
+        source.close()
+        await relay
+        subscription.close()
+        await instance.aclose()
+
+
+async def test_completed_reconcile_releases_failure_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cluster"
+    configuration().save(root)
+    instance = ClusterController(ConfigurationStore(root))
+    references = []
+
+    async def failed() -> None:
+        await asyncio.sleep(0)
+        record = LogRecord(
+            shard="Master",
+            game_attempt=ULID(),
+            sequence=0,
+            observed_timestamp_ns=0,
+            line="x" * 1024 * 1024,
+        )
+        references.append(ref(record))
+        msg = "prepare failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(instance, "_reconcile", failed)
+    instance._schedule_reconcile()
+    try:
+        await instance.wait_idle()
+        await asyncio.sleep(0)
+        assert references
+        assert references[0]() is None
+    finally:
         await instance.aclose()
 
 

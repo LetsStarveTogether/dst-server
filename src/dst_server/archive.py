@@ -154,6 +154,7 @@ def export_cluster(  # ruff: ignore[complex-structure, too-many-branches]
         if saves != _save_files(directory, configuration, encode_user_path):
             msg = "saves changed during export; use a quiescent copy or stop the games"
             raise RuntimeError(msg)
+        del saves, files, exported, configuration
         stream.seek(0)
         yield ClusterArchive(filename, stream)
 

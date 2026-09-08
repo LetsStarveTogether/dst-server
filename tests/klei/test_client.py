@@ -1,5 +1,7 @@
+import asyncio
 import gzip
 import json
+from collections.abc import Iterator
 from datetime import date
 
 import httpx2
@@ -317,3 +319,78 @@ async def test_valid_region_string_is_normalized_for_request_and_response() -> N
         rows = await KleiClient(client=http).lobby("us-east-1", Platform.STEAM)
 
     assert rows[0].region is Region.US_EAST
+
+
+@pytest.mark.parametrize("finish", ["complete", "cancel", "error"])
+async def test_room_queries_bound_pending_work_and_preserve_order(finish: str) -> None:
+    consumed = 0
+    active = 0
+    ready, release, last = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    def rooms() -> Iterator[tuple[str, Region]]:
+        nonlocal consumed
+        for index in range(200):
+            consumed += 1
+            yield str(index), Region.US_EAST
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal active
+        active += 1
+        if active == 3:
+            ready.set()
+        try:
+            await release.wait()
+            row_id = json.loads(request.content)["query"]["__rowId"]
+            if row_id == "0":
+                await last.wait()
+            elif row_id == "199":
+                last.set()
+            await asyncio.sleep(0)
+            return httpx2.Response(
+                200,
+                json={
+                    "GET": [
+                        {
+                            **lobby_row(),
+                            "__rowId": row_id,
+                            "tick": "invalid" if finish == "error" else int(row_id),
+                            "clientmodsoff": False,
+                            "nat": 1,
+                        }
+                    ]
+                },
+            )
+        finally:
+            active -= 1
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
+        credential = "test"
+        client = KleiClient(access_token=credential, client=http, room_concurrency=3)
+        task = asyncio.create_task(client.get_rooms(rooms()))
+        try:
+            async with asyncio.timeout(1):
+                await ready.wait()
+            assert consumed == 3
+            if finish == "cancel":
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                release.set()
+                if finish == "error":
+                    with pytest.raises(ExceptionGroup) as raised:
+                        await task
+                    assert all(
+                        isinstance(error, ValidationError)
+                        for error in raised.value.exceptions
+                    )
+                else:
+                    result = await task
+                    assert [room.row_id for room in result] == [
+                        str(index) for index in range(200)
+                    ]
+                    assert consumed == 200
+            assert active == 0
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

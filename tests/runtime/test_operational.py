@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+from types import CoroutineType
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
@@ -12,6 +13,49 @@ from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime import server as server_module
 from dst_server.runtime.console import Console
 from tests.helpers import StubWriter, feed_frame, next_frame
+
+
+@pytest.mark.parametrize("kind", ["log", "stats", "log-then-stats"])
+async def test_idle_stdout_releases_large_temporary_lines(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    server = Server(ServerConfig(shard="test"), log_handler=lambda _: None)
+    reader = asyncio.StreamReader(limit=server_module.SUBPROCESS_STREAM_LIMIT)
+    idle = asyncio.Event()
+    read_line = server_module.read_line
+    read_count = 0
+    expected_lines = 2 if kind == "log-then-stats" else 1
+
+    async def read() -> tuple[bytes | None, bool]:
+        nonlocal read_count
+        if read_count == expected_lines:
+            idle.set()
+        read_count += 1
+        return await read_line(reader)
+
+    monkeypatch.setattr(server_module, "read_line", lambda _: read())
+    operation = server.pump_logs(reader)
+    pumping = asyncio.create_task(operation)
+    reader.feed_data(
+        (b"DST_Stats|" if kind == "stats" else b"[00:00:01]: ")
+        + b"x" * 1_000_000
+        + b"\n"
+        + (b"DST_Stats|1\n" if kind == "log-then-stats" else b"")
+    )
+    try:
+        await asyncio.wait_for(idle.wait(), 1)
+        frame = cast("CoroutineType", operation).cr_frame
+        assert frame is not None
+        retained = {
+            name: len(value)
+            for name, value in frame.f_locals.items()
+            if isinstance(value, (bytes, str)) and len(value) > 4096
+        }
+        assert retained == {}
+    finally:
+        reader.feed_eof()
+        await pumping
+        await server.finish()
 
 
 async def observations(server: Server) -> list[Any]:

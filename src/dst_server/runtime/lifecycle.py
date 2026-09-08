@@ -52,12 +52,12 @@ class Lifecycle:
                 line, oversized = await read_line(reader)
                 if line is None:
                     break
-                if oversized:
-                    continue
-                if line.startswith(b"DST_Stats|"):
+                if oversized or line.startswith(b"DST_Stats|"):
+                    del line
                     continue
                 observed_timestamp_ns = time_ns()
                 event = server.parse_event(line.decode(errors="replace").rstrip("\r\n"))
+                del line
                 if __debug__:
                     logger.debug("DST server event : {event}", event=event)
                 self.handle(event, on_session)
@@ -66,6 +66,7 @@ class Lifecycle:
                 await self.queue.put(
                     ObservedLifecycleEvent(event, observed_timestamp_ns)
                 )
+                del event
         finally:
             self.close()
 

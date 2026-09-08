@@ -1,4 +1,5 @@
 import asyncio
+from weakref import ref
 
 import pytest
 from pydantic import ValidationError
@@ -8,6 +9,23 @@ from dst_server.cluster.subscriptions import (
     Broadcast,
 )
 from dst_server.errors import SubscriptionOverflowError
+
+
+def test_abandoned_subscription_releases_queued_records() -> None:
+    class Record:
+        pass
+
+    broadcast = Broadcast[Record]()
+    subscription = broadcast.subscribe()
+    record = Record()
+    subscription_reference, record_reference = ref(subscription), ref(record)
+    broadcast.publish(record)
+
+    del record, subscription
+
+    assert subscription_reference() is None
+    assert record_reference() is None
+    assert not broadcast._subscriptions
 
 
 async def test_subscription_waits_and_drains_bounded_batches() -> None:

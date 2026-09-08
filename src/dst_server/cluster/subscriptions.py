@@ -1,5 +1,6 @@
 import asyncio
 from typing import Annotated
+from weakref import WeakSet
 
 from pydantic import Field, TypeAdapter
 
@@ -11,7 +12,7 @@ BATCH_SIZE = TypeAdapter(Annotated[int, Field(ge=1, le=MAX_BATCH_SIZE)])
 
 class Broadcast[T]:
     def __init__(self) -> None:
-        self._subscriptions: set[Subscription[T]] = set()
+        self._subscriptions: WeakSet[Subscription[T]] = WeakSet()
         self._closed = False
 
     def subscribe(self) -> Subscription[T]:

@@ -1,8 +1,10 @@
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
+from weakref import ref
 
 import logbook
 import pytest
@@ -13,11 +15,14 @@ from dst_server.cluster import agent as agent_module
 from dst_server.cluster.agent import ShardAgent
 from dst_server.configuration.files import Shard
 from dst_server.errors import IndeterminateError
-from dst_server.events.server import Event, SavedEvent, SessionEvent
+from dst_server.events import ObservedGameEvent
+from dst_server.events.server import Event, SavedEvent, SessionEvent, UnknownEvent
+from dst_server.events.world import CycleState, StateChangedEvent
 from dst_server.models.cluster import ObservationCursor
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog, WorldSnapshotMetadata
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.lifecycle import ObservedLifecycleEvent
+from dst_server.runtime.operational import OperationalRecord
 from dst_server.runtime.supervisor import (
     ShardDesired,
     ShardPhase,
@@ -476,6 +481,71 @@ async def test_failure_is_queued_and_public_status_is_sanitized(
     assert status.error == "DST shard failed"
     assert status.error_id is not None
     assert await agent.next_failure() == failed
+
+
+async def test_unread_failures_coalesce_to_the_latest_status(agent: ShardAgent) -> None:
+    failed = supervisor_status(ShardPhase.FAILED)
+    for attempt in range(1000):
+        latest = replace(failed, attempts=attempt)
+        await agent._failed(latest)
+    assert agent.failures.qsize() == 1
+    assert await agent.next_failure() == latest
+
+
+@pytest.mark.parametrize("kind", ["lifecycle", "game", "operational"])
+async def test_relays_release_consumed_records_while_idle(
+    agent: ShardAgent,
+    running_server: SimpleNamespace,
+    kind: str,
+) -> None:
+    class Body(dict[str, Any]):
+        pass
+
+    idle, stop = asyncio.Event(), asyncio.Event()
+    if kind == "lifecycle":
+        value = UnknownEvent(line="x" * 65536)
+        pending = [ObservedLifecycleEvent(value, 1)]
+    elif kind == "game":
+        value = StateChangedEvent(
+            v=2,
+            nonce=running_server.game_events.nonce,
+            generation=1,
+            session_id=None,
+            seq=1,
+            event="dst.world.state_changed",
+            tick=1,
+            monotonic_ms=1,
+            cycle=None,
+            data=CycleState(name="cycles", value=1),
+        )
+        pending = [ObservedGameEvent(value, 1)]
+    else:
+        value = Body(message="x" * 65536)
+        pending = [OperationalRecord("uid", "test", value, 1, "INFO")]
+    released = ref(value)
+    del value
+
+    async def read() -> Any:
+        if pending:
+            return pending.pop()
+        idle.set()
+        await stop.wait()
+        return None
+
+    setattr(running_server, f"read_{kind}_event", read)
+    relay = {
+        "lifecycle": agent._drain_lifecycle,
+        "game": agent._drain_game_events,
+        "operational": agent._drain_operational,
+    }[kind]
+    task = asyncio.create_task(relay(cast("Server", running_server)))
+    try:
+        async with asyncio.timeout(1):
+            await idle.wait()
+        assert released() is None
+    finally:
+        stop.set()
+        await task
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 from collections.abc import Callable, Collection, Iterable, Sequence
+from io import StringIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -63,25 +64,27 @@ class SteamCMD:
         environment = download_environment(self.proxy)
         if self.steam_home is not None:
             environment["HOME"] = str(self.steam_home)
-        output: list[str] = []
 
         def on_line(line: str) -> None:
             value = redact(line, secret_values)
-            output.append(value)
+            output.write(value)
             if self.log_handler is not None:
                 self.log_handler(value.rstrip("\r\n"))
 
         async with self._lock:
             if self.steam_home is not None:
                 self.steam_home.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                prefix=".dst-server-steamcmd-",
-                suffix=".txt",
-                dir=self.steam_home,
-                delete_on_close=False,
-            ) as script:
+            with (
+                StringIO() as output,
+                NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    prefix=".dst-server-steamcmd-",
+                    suffix=".txt",
+                    dir=self.steam_home,
+                    delete_on_close=False,
+                ) as script,
+            ):
                 script.write("@ShutdownOnFailedCommand 1\n@NoPromptForPassword 1\n")
                 for command in commands:
                     script.write(command[0])
@@ -98,13 +101,12 @@ class SteamCMD:
                     environment=environment,
                     on_line=on_line,
                 )
-        result = "".join(output)
-        if returncode:
-            detail = result[-4000:].strip()
-            suffix = "" if not detail else f": {detail}"
-            msg = f"SteamCMD exited with status {returncode}{suffix}"
-            raise ChildProcessError(msg)
-        return result
+                if returncode:
+                    detail = output.getvalue()[-4000:].strip()
+                    suffix = "" if not detail else f": {detail}"
+                    msg = f"SteamCMD exited with status {returncode}{suffix}"
+                    raise ChildProcessError(msg)
+                return output.getvalue()
 
 
 def normalize_commands(

@@ -1141,8 +1141,9 @@ class ClusterController(ClusterAPI):
         )
         self._reconcile_task.add_done_callback(self._consume_task_result)
 
-    @staticmethod
-    def _consume_task_result(task: asyncio.Task[None]) -> None:
+    def _consume_task_result(self, task: asyncio.Task[None]) -> None:
+        if self._reconcile_task is task:
+            self._reconcile_task = None
         if not task.cancelled():
             task.exception()
 
@@ -1175,6 +1176,7 @@ class ClusterController(ClusterAPI):
                         for item in batch:
                             for target in targets:
                                 target.publish(item)
+                        del batch, item
                 except SubscriptionOverflowError:
                     logger.warning(
                         "internal shard relay overflowed; resubscribing: {shard}",

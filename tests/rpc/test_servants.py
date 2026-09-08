@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
+from weakref import ref
 
 import pytest
 from pydantic import ValidationError
@@ -42,6 +43,7 @@ from dst_server.rpc.schema import SCHEMA_FINGERPRINT, load_schema
 from dst_server.rpc.servants import (
     AgentServant,
     BootstrapServant,
+    RemoteAgent,
     WorkerRegistryServant,
 )
 from dst_server.rpc.transport import abstract_rpc_server, filesystem_rpc_server
@@ -456,6 +458,208 @@ async def test_subscription_validation_and_capability_gc(tmp_path: Path) -> None
         async with asyncio.timeout(1):
             while controller.master.logs._subscriptions:  # ruff: ignore[async-busy-wait]
                 await asyncio.sleep(0)
+
+
+async def test_repeated_connections_release_subscriptions_and_roots(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    controller = FakeController()
+    roots = []
+
+    def bootstrap() -> BootstrapServant:
+        servant = BootstrapServant(controller)
+        roots.append(ref(servant))
+        return servant
+
+    path = tmp_path / "cluster.sock"
+    async with rpc_runtime(), filesystem_rpc_server(path, bootstrap) as server:
+        for sequence in range(10):
+            async with (
+                await ClusterClient.connect(path) as client,
+                await client.subscribe_logs() as subscription,
+            ):
+                controller.master.logs.publish(log_record(sequence))
+                assert (await subscription.next())[0].sequence == sequence
+            del subscription, client
+        async with asyncio.timeout(1):
+            while server.tasks:  # ruff: ignore[async-busy-wait]
+                await asyncio.sleep(0)
+        assert not server.connections
+        assert not controller.master.logs._subscriptions
+        assert all(reference() is None for reference in roots)
+
+
+async def test_shard_handles_are_cached_only_while_in_use(tmp_path: Path) -> None:
+    controller = FakeController()
+    async with connected(tmp_path, controller) as client:
+        shard = client.shard("Master")
+        assert shard is client.shard("Master")
+        references = [ref(client.shard(f"Missing-{index}")) for index in range(100)]
+        assert all(reference() is None for reference in references)
+        assert len(client._shards) == 1
+
+
+def test_client_close_releases_connection_and_shard_capabilities() -> None:
+    class Resource:
+        def close(self) -> None:
+            pass
+
+    resources = [Resource() for _ in range(4)]
+    references = tuple(ref(resource) for resource in resources)
+    client = ClusterClient(*resources[:3])
+    shard = client.shard("Master")
+    shard._capability = resources[3]
+    del resources
+
+    client.close()
+
+    assert all(reference() is None for reference in references)
+
+
+async def test_remote_relay_releases_delivered_batch() -> None:
+    agent = RemoteAgent(None)
+    source, target = Broadcast[LogRecord](), Broadcast[LogRecord]()
+    incoming, outgoing = source.subscribe(), target.subscribe()
+    subscription: Any = SimpleNamespace(next=lambda: incoming.next(256))
+    relay = asyncio.create_task(agent._relay_stream(subscription, target, LogRecord))
+    references = []
+    for sequence in range(3):
+        record = log_record(sequence, "x" * 1024 * 1024)
+        references.append(ref(record))
+        source.publish(record)
+    del record
+    try:
+        async with asyncio.timeout(1):
+            batch = await outgoing.next(3)
+        assert len(batch) == 3
+        del batch
+        assert all(reference() is None for reference in references)
+    finally:
+        source.close()
+        await relay
+        outgoing.close()
+        await agent.aclose()
+
+
+async def test_remote_reconnect_does_not_retain_failed_stream_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = RemoteAgent(None)
+    reconnecting = asyncio.Event()
+    references = []
+
+    class BrokenSubscription:
+        async def next(self) -> None:
+            record = log_record(0, "x" * 1024 * 1024)
+            references.append(ref(record))
+            msg = "stream failed"
+            raise ValueError(msg)
+
+        async def close(self) -> None:
+            pass
+
+    async def subscribe(*_: object) -> None:
+        reconnecting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(servant_module, "_STREAM_RETRY_DELAY", 0)
+    monkeypatch.setattr(agent, "_subscribe", subscribe)
+    pump = asyncio.create_task(
+        agent._pump(cast("Any", BrokenSubscription()), "logs", agent.logs, LogRecord)
+    )
+    try:
+        async with asyncio.timeout(1):
+            await reconnecting.wait()
+        assert references
+        assert references[0]() is None
+    finally:
+        pump.cancel()
+        with suppress(asyncio.CancelledError):
+            await pump
+        await agent.aclose()
+
+
+async def test_remote_agent_close_releases_capability() -> None:
+    class Capability:
+        pass
+
+    capability = Capability()
+    reference = ref(capability)
+    agent = RemoteAgent(capability)
+    del capability
+
+    await agent.aclose()
+
+    assert reference() is None
+
+
+async def test_client_releases_encoded_request_while_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dst_server.rpc import client as client_module
+
+    class Payload(bytearray):
+        pass
+
+    sent = asyncio.Event()
+    response = asyncio.get_running_loop().create_future()
+    references = []
+
+    def encode(_: c.Request[Any]) -> Payload:
+        payload = Payload(1024 * 1024)
+        references.append(ref(payload))
+        return payload
+
+    def send(*, request: Payload) -> asyncio.Future[Any]:
+        assert len(request) == 1024 * 1024
+        sent.set()
+        return response
+
+    monkeypatch.setattr(client_module, "encode_request", encode)
+    client = ClusterClient(None, None, SimpleNamespace(call=send))
+    pending = asyncio.create_task(client.status())
+    try:
+        await sent.wait()
+        assert references
+        assert references[0]() is None
+    finally:
+        pending.cancel()
+        with suppress(asyncio.CancelledError):
+            await pending
+
+
+async def test_call_releases_native_request_before_running_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+    respond = servant_module._EndpointMethods._respond
+
+    async def inspect_context(
+        self: Any, context: Any, method: str, *args: Any, **kwargs: Any
+    ) -> None:
+        if method == "execute":
+            with pytest.raises(capnp.KjException, match="releaseParams"):
+                _ = context.params
+            entered.set()
+        await respond(self, context, method, *args, **kwargs)
+
+    async def blocked(command: c.Request[Any]) -> str:
+        await release.wait()
+        assert isinstance(command, c.Execute)
+        return command.source
+
+    monkeypatch.setattr(servant_module._EndpointMethods, "_respond", inspect_context)
+    controller = FakeController()
+    controller.master.hook = blocked
+    async with connected(tmp_path, controller) as client:
+        pending = asyncio.create_task(client.shard("Master").execute("x" * 1024 * 1024))
+        try:
+            async with asyncio.timeout(1):
+                await entered.wait()
+        finally:
+            release.set()
+            await pending
 
 
 async def test_connection_timeout_covers_socket_creation(

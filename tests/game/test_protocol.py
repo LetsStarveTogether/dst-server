@@ -523,6 +523,35 @@ def test_reply_limits_encoded_bytes_not_source_character_count(
     assert envelope == {"ok": False, "error": "response_too_large"}
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        'local value=string.rep("x", 4*1024*1024)',
+        "local value=string.rep(string.char(0), 65000)",
+        'local value={}; for index=1,10000 do value[index]=string.rep("x", 1024) end',
+    ],
+    ids=["large-string", "escaped-string", "large-array"],
+)
+def test_wire_stops_encoding_when_the_byte_budget_is_exhausted(
+    source: str, luajit: str
+) -> None:
+    run_lua(
+        f"""
+        local wire=require("dst_server.wire")
+        {source}
+        collectgarbage("collect")
+        collectgarbage("stop")
+        local baseline=collectgarbage("count")
+        local ok, failure=pcall(wire.encode, value, 65000)
+        local allocated=collectgarbage("count")-baseline
+        assert(not ok and failure=="response_too_large")
+        assert(allocated < 512, "encoder retained "..allocated.." KiB")
+        collectgarbage("restart")
+        """,
+        luajit,
+    )
+
+
 def test_lua_request_delegates_to_the_shared_wire_reply() -> None:
     command = rpc.lua_request("return false")
     assert "dst_server.wire" in command

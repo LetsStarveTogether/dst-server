@@ -156,9 +156,10 @@ class Console:
         finally:
             if result_task.done():
                 self._result_finished(result_task)
-                self.pending_result = None
 
     def _result_finished(self, result_task: asyncio.Task[str]) -> None:
+        if self.pending_result is result_task:
+            self.pending_result = None
         if result_task.cancelled():
             self.broken = True
         else:
@@ -274,7 +275,7 @@ class Console:
         except LuaBusyError, ResponseTooLargeError:
             pass
         finally:
-            if result_task.done():
+            if self.pending_result is result_task and result_task.done():
                 self.pending_result = None
 
     async def close(self) -> None:

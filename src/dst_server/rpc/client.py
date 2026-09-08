@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from importlib import import_module
 from os import PathLike, fspath
 from typing import Any, Literal, Self, cast
+from weakref import WeakValueDictionary
 
 from pydantic import BaseModel
 from ulid import ULID
@@ -113,7 +114,9 @@ class RemoteEndpoint:
         capability = await self._get_capability()
         try:
             async with asyncio.timeout(command.timeout + 2 * RPC_TIMEOUT_MARGIN):
-                response = await capability.call(request=payload)
+                pending = capability.call(request=payload)
+                del payload
+                response = await pending
         except TimeoutError as error:
             if spec.mutation:
                 raise IndeterminateError from error
@@ -158,10 +161,10 @@ class ClusterClient(RemoteEndpoint, ClusterAPI):
     scope: Scope = "cluster"
 
     def __init__(self, stream: Any, client: Any, capability: Any) -> None:
-        self._stream = stream
-        self._client = client
-        self._capability = capability
-        self._shards: dict[str, ShardClient] = {}
+        self._stream: Any = stream
+        self._client: Any = client
+        self._capability: Any = capability
+        self._shards: WeakValueDictionary[str, ShardClient] = WeakValueDictionary()
         self._closed = False
 
     @classmethod
@@ -199,6 +202,10 @@ class ClusterClient(RemoteEndpoint, ClusterAPI):
             self._closed = True
             self._client.close()
             self._stream.close()
+            self._client = self._stream = self._capability = None
+            for shard in self._shards.values():
+                shard._capability = None
+            self._shards.clear()
 
     async def _get_capability(self) -> Any:
         if self._closed:
@@ -207,9 +214,10 @@ class ClusterClient(RemoteEndpoint, ClusterAPI):
         return self._capability
 
     def shard(self, shard_name: str) -> ShardClient:
-        if shard_name not in self._shards:
-            self._shards[shard_name] = ShardClient(self, shard_name)
-        return self._shards[shard_name]
+        shard = self._shards.get(shard_name)
+        if shard is None:
+            shard = self._shards[shard_name] = ShardClient(self, shard_name)
+        return shard
 
 
 class ShardClient(RemoteEndpoint, ShardAPI):

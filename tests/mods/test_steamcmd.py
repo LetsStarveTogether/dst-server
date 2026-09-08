@@ -1,6 +1,7 @@
 import asyncio
 import os
 import signal
+import tracemalloc
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from pathlib import Path
@@ -173,6 +174,41 @@ async def test_failure_redacts_output_and_removes_script(tmp_path: Path) -> None
     assert "secret-value" not in str(error.value)
     assert all("secret-value" not in line for line in lines)
     assert not tuple((tmp_path / "steam home").glob(".dst-server-steamcmd-*"))
+
+
+@pytest.mark.parametrize("failure", ["exit", "read", "cancel"])
+async def test_failure_traceback_does_not_keep_captured_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    async def run_process(  # ruff: ignore[unused-async]
+        *_command: str, on_line: Callable[[str], None], **_options: object
+    ) -> int:
+        for index in range(1024):
+            on_line(f"{index}:" + "x" * 4096 + "\n")
+        if failure == "read":
+            msg = "injected output read failure"
+            raise RuntimeError(msg)
+        if failure == "cancel":
+            raise asyncio.CancelledError
+        return 7
+
+    monkeypatch.setattr(steamcmd, "run_process", run_process)
+    client = make_client(tmp_path)
+    expected = {
+        "exit": ChildProcessError,
+        "read": RuntimeError,
+        "cancel": asyncio.CancelledError,
+    }[failure]
+    tracemalloc.start()
+    try:
+        baseline = tracemalloc.get_traced_memory()[0]
+        with pytest.raises(expected) as raised:
+            await client.run([("noop",)])
+        retained = tracemalloc.get_traced_memory()[0] - baseline
+        assert raised.value.__traceback__ is not None
+        assert retained < 512 * 1024
+    finally:
+        tracemalloc.stop()
 
 
 async def test_spawn_failure_removes_script(tmp_path: Path) -> None:

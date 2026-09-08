@@ -1,10 +1,39 @@
 import asyncio
+from weakref import ref
 
 import pytest
 
 from dst_server.events import server as events
 from dst_server.runtime import lifecycle as lifecycle_module
 from dst_server.runtime.lifecycle import Lifecycle
+
+
+async def test_idle_lifecycle_releases_the_consumed_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lifecycle = Lifecycle()
+    reader = asyncio.StreamReader()
+    idle = asyncio.Event()
+    read_line = lifecycle_module.read_line
+
+    async def read() -> tuple[bytes | None, bool]:
+        if lifecycle.queue.qsize():
+            idle.set()
+        return await read_line(reader)
+
+    monkeypatch.setattr(lifecycle_module, "read_line", lambda _: read())
+    pumping = asyncio.create_task(lifecycle.pump(reader, lambda _: None))
+    reader.feed_data(b"unknown|" + b"x" * 60_000 + b"\n")
+    try:
+        await asyncio.wait_for(idle.wait(), 1)
+        event = await lifecycle.read()
+        assert isinstance(event, events.UnknownEvent)
+        lifetime = ref(event)
+        del event
+        assert lifetime() is None
+    finally:
+        reader.feed_eof()
+        await pumping
 
 
 async def test_bounded_native_lifecycle_never_drops_a_save_for_eof() -> None:

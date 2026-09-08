@@ -1,8 +1,8 @@
 import fcntl
 import os
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
-from itertools import starmap
 from pathlib import Path
 from threading import Lock
 
@@ -129,22 +129,36 @@ class Outbox:
             )
             return identity
 
-    def read_batch(self, limit: int = 128) -> tuple[PendingLog, ...]:
+    def read_batch(
+        self, limit: int = 128, *, max_bytes: int | None = None
+    ) -> tuple[PendingLog, ...]:
         if type(limit) is not int or limit <= 0:
             message = "outbox batch limit must be a positive integer"
             raise ValueError(message)
-        with self._lock:
-            rows = (
-                self
-                ._open_database()
-                .execute(
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes <= 0):
+            message = "outbox batch byte budget must be a positive integer"
+            raise ValueError(message)
+        rows: list[PendingLog] = []
+        size = 0
+        with (
+            self._lock,
+            closing(
+                self._open_database().execute(
                     "SELECT id, payload FROM records WHERE reason IS NULL "
                     "ORDER BY id LIMIT ?",
                     (limit,),
                 )
-                .fetchall()
-            )
-        return tuple(starmap(PendingLog, rows))
+            ) as cursor,
+        ):
+            for identity, payload in cursor:
+                if rows and max_bytes is not None and size + len(payload) > max_bytes:
+                    break
+                rows.append(PendingLog(identity, payload))
+                size += len(payload)
+                # Return an oversized first row so the exporter can quarantine it.
+                if max_bytes is not None and size >= max_bytes:
+                    break
+        return tuple(rows)
 
     def acknowledge(self, identities: tuple[int, ...]) -> None:
         with self._lock:

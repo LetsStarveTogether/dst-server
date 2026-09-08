@@ -1,6 +1,8 @@
 import asyncio
+import gc
 from typing import cast
 from unittest.mock import AsyncMock, Mock
+from weakref import ref
 
 import pytest
 
@@ -355,6 +357,45 @@ async def test_cancelled_command_retrieves_later_lua_busy() -> None:
         assert contexts == []
     finally:
         loop.set_exception_handler(old_handler)
+
+
+@pytest.mark.parametrize("outcome", ["result", "busy", "oversized", "eof", "cancelled"])
+async def test_cancelled_command_releases_its_late_result(outcome: str) -> None:
+    console, writer, reader = make_console()
+    executing, start, end, _ = await start_command(console, writer, "first")
+    executing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await executing
+    del executing
+
+    pending = console.pending_result
+    assert pending is not None
+    lifetime = ref(pending)
+    completed = asyncio.Event()
+    pending.add_done_callback(lambda _: completed.set())
+    if outcome == "cancelled":
+        pending.cancel()
+    elif outcome == "busy":
+        reader.feed_data(b"DST_LuaBusy\n")
+    elif outcome == "eof":
+        reader.feed_eof()
+    else:
+        feed_frame(
+            reader,
+            start,
+            end,
+            b"x" * (MAX_RESULT_LINE_BYTES + (outcome == "oversized")),
+        )
+    del pending
+    try:
+        await asyncio.wait_for(completed.wait(), 1)
+        await asyncio.sleep(0)
+        gc.collect()
+        assert lifetime() is None
+        assert console.pending_result is None
+        assert console.broken is (outcome in {"eof", "cancelled"})
+    finally:
+        await console.close()
 
 
 async def test_cancelled_save_late_busy_releases_confirmation_barrier() -> None:

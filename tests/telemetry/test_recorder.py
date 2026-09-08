@@ -1,3 +1,6 @@
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
+import sys
+
 import pytest
 
 
@@ -69,3 +72,45 @@ def test_recorder_preserves_trace_parent_errors_and_metric_outcomes() -> None:
     finally:
         tracer_provider.shutdown()
         meter_provider.shutdown()
+
+
+def test_default_metrics_stay_bounded_and_bind_to_a_late_provider() -> None:
+    source = """
+import os
+import weakref
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from dst_server.telemetry.recorder import Recorder
+
+for name in tuple(os.environ):
+    if name.startswith('OTEL_'):
+        del os.environ[name]
+early = Recorder('early', 'forest')
+instruments = weakref.WeakSet()
+for _ in range(100):
+    recorder = Recorder('restarted', 'forest')
+    instruments.add(recorder.operation_duration)
+    del recorder
+assert len(instruments) == 1, len(instruments)
+
+reader = InMemoryMetricReader()
+provider = MeterProvider(metric_readers=(reader,), shutdown_on_exit=False)
+metrics.set_meter_provider(provider)
+try:
+    early.record_action('CHOP', True)
+    Recorder('late', 'forest').record_action('CHOP', True)
+    data = reader.get_metrics_data()
+    points = [point for resource in data.resource_metrics
+              for scope in resource.scope_metrics for metric in scope.metrics
+              if metric.name == 'dst.player.action.count'
+              for point in metric.data.data_points]
+    assert {point.attributes['dst.cluster.name']: point.value for point in points} == {
+        'early': 1, 'late': 1,
+    }
+finally:
+    provider.shutdown()
+"""
+    subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        [sys.executable, "-c", source], check=True, timeout=10
+    )

@@ -3,6 +3,7 @@ import importlib
 import sqlite3
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
+import weakref
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -25,6 +26,7 @@ from opentelemetry.sdk.resources import Resource
 from dst_server.events import GAME_EVENT_ADAPTER, ObservedGameEvent
 from dst_server.telemetry import otel
 from dst_server.telemetry.exporter import LogsExporter
+from dst_server.telemetry.outbox import PendingLog
 
 ATTEMPT = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 INSTANCE = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
@@ -74,6 +76,26 @@ class Sender(LogsExporter):
     async def aclose(self) -> None:
         self.closed += 1
         self.release.set()
+
+
+class UnrecordedSender(Sender):
+    async def export(self, payload: bytes) -> ExportLogsServiceResponse:
+        assert payload
+        self.entered.set()
+        await self.release.wait()
+        return ExportLogsServiceResponse()
+
+
+class TrackedLog(PendingLog):
+    pass
+
+
+class PayloadLifetime:
+    pass
+
+
+class TrackedPayload(bytes):
+    lifetime: PayloadLifetime
 
 
 def observed(*, generation: int = 1, sequence: int = 1) -> ObservedGameEvent:
@@ -319,6 +341,72 @@ async def test_network_outage_does_not_block_durable_append_or_event_loop(
         assert len(sender.requests) == 1
     finally:
         sender.release.set()
+        await pipeline.shutdown()
+
+
+@pytest.mark.parametrize("stage", ["export", "acknowledge", "idle"])
+async def test_delivery_releases_rows_and_completed_payloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    sender = UnrecordedSender()
+    if stage == "export":
+        sender.release.clear()
+    pipeline = make_pipeline(tmp_path, sender)
+    assert pipeline.outbox is not None
+    read_batch = pipeline.outbox.read_batch
+    make_batch = otel.batch
+    acknowledge = pipeline.outbox.acknowledge
+    rows: list[weakref.ReferenceType[TrackedLog]] = []
+    payloads: list[weakref.ReferenceType[PayloadLifetime]] = []
+    entered, release = Event(), Event()
+
+    def tracked_read(
+        limit: int = 128, *, max_bytes: int | None = None
+    ) -> tuple[PendingLog, ...]:
+        values = tuple(
+            TrackedLog(row.id, row.payload)
+            for row in read_batch(limit, max_bytes=max_bytes)
+        )
+        rows.extend(weakref.ref(row) for row in values)
+        return values
+
+    def tracked_batch(
+        values: tuple[PendingLog, ...],
+    ) -> tuple[tuple[int, ...], bytes, tuple[int, ...]]:
+        identities, payload, invalid = make_batch(values)
+        tracked = TrackedPayload(payload)
+        tracked.lifetime = PayloadLifetime()
+        payloads.append(weakref.ref(tracked.lifetime))
+        return identities, tracked, invalid
+
+    def blocked_acknowledge(identities: tuple[int, ...]) -> None:
+        entered.set()
+        if not release.wait(3):
+            message = "test acknowledgement was not released"
+            raise TimeoutError(message)
+        acknowledge(identities)
+
+    monkeypatch.setattr(pipeline.outbox, "read_batch", tracked_read)
+    monkeypatch.setattr(otel, "batch", tracked_batch)
+    if stage == "acknowledge":
+        monkeypatch.setattr(pipeline.outbox, "acknowledge", blocked_acknowledge)
+    try:
+        await pipeline.emit_event(observed())
+        if stage == "export":
+            await until(sender.entered.is_set)
+        elif stage == "acknowledge":
+            await until(entered.is_set)
+        else:
+            await until(lambda: pipeline.status().pending == 0)
+        assert rows
+        assert all(reference() is None for reference in rows)
+        assert payloads
+        assert all(
+            (reference() is not None) == (stage == "export") for reference in payloads
+        )
+    finally:
+        sender.release.set()
+        release.set()
         await pipeline.shutdown()
 
 

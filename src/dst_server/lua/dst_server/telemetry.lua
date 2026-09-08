@@ -30,7 +30,7 @@ local function write(event_name, data)
         monotonic_ms = math.floor(GetTimeReal()),
         cycle = cycle == nil and json.null or cycle,
         data = data,
-    })
+    }, state.max_line_bytes - #state.prefix)
     if type(encoded) ~= "string" then
         error("encoding_failed", 0)
     end
@@ -65,7 +65,7 @@ end
 function telemetry.emit(event_name, data)
     local ok, emitted, failure = pcall(write, event_name, data)
     if not ok then
-        telemetry.report(event_name, "encoding_failed")
+        telemetry.report(event_name, emitted == "response_too_large" and "event_too_large" or "encoding_failed")
     elseif not emitted then
         telemetry.report(event_name, failure)
     end
