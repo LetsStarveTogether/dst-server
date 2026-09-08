@@ -24,12 +24,12 @@ Both languages include the complete module documentation.
 | [Configuration and deployment](#configuration-and-deployment) | [Directory layout](#directory-layout) · [Ports](#shards-and-ports) · [World settings](#world-settings) · [Configuration SDK](#configuration-sdk) · [Permissions](#container-users-and-directory-permissions) · [DNS](#container-dns) |
 | [Routine maintenance](#routine-maintenance) | systemd commands, image updates, recovery consoles |
 | [Runtime](#runtime) | [Components and communication](#components-and-communication) · [Lifecycle](#lifecycle-and-failure-recovery) · [Save confirmation](#saving-and-world-reloads) · [Timeouts](#default-timeouts) |
-| [RPC and game SDK](#rpc-and-game-sdk) | [Connection example](#connecting-to-a-cluster) · [API index](#api-index) · [Emoji and Emote](#emoji-and-emote-enums) |
+| [RPC and game SDK](#rpc-and-game-sdk) | [Connection example](#connecting-to-a-cluster) · [Shared requests](#shared-requests-and-validation) · [API index](#api-index) · [Emoji and Emote](#emoji-and-emote-enums) |
 | [Saves and exports](#saves-and-exports) | [File reference](#save-files) · [Snapshots and rollback](#snapshot-queries-and-rollback-by-day) · [Exports and R2](#exports-and-r2-uploads) |
 | [Mod management](#mod-management) | [Updaters](#choosing-an-updater) · [Downloads and activation](#declaring-downloads-and-activation) · [Workshop SDK](#standalone-workshop-sdk) |
 | [Telemetry and historical logs](#telemetry-and-historical-logs) | [Collection scope](#collection-scope) · [OTLP](#otlp-configuration) · [Delivery](#durable-delivery) · [Log boundaries](#log-boundaries) · [Netdata](#netdata-deployment-and-queries) · [Troubleshooting](#telemetry-troubleshooting) |
 | [Utilities](#utilities) | Klei services, player path encoding, Lua annotations |
-| [Development and validation](#development-and-validation) | Dependencies, check commands, source index |
+| [Development and validation](#development-and-validation) | [Module boundaries](#module-boundaries), dependencies, check commands, source index |
 
 ## Quick Start
 
@@ -159,7 +159,7 @@ Then recreate the Pod.
 
 In `cluster.ini`, `[NETWORK]` controls the name and access restrictions.
 `[GAMEPLAY]` controls player count, PVP, and pausing when empty.
-See [ClusterSettings / ShardSettings](src/dst_server/cluster/config.py) for all fields, ranges, and defaults.
+See [ClusterSettings / ShardSettings](src/dst_server/configuration/models.py) for all fields, ranges, and defaults.
 The SDK defaults to `encode_user_path=True` and always writes its current value to `server.ini`.
 It preserves an explicit `False`.
 With existing saves, changing this value also requires migrating the [player directories](#player-path-encoding).
@@ -184,14 +184,16 @@ return {
 | Endless | Keep `game_mode = survival`, with the forest `ENDLESS` preset and corresponding cave overrides. |
 | Forge / Gorge | `lavaarena` / `quagmire` also require full `leveldataoverride.lua` data, included in the built-in event presets. |
 
-Prefer composing the [built-in configuration presets](src/dst_server/cluster/presets.py).
+Prefer composing the [built-in configuration presets](src/dst_server/configuration/presets.py).
 `leveldataoverride.lua` supplies the level baseline, then `worldgenoverride.lua` applies overrides.
 Changing generation settings does not rebuild an existing map.
 Game saves can also rewrite settings, so stop the games before editing.
 
 ### Configuration SDK
 
+`ClusterConfig`, `ClusterSettings`, `ShardConfig`, and `ShardSettings` are available from `dst_server.configuration`.
 `ClusterConfig` reads, validates, and saves a complete configuration tree; `RoomPreset` combines configuration fragments.
+`dst_server.deployment.QuadletApplication` derives Pod and container units from that configuration.
 This example generates an endless forest-and-caves configuration in a new directory:
 
 ```python
@@ -200,7 +202,7 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
-from dst_server.cluster.presets import ENDLESS, FOREST_CAVES, compose
+from dst_server.configuration.presets import ENDLESS, FOREST_CAVES, compose
 
 config = compose(FOREST_CAVES, ENDLESS).build(
     token=SecretStr(os.environ["DST_SERVER_CLUSTER_TOKEN"]),
@@ -350,7 +352,7 @@ flowchart LR
 | [daemon](src/dst_server/cluster/daemon.py) | Runs management services, registration connections, and systemd notifications. |
 | [Controller](src/dst_server/cluster/controller.py) | Tracks expected shards and coordinates shared preparation, configuration revisions, and cluster operations. |
 | [Agent](src/dst_server/cluster/agent.py) | Owns one shard's process resources, consumes logs, lifecycle records, and events, and handles telemetry. |
-| [Supervisor](src/dst_server/cluster/supervisor.py) | Stops and retries game processes, creating a new `Server` for each attempt. |
+| [Supervisor](src/dst_server/runtime/supervisor.py) | Stops and retries game processes, creating a new `Server` for each attempt. |
 | [Server](src/dst_server/runtime/server.py) | Manages one DST subprocess and its communication channels; single use. |
 
 The master container runs `dst-server master`; secondaries run `dst-server serve <shard>`.
@@ -447,7 +449,9 @@ The process manager then restarts the container.
 ### Saving and World Reloads
 
 `await cluster.save()` requests one save from the master.
-It waits for every shard to report a matching Saved confirmation after its own marker.
+It waits for every shard to report a matching Saved confirmation after its own observation cursor.
+`ObservationCursor(attempt, sequence)` binds the marker to one process attempt.
+An earlier attempt cannot confirm new work.
 Wait for success before stopping, restarting, or [exporting](#exports-and-r2-uploads).
 Successful command submission, a completed FIFO write, and exit logs cannot replace save confirmation.
 
@@ -482,9 +486,12 @@ Nested steps share one deadline.
 The reload budget includes confirmation from every shard and new driver readiness.
 Rollback by day also includes snapshot selection and result verification.
 
-RPC reserves another 60 seconds for preflight checks, forwarding, and responses.
-Startup, restart, and Mod update requests without an explicit timeout parameter wait up to three hours.
-Stop requests allow 300 seconds and forced stops 120 seconds.
+Requests declare their budgets in [commands.py](src/dst_server/commands.py).
+`Start`, `Restart`, and `UpdateMods` default to three hours; `Stop` and `Kill` both default to 120 seconds.
+The RPC server allows another 30 seconds around the workflow, and the client allows another 60 seconds in total.
+These overall RPC deadlines also include lock waits, preflight checks, forwarding, and responses.
+A transport deadline can therefore expire even while a workflow still has time left.
+An unconfirmed submitted mutation is reported as `indeterminate`.
 Subscription `next()` uses long polling; Quadlet allows 360 seconds for container stops and 420 seconds for systemd stops.
 Defaults are defined in [timeouts.py](src/dst_server/timeouts.py).
 
@@ -538,6 +545,33 @@ asyncio.run(main())
 The rootful host path is `/srv/dst/000/.dst-server.sock`; inside containers it is `/cluster/.dst-server.sock`.
 `connect()` requires a path and must run within a `rpc_runtime()` context.
 
+### Shared Requests and Validation
+
+[commands.py](src/dst_server/commands.py) defines `Request[T]` subclasses.
+They declare typed arguments, result types, allowed scopes, and timeouts.
+[api.py](src/dst_server/api.py) provides `ClusterAPI`, `ShardAPI`, and `PlayerAPI` convenience methods over `invoke(request)`.
+Import `commands as c` from `dst_server`.
+Then `await shard.world()` and `await shard.invoke(c.World())` use the same contract.
+Local controllers, game clients, and RPC clients validate the same Pydantic requests before dispatch.
+Invalid types, ranges, and copied models with invalid values are rejected before execution.
+Pass a request directly to override its timeout, such as `c.World(timeout=30)`.
+Each endpoint accepts only its declared command scope.
+Game clients handle game operations; controllers own process lifecycle and cluster coordination.
+
+Cap'n Proto carries commands through `call` and observations through subscription capabilities.
+The handshake fingerprint covers the capability schema and Pydantic request, result, event, and error schemas.
+Use matching client and daemon versions.
+Configuration payloads preserve omitted fields, explicit `False`, world override types, and secrets needed for saving.
+
+Import cluster results, statuses, and observation cursors from [models.cluster](src/dst_server/models/cluster.py).
+Import `DriverHealth` from [models.driver](src/dst_server/models/driver.py).
+Shared exceptions and error codes are in [errors.py](src/dst_server/errors.py).
+RPC reports domain failures with `RemoteError`; loss of an unconfirmed mutation result raises `IndeterminateError`.
+The game boundary uses `IndeterminateCommandError` for an unconfirmed native mutation.
+Accepted mutations retain their server task when a caller cancels or disconnects.
+Cancelled queries release their work.
+No unconfirmed mutation is replayed automatically.
+
 ### API Index
 
 | Object | Common interfaces |
@@ -551,13 +585,28 @@ The rootful host path is `/srv/dst/000/.dst-server.sock`; inside containers it i
 | `shard.execute(lua)` | Execute single-line Lua and return explicitly printed text. |
 | `shard.execute_json(lua)` | Return JSON through the typed driver, for example `"return TheWorld.state.cycles + 1"`. |
 
-See the [RPC client](src/dst_server/rpc/client.py) for full signatures and [rpc.capnp](src/dst_server/rpc/schema/rpc.capnp) for the protocol.
+See [api.py](src/dst_server/api.py) for convenience method signatures, [commands.py](src/dst_server/commands.py) for request contracts, and [rpc.capnp](src/dst_server/rpc/schema/rpc.capnp) for capabilities.
 Return models for players, entities, worlds, and snapshots are in [models](src/dst_server/models).
 Live subscriptions do not replay history; see [Netdata](#netdata-deployment-and-queries) for persistent historical queries.
 
 Applications that manage a single game process themselves can use `dst_server.runtime.Server` and `server.game`.
 The caller must continuously consume lifecycle, game, and operational observation streams and clean up the process.
 Standard Pod deployments can use `ClusterClient`.
+For a running `Server`, pass `server.game` to a function such as:
+
+```python
+from dst_server import commands as c
+from dst_server.game import GameClient
+
+
+async def inspect_game(game: GameClient) -> None:
+    world = await game.invoke(c.World())
+    day = await game.invoke(c.ExecuteJson(source="return TheWorld.state.cycles + 1"))
+    players = await game.players.list()
+    print(world, day, players)
+```
+
+`GameClient.request_save()` only requests the native save; use `Server.save()` or a cluster/shard `save()` to wait for confirmation.
 
 ### Emoji and Emote Enums
 
@@ -726,7 +775,7 @@ Save and stop the games, then package configuration and saves as `.7z`:
 import shutil
 from pathlib import Path
 
-from dst_server.cluster.archive import export_cluster
+from dst_server.archive import export_cluster
 
 with export_cluster(Path("/srv/dst/000")) as archive:
     destination = Path("/path/to/exports") / archive.filename
@@ -778,7 +827,7 @@ export AWS_SECRET_ACCESS_KEY='your-secret-access-key'
 ```python
 from pathlib import Path
 
-from dst_server.cluster.archive import export_cluster
+from dst_server.archive import export_cluster
 
 with export_cluster(Path("/srv/dst/000")) as archive:
     result = archive.upload(
@@ -856,8 +905,10 @@ Downloading does not enable a Mod automatically; each shard's `modoverrides.lua`
   They accept supported declarative Lua, double-quoted IDs, and at most one final return.
 - The standalone SteamCMD preparation path also extracts only static string calls.
   Variables, loops, conditionals, and computed expressions are unsupported.
-- Only direct calls to the low-level native `mods.update()` let the game execute setup.
-  Changing the cluster backend does not relax SDK restrictions.
+- Low-level functions in `dst_server.mods` support dynamic setup scripts.
+  `prepare_shared()` / `activate()` preserve them, and `update_native()` lets the game execute them.
+  `cluster.service.prepare_shared()` with the native backend also supports this low-level path.
+  Changing the controller's backend does not relax configuration SDK restrictions.
 - The game executes Mod code such as `modinfo.lua` and `modmain.lua`.
   The Python installer does not use Lua version fields to determine updates.
 
@@ -872,8 +923,7 @@ On Linux, with SteamCMD available and all games using the target `mods` director
 import asyncio
 from pathlib import Path
 
-from dst_server.steamcmd import SteamCMD
-from dst_server.workshop import WorkshopUpdater
+from dst_server.mods import SteamCMD, WorkshopUpdater
 
 
 async def main() -> None:
@@ -890,6 +940,8 @@ Pass `collections=[numeric_collection_id]` to expand collections recursively and
 The collection details endpoint requires no API key.
 SteamCMD manages ACF files, manifests, and download state under `mods/ugc/steamcmd`.
 The SDK does not maintain a separate installation revision database.
+Workshop metadata and legacy downloads use HTTPX2 with the explicit `SteamCMD.proxy` value and `trust_env=False`.
+Inherited proxy environment variables do not configure these requests.
 
 | Downloaded content | Installation |
 | --- | --- |
@@ -902,7 +954,7 @@ Later failures do not roll back committed items.
 If a switch is forcibly interrupted, the next call restores unpublished previous directories before contacting the network.
 An exclusive directory lock covers updates and installation.
 Cancellation cleans up download processes and waits for active file installation to finish before releasing the lock.
-See [WorkshopUpdater](src/dst_server/workshop.py) and [SteamCMD](src/dst_server/steamcmd.py) for the implementations.
+See [WorkshopUpdater](src/dst_server/mods/workshop.py) and [SteamCMD](src/dst_server/mods/steamcmd.py) for the implementations.
 
 [Back to contents](#contents)
 
@@ -936,6 +988,9 @@ The SDK uses `TelemetrySettings(profile=..., actions=...)`, passed through `Serv
 ### OTLP Configuration
 
 The image includes OTLP dependencies; install `dst-server[otel]` when using the SDK independently.
+Logs use the native asynchronous `grpc.aio` client with OTLP protobuf messages.
+The exporter supports TLS and client certificates, metadata headers, compression, deadlines, and channel cleanup.
+Metrics and Traces use the OpenTelemetry exporters and remain outside the durable Logs outbox.
 Agents initialize export when any of these variables is set:
 
 - `OTEL_EXPORTER_OTLP_ENDPOINT`
@@ -999,6 +1054,7 @@ Events not yet queued before closure or cancellation count toward `telemetry_dro
 | Full storage, corruption, or schema mismatch | Preserves existing files and reports an error; full storage rejects new writes and fails the Agent, without evicting unacknowledged history |
 | Metrics, Traces, and live subscriptions | Bypass the outbox and do not have these durability guarantees |
 
+The persistence and delivery implementations are [outbox.py](src/dst_server/telemetry/outbox.py) and [exporter.py](src/dst_server/telemetry/exporter.py).
 Replay preserves original observation times, resource attributes, and UIDs; records are deleted only after acknowledgment.
 A game event's `log.record.uid` is `nonce:generation:seq`, useful for identifying duplicates.
 Do not assume the backend deduplicates automatically.
@@ -1010,7 +1066,9 @@ It does not confirm Python validation, persistence, or delivery.
 Python reads merged game stdout and stderr and can no longer distinguish their sources.
 FD 3 command input, FD 4 responses, and FD 5 lifecycle events stay separate.
 Matching markers in stdout do not complete commands, advance Sessions, or confirm saves.
-The standard CLI writes Agent logs to container stdout.
+The standard CLI writes Agent logs through Logbook to container stdout.
+Ordinary Logbook records do not automatically enter the OTLP outbox.
+Structured game events and allowlisted runtime diagnostics keep their explicit routing.
 When Podman uses its journald driver, conmon forwards this output to the journal.
 
 | Input | Handling |
@@ -1044,7 +1102,7 @@ Fonts, terminals, and journal tools may render strings differently; rendering is
 
 #### Log Test Corpus and Sources
 
-[Mixed-stream tests](tests/test_operational.py) cross nine corpus groups with timestamps, line endings, chunks, and corruption.
+[Mixed-stream tests](tests/runtime/test_operational.py) cross nine corpus groups with timestamps, line endings, chunks, and corruption.
 They cover 486 combinations.
 The corpus retains only short signatures and substitutes local Mod names.
 Historical posts are not used to infer current-version root causes.
@@ -1060,10 +1118,10 @@ Historical posts are not used to infer current-version root causes.
 | Authentication / DNS | [Token error][token-error] and [DNS error][dns-error], plus constructed current-CURL examples |
 | Port bind failure | [Original error][bind-error]; one failed attempt does not prove final startup failure |
 
-[Event parser tests](tests/test_stream.py) separately cover schema, nonce, size, and encoding.
+[Event parser tests](tests/telemetry/test_stream.py) separately cover schema, nonce, size, and encoding.
 Lua tests execute native logging functions with varied output order.
-[RPC tests](tests/test_rpc.py) cover special Unicode and truncation budgets.
-[CLI tests](tests/test_telemetry_integration.py) verify local and OTLP routing.
+[RPC tests](tests/game/test_protocol.py) cover special Unicode and truncation budgets.
+[CLI tests](tests/telemetry/test_integration.py) verify local and OTLP routing.
 Actual journald storage and terminal rendering need separate verification in the deployment environment.
 
 Events can contain player `userid`, entities, coordinates, actions, and item history.
@@ -1183,6 +1241,41 @@ Generated LSP definitions are inferred from syntax.
 See the [DST Lua index](dst-scripts/index/README.md) for a starting point when reading game source.
 
 ## Development and Validation
+
+The SDK separates data and formats from game processes, cluster coordination, and transport.
+
+### Module Boundaries
+
+| Module | Responsibility |
+| --- | --- |
+| [models](src/dst_server/models) / [events](src/dst_server/events) | Business values, states, driver health, observation cursors, and event schemas. |
+| [commands.py](src/dst_server/commands.py) / [api.py](src/dst_server/api.py) / [errors.py](src/dst_server/errors.py) | Shared validated requests and results, allowed scopes, Python interfaces, and domain errors. |
+| [configuration](src/dst_server/configuration) | Configuration models, INI/Lua formats, explicit field semantics, directory reads/writes, and revisioned configuration storage. |
+| [deployment](src/dst_server/deployment) | Quadlet models and serialization, room ports, and Pod/systemd deployment derivation. |
+| [mods](src/dst_server/mods) | Mod declarations and files, native updates, SteamCMD, Workshop HTTP, and download process ownership. |
+| [lua_codec.py](src/dst_server/lua_codec.py) | Lua literal parsing/rendering and JSON value encoding without file I/O. |
+| [runtime](src/dst_server/runtime) | Game processes, FD protocols, command confirmation, driver readiness, and Supervisor retries. |
+| [cluster](src/dst_server/cluster) | Agent registration, topology, coordinated operations, observation subscriptions, and daemon assembly. |
+| [rpc](src/dst_server/rpc) | Cap'n Proto connections and capabilities, validated payload transport, and remote subscriptions. |
+| [telemetry](src/dst_server/telemetry) | Collection, SQLite outbox, OTLP encoding, and asynchronous export. |
+| [archive.py](src/dst_server/archive.py) | Save export, credential removal, 7z archives, and object storage uploads. |
+| [concurrency.py](src/dst_server/concurrency.py) / [timeouts.py](src/dst_server/timeouts.py) | Cancellation-safe cleanup and shared deadline handling. |
+| [klei](src/dst_server/klei) / [annotations](src/dst_server/annotations) / [netdata.py](src/dst_server/netdata.py) | External queries, Lua annotation generation, and historical log queries. |
+
+Controllers use shared request and model contracts and do not import RPC clients or wire schemas.
+The configuration and deployment models use Pydantic field declarations for validation and serialization.
+Domain state and errors are shared by local and remote callers.
+Logbook remains the application logger, and `python-ulid` supplies identities for attempts, revisions, and errors.
+HTTPX2 with HTTP/2 support is a core dependency shared by Workshop and Klei clients; the `klei` extra adds HTML parsing.
+The `otel` extra supplies OTLP and gRPC dependencies, and `export` supplies 7z and object storage dependencies.
+
+### Tests and Checks
+
+Tests are grouped by behavior: configuration, deployment, Mods, runtime, cluster, RPC, game/Lua, telemetry, and utilities.
+Hypothesis checks Lua value round trips and byte stream chunking.
+It also compares outbox append/acknowledge/quarantine/reopen sequences with a reference model.
+Process and transport tests use local pipes, Unix sockets, and HTTP/gRPC services.
+Explicit synchronization gates exercise cancellation races.
 
 Install Lua 5.1, LuaJIT, and just, then initialize the game source submodule; its repository URL uses GitHub SSH.
 

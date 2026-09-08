@@ -10,7 +10,7 @@ from pydantic import (
     model_validator,
 )
 
-from dst_server.cluster.overrides import _literal_lua_value
+from dst_server.lua_codec import parse_literal
 
 from .enums import Platform, Region, Role
 from .schema import KleiModel
@@ -118,7 +118,7 @@ class Room(Lobby):
             return ()
         if not isinstance(value, str):
             return value
-        players = _literal_lua_value(value, "Klei room players")
+        players = parse_literal(value, "Klei room players")
         if players == {}:
             return ()
         if not isinstance(players, list):

@@ -5,12 +5,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from logbook import Logger
+from pydantic import TypeAdapter
 
+from dst_server import mods
+from dst_server.configuration import files as layout
+from dst_server.configuration.models import Port
+from dst_server.configuration.overrides import WorkshopDownloads
+from dst_server.mods import SteamCMD
 from dst_server.runtime import ServerConfig
-from dst_server.steamcmd import SteamCMD
 from dst_server.telemetry import TelemetrySettings
 
-from . import console, layout, mods
+from . import console
 
 if TYPE_CHECKING:
     from dst_server.telemetry.otel import Pipeline
@@ -25,20 +30,12 @@ OTEL_ENDPOINTS = (
     "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 )
 CLUSTER_NAME_ENV = "DST_SERVER_CLUSTER_NAME"
-MIN_EXTERNAL_PORT = 1024
-MAX_EXTERNAL_PORT = 65535
+_EXTERNAL_PORT = TypeAdapter(Port)
 logger = Logger(__name__)
 
 
 def _validate_external_port(value: int) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not MIN_EXTERNAL_PORT <= value <= MAX_EXTERNAL_PORT
-    ):
-        msg = "external_port must be between 1024 and 65535"
-        raise ValueError(msg)
-    return value
+    return _EXTERNAL_PORT.validate_python(value, strict=True)
 
 
 def log_handler(prefix: str) -> Callable[[str], None]:
@@ -74,9 +71,10 @@ async def prepare_shared(
     if update_mods and (mod_ids or mods.has_setup_code(setup)):
         proxy = os.environ.get("DST_SERVER_MOD_PROXY") or None
         if backend == "steamcmd":
-            from dst_server.workshop import WorkshopUpdater
+            from dst_server.mods.workshop import WorkshopUpdater
 
-            items, collections = mods.setup_downloads(setup, strict=True)
+            downloads = WorkshopDownloads.load(setup)
+            items, collections = downloads.items, downloads.collections
             if not items and not collections:
                 return shards
             steamcmd_executable = os.environ.get("DST_SERVER_STEAMCMD")
@@ -103,7 +101,7 @@ async def prepare_shared(
             mods.activate(install_path, cluster_path)
         else:
             mods.activate(install_path, cluster_path)
-            await mods.update(
+            await mods.update_native(
                 executable,
                 cluster_path / "mods" / "ugc",
                 proxy=proxy,

@@ -11,10 +11,14 @@ from obstore.exceptions import PermissionDeniedError
 from py7zr import SevenZipFile
 from pydantic import SecretStr, ValidationError
 
-from dst_server.cluster import archive
-from dst_server.cluster.config import ClusterConfig, ClusterSettings, ShardSettings
-from dst_server.cluster.overrides import _literal_return_table
-from dst_server.cluster.presets import FOREST_CAVES
+from dst_server import archive
+from dst_server.configuration.files import load_lua_table
+from dst_server.configuration.models import (
+    ClusterConfig,
+    ClusterSettings,
+    ShardSettings,
+)
+from dst_server.configuration.presets import FOREST_CAVES
 from dst_server.klei_id import encode_klei_id
 
 
@@ -109,7 +113,7 @@ def test_export_round_trip_and_cleanup(
             session = saved_cluster / shard / "save/session/0123456789ABCDEF"
             (session / "KU_ABCDEFG__").rename(session / encode_klei_id("KU_ABCDEFG_"))
             index = saved_cluster / shard / "save/shardindex"
-            index.write_bytes(archive._export_shard_index(index))
+            index.write_bytes(archive._export_shard_index(index.read_bytes()))
     encoded = source_encoded or encode_user_path
     original = {
         path.relative_to(saved_cluster): path.read_bytes()
@@ -178,7 +182,7 @@ def test_export_round_trip_and_cleanup(
         shard_settings = ShardSettings.load(root / shard / "server.ini")
         assert shard_settings.encode_user_path is encoded
         assert shard_settings.cluster_key is None
-        index = _literal_return_table(root / shard / "save/shardindex", "test")
+        index = load_lua_table(root / shard / "save/shardindex", "test")
         assert index["session_id"] == "0123456789ABCDEF"
         assert index["server"] == {"encode_user_path": encoded, "privacy_type": 0}
         base = root / shard / "save/session/0123456789ABCDEF"
@@ -502,16 +506,18 @@ def test_export_shard_index_preserves_world_and_removes_credentials(
         encoding="utf-8",
     )
     original_bytes = source.read_bytes()
-    before = _literal_return_table(source, "test shard index")
+    before = load_lua_table(source, "test shard index")
 
-    exported = archive._export_shard_index(source, encode_user_path=convert)
+    exported = archive._export_shard_index(
+        source.read_bytes(), encode_user_path=convert
+    )
 
     assert source.read_bytes() == original_bytes
     assert exported.startswith(b"KLEI     1 return ")
     assert b"private-" not in exported
     target = tmp_path / "exported"
     target.write_bytes(exported)
-    after = _literal_return_table(target, "test exported shard index")
+    after = load_lua_table(target, "test exported shard index")
     assert after == before | {
         "server": {
             "encode_user_path": expected,
@@ -544,22 +550,27 @@ def test_export_shard_index_rejects_unreadable_or_executable_data(
     source.write_bytes(contents)
 
     with pytest.raises(ValueError, match="shard index"):
-        archive._export_shard_index(source)
+        archive._export_shard_index(source.read_bytes())
 
     assert source.read_bytes() == contents
 
 
-def test_export_shard_index_does_not_follow_symlinks_or_create_missing_index(
+def test_export_does_not_follow_shard_index_symlinks_or_create_missing_index(
+    saved_cluster: Path,
     tmp_path: Path,
 ) -> None:
-    missing = tmp_path / "missing"
-    with pytest.raises(ValueError, match="regular file"):
-        archive._export_shard_index(missing)
-    assert not missing.exists()
+    index = saved_cluster / "cave" / "save" / "shardindex"
+    index.unlink()
+    with archive.export_cluster(saved_cluster):
+        pass
+    assert not index.exists()
 
     source = tmp_path / "shardindex"
     source.write_bytes(b"KLEI     1 return {server={}}")
-    linked = tmp_path / "linked"
-    linked.symlink_to(source)
-    with pytest.raises(ValueError, match="symlink"):
-        archive._export_shard_index(linked)
+    index.symlink_to(source)
+    with (
+        pytest.raises(ValueError, match="regular file"),
+        archive.export_cluster(saved_cluster),
+    ):
+        pass
+    assert source.read_bytes() == b"KLEI     1 return {server={}}"

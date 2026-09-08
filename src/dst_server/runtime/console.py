@@ -1,36 +1,24 @@
 import asyncio
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Callable
 from time import time_ns
 
 from ulid import ULID
 
-from dst_server.game.rpc import MAX_RESULT_LINE_BYTES, lua_string
-from dst_server.game.validation import positive_timeout
+from dst_server.concurrency import cancel_tasks, complete
+from dst_server.errors import IndeterminateCommandError
+from dst_server.game.rpc import MAX_RESULT_LINE_BYTES
+from dst_server.lua_codec import lua_string
 from dst_server.telemetry.stream import EventStream
-from dst_server.timeouts import DEFAULT_COMMAND_TIMEOUT
+from dst_server.timeouts import DEFAULT_COMMAND_TIMEOUT, positive_timeout
 
-from .lifecycle import RequestState
+from .fds import read_line
+from .request import RequestState, current_request
 
 COMMAND_DONE = "DST_RemoteCommandDone"
 LUA_BUSY = "DST_LuaBusy"
 LUA_BUSY_RETRY_DELAY = 0.1
 FRAME_PREFIX = "DST_SERVER_FRAME"
 MAX_RESULT_LINES = 1024
-_request_state = ContextVar[RequestState | None](
-    "dst_server_request_state", default=None
-)
-
-
-@contextmanager
-def track_request(state: RequestState | None = None) -> Iterator[RequestState]:
-    state = state or RequestState()
-    token = _request_state.set(state)
-    try:
-        yield state
-    finally:
-        _request_state.reset(token)
 
 
 class LuaBusyError(Exception):
@@ -42,10 +30,6 @@ class ResponseTooLargeError(RuntimeError):
 
 
 class StaleGenerationError(RuntimeError):
-    pass
-
-
-class IndeterminateCommandError(RuntimeError):
     pass
 
 
@@ -150,7 +134,7 @@ class Console:
             self.broken = True
             raise
         command_state.mark_sent()
-        state = _request_state.get()
+        state = current_request.get()
         if state is not None:
             state.mark_sent()
         result_task = asyncio.create_task(
@@ -165,8 +149,7 @@ class Console:
                 raise
             except BaseException:
                 self.broken = True
-                result_task.cancel()
-                await asyncio.gather(result_task, return_exceptions=True)
+                await cancel_tasks(result_task)
                 raise
             await asyncio.wait((result_task,))
             return result_task.result()
@@ -247,7 +230,7 @@ class Console:
                     continue
                 if value == LUA_BUSY and not output_before_start:
                     command_state.mark_rejected()
-                    state = _request_state.get()
+                    state = current_request.get()
                     if state is not None:
                         state.mark_rejected()
                     raise LuaBusyError
@@ -268,25 +251,18 @@ class Console:
         result_task = self.pending_result
         if result_task is None:
             return
-        if not result_task.done():
-            result_task.cancel()
-        await asyncio.gather(result_task, return_exceptions=True)
-        if self.pending_result is result_task:
-            self.pending_result = None
+        try:
+            await cancel_tasks(result_task)
+        finally:
+            if self.pending_result is result_task:
+                self.pending_result = None
 
     async def _read_line(self) -> tuple[bytes, bool]:
-        oversized = False
-        while True:
-            try:
-                return await self.reader.readuntil(b"\n"), oversized
-            except asyncio.LimitOverrunError as error:
-                await self.reader.readexactly(
-                    min(error.consumed, MAX_RESULT_LINE_BYTES)
-                )
-                oversized = True
-            except asyncio.IncompleteReadError as error:
-                msg = "DST result stream closed before the command response completed"
-                raise EOFError(msg) from error
+        line, oversized = await read_line(self.reader)
+        if line is None or not line.endswith(b"\n"):
+            msg = "DST result stream closed before the command response completed"
+            raise EOFError(msg)
+        return line, oversized
 
     async def drain_result(self) -> None:
         result_task = self.pending_result
@@ -302,6 +278,12 @@ class Console:
                 self.pending_result = None
 
     async def close(self) -> None:
+        await complete(self._close())
+
+    async def _close(self) -> None:
         self.broken = True
         self.writer.close()
-        await asyncio.gather(self.writer.wait_closed(), return_exceptions=True)
+        try:
+            await self._discard_pending_result()
+        finally:
+            await asyncio.gather(self.writer.wait_closed(), return_exceptions=True)

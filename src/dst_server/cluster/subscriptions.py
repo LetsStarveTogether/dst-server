@@ -1,10 +1,12 @@
 import asyncio
+from typing import Annotated
+
+from pydantic import Field, TypeAdapter
+
+from dst_server.errors import SubscriptionOverflowError
 
 MAX_BATCH_SIZE = 256
-
-
-class SubscriptionOverflowError(OverflowError):
-    pass
+BATCH_SIZE = TypeAdapter(Annotated[int, Field(ge=1, le=MAX_BATCH_SIZE)])
 
 
 class Broadcast[T]:
@@ -44,9 +46,7 @@ class Subscription[T]:
         self._overflowed = False
 
     async def next(self, max_items: int) -> tuple[T, ...]:
-        if not 1 <= max_items <= MAX_BATCH_SIZE:
-            msg = f"max_items must be between 1 and {MAX_BATCH_SIZE}"
-            raise ValueError(msg)
+        max_items = BATCH_SIZE.validate_python(max_items, strict=True)
         if self._reading:
             msg = "concurrent subscription reads are unsupported"
             raise RuntimeError(msg)

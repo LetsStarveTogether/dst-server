@@ -63,10 +63,7 @@ class SnapshotSeasons(FrozenModel):
 class _Metadata(FrozenModel):
     @classmethod
     def load(cls, path: Path) -> Self:
-        from dst_server.cluster.overrides import (
-            KLEI_FILE_HEADER,
-            _literal_lua_value,
-        )
+        from dst_server.lua_codec import KLEI_FILE_HEADER, parse_literal
 
         if path.is_symlink() or not path.is_file():
             msg = f"snapshot metadata must be a regular file, not a symlink: {path}"
@@ -80,7 +77,7 @@ class _Metadata(FrozenModel):
         if "\0" in source or not source.startswith("return"):
             msg = f"unsupported snapshot metadata format: {path}"
             raise ValueError(msg)
-        value = _literal_lua_value(source.removeprefix("return"), "snapshot metadata")
+        value = parse_literal(source.removeprefix("return"), "snapshot metadata")
         return cls.model_validate(value)
 
 

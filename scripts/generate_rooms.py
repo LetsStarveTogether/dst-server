@@ -6,9 +6,17 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
-from dst_server.cluster.config import ClusterConfig, ClusterSettings, ShardSettings
-from dst_server.cluster.overrides import ModOverride, ModOverrides, WorldgenOverride
-from dst_server.cluster.presets import (
+from dst_server.configuration.models import (
+    ClusterConfig,
+    ClusterSettings,
+    ShardSettings,
+)
+from dst_server.configuration.overrides import (
+    ModOverride,
+    ModOverrides,
+    WorldgenOverride,
+)
+from dst_server.configuration.presets import (
     ENDLESS,
     FOREST_CAVES,
     FOREST_ONLY_NIGHT,
@@ -22,12 +30,12 @@ from dst_server.cluster.presets import (
     custom_world,
     shard,
 )
-from dst_server.cluster.quadlet import (
+from dst_server.configuration.world import CaveOverrides, ForestOverrides
+from dst_server.deployment import (
     DEFAULT_IMAGE,
     QuadletApplication,
     RoomPortAllocation,
 )
-from dst_server.cluster.world import CaveOverrides, ForestOverrides
 from scripts.mod_configurations import MOD_CONFIGURATIONS
 
 CLUSTER_DESCRIPTION = "朗诵团：924715341 频道：饥荒联机版 Let's Starve Together!"  # ruff: ignore[ambiguous-unicode-character-string]

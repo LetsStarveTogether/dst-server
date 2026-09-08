@@ -7,15 +7,22 @@ from opentelemetry.trace import Span
 
 
 class Recorder:
-    def __init__(self, cluster: str, shard: str) -> None:
+    def __init__(
+        self,
+        cluster: str,
+        shard: str,
+        *,
+        tracer_provider: trace.TracerProvider | None = None,
+        meter_provider: metrics.MeterProvider | None = None,
+    ) -> None:
         self.base_attributes = {
             "dst.cluster.name": cluster,
             "dst.shard.name": shard,
         }
         self.player_count = 0
         self.process_up = False
-        self.tracer = trace.get_tracer("dst-server")
-        meter = metrics.get_meter("dst-server")
+        self.tracer = trace.get_tracer("dst-server", tracer_provider=tracer_provider)
+        meter = metrics.get_meter("dst-server", meter_provider=meter_provider)
         self.operation_duration = meter.create_histogram(
             "dst.server.operation.duration",
             unit="s",

@@ -5,6 +5,61 @@ from luaparser.ast import SyntaxException
 
 from dst_server.annotations import generate_components, generate_modutil
 from dst_server.annotations.cli import main
+from dst_server.annotations.visitors import parse_component, parse_modutil
+
+
+@pytest.mark.parametrize(
+    ("definition", "name"),
+    [
+        ("function Widget:Outer(value, ...) {body} end", "_l:Outer"),
+        ("Widget.Outer = function(value, ...) {body} end", "_l.Outer"),
+        ("env.Outer = function(value, ...) {body} end", "Outer"),
+    ],
+    ids=["component-method", "component-function", "modutil"],
+)
+@pytest.mark.parametrize(
+    "nested",
+    [
+        "local helper = function() return true end",
+        "local function helper() return true end",
+        "function helper() return true end",
+        "function Other:Helper() return true end",
+    ],
+    ids=["anonymous", "local-function", "function", "method"],
+)
+@pytest.mark.parametrize(
+    ("before", "after", "annotation", "returned"),
+    [
+        ("", "", None, ""),
+        ("if value then return 7 end", "", "number", " return 0"),
+        ("", "return 'outer'", "string", ' return ""'),
+    ],
+    ids=["no-return", "return-before-nested-function", "return-after-nested-function"],
+)
+def test_nested_function_returns_do_not_change_outer_annotations(
+    definition: str,
+    name: str,
+    nested: str,
+    before: str,
+    after: str,
+    annotation: str | None,
+    returned: str,
+) -> None:
+    source = definition.format(body=f"{before}\n{nested}\n{after}")
+    definitions = (
+        parse_modutil(source, "modutil")
+        if name == "Outer"
+        else parse_component(source, "widget", "Widget", "components")[1]
+    )
+
+    assert len(definitions) == 1
+    result = definitions[0]
+    assert "---@param value any\n---@param ... any" in result
+    assert result.endswith(f"function {name}(value, ...){returned} end")
+    if annotation is None:
+        assert "---@return" not in result
+    else:
+        assert f"---@return {annotation}\n" in result
 
 
 def test_generate_component_annotations(tmp_path: Path) -> None:

@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from logbook import Logger
 
 from dst_server.events import GameEvent
-from dst_server.game import DriverHealth
+from dst_server.models.driver import DriverHealth
 
 logger = Logger(__name__)
 
@@ -162,6 +162,8 @@ class Driver:
         return True
 
     def close(self) -> None:
+        if self.closed:
+            return
         self.closed = True
         self._health = None
         if self.task is not None:

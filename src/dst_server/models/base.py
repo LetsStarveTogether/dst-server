@@ -1,6 +1,16 @@
 from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    SecretStr,
+    SerializationInfo,
+    SerializerFunctionWrapHandler,
+    field_serializer,
+)
+from ulid import ULID
 
 type FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 type NonNegativeFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
@@ -11,6 +21,9 @@ type PositiveInt = Annotated[int, Field(gt=0)]
 type Identifier = Annotated[str, Field(min_length=1, max_length=128)]
 type Name = Annotated[str, Field(max_length=256)]
 type Description = Annotated[str, Field(max_length=2048)]
+type ULIDValue = Annotated[
+    ULID, PlainSerializer(str, return_type=str, when_used="json")
+]
 
 
 class FrozenModel(BaseModel):
@@ -20,6 +33,22 @@ class FrozenModel(BaseModel):
         frozen=True,
         strict=True,
     )
+
+    # No return annotation: preserve each field's native serialization schema.
+    @field_serializer("*", mode="wrap")
+    def _serialize_field(  # ruff: ignore[missing-return-type-private-function]
+        self,
+        value: object,
+        handler: SerializerFunctionWrapHandler,
+        info: SerializationInfo,
+    ):
+        if (
+            isinstance(value, SecretStr)
+            and isinstance(info.context, dict)
+            and info.context.get("secrets") is True
+        ):
+            return value.get_secret_value()
+        return handler(value)
 
     def replace(self, **changes: object) -> Self:
         values = {field: getattr(self, field) for field in self.model_fields_set}

@@ -1,4 +1,3 @@
-import asyncio
 import os
 import stat
 from pathlib import Path
@@ -6,23 +5,9 @@ from pathlib import Path
 from logbook import Logger
 
 from dst_server.runtime import Server
-from dst_server.runtime.fds import PROTOCOL_LINE_LIMIT, open_reader
+from dst_server.runtime.fds import open_reader, read_line
 
 logger = Logger(__name__)
-
-
-async def _read_command(reader: asyncio.StreamReader) -> tuple[bytes | None, bool]:
-    oversized = False
-    while True:
-        try:
-            line = await reader.readuntil(b"\n")
-        except asyncio.LimitOverrunError as error:
-            await reader.readexactly(min(error.consumed, PROTOCOL_LINE_LIMIT))
-            oversized = True
-            continue
-        except asyncio.IncompleteReadError as error:
-            return (error.partial or None, oversized)
-        return line, oversized
 
 
 def ensure(path: Path) -> None:
@@ -45,7 +30,7 @@ async def forward(path: Path, server: Server) -> None:
     reader, transport = await open_reader(descriptor)
     try:
         while True:
-            raw_line, oversized = await _read_command(reader)
+            raw_line, oversized = await read_line(reader)
             if oversized:
                 logger.warning(
                     "{shard}: discarded oversized console command",

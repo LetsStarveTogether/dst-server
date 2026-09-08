@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from time import time_ns
 
 from logbook import Logger
@@ -8,7 +8,8 @@ from logbook import Logger
 from dst_server.events import server
 from dst_server.timeouts import DEFAULT_SAVE_TIMEOUT, timeout_scope
 
-from .fds import PROTOCOL_LINE_LIMIT
+from .fds import read_line
+from .request import RequestState
 
 logger = Logger(__name__)
 
@@ -19,67 +20,6 @@ MAX_PENDING_EVENTS = 64
 class ObservedLifecycleEvent:
     event: server.Event
     observed_timestamp_ns: int
-
-
-@dataclass(slots=True)
-class RequestStatus:
-    sent: bool = False
-    attempt: int = 0
-    rejected: asyncio.Event = field(default_factory=asyncio.Event)
-
-
-@dataclass(slots=True)
-class RequestState:
-    status: RequestStatus = field(default_factory=RequestStatus)
-    resolved: asyncio.Event = field(default_factory=asyncio.Event)
-
-    @property
-    def sent(self) -> bool:
-        return self.status.sent
-
-    def mark_sent(self) -> None:
-        self.status.sent = True
-        self.status.attempt += 1
-        self.status.rejected.clear()
-        self.resolved.clear()
-
-    def mark_rejected(self) -> None:
-        self.status.sent = False
-        self.status.rejected.set()
-
-    async def wait_resolved(self) -> None:
-        if self.resolved.is_set() or self.status.rejected.is_set():
-            return
-        resolved = asyncio.create_task(self.resolved.wait())
-        rejected = asyncio.create_task(self.status.rejected.wait())
-        try:
-            await asyncio.wait(
-                (resolved, rejected), return_when=asyncio.FIRST_COMPLETED
-            )
-        finally:
-            for task in (resolved, rejected):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(resolved, rejected, return_exceptions=True)
-
-
-async def read_line(reader: asyncio.StreamReader) -> bytes | None:
-    oversized = False
-    while True:
-        try:
-            line = await reader.readuntil(b"\n")
-        except asyncio.LimitOverrunError as error:
-            await reader.readexactly(min(error.consumed, PROTOCOL_LINE_LIMIT))
-            oversized = True
-            continue
-        except asyncio.IncompleteReadError as error:
-            if oversized or not error.partial:
-                return None
-            return error.partial
-        if oversized:
-            oversized = False
-            continue
-        return line
 
 
 class Lifecycle:
@@ -108,7 +48,12 @@ class Lifecycle:
         on_event: Callable[[server.Event, int], Awaitable[None]] | None = None,
     ) -> None:
         try:
-            while (line := await read_line(reader)) is not None:
+            while True:
+                line, oversized = await read_line(reader)
+                if line is None:
+                    break
+                if oversized:
+                    continue
                 if line.startswith(b"DST_Stats|"):
                     continue
                 observed_timestamp_ns = time_ns()
@@ -152,7 +97,7 @@ class Lifecycle:
             self.save_count += 1
             self._resolve_save_barrier()
             if self._save_request is not None and self._save_request.sent:
-                attempt = self._save_request.status.attempt
+                attempt = self._save_request.attempt
                 if (
                     self._save_confirmation is None
                     or self._save_confirmation[1] != attempt
@@ -168,7 +113,7 @@ class Lifecycle:
 
     def _discard_stale_confirmation(self, state: RequestState) -> None:
         if self._save_confirmation is not None and (
-            not state.sent or self._save_confirmation[1] != state.status.attempt
+            not state.sent or self._save_confirmation[1] != state.attempt
         ):
             self._save_confirmation = None
 
@@ -202,11 +147,11 @@ class Lifecycle:
         async with timeout_scope(completion_timeout), self.save_lock:
             barrier = self._save_confirmation_barrier
             if barrier is not None:
-                await barrier.wait_resolved()
+                await barrier.resolved.wait()
                 if self._save_confirmation_barrier is barrier:
                     self._save_confirmation_barrier = None
             self._raise_if_eof()
-            state = request_state or RequestState(RequestStatus(sent=True))
+            state = request_state or RequestState(sent=True)
             self._save_request = state
             self._save_confirmation = None
             self.saved.clear()

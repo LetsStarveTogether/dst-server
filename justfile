@@ -21,7 +21,7 @@ test:
 
 # Run the real game against an explicitly selected local image.
 test-system image:
-    DST_SERVER_IMAGE="{{ image }}" DST_SERVER_PODMAN_TEST=1 uv run --locked --all-extras pytest -m system tests/test_podman.py
+    DST_SERVER_IMAGE="{{ image }}" DST_SERVER_PODMAN_TEST=1 uv run --locked --all-extras pytest -m system tests/system/test_podman.py
 
 # Also verify the OTLP round trip against a configured local Netdata.
 test-netdata-system image:
@@ -29,7 +29,7 @@ test-netdata-system image:
 
 # Query a real SteamCMD installation separately because it requires host network access.
 test-steamcmd-system:
-    DST_SERVER_STEAMCMD_TEST=1 uv run --locked --all-extras pytest -m system tests/test_steamcmd.py
+    DST_SERVER_STEAMCMD_TEST=1 uv run --locked --all-extras pytest -m system tests/mods/test_steamcmd.py
 
 check:
     uv lock --check

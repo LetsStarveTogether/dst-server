@@ -2,58 +2,35 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from importlib import import_module
 from os import PathLike, fspath
-from typing import Any, Self, cast
+from typing import Any, Literal, Self, cast
 
-from pydantic import JsonValue
+from pydantic import BaseModel
 from ulid import ULID
 
-from dst_server.cluster.config import ClusterConfig
-from dst_server.events.server import SavedEvent
-from dst_server.game.rpc import DriverHealth
-from dst_server.game.validation import item_count, positive_timeout
-from dst_server.game.world import MAX_SNAPSHOT_PAGE_SIZE
-from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
-from dst_server.models.snapshot import Snapshot, SnapshotCatalog
-from dst_server.timeouts import (
-    DEFAULT_COMMAND_TIMEOUT,
-    DEFAULT_CONNECT_TIMEOUT,
-    DEFAULT_LIFECYCLE_TIMEOUT,
-    DEFAULT_RELOAD_TIMEOUT,
-    DEFAULT_SAVE_TIMEOUT,
-    RPC_TIMEOUT_MARGIN,
-)
-
-from .codec import decode_json_value, decode_model, encode_model
-from .errors import (
+from dst_server.api import ClusterAPI, ShardAPI
+from dst_server.cluster.subscriptions import BATCH_SIZE, MAX_BATCH_SIZE
+from dst_server.commands import Request, Scope, encode_request, operation
+from dst_server.errors import (
     DisconnectedError,
     ErrorCode,
     ErrorInfo,
     IndeterminateError,
     RemoteError,
-    unwrap_outcome,
 )
-from .models import (
-    ClusterStatus,
-    GameEventRecord,
-    LifecycleRecord,
-    LocatedPlayer,
-    LogRecord,
-    ShardRuntimeStatus,
+from dst_server.models.cluster import GameEventRecord, LifecycleRecord, LogRecord
+from dst_server.timeouts import (
+    DEFAULT_COMMAND_TIMEOUT,
+    DEFAULT_CONNECT_TIMEOUT,
+    RPC_TIMEOUT_MARGIN,
+    positive_timeout,
 )
+
+from .codec import ERROR, decode, decode_model, unwrap_outcome
 from .schema import SCHEMA_FINGERPRINT, load_schema
 
-DEFAULT_BATCH_SIZE = 256
-MAX_UINT64 = 2**64 - 1
-_REQUEST_TIMEOUTS = {
-    "start": DEFAULT_LIFECYCLE_TIMEOUT,
-    "restart": DEFAULT_LIFECYCLE_TIMEOUT,
-    "updateMods": DEFAULT_LIFECYCLE_TIMEOUT,
-    "stop": 300.0,
-    "kill": 120.0,
-}
+type StreamKind = Literal["logs", "lifecycle", "events"]
 capnp: Any = import_module("capnp")
 
 
@@ -63,100 +40,18 @@ async def rpc_runtime() -> AsyncIterator[None]:
         yield
 
 
-def _unit(_: Any) -> None:
-    return None
+async def _read_call(operation: Any, timeout: float = DEFAULT_COMMAND_TIMEOUT) -> Any:
+    try:
+        async with asyncio.timeout(timeout):
+            return unwrap_outcome((await operation).result)
+    except capnp.KjException as error:
+        raise DisconnectedError(str(error)) from error
 
 
-def _scalar(value: Any) -> Any:
-    return value.value
-
-
-def _nullable[ValueT](
-    value: Any,
-    decode: Callable[[Any], ValueT],
-) -> ValueT | None:
-    selected = value.which()
-    if selected == "none":
-        return None
-    if selected != "value":
-        msg = f"invalid nullable RPC member: {selected}"
-        raise ValueError(msg)
-    return decode(value.value)
-
-
-def _nullable_scalar(value: object | None) -> dict[str, object]:
-    return {"none": None} if value is None else {"value": {"value": value}}
-
-
-def _snapshot_arguments(limit: int, before: int | None) -> tuple[int, int | None]:
-    limit = item_count(limit)
-    if limit > MAX_SNAPSHOT_PAGE_SIZE:
-        msg = f"snapshot limit must not exceed {MAX_SNAPSHOT_PAGE_SIZE}"
-        raise ValueError(msg)
-    if before is not None:
-        before = item_count(before, allow_zero=True)
-        if before > MAX_UINT64:
-            msg = "snapshot before must fit UInt64"
-            raise ValueError(msg)
-    return limit, before
-
-
-@dataclass(frozen=True, slots=True)
-class ConfigurationSnapshot:
-    revision: ULID
-    configuration: ClusterConfig
-
-
-@dataclass(frozen=True, slots=True)
-class InvalidConfiguration:
-    revision: ULID
-    fields: tuple[tuple[str, ...], ...]
-
-
-type ConfigurationRead = ConfigurationSnapshot | InvalidConfiguration
-
-
-def _configuration_snapshot(value: Any) -> ConfigurationSnapshot:
-    return ConfigurationSnapshot(
-        revision=ULID.from_str(str(value.revision)),
-        configuration=decode_model(ClusterConfig, value.configuration),
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class ShardResult[ValueT]:
-    shard: str
-    value: ValueT | None = None
-    error: ErrorInfo | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ClusterSaveResult:
-    snapshot: int | None
-    shards: tuple[tuple[str, SavedEvent], ...]
-
-
-def _nested_result[ValueT](
-    value: Any,
-    decode: Callable[[Any], ValueT],
-) -> tuple[ValueT | None, ErrorInfo | None]:
-    selected = value.which()
-    if selected == "error":
-        return None, ErrorInfo.from_wire(value.error)
-    if selected == "value":
-        return decode(value.value), None
-    msg = f"invalid nested RPC outcome member: {selected}"
-    raise ValueError(msg)
-
-
-class Subscription[RecordT]:
-    def __init__(
-        self,
-        capability: Any,
-        decode: Callable[[Any], RecordT],
-    ) -> None:
+class Subscription[T]:
+    def __init__(self, capability: Any, decode_item: Callable[[bytes], T]) -> None:
         self._capability: Any = capability
-        self._decode = decode
+        self._decode_item = decode_item
         self.closed = False
 
     async def __aenter__(self) -> Self:
@@ -165,81 +60,103 @@ class Subscription[RecordT]:
     async def __aexit__(self, *_: object) -> None:
         await self.close()
 
-    async def next(self, max_items: int = DEFAULT_BATCH_SIZE) -> tuple[RecordT, ...]:
+    async def next(self, max_items: int = MAX_BATCH_SIZE) -> tuple[T, ...]:
+        max_items = BATCH_SIZE.validate_python(max_items, strict=True)
         if self.closed:
             return ()
         try:
-            response = await self._capability.next(maxItems=max_items)
+            batch = (await self._capability.next(maxItems=max_items)).batch
         except capnp.KjException as error:
             self.closed = True
+            self._capability = None
             raise DisconnectedError(str(error)) from error
-        batch = response.batch
-        selected = batch.which()
-        if selected == "items":
-            return tuple(self._decode(item) for item in batch.items)
-        if selected == "closed":
-            self.closed = True
-            return ()
-        if selected == "error":
-            error = ErrorInfo.from_wire(batch.error)
-            if error.code is not ErrorCode.OVERFLOW:
+        match batch.which():
+            case "items":
+                try:
+                    return tuple(self._decode_item(item) for item in batch.items)
+                except Exception:
+                    await self.close()
+                    raise
+            case "closed":
                 self.closed = True
-            raise RemoteError(error)
-        self.closed = True
-        msg = f"invalid RPC batch member: {selected}"
-        raise ValueError(msg)
+                self._capability = None
+                return ()
+            case "error":
+                error = decode(ERROR, batch.error)
+                if error.code is not ErrorCode.OVERFLOW:
+                    await self.close()
+                raise RemoteError(error)
+            case selected:
+                await self.close()
+                msg = f"invalid RPC batch member: {selected}"
+                raise ValueError(msg)
 
     async def close(self) -> None:
         if self.closed:
             return
         try:
-            async with asyncio.timeout(RPC_TIMEOUT_MARGIN):
-                response = await self._capability.close()
-            _unit(unwrap_outcome(response.result))
-        except capnp.KjException as error:
-            raise DisconnectedError(str(error)) from error
+            await _read_call(self._capability.close(), RPC_TIMEOUT_MARGIN)
         finally:
             self.closed = True
             self._capability = None
 
 
-class _Remote:
-    async def _invoke(
-        self,
-        capability: Any,
-        method: str,
-        *,
-        mutation: bool = False,
-        **arguments: object,
-    ) -> Any:
-        timeout = _REQUEST_TIMEOUTS.get(
-            method, DEFAULT_COMMAND_TIMEOUT + 2 * RPC_TIMEOUT_MARGIN
-        )
-        if "timeout" in arguments:
-            duration = positive_timeout(cast("float", arguments["timeout"]))
-            arguments["timeout"] = duration
-            timeout = duration + 2 * RPC_TIMEOUT_MARGIN
+class RemoteEndpoint:
+    scope: Scope
+
+    async def _get_capability(self) -> Any:
+        raise NotImplementedError
+
+    async def invoke[T](self, command: Request[T]) -> T:
+        spec = operation(self.scope, command)
+        payload = encode_request(command)
+        capability = await self._get_capability()
         try:
-            async with asyncio.timeout(timeout):
-                response = await getattr(capability, method)(**arguments)
+            async with asyncio.timeout(command.timeout + 2 * RPC_TIMEOUT_MARGIN):
+                response = await capability.call(request=payload)
         except TimeoutError as error:
-            if mutation:
+            if spec.mutation:
                 raise IndeterminateError from error
             raise RemoteError(
                 ErrorInfo(ErrorCode.TIMEOUT, ULID(), "operation timed out")
             ) from error
         except asyncio.CancelledError as error:
-            if mutation:
+            if spec.mutation:
                 raise IndeterminateError from error
             raise
         except capnp.KjException as error:
-            if mutation:
+            if spec.mutation:
                 raise IndeterminateError from error
             raise DisconnectedError(str(error)) from error
-        return unwrap_outcome(response.result)
+        try:
+            return cast("T", decode(spec.response, unwrap_outcome(response.result)))
+        except RemoteError:
+            raise
+        except Exception as error:
+            if spec.mutation:
+                raise IndeterminateError from error
+            raise
+
+    async def _subscribe[T: BaseModel](
+        self, kind: StreamKind, model: type[T]
+    ) -> Subscription[T]:
+        capability = await self._get_capability()
+        subscription = await _read_call(capability.subscribe(kind=kind))
+        return Subscription(subscription, lambda item: decode_model(model, item))
+
+    async def subscribe_logs(self) -> Subscription[LogRecord]:
+        return await self._subscribe("logs", LogRecord)
+
+    async def subscribe_lifecycle(self) -> Subscription[LifecycleRecord]:
+        return await self._subscribe("lifecycle", LifecycleRecord)
+
+    async def subscribe_events(self) -> Subscription[GameEventRecord]:
+        return await self._subscribe("events", GameEventRecord)
 
 
-class ClusterClient(_Remote):  # ruff: ignore[too-many-public-methods]
+class ClusterClient(RemoteEndpoint, ClusterAPI):
+    scope: Scope = "cluster"
+
     def __init__(self, stream: Any, client: Any, capability: Any) -> None:
         self._stream = stream
         self._client = client
@@ -249,17 +166,13 @@ class ClusterClient(_Remote):  # ruff: ignore[too-many-public-methods]
 
     @classmethod
     async def connect(
-        cls,
-        path: str | PathLike[str],
-        *,
-        timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        cls, path: str | PathLike[str], *, timeout: float = DEFAULT_CONNECT_TIMEOUT
     ) -> Self:
-        timeout = positive_timeout(timeout, "connection")
-        address = fspath(path)
+        timeout = positive_timeout(timeout)
         stream = client = None
         try:
             async with asyncio.timeout(timeout):
-                stream = await capnp.AsyncIoStream.create_unix_connection(address)
+                stream = await capnp.AsyncIoStream.create_unix_connection(fspath(path))
                 client = capnp.TwoPartyClient(stream)
                 response = (
                     await client
@@ -282,461 +195,33 @@ class ClusterClient(_Remote):  # ruff: ignore[too-many-public-methods]
         self.close()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._client.close()
-        self._stream.close()
+        if not self._closed:
+            self._closed = True
+            self._client.close()
+            self._stream.close()
 
-    async def _call(
-        self,
-        method: str,
-        *,
-        mutation: bool = False,
-        **arguments: object,
-    ) -> Any:
+    async def _get_capability(self) -> Any:
         if self._closed:
             msg = "ClusterClient is closed"
             raise DisconnectedError(msg)
-        return await self._invoke(
-            self._capability,
-            method,
-            mutation=mutation,
-            **arguments,
-        )
-
-    async def _get_shard(self, shard_name: str) -> Any:
-        return await self._call("shard", shardName=shard_name)
+        return self._capability
 
     def shard(self, shard_name: str) -> ShardClient:
-        return self._shards.setdefault(shard_name, ShardClient(self, shard_name))
-
-    async def status(self) -> ClusterStatus:
-        return decode_model(ClusterStatus, await self._call("status"))
-
-    async def start(self) -> None:
-        _unit(await self._call("start", mutation=True))
-
-    async def stop(self) -> None:
-        _unit(await self._call("stop", mutation=True))
-
-    async def restart(self) -> None:
-        _unit(await self._call("restart", mutation=True))
-
-    async def kill(self) -> None:
-        _unit(await self._call("kill", mutation=True))
-
-    async def update_mods(self) -> None:
-        _unit(await self._call("updateMods", mutation=True))
-
-    async def read_configuration(self) -> ConfigurationRead:
-        value = await self._call("readConfiguration")
-        selected = value.which()
-        if selected == "valid":
-            return _configuration_snapshot(value.valid)
-        if selected == "invalid":
-            return InvalidConfiguration(
-                revision=ULID.from_str(str(value.invalid.revision)),
-                fields=tuple(
-                    tuple(map(str, field.components)) for field in value.invalid.fields
-                ),
-            )
-        msg = f"invalid configuration read member: {selected}"
-        raise ValueError(msg)
-
-    async def save_configuration(
-        self,
-        expected_revision: ULID,
-        configuration: ClusterConfig,
-    ) -> ConfigurationSnapshot:
-        value = await self._call(
-            "saveConfiguration",
-            mutation=True,
-            expectedRevision=str(expected_revision),
-            configuration=encode_model(configuration),
-        )
-        return _configuration_snapshot(value)
-
-    async def execute_all(
-        self,
-        source: str,
-        timeout: float = DEFAULT_COMMAND_TIMEOUT,
-    ) -> tuple[ShardResult[str], ...]:
-        values = await self._call(
-            "executeAll", mutation=True, source=source, timeout=timeout
-        )
-        result = []
-        for item in values:
-            value, error = _nested_result(item.result, lambda raw: str(_scalar(raw)))
-            result.append(ShardResult(str(item.shard), value, error))
-        return tuple(result)
-
-    async def announce(self, message: str) -> None:
-        _unit(await self._call("announce", mutation=True, message=message))
-
-    async def save(self, timeout: float = DEFAULT_SAVE_TIMEOUT) -> ClusterSaveResult:
-        value = await self._call("save", mutation=True, timeout=timeout)
-        snapshot = _nullable(value.snapshot, lambda raw: int(_scalar(raw)))
-        shards = tuple(
-            (str(item.shard), decode_model(SavedEvent, item.event))
-            for item in value.shards
-        )
-        return ClusterSaveResult(snapshot, shards)
-
-    async def pause(self, paused: bool) -> tuple[ShardResult[bool], ...]:
-        values = await self._call("pause", mutation=True, paused=paused)
-        result = []
-        for item in values:
-            value, error = _nested_result(item.result, lambda raw: bool(_scalar(raw)))
-            result.append(ShardResult(str(item.shard), value, error))
-        return tuple(result)
-
-    async def reset(self, timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
-        _unit(await self._call("reset", mutation=True, timeout=timeout))
-
-    async def rollback(
-        self,
-        count: int = 1,
-        *,
-        timeout: float = DEFAULT_RELOAD_TIMEOUT,
-    ) -> None:
-        _unit(
-            await self._call(
-                "rollback",
-                mutation=True,
-                count=count,
-                timeout=timeout,
-            )
-        )
-
-    async def regenerate(self, timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
-        _unit(await self._call("regenerate", mutation=True, timeout=timeout))
-
-    async def list_snapshots(
-        self, limit: int = 100, *, before: int | None = None
-    ) -> SnapshotCatalog:
-        limit, before = _snapshot_arguments(limit, before)
-        return decode_model(
-            SnapshotCatalog,
-            await self._call(
-                "listSnapshots", limit=limit, before=_nullable_scalar(before)
-            ),
-        )
-
-    async def rollback_to_day(
-        self, day: int, *, timeout: float = DEFAULT_RELOAD_TIMEOUT
-    ) -> Snapshot:
-        day = item_count(day)
-        if day > MAX_UINT64:
-            msg = "rollback day must fit UInt64"
-            raise ValueError(msg)
-        timeout = positive_timeout(timeout)
-        return decode_model(
-            Snapshot,
-            await self._call("rollbackToDay", mutation=True, day=day, timeout=timeout),
-        )
-
-    async def list_players(self) -> tuple[LocatedPlayer, ...]:
-        values = await self._call("listPlayers")
-        return tuple(decode_model(LocatedPlayer, item) for item in values)
-
-    async def get_player(self, userid: str) -> LocatedPlayer | None:
-        value = await self._call("getPlayer", userid=userid)
-        return _nullable(value, lambda raw: decode_model(LocatedPlayer, raw))
-
-    async def is_whitelisted(self, userid: str) -> bool:
-        return bool(_scalar(await self._call("isWhitelisted", userid=userid)))
-
-    async def whitelist(self, userid: str) -> bool:
-        return bool(
-            _scalar(await self._call("whitelist", mutation=True, userid=userid))
-        )
-
-    async def unwhitelist(self, userid: str) -> bool:
-        return bool(
-            _scalar(await self._call("unwhitelist", mutation=True, userid=userid))
-        )
-
-    async def subscribe_logs(self) -> Subscription[LogRecord]:
-        capability = await self._call("subscribeLogs")
-        return Subscription(capability, lambda raw: decode_model(LogRecord, raw))
-
-    async def subscribe_lifecycle(self) -> Subscription[LifecycleRecord]:
-        capability = await self._call("subscribeLifecycle")
-        return Subscription(capability, lambda raw: decode_model(LifecycleRecord, raw))
-
-    async def subscribe_events(self) -> Subscription[GameEventRecord]:
-        capability = await self._call("subscribeEvents")
-        return Subscription(capability, lambda raw: decode_model(GameEventRecord, raw))
+        if shard_name not in self._shards:
+            self._shards[shard_name] = ShardClient(self, shard_name)
+        return self._shards[shard_name]
 
 
-class _ShardClient(_Remote):
-    async def _call(
-        self,
-        method: str,
-        *,
-        mutation: bool = False,
-        **arguments: object,
-    ) -> Any:
-        raise NotImplementedError
+class ShardClient(RemoteEndpoint, ShardAPI):
+    scope: Scope = "shard"
 
-    async def status(self) -> ShardRuntimeStatus:
-        return decode_model(ShardRuntimeStatus, await self._call("status"))
-
-    async def start(self) -> None:
-        _unit(await self._call("start", mutation=True))
-
-    async def stop(self) -> None:
-        _unit(await self._call("stop", mutation=True))
-
-    async def restart(self) -> None:
-        _unit(await self._call("restart", mutation=True))
-
-    async def kill(self) -> None:
-        _unit(await self._call("kill", mutation=True))
-
-    async def execute(
-        self,
-        source: str,
-        timeout: float = DEFAULT_COMMAND_TIMEOUT,
-    ) -> str:
-        return str(
-            _scalar(
-                await self._call(
-                    "execute", mutation=True, source=source, timeout=timeout
-                )
-            )
-        )
-
-    async def save(self, timeout: float = DEFAULT_SAVE_TIMEOUT) -> SavedEvent:
-        return decode_model(
-            SavedEvent,
-            await self._call("save", mutation=True, timeout=timeout),
-        )
-
-    async def execute_json(self, source: str) -> JsonValue:
-        return decode_json_value(
-            await self._call("executeJson", mutation=True, source=source)
-        )
-
-    async def health(self) -> DriverHealth:
-        return decode_model(DriverHealth, await self._call("health"))
-
-    async def room(self) -> Room:
-        return decode_model(Room, await self._call("room"))
-
-    async def world(self) -> World:
-        return decode_model(World, await self._call("world"))
-
-    async def runtime(self) -> Runtime:
-        return decode_model(Runtime, await self._call("runtime"))
-
-    async def list_snapshots(
-        self, limit: int = 100, *, before: int | None = None
-    ) -> SnapshotCatalog:
-        limit, before = _snapshot_arguments(limit, before)
-        return decode_model(
-            SnapshotCatalog,
-            await self._call(
-                "listSnapshots", limit=limit, before=_nullable_scalar(before)
-            ),
-        )
-
-    async def mods(self) -> tuple[Mod, ...]:
-        values = await self._call("mods")
-        return tuple(decode_model(Mod, item) for item in values)
-
-    async def connected_shards(self) -> tuple[ShardStatus, ...]:
-        values = await self._call("connectedShards")
-        return tuple(decode_model(ShardStatus, item) for item in values)
-
-    async def pause(self, paused: bool) -> bool:
-        return bool(_scalar(await self._call("pause", mutation=True, paused=paused)))
-
-    async def subscribe_logs(self) -> Subscription[LogRecord]:
-        return Subscription(
-            await self._call("subscribeLogs"),
-            lambda raw: decode_model(LogRecord, raw),
-        )
-
-    async def subscribe_lifecycle(self) -> Subscription[LifecycleRecord]:
-        return Subscription(
-            await self._call("subscribeLifecycle"),
-            lambda raw: decode_model(LifecycleRecord, raw),
-        )
-
-    async def subscribe_events(self) -> Subscription[GameEventRecord]:
-        return Subscription(
-            await self._call("subscribeEvents"),
-            lambda raw: decode_model(GameEventRecord, raw),
-        )
-
-
-class ShardClient(_ShardClient):
     def __init__(self, cluster: ClusterClient, shard_name: str) -> None:
-        self.cluster = cluster
+        self._cluster = cluster
         self.name = shard_name
-        self.players = RemotePlayerClient(self)
+        self._capability: Any = None
 
-    async def _call(
-        self,
-        method: str,
-        *,
-        mutation: bool = False,
-        **arguments: object,
-    ) -> Any:
-        return await self._invoke(
-            await self.cluster._get_shard(self.name),
-            method,
-            mutation=mutation,
-            **arguments,
-        )
-
-    async def regenerate_shard(
-        self,
-        *,
-        preserve_settings: bool = True,
-        timeout: float = DEFAULT_RELOAD_TIMEOUT,
-    ) -> None:
-        _unit(
-            await self._call(
-                "regenerateShard",
-                mutation=True,
-                preserveSettings=preserve_settings,
-                timeout=timeout,
-            )
-        )
-
-
-class RemotePlayerClient:
-    def __init__(self, shard: _ShardClient) -> None:
-        self.shard = shard
-
-    async def list(self) -> tuple[Player, ...]:
-        values = await self.shard._call("listPlayers")
-        return tuple(decode_model(Player, item) for item in values)
-
-    async def get(self, userid: str) -> Player | None:
-        value = await self.shard._call("getPlayer", userid=userid)
-        return _nullable(value, lambda raw: decode_model(Player, raw))
-
-    async def inventory(self, userid: str) -> Inventory | None:
-        value = await self.shard._call("inventory", userid=userid)
-        return _nullable(value, lambda raw: decode_model(Inventory, raw))
-
-    async def kick(self, userid: str) -> None:
-        _unit(await self.shard._call("kick", mutation=True, userid=userid))
-
-    async def ban(self, userid: str, *, seconds: int | None = None) -> None:
-        _unit(
-            await self.shard._call(
-                "ban",
-                mutation=True,
-                userid=userid,
-                seconds=_nullable_scalar(seconds),
-            )
-        )
-
-    async def blocklist(self) -> tuple[str, ...]:
-        return tuple(await self.shard._call("blocklist"))
-
-    async def is_blocked(self, userid: str) -> bool:
-        return bool(_scalar(await self.shard._call("isBlocked", userid=userid)))
-
-    async def unban(self, userid: str) -> bool:
-        return bool(
-            _scalar(await self.shard._call("unban", mutation=True, userid=userid))
-        )
-
-    async def is_admin(self, userid: str) -> bool | None:
-        value = await self.shard._call("isAdmin", userid=userid)
-        return _nullable(value, lambda raw: bool(_scalar(raw)))
-
-    async def set_vitals(
-        self,
-        userid: str,
-        *,
-        health: float | None = None,
-        hunger: float | None = None,
-        sanity: float | None = None,
-        temperature: float | None = None,
-        moisture: float | None = None,
-    ) -> bool:
-        result = await self.shard._call(
-            "setVitals",
-            mutation=True,
-            userid=userid,
-            health=_nullable_scalar(health),
-            hunger=_nullable_scalar(hunger),
-            sanity=_nullable_scalar(sanity),
-            temperature=_nullable_scalar(temperature),
-            moisture=_nullable_scalar(moisture),
-        )
-        return bool(_scalar(result))
-
-    async def kill(self, userid: str) -> bool:
-        return bool(
-            _scalar(await self.shard._call("killPlayer", mutation=True, userid=userid))
-        )
-
-    async def revive(self, userid: str) -> bool:
-        return bool(
-            _scalar(await self.shard._call("revive", mutation=True, userid=userid))
-        )
-
-    async def despawn(self, userid: str) -> bool:
-        return bool(
-            _scalar(await self.shard._call("despawn", mutation=True, userid=userid))
-        )
-
-    async def migrate(
-        self,
-        userid: str,
-        shard_id: str,
-        portal_id: int = 1,
-    ) -> bool:
-        result = await self.shard._call(
-            "migrate",
-            mutation=True,
-            userid=userid,
-            shardId=shard_id,
-            portalId=portal_id,
-        )
-        return bool(_scalar(result))
-
-    async def teleport(
-        self,
-        userid: str,
-        x: float,
-        y: float,
-        z: float,
-    ) -> bool:
-        result = await self.shard._call(
-            "teleport",
-            mutation=True,
-            userid=userid,
-            x=x,
-            y=y,
-            z=z,
-        )
-        return bool(_scalar(result))
-
-    async def give(self, userid: str, item: str, count: int = 1) -> int:
-        result = await self.shard._call(
-            "give",
-            mutation=True,
-            userid=userid,
-            item=item,
-            count=count,
-        )
-        return int(_scalar(result))
-
-    async def remove(self, userid: str, item: str, count: int = 1) -> int:
-        result = await self.shard._call(
-            "remove",
-            mutation=True,
-            userid=userid,
-            item=item,
-            count=count,
-        )
-        return int(_scalar(result))
+    async def _get_capability(self) -> Any:
+        cluster = await self._cluster._get_capability()
+        if self._capability is None:
+            self._capability = await _read_call(cluster.shard(shardName=self.name))
+        return self._capability

@@ -1,8 +1,5 @@
-from typing import Literal
-
 from dst_server.models.base import FrozenModel, Identifier
-
-type TelemetryProfile = Literal["off", "critical", "history"]
+from dst_server.models.telemetry import TelemetryProfile
 
 DEFAULT_ACTIONS = (
     "ACTIVATE",

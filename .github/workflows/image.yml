@@ -8,7 +8,7 @@ on:
       - '.github/workflows/image.yml'
       - 'Containerfile'
       - 'src/**'
-      - 'tests/test_podman.py'
+      - 'tests/system/test_podman.py'
       - 'pyproject.toml'
       - 'uv.lock'
       - 'README.md'
@@ -215,7 +215,7 @@ jobs:
         run: |
           podman save "$DST_SERVER_IMAGE" | sudo podman load
           sudo --preserve-env=DST_SERVER_EXPECTED_REVISION,DST_SERVER_EXPECTED_VERSION,DST_SERVER_IMAGE,DST_SERVER_PODMAN_TEST \
-            "$(command -v uv)" run --locked --all-extras pytest -m system tests/test_podman.py
+            "$(command -v uv)" run --locked --all-extras pytest -m system tests/system/test_podman.py
 
       - name: Push to registry
         if: ${{ matrix.build }}

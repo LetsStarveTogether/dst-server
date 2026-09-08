@@ -1,56 +1,49 @@
 import asyncio
 from collections import deque
+from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 from time import time_ns
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from logbook import Logger
-from pydantic import JsonValue
 from ulid import ULID
 
+from dst_server import commands as c
+from dst_server.concurrency import cancel_tasks, complete
+from dst_server.configuration.files import Shard
+from dst_server.errors import IndeterminateError
 from dst_server.events.server import SavedEvent, SessionEvent
-from dst_server.game import DriverHealth
-from dst_server.game.validation import positive_timeout
-from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
-from dst_server.models.snapshot import Snapshot, SnapshotCatalog, WorldSnapshotMetadata
-from dst_server.rpc.models import (
+from dst_server.models.cluster import (
     GameEventRecord,
     LifecycleRecord,
     LogRecord,
+    ObservationCursor,
+    ShardPhase,
     ShardRuntimeStatus,
 )
-from dst_server.rpc.models import ShardPhase as RpcShardPhase
+from dst_server.models.snapshot import Snapshot, SnapshotCatalog, WorldSnapshotMetadata
 from dst_server.runtime import Server, ServerConfig
+from dst_server.runtime.supervisor import ShardSupervisor, ShardSupervisorStatus
 from dst_server.telemetry import TelemetrySettings
+from dst_server.telemetry.recorder import Recorder
 from dst_server.timeouts import (
-    DEFAULT_COMMAND_TIMEOUT,
     DEFAULT_RELOAD_TIMEOUT,
     DEFAULT_SAVE_TIMEOUT,
+    positive_timeout,
     timeout_scope,
 )
 
 from . import console, service
-from .layout import Shard
 from .subscriptions import Broadcast
-from .supervisor import ShardPhase, ShardSupervisor, ShardSupervisorStatus
 
 if TYPE_CHECKING:
     from dst_server.telemetry.otel import Pipeline
 
 logger = Logger(__name__)
 SAVED_EVENT_HISTORY = 64
-_RPC_PHASE: dict[ShardPhase, RpcShardPhase] = {
-    ShardPhase.UNAVAILABLE: "unavailable",
-    ShardPhase.STOPPED: "stopped",
-    ShardPhase.STARTING: "starting",
-    ShardPhase.RUNNING: "running",
-    ShardPhase.STOPPING: "stopping",
-    ShardPhase.RETRY_WAIT: "retryWait",
-    ShardPhase.FAILED: "failed",
-}
 
 
-class ShardAgent:  # ruff:ignore[too-many-public-methods]
+class ShardAgent:
     def __init__(
         self,
         shard: Shard,
@@ -82,12 +75,7 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
         self._saved: deque[tuple[int, str, SavedEvent]] = deque(
             maxlen=SAVED_EVENT_HISTORY,
         )
-        self._save_markers: deque[tuple[int, str]] = deque(
-            maxlen=SAVED_EVENT_HISTORY,
-        )
-        self._generation_markers: deque[tuple[int, str]] = deque(
-            maxlen=SAVED_EVENT_HISTORY,
-        )
+        self._saved_floor = 0
         self._event_changed = asyncio.Condition()
         self._attempt_tasks: tuple[asyncio.Task[None], ...] = ()
         self._fifo_task: asyncio.Task[None] | None = None
@@ -139,8 +127,8 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
         return ShardRuntimeStatus(
             name=self.shard.name,
             is_master=self.shard.master,
-            desired=status.desired.value,
-            phase=_RPC_PHASE[status.phase],
+            desired=status.desired,
+            phase=status.phase,
             agent_incarnation=ULID.from_str(self.incarnation),
             game_attempt=(
                 ULID.from_str(server.game_events.nonce) if server is not None else None
@@ -193,34 +181,51 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
     async def kill(self) -> ShardSupervisorStatus:
         return await self.supervisor.kill()
 
-    async def execute(
-        self, command: str, completion_timeout: float = DEFAULT_COMMAND_TIMEOUT
-    ) -> str:
-        return await self.server.execute(
-            command,
-            completion_timeout=completion_timeout,
-        )
-
-    async def execute_json(self, source: str) -> JsonValue:
-        return await self.server.game.world.execute(source)
-
-    async def health(self) -> DriverHealth:
-        return await self.server.game.get_health()
-
-    async def room(self) -> Room:
-        return await self.server.game.world.room()
-
-    async def world(self) -> World:
-        return await self.server.game.world.state()
-
-    async def runtime(self) -> Runtime:
-        return await self.server.game.world.runtime()
+    async def invoke[T](self, command: c.Request[T]) -> T:  # ruff: ignore[complex-structure]
+        operation = c.operation("agent", command)
+        async with timeout_scope(command.timeout):
+            match command:
+                case c.Status():
+                    result = await self.runtime_status()
+                case c.Activate():
+                    result = await self.activate()
+                case c.Start() | c.Stop() | c.Restart() | c.Kill():
+                    lifecycle: dict[
+                        type[c.Request[Any]],
+                        Callable[[], Awaitable[ShardSupervisorStatus]],
+                    ] = {
+                        c.Start: self.start,
+                        c.Stop: self.stop,
+                        c.Restart: self.restart,
+                        c.Kill: self.kill,
+                    }
+                    await lifecycle[type(command)]()
+                    result = None
+                case c.Execute(source=source):
+                    result = await self.server.execute(
+                        source, completion_timeout=command.timeout
+                    )
+                case c.Save():
+                    result = await self.server.save(completion_timeout=command.timeout)
+                case c.Snapshots(limit=limit, before=before):
+                    result = await self.list_snapshots(limit, before=before)
+                case c.SaveMarker():
+                    result = await self.save_marker()
+                case c.WaitSaved(cursor=cursor, snapshot=snapshot):
+                    result = await self.wait_saved(cursor, snapshot, command.timeout)
+                case c.GenerationMarker():
+                    result = await self.generation_marker()
+                case c.WaitGeneration(cursor=cursor):
+                    result = await self.wait_generation(cursor, command.timeout)
+                case _:
+                    result = await self.server.game.invoke(command)
+        return operation.response.validate_python(result, strict=True)
 
     async def list_snapshots(
         self, limit: int = 100, before: int | None = None
     ) -> SnapshotCatalog:
         server = self.server
-        catalog = await server.game.world.snapshots(limit, before=before)
+        catalog = await server.game.invoke(c.Snapshots(limit=limit, before=before))
         result = await asyncio.to_thread(self._read_snapshot_metadata, catalog)
         if self.server is not server or server.session_id != catalog.session_id:
             msg = "world session changed while reading snapshots"
@@ -266,181 +271,34 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
             snapshots.append(snapshot.replace(metadata=metadata))
         return catalog.replace(snapshots=tuple(snapshots))
 
-    async def rollback_to_snapshot(
-        self,
-        session_id: str,
-        snapshot_id: int,
-        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
-    ) -> None:
-        await self.server.game.world.rollback_to_snapshot(
-            session_id, snapshot_id, completion_timeout=completion_timeout
+    async def save_marker(self) -> ObservationCursor:
+        return ObservationCursor(
+            attempt=ULID.from_str(self.server.game_events.nonce),
+            sequence=self._lifecycle_sequence,
         )
-
-    async def mods(self) -> tuple[Mod, ...]:
-        return await self.server.game.world.mods()
-
-    async def connected_shards(self) -> tuple[ShardStatus, ...]:
-        return await self.server.game.world.shards()
-
-    async def pause(self, paused: bool) -> bool:
-        return await self.server.game.world.pause(paused)
-
-    async def regenerate_shard(
-        self,
-        *,
-        preserve_settings: bool = True,
-        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
-    ) -> None:
-        await self.server.game.world.regenerate_shard(
-            preserve_settings=preserve_settings,
-            completion_timeout=completion_timeout,
-        )
-
-    async def list_players(self) -> tuple[Player, ...]:
-        return await self.server.game.players.list()
-
-    async def get_player(self, userid: str) -> Player | None:
-        return await self.server.game.players.get(userid)
-
-    async def inventory(self, userid: str) -> Inventory | None:
-        return await self.server.game.players.inventory(userid)
-
-    async def kick(self, userid: str) -> None:
-        await self.server.game.players.kick(userid)
-
-    async def ban(self, userid: str, *, seconds: int | None = None) -> None:
-        await self.server.game.players.ban(userid, seconds=seconds)
-
-    async def blocklist(self) -> tuple[str, ...]:
-        return await self.server.game.players.blocklist()
-
-    async def is_blocked(self, userid: str) -> bool:
-        return await self.server.game.players.is_blocked(userid)
-
-    async def unban(self, userid: str) -> bool:
-        return await self.server.game.players.unban(userid)
-
-    async def is_admin(self, userid: str) -> bool | None:
-        return await self.server.game.players.is_admin(userid)
-
-    async def set_vitals(
-        self,
-        userid: str,
-        *,
-        health: float | None = None,
-        hunger: float | None = None,
-        sanity: float | None = None,
-        temperature: float | None = None,
-        moisture: float | None = None,
-    ) -> bool:
-        return await self.server.game.players.set_vitals(
-            userid,
-            health=health,
-            hunger=hunger,
-            sanity=sanity,
-            temperature=temperature,
-            moisture=moisture,
-        )
-
-    async def kill_player(self, userid: str) -> bool:
-        return await self.server.game.players.kill(userid)
-
-    async def revive(self, userid: str) -> bool:
-        return await self.server.game.players.revive(userid)
-
-    async def despawn(self, userid: str) -> bool:
-        return await self.server.game.players.despawn(userid)
-
-    async def migrate(
-        self,
-        userid: str,
-        shard_id: str,
-        portal_id: int = 1,
-    ) -> bool:
-        return await self.server.game.players.migrate(userid, shard_id, portal_id)
-
-    async def teleport(
-        self,
-        userid: str,
-        x: float,
-        y: float,
-        z: float,
-    ) -> bool:
-        return await self.server.game.players.teleport(userid, x, y, z)
-
-    async def give(self, userid: str, item: str, count: int = 1) -> int:
-        return await self.server.game.players.give(userid, item, count)
-
-    async def remove(self, userid: str, item: str, count: int = 1) -> int:
-        return await self.server.game.players.remove(userid, item, count)
-
-    async def is_whitelisted(self, userid: str) -> bool:
-        return await self.server.game.players.is_whitelisted(userid)
-
-    async def whitelist(self, userid: str) -> bool:
-        return await self.server.game.players.whitelist(userid)
-
-    async def unwhitelist(self, userid: str) -> bool:
-        return await self.server.game.players.unwhitelist(userid)
-
-    async def announce(self, message: str) -> None:
-        await self.server.game.world.announce(message)
-
-    async def reset(self, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
-        await self.server.game.world.reset(completion_timeout=completion_timeout)
-
-    async def rollback(
-        self, count: int = 1, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT
-    ) -> None:
-        await self.server.game.world.rollback(
-            count,
-            completion_timeout=completion_timeout,
-        )
-
-    async def regenerate(
-        self, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT
-    ) -> None:
-        await self.server.game.world.regenerate(
-            completion_timeout=completion_timeout,
-        )
-
-    async def save_marker(self) -> int:
-        marker = self._lifecycle_sequence
-        self._save_markers.append((marker, self.server.game_events.nonce))
-        return marker
-
-    async def save(
-        self, completion_timeout: float = DEFAULT_SAVE_TIMEOUT
-    ) -> SavedEvent:
-        return await self.server.save(completion_timeout=completion_timeout)
 
     async def wait_saved(
         self,
-        after_sequence: int,
+        cursor: ObservationCursor,
         snapshot: int | None,
         completion_timeout: float = DEFAULT_SAVE_TIMEOUT,
     ) -> SavedEvent:
-        attempt = next(
-            (
-                value
-                for marker, value in reversed(self._save_markers)
-                if marker == after_sequence
-            ),
-            None,
-        )
-        if attempt is None:
-            msg = "unknown save marker"
+        if cursor.sequence > self._lifecycle_sequence:
+            msg = "future save cursor"
             raise ValueError(msg)
+        attempt = str(cursor.attempt)
         async with (
             timeout_scope(positive_timeout(completion_timeout)),
             self._event_changed,
         ):
             while True:
+                if cursor.sequence < self._saved_floor:
+                    raise IndeterminateError
                 match = next(
                     (
                         event
                         for sequence, event_attempt, event in self._saved
-                        if sequence > after_sequence
+                        if sequence > cursor.sequence
                         and event_attempt == attempt
                         and (snapshot is None or event.snapshot == snapshot)
                     ),
@@ -451,30 +309,24 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
                 self._require_attempt(attempt)
                 await self._event_changed.wait()
 
-    async def generation_marker(self) -> int:
-        marker = self._generation_sequence
-        self._generation_markers.append((marker, self.server.game_events.nonce))
-        return marker
+    async def generation_marker(self) -> ObservationCursor:
+        return ObservationCursor(
+            attempt=ULID.from_str(self.server.game_events.nonce),
+            sequence=self._generation_sequence,
+        )
 
     async def wait_generation(
         self,
-        after_sequence: int,
+        cursor: ObservationCursor,
         completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> int:
-        attempt = next(
-            (
-                value
-                for marker, value in reversed(self._generation_markers)
-                if marker == after_sequence
-            ),
-            None,
-        )
-        if attempt is None:
-            msg = "unknown generation marker"
+        if cursor.sequence > self._generation_sequence:
+            msg = "future generation cursor"
             raise ValueError(msg)
+        attempt = str(cursor.attempt)
         async with timeout_scope(positive_timeout(completion_timeout)):
             async with self._event_changed:
-                while self._generation_sequence <= after_sequence:
+                while self._generation_sequence <= cursor.sequence:
                     self._require_attempt(attempt)
                     await self._event_changed.wait()
             server = self._require_attempt(attempt)
@@ -496,11 +348,14 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
                 self._close(), name=f"dst-agent-close-{self.shard.name}"
             )
         try:
-            await asyncio.shield(task)
-        except Exception:
-            if self._close_task is task:
+            await complete(task)
+        finally:
+            if (
+                self._close_task is task
+                and task.done()
+                and (task.cancelled() or task.exception() is not None)
+            ):
                 self._close_task = None
-            raise
         if self._fatal_error is not None:
             raise self._fatal_error
 
@@ -512,13 +367,9 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
             errors.append(error)
         fifo, self._fifo_task = self._fifo_task, None
         if fifo is not None:
-            fifo.cancel()
-            await asyncio.gather(fifo, return_exceptions=True)
+            await cancel_tasks(fifo)
         tasks, self._attempt_tasks = self._attempt_tasks, ()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await cancel_tasks(*tasks)
         self.logs.close()
         self.lifecycle.close()
         self.game_events.close()
@@ -538,7 +389,14 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
             raise BaseExceptionGroup(message, errors)
 
     def _new_server(self) -> Server:
-        server = Server(self.config)
+        pipeline = self._pipeline
+        recorder = Recorder(
+            self.config.telemetry_cluster or self.config.cluster,
+            self.name,
+            meter_provider=pipeline.meter_provider if pipeline is not None else None,
+            tracer_provider=pipeline.tracer_provider if pipeline is not None else None,
+        )
+        server = Server(self.config, recorder=recorder)
         server.log_handler = lambda line: self._log(server, line)
         self._attempt_tasks = (
             asyncio.create_task(
@@ -607,8 +465,7 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
         self._started_at_ns = None
         fifo, self._fifo_task = self._fifo_task, None
         if fifo is not None:
-            fifo.cancel()
-            await asyncio.gather(fifo, return_exceptions=True)
+            await cancel_tasks(fifo)
         tasks, self._attempt_tasks = self._attempt_tasks, ()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -673,6 +530,8 @@ class ShardAgent:  # ruff:ignore[too-many-public-methods]
             )
             async with self._event_changed:
                 if isinstance(event, SavedEvent):
+                    if len(self._saved) == SAVED_EVENT_HISTORY:
+                        self._saved_floor = self._saved[0][0]
                     self._saved.append((sequence, str(attempt), event))
                 if isinstance(event, SessionEvent):
                     self._generation_sequence += 1

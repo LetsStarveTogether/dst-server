@@ -8,6 +8,7 @@ type ReturnInfo = tuple[list[LuaType], str]
 
 BANNED_NAMES = ("inst", "GetDebugString")
 DEFAULT_VAR = "_l"
+FUNCTION_NODES = (ast.Function, ast.AnonymousFunction, ast.LocalFunction, ast.Method)
 
 
 def argument_names(arguments: Any) -> list[str]:
@@ -51,17 +52,27 @@ def pretty_value(node: Any) -> str:
         return "variable"
 
 
-class ReturnVisitor(ast.ASTVisitor):
+class ReturnVisitor(ast.ASTRecursiveVisitor):
     def __init__(self) -> None:
         self.returns: list[ReturnInfo] = []
+        self.function_depth = 0
 
-    def visit_Return(self, node: Any) -> bool:
+    def enter_Expression(self, node: ast.Expression) -> None:
+        if isinstance(node, FUNCTION_NODES):
+            self.function_depth += 1
+
+    def exit_Expression(self, node: ast.Expression) -> None:
+        if isinstance(node, FUNCTION_NODES):
+            self.function_depth -= 1
+
+    def enter_Return(self, node: Any) -> None:
+        if self.function_depth:
+            return
         values = getattr(node, "values", ())
         self.returns.append((
             [infer_type(value) for value in values],
             ", ".join(pretty_value(value) for value in values),
         ))
-        return False
 
 
 def return_info(body: Any) -> list[ReturnInfo]:

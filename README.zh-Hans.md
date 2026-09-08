@@ -23,12 +23,12 @@
 | [配置与部署](#配置与部署) | [目录布局](#目录布局) · [端口](#分片与端口) · [世界设置](#世界设置) · [配置 SDK](#配置-sdk) · [权限](#容器用户与目录权限) · [DNS](#容器-dns) |
 | [日常维护](#日常维护) | systemd 命令、镜像更新、恢复控制台 |
 | [运行机制](#运行机制) | [组件与通信](#组件与通信) · [生命周期](#生命周期与故障恢复) · [保存确认](#保存与世界重载) · [超时](#默认超时) |
-| [RPC 与游戏 SDK](#rpc-与游戏-sdk) | [连接示例](#连接集群) · [接口索引](#接口索引) · [表情与动作](#表情与动作枚举) |
+| [RPC 与游戏 SDK](#rpc-与游戏-sdk) | [连接示例](#连接集群) · [共享请求](#共享请求与验证) · [接口索引](#接口索引) · [表情与动作](#表情与动作枚举) |
 | [存档与导出](#存档与导出) | [文件说明](#存档文件) · [查询与回档](#快照查询与按天回档) · [导出与 R2](#导出与-r2-上传) |
 | [Mod 管理](#mod-管理) | [更新器](#选择更新器) · [下载与启用](#声明下载与启用) · [Workshop SDK](#独立-workshop-sdk) |
 | [遥测与历史日志](#遥测与历史日志) | [采集范围](#采集范围) · [OTLP](#otlp-配置) · [交付](#持久交付) · [日志边界](#日志边界) · [Netdata](#netdata-部署与查询) · [排障](#遥测排障) |
 | [辅助工具](#辅助工具) | Klei 服务、玩家路径编码、Lua 注解 |
-| [开发与验证](#开发与验证) | 依赖、检查命令、源码索引 |
+| [开发与验证](#开发与验证) | [模块边界](#模块边界)、依赖、检查命令、源码索引 |
 
 ## 快速开始
 
@@ -150,7 +150,7 @@ cluster/
 修改分片集合、主分片身份或发布端口时，重新生成配置与 Quadlet，并重建对应 Pod。
 
 `cluster.ini` 的 `[NETWORK]` 管理名称与访问限制，`[GAMEPLAY]` 管理人数、PVP 和空房暂停。
-完整字段、范围和默认值见 [ClusterSettings / ShardSettings](src/dst_server/cluster/config.py)。
+完整字段、范围和默认值见 [ClusterSettings / ShardSettings](src/dst_server/configuration/models.py)。
 SDK 默认 `encode_user_path=True`，始终在 `server.ini` 中写入当前值，也保留显式 `False`。
 已有存档时，修改此值必须同步迁移 [玩家目录](#玩家路径编码)。
 
@@ -174,13 +174,15 @@ return {
 | 无尽 | 保留 `game_mode = survival`，使用森林 `ENDLESS` preset 与洞穴对应 overrides。 |
 | 熔炉 / 暴食 | `lavaarena` / `quagmire` 还需完整 `leveldataoverride.lua`，内置事件片段已包含。 |
 
-优先组合 [内置配置片段](src/dst_server/cluster/presets.py)。
+优先组合 [内置配置片段](src/dst_server/configuration/presets.py)。
 `leveldataoverride.lua` 提供关卡基线，`worldgenoverride.lua` 随后应用覆盖。
 修改生成参数不会重建已有地图；游戏保存也可能重写设置，请停服后修改。
 
 ### 配置 SDK
 
+`ClusterConfig`、`ClusterSettings`、`ShardConfig`、`ShardSettings` 从 `dst_server.configuration` 导入。
 `ClusterConfig` 读取、验证和保存完整配置树，`RoomPreset` 组合配置片段。
+`dst_server.deployment.QuadletApplication` 根据配置推导 Pod 和容器单元。
 以下示例在新目录生成无尽森林与洞穴：
 
 ```python
@@ -189,7 +191,7 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
-from dst_server.cluster.presets import ENDLESS, FOREST_CAVES, compose
+from dst_server.configuration.presets import ENDLESS, FOREST_CAVES, compose
 
 config = compose(FOREST_CAVES, ENDLESS).build(
     token=SecretStr(os.environ["DST_SERVER_CLUSTER_TOKEN"]),
@@ -278,7 +280,8 @@ systemctl --user restart dst-000-pod.service
 systemctl --user stop dst-000-pod.service
 ```
 
-**停止、重启和正常退出均不会隐式确认保存。**
+**停止、重启和正常退出均不会隐式确认保存。
+**
 需要最新快照时，先等待 [集群 `save()`](#保存与世界重载) 成功。
 
 ### 镜像更新
@@ -331,7 +334,7 @@ flowchart LR
 | [daemon](src/dst_server/cluster/daemon.py) | 运行管理服务、注册连接与 systemd 通知。 |
 | [Controller](src/dst_server/cluster/controller.py) | 维护预期分片名单，协调共享准备、配置 revision 与集群操作。 |
 | [Agent](src/dst_server/cluster/agent.py) | 独占一个分片的进程资源，消费日志、生命周期、事件并处理遥测。 |
-| [Supervisor](src/dst_server/cluster/supervisor.py) | 停止和重试游戏进程，每次尝试创建新的 `Server`。 |
+| [Supervisor](src/dst_server/runtime/supervisor.py) | 停止和重试游戏进程，每次尝试创建新的 `Server`。 |
 | [Server](src/dst_server/runtime/server.py) | 管理一次 DST 子进程及其通信通道；单次使用。 |
 
 主容器运行 `dst-server master`，次容器运行 `dst-server serve <shard>`。
@@ -417,7 +420,8 @@ FD 4 出现 EOF 或不完整响应会使 Console 不可用；游戏仍运行但�
 
 ### 保存与世界重载
 
-`await cluster.save()` 只向主分片发起一次保存，并等待全部分片在各自标记之后报告匹配的 Saved 确认。
+`await cluster.save()` 只向主分片发起一次保存，并等待全部分片在各自观测游标之后报告匹配的 Saved 确认。
+`ObservationCursor(attempt, sequence)` 将标记绑定到一次进程尝试，之前的进程不能确认新的操作。
 成功返回后，再执行停止、重启或 [导出](#导出与-r2-上传)。
 命令提交成功、FIFO 写入完成和退出日志都不能替代保存确认。
 
@@ -447,8 +451,11 @@ FD 5 的 Session 推进宿主记录的 generation，并使上一代 driver 健�
 集群保存和重载在取得操作锁并确认就绪后开始计时，嵌套步骤共享同一个截止时间。
 重载预算包含全部分片确认和新 driver 就绪；按天回档还包含快照选择与结果核验。
 
-RPC 额外预留 60 秒用于预检、转发和响应。
-无显式 timeout 参数的启动、重启、Mod 更新请求最多等待三小时，停止为 300 秒，强制停止为 120 秒。
+请求预算由 [commands.py](src/dst_server/commands.py) 声明。
+`Start`、`Restart`、`UpdateMods` 默认为三小时，`Stop` 和 `Kill` 均默认为 120 秒。
+RPC 服务端在工作流外额外允许 30 秒，客户端总共额外允许 60 秒。
+RPC 整体截止时间还包括等锁、预检、转发和响应，因此可能在工作流仍有剩余预算时到期。
+已提交但未确认的变更会报告为 `indeterminate`。
 订阅 `next()` 保持长轮询；Quadlet 的容器与 systemd 停止预算分别为 360 秒和 420 秒。
 默认值统一定义于 [timeouts.py](src/dst_server/timeouts.py)。
 
@@ -501,6 +508,27 @@ asyncio.run(main())
 rootful 宿主路径为 `/srv/dst/000/.dst-server.sock`，容器内为 `/cluster/.dst-server.sock`。
 `connect()` 必须传入路径，并在 `rpc_runtime()` 上下文内调用。
 
+### 共享请求与验证
+
+[commands.py](src/dst_server/commands.py) 定义 `Request[T]` 子类，统一声明类型化参数、结果类型、允许的调用范围和超时。
+[api.py](src/dst_server/api.py) 的 `ClusterAPI`、`ShardAPI`、`PlayerAPI` 在 `invoke(request)` 之上提供便捷方法。
+例如，从 `dst_server` 导入 `commands as c` 后，`await shard.world()` 与 `await shard.invoke(c.World())` 使用同一契约。
+本地 Controller、游戏客户端和 RPC 客户端都在分发前验证同一份 Pydantic 请求。
+错误类型、越界参数和含无效值的复制模型会在执行前被拒绝。
+直接传请求可覆盖超时，例如 `c.World(timeout=30)`。
+各入口只接受声明的命令范围；游戏客户端处理游戏操作，Controller 负责进程生命周期与集群协调。
+
+Cap'n Proto 通过 `call` 传输命令，通过订阅能力传输观测记录。
+握手指纹同时覆盖能力协议与 Pydantic 请求、结果、事件、错误 schema，客户端和 daemon 应使用匹配版本。
+配置传输保留省略字段、显式 `False`、世界覆盖类型，以及保存配置所需的秘密值。
+
+集群结果、状态与观测游标从 [models.cluster](src/dst_server/models/cluster.py) 导入，`DriverHealth` 从 [models.driver](src/dst_server/models/driver.py) 导入。
+共享异常和错误码位于 [errors.py](src/dst_server/errors.py)。
+RPC 使用 `RemoteError` 报告业务错误，丢失未确认的变更结果时抛出 `IndeterminateError`。
+游戏边界使用 `IndeterminateCommandError` 报告未确认的原生变更。
+调用方取消或断开连接后，已接受的变更仍由服务端任务持有；取消查询会释放查询工作。
+未确认的变更不会自动重放。
+
 ### 接口索引
 
 | 对象 | 常用接口 |
@@ -514,12 +542,28 @@ rootful 宿主路径为 `/srv/dst/000/.dst-server.sock`，容器内为 `/cluster
 | `shard.execute(lua)` | 执行单行 Lua，返回显式 `print` 的文本。 |
 | `shard.execute_json(lua)` | 通过类型化 driver 返回 JSON，例如 `"return TheWorld.state.cycles + 1"`。 |
 
-完整签名见 [RPC client](src/dst_server/rpc/client.py)，协议见 [rpc.capnp](src/dst_server/rpc/schema/rpc.capnp)。
+便捷方法签名见 [api.py](src/dst_server/api.py)，请求契约见 [commands.py](src/dst_server/commands.py)，能力协议见 [rpc.capnp](src/dst_server/rpc/schema/rpc.capnp)。
 玩家、实体、世界与快照的返回模型见 [models](src/dst_server/models)。
 实时订阅不提供历史重放，持久历史查询见 [Netdata](#netdata-部署与查询)。
 
 需要自行管理单个游戏进程的应用可使用 `dst_server.runtime.Server` 与 `server.game`。
-调用方负责持续消费 lifecycle、game 和 operational 观察流，以及进程清理；常规 Pod 部署使用 `ClusterClient` 即可。
+调用方负责持续消费 lifecycle、game 和 operational 观察流，以及进程清理。
+常规 Pod 部署使用 `ClusterClient` 即可。
+对于已运行的 `Server`，可将 `server.game` 传给以下函数：
+
+```python
+from dst_server import commands as c
+from dst_server.game import GameClient
+
+
+async def inspect_game(game: GameClient) -> None:
+    world = await game.invoke(c.World())
+    day = await game.invoke(c.ExecuteJson(source="return TheWorld.state.cycles + 1"))
+    players = await game.players.list()
+    print(world, day, players)
+```
+
+`GameClient.request_save()` 仅提交原生保存请求；需要等待确认时使用 `Server.save()` 或集群/分片的 `save()`。
 
 ### 表情与动作枚举
 
@@ -676,7 +720,7 @@ uv sync --extra export
 import shutil
 from pathlib import Path
 
-from dst_server.cluster.archive import export_cluster
+from dst_server.archive import export_cluster
 
 with export_cluster(Path("/srv/dst/000")) as archive:
     destination = Path("/path/to/exports") / archive.filename
@@ -722,7 +766,7 @@ export AWS_SECRET_ACCESS_KEY='your-secret-access-key'
 ```python
 from pathlib import Path
 
-from dst_server.cluster.archive import export_cluster
+from dst_server.archive import export_cluster
 
 with export_cluster(Path("/srv/dst/000")) as archive:
     result = archive.upload(
@@ -795,7 +839,9 @@ ServerModSetup("1803285852")
 
 - 集群两个后端都先经过配置 SDK，只接受受支持的声明式 Lua、双引号 ID 和至多一个末尾 return。
 - 独立 SteamCMD 准备路径也只提取静态字符串调用，不支持变量、循环、条件和计算表达式。
-- 直接调用低层原生 `mods.update()` 才会将 setup 交给游戏执行，切换集群后端不会放宽 SDK 限制。
+- 底层 `dst_server.mods.prepare_shared()` / `activate()` 保留已有动态 setup 脚本，`update_native()` 交给游戏执行。
+  `cluster.service.prepare_shared()` 的 native backend 也支持这条底层路径。
+  修改 Controller 的 backend 不会放宽配置 SDK 限制。
 - `modinfo.lua`、`modmain.lua` 等 Mod 代码由游戏执行；Python 安装器不靠 Lua 版本字段判断更新。
 
 共享更新时机统一见 [生命周期表](#生命周期与故障恢复)。
@@ -809,8 +855,7 @@ Linux 上准备好 SteamCMD，停止使用目标 `mods` 目录的游戏后，可
 import asyncio
 from pathlib import Path
 
-from dst_server.steamcmd import SteamCMD
-from dst_server.workshop import WorkshopUpdater
+from dst_server.mods import SteamCMD, WorkshopUpdater
 
 
 async def main() -> None:
@@ -825,6 +870,8 @@ asyncio.run(main())
 返回已安装 ID 的排序元组，上例为 `(466732225, 1803285852)`。
 `collections=[合集数字ID]` 可递归展开合集并去重，合集详情接口不要求 API key。
 SteamCMD 管理 `mods/ugc/steamcmd` 下的 ACF、manifest 与下载状态，SDK 不另建安装 revision 数据库。
+Workshop 元数据与旧格式下载使用 HTTPX2，显式传入 `SteamCMD.proxy` 并设置 `trust_env=False`。
+继承的代理环境变量不会配置这些请求。
 
 | 下载产物 | 安装方式 |
 | --- | --- |
@@ -835,7 +882,7 @@ SteamCMD 管理 `mods/ugc/steamcmd` 下的 ACF、manifest 与下载状态，SDK 
 每项先暂存再切换，失败保留该项旧安装；后续失败不回退已经提交的项目。
 切换被强制中断时，下次调用先恢复未发布成功的旧目录，再联网。
 目录独占锁覆盖更新与安装；取消会清理下载进程，等待正在执行的文件安装结束后释放锁。
-实现见 [WorkshopUpdater](src/dst_server/workshop.py) 与 [SteamCMD](src/dst_server/steamcmd.py)。
+实现见 [WorkshopUpdater](src/dst_server/mods/workshop.py) 与 [SteamCMD](src/dst_server/mods/steamcmd.py)。
 
 [返回目录](#目录)
 
@@ -864,6 +911,9 @@ SDK 使用 `TelemetrySettings(profile=..., actions=...)`，通过 `ServerConfig.
 ### OTLP 配置
 
 镜像已包含 OTLP 依赖；独立使用 SDK 时安装 `dst-server[otel]`。
+Logs 使用原生异步 `grpc.aio` 客户端与 OTLP protobuf 消息。
+导出器支持 TLS 与客户端证书、metadata headers、压缩、截止时间和 channel 清理。
+Metrics 和 Traces 使用 OpenTelemetry 导出器，不经过持久 Logs outbox。
 设置以下任一变量后，Agent 初始化导出：
 
 - `OTEL_EXPORTER_OTLP_ENDPOINT`
@@ -923,6 +973,7 @@ Python 校验类型、字段、UTF-8 和当前进程 nonce；`DST_OTEL|` 加 JSO
 | 满额、损坏、schema 不匹配 | 保留已有文件并报错，满额拒绝新写入并使 Agent 失败，不淘汰未确认历史 |
 | Metrics、Traces、实时订阅 | 不经过 outbox，没有上述持久交付保证 |
 
+持久化与交付实现分别位于 [outbox.py](src/dst_server/telemetry/outbox.py) 和 [exporter.py](src/dst_server/telemetry/exporter.py)。
 重放保留原始观察时间、资源属性和 UID，确认成功才删除记录。
 游戏事件的 `log.record.uid` 为 `nonce:generation:seq`，可用于辨认重复，不能假定后端自动去重。
 Lua `events_emitted` 只是已分配输出序号的高水位；输出失败可能留下缺号，不代表 Python 已校验、落盘或送达。
@@ -931,7 +982,9 @@ Lua `events_emitted` 只是已分配输出序号的高水位；输出失败可�
 
 游戏 stdout 与 stderr 合流后由 Python 读取，无法再区分来源。
 FD 3 命令输入、FD 4 命令响应、FD 5 生命周期保持独立；stdout 中的相同标记不完成命令、推进 Session 或确认保存。
-标准 CLI 将 Agent 日志写到容器 stdout；Podman 使用 journald 驱动时，由 conmon 转入 journal。
+标准 CLI 通过 Logbook 将 Agent 日志写到容器 stdout。
+普通 Logbook 记录不会自动进入 OTLP outbox，结构化游戏事件和白名单运行诊断保持显式分流。
+Podman 使用 journald driver 时由 conmon 转交 journal。
 
 | 输入 | 处理方式 |
 | --- | --- |
@@ -956,7 +1009,7 @@ FD 3 命令输入、FD 4 命令响应、FD 5 生命周期保持独立；stdout �
 
 #### 日志测试语料与来源
 
-[混合流测试](tests/test_operational.py) 将九组语料与时间前缀、换行、分块、损坏方式交叉，覆盖 486 个组合。
+[混合流测试](tests/runtime/test_operational.py) 将九组语料与时间前缀、换行、分块、损坏方式交叉，覆盖 486 个组合。
 语料只保留短签名并替换本地 Mod 名；历史帖子不用于推断当前版本根因。
 
 | 语料 | 来源与分类边界 |
@@ -970,8 +1023,8 @@ FD 3 命令输入、FD 4 命令响应、FD 5 生命周期保持独立；stdout �
 | 鉴权 / DNS | [token 报错][token-error]、[DNS 报错][dns-error]；另构造当前 CURL 格式样例 |
 | bind 端口失败 | [原始报错][bind-error]；单次尝试不证明最终启动失败 |
 
-[事件解析](tests/test_stream.py) 另测 schema、nonce、大小和编码；Lua 测试执行原版日志函数并交叉输出顺序。
-[RPC](tests/test_rpc.py) 验证特殊 Unicode 和截断预算，[CLI](tests/test_telemetry_integration.py) 验证本地与 OTLP 分流。
+[事件解析](tests/telemetry/test_stream.py) 另测 schema、nonce、大小和编码；Lua 测试执行原版日志函数并交叉输出顺序。
+[RPC](tests/game/test_protocol.py) 验证特殊 Unicode 和截断预算，[CLI](tests/telemetry/test_integration.py) 验证本地与 OTLP 分流。
 真实 journald 存储和终端渲染需在部署环境另行验证。
 
 事件可能包含玩家 `userid`、实体、坐标、动作与物品历史，本地日志与 outbox 应采用相同访问控制。
@@ -1080,6 +1133,39 @@ uv run dst-annotations dst-scripts/scripts/modutil.lua --output modutil_def.lua
 生成结果是基于语法推断的 LSP 定义；游戏源码阅读入口见 [DST Lua 索引](dst-scripts/index/README.md)。
 
 ## 开发与验证
+
+SDK 将数据与格式、游戏进程、集群协调和传输分开。
+
+### 模块边界
+
+| 模块 | 职责 |
+| --- | --- |
+| [models](src/dst_server/models) / [events](src/dst_server/events) | 业务值、状态、driver 健康、观测游标与事件 schema。 |
+| [commands.py](src/dst_server/commands.py) / [api.py](src/dst_server/api.py) / [errors.py](src/dst_server/errors.py) | 共享请求与结果验证、允许的调用范围、Python 接口和业务错误。 |
+| [configuration](src/dst_server/configuration) | 配置模型、INI/Lua 格式、显式字段语义、目录读写和带 revision 的配置存储。 |
+| [deployment](src/dst_server/deployment) | Quadlet 模型与序列化、房间端口及 Pod/systemd 部署推导。 |
+| [mods](src/dst_server/mods) | Mod 声明与文件、原生更新、SteamCMD、Workshop HTTP 与下载进程管理。 |
+| [lua_codec.py](src/dst_server/lua_codec.py) | 不含文件 I/O 的 Lua 字面量解析、渲染与 JSON 值编码。 |
+| [runtime](src/dst_server/runtime) | 游戏进程、FD 协议、命令确认、driver 就绪与 Supervisor 重试。 |
+| [cluster](src/dst_server/cluster) | Agent 注册、拓扑、协调操作、观测订阅与 daemon 组装。 |
+| [rpc](src/dst_server/rpc) | Cap'n Proto 连接与能力、经过验证的 payload 传输和远端订阅。 |
+| [telemetry](src/dst_server/telemetry) | 采集、SQLite outbox、OTLP 编码与异步导出。 |
+| [archive.py](src/dst_server/archive.py) | 存档导出、凭据清理、7z 归档与对象存储上传。 |
+| [concurrency.py](src/dst_server/concurrency.py) / [timeouts.py](src/dst_server/timeouts.py) | 取消时的完整清理与共享截止时间处理。 |
+| [klei](src/dst_server/klei) / [annotations](src/dst_server/annotations) / [netdata.py](src/dst_server/netdata.py) | 外部查询、Lua 注解生成与历史日志查询。 |
+
+Controller 使用共享请求和模型契约，不导入 RPC client 或 wire schema。
+配置与部署模型使用 Pydantic 字段声明驱动验证和序列化。
+本地与远端调用方共用业务状态和错误。
+Logbook 继续负责应用日志，`python-ulid` 提供进程尝试、revision 和错误的标识。
+带 HTTP/2 支持的 HTTPX2 是 Workshop 与 Klei 共用的核心依赖，`klei` extra 增加 HTML 解析。
+`otel` extra 提供 OTLP 与 gRPC 依赖，`export` 提供 7z 与对象存储依赖。
+
+### 测试与检查
+
+测试按行为分组，覆盖配置、部署、Mod、runtime、cluster、RPC、游戏/Lua、遥测与辅助工具。
+Hypothesis 验证 Lua 值往返、字节流分块，以及 outbox 写入、确认、隔离、重开序列与参考模型的不变量。
+进程和传输测试使用本地管道、Unix socket、HTTP/gRPC 服务，并以显式同步门闩验证取消竞态。
 
 先安装 Lua 5.1、LuaJIT 和 just，并初始化游戏源码子模块；仓库的子模块 URL 使用 GitHub SSH。
 

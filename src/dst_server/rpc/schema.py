@@ -1,15 +1,34 @@
+import json
 from functools import cache
 from hashlib import sha256
 from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-from .codec import _payload_contract
+from pydantic import TypeAdapter
+
+from dst_server.commands import schema_contract
+from dst_server.errors import ErrorInfo
+from dst_server.models.cluster import GameEventRecord, LifecycleRecord, LogRecord
 
 capnp: Any = import_module("capnp")
+RPC_SCHEMA_PATH = Path(__file__).with_name("schema") / "rpc.capnp"
 
-SCHEMA_DIRECTORY = Path(__file__).with_name("schema")
-RPC_SCHEMA_PATH = SCHEMA_DIRECTORY / "rpc.capnp"
+
+def _payload_contract() -> bytes:
+    return json.dumps(
+        {
+            "wireFormat": 2,
+            "commands": schema_contract(),
+            "observations": {
+                model.__name__: model.model_json_schema()
+                for model in (LogRecord, LifecycleRecord, GameEventRecord)
+            },
+            "error": TypeAdapter(ErrorInfo).json_schema(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
 
 
 @cache

@@ -9,6 +9,7 @@ from typing import Annotated, Self
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 
+from dst_server.concurrency import complete
 from dst_server.models.base import FrozenModel, PositiveInt
 from dst_server.timeouts import DEFAULT_COMMAND_TIMEOUT
 
@@ -39,6 +40,37 @@ class NetdataLogQuery(FrozenModel):
             raise ValueError(msg)
         return datetime.fromtimestamp(int(timestamp), UTC)
 
+    @field_validator("filters")
+    @classmethod
+    def _validate_filters(
+        cls, values: tuple[NetdataLogFilter, ...]
+    ) -> tuple[NetdataLogFilter, ...]:
+        for field, value in values:
+            if field != field.strip() or value != value.strip():
+                message = (
+                    "Netdata filter fields and values cannot have "
+                    "surrounding whitespace"
+                )
+                raise ValueError(message)
+            if any(character in field for character in ",=~"):
+                message = "Netdata filter fields cannot contain a comma, '=' or '~'"
+                raise ValueError(message)
+            if "," in value:
+                message = "Netdata CLI cannot encode a comma in a filter value"
+                raise ValueError(message)
+        return values
+
+    @field_validator("fields")
+    @classmethod
+    def _validate_fields(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(value != value.strip() for value in values):
+            message = "Netdata fields cannot have surrounding whitespace"
+            raise ValueError(message)
+        if any("," in value for value in values):
+            message = "Netdata fields cannot contain a comma"
+            raise ValueError(message)
+        return values
+
     @model_validator(mode="after")
     def _validate_query(self) -> Self:
         if self.until is not None and self.until <= self.since:
@@ -51,7 +83,7 @@ class NetdataLogQuery(FrozenModel):
 
 
 class NetdataLogRecord(FrozenModel):
-    timestamp_ns: int
+    timestamp_ns: Annotated[int, Field(ge=0, le=(1 << 64) - 1)]
     fields: tuple[tuple[str, str], ...]
 
 
@@ -72,11 +104,7 @@ class NetdataLogs:
         self.executable = _path("Netdata executable", executable)
         self.stock_config = _path("Netdata stock config", stock_config)
         self.config = _path("Netdata config", config)
-        if (
-            isinstance(max_concurrency, bool)
-            or not isinstance(max_concurrency, int)
-            or max_concurrency < 1
-        ):
+        if type(max_concurrency) is not int or max_concurrency < 1:
             msg = "Netdata query concurrency must be a positive integer"
             raise ValueError(msg)
         self._semaphore = asyncio.Semaphore(max_concurrency)
@@ -109,7 +137,7 @@ class NetdataLogs:
                 if process.returncode is None:
                     with suppress(ProcessLookupError):
                         process.kill()
-                await process.wait()
+                await complete(process.wait())
                 raise
         if process.returncode:
             raise subprocess.CalledProcessError(
@@ -148,11 +176,14 @@ class NetdataLogs:
         if request.service_namespace is not None:
             command.extend(("--namespace", request.service_namespace))
         if request.filters:
-            command.extend(("--filter", _filters(request.filters)))
+            command.extend((
+                "--filter",
+                ",".join(f"{field}={value}" for field, value in request.filters),
+            ))
         if request.query is not None:
             command.extend(("--query", request.query))
         if request.fields:
-            command.extend(("--fields", _joined("field", request.fields)))
+            command.extend(("--fields", ",".join(request.fields)))
         command.extend(("--limit", str(request.limit), "--output", "ndjson"))
         return tuple(command)
 
@@ -163,29 +194,3 @@ def _path(name: str, value: str | Path) -> str:
         msg = f"{name} must not be empty"
         raise ValueError(msg)
     return result
-
-
-def _filters(values: tuple[NetdataLogFilter, ...]) -> str:
-    terms = []
-    for field, value in values:
-        if field != field.strip() or value != value.strip():
-            msg = "Netdata filter fields and values cannot have surrounding whitespace"
-            raise ValueError(msg)
-        if any(character in field for character in ",=~"):
-            msg = f"Netdata filter field cannot contain a comma, '=' or '~': {field!r}"
-            raise ValueError(msg)
-        if "," in value:
-            msg = f"Netdata CLI cannot encode a comma in filter value: {value!r}"
-            raise ValueError(msg)
-        terms.append(f"{field}={value}")
-    return ",".join(terms)
-
-
-def _joined(name: str, values: tuple[str, ...]) -> str:
-    if any(value != value.strip() for value in values):
-        msg = f"Netdata {name} cannot have surrounding whitespace"
-        raise ValueError(msg)
-    if any("," in value for value in values):
-        msg = f"Netdata {name} cannot contain a comma"
-        raise ValueError(msg)
-    return ",".join(values)

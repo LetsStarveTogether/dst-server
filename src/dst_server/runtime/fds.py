@@ -8,6 +8,20 @@ LAST_PROTOCOL_FD = PROTOCOL_FDS[-1]
 PROTOCOL_LINE_LIMIT = 64 * 1024
 
 
+async def read_line(reader: asyncio.StreamReader) -> tuple[bytes | None, bool]:
+    oversized = False
+    while True:
+        try:
+            line = await reader.readuntil(b"\n")
+        except asyncio.LimitOverrunError as error:
+            await reader.readexactly(min(error.consumed, PROTOCOL_LINE_LIMIT))
+            oversized = True
+            continue
+        except asyncio.IncompleteReadError as error:
+            return (error.partial or None, oversized)
+        return line, oversized
+
+
 def open_pipes() -> tuple[list[int], tuple[int, int, int]]:
     pairs: list[tuple[int, int]] = []
     open_fds: set[int] = set()

@@ -108,12 +108,12 @@ class KleiClient:
 
     async def get_lobbies(
         self,
-        regions: Iterable[Region] = Region,
+        regions: Iterable[Region | str] = Region,
         platforms: Iterable[Platform] = Platform,
     ) -> tuple[Lobby, ...]:
         semaphore = Semaphore(self.lobby_concurrency)
 
-        async def load(region: Region, platform: Platform) -> tuple[Lobby, ...]:
+        async def load(region: Region | str, platform: Platform) -> tuple[Lobby, ...]:
             async with semaphore:
                 return await self.lobby(region, platform)
 
@@ -126,7 +126,7 @@ class KleiClient:
 
     async def get_rooms(
         self,
-        rooms: Iterable[tuple[str, Region]] | None = None,
+        rooms: Iterable[tuple[str, Region | str]] | None = None,
     ) -> tuple[Room, ...]:
         if self.access_token is None:
             msg = "a Klei access token is required to query room details"
@@ -136,7 +136,7 @@ class KleiClient:
             rooms = ((lobby.row_id, lobby.region) for lobby in lobbies)
         semaphore = Semaphore(self.room_concurrency)
 
-        async def load(row_id: str, region: Region) -> Room | None:
+        async def load(row_id: str, region: Region | str) -> Room | None:
             async with semaphore:
                 return await self.room(row_id, region)
 
@@ -146,9 +146,10 @@ class KleiClient:
 
     async def lobby(
         self,
-        region: Region,
+        region: Region | str,
         platform: Platform,
     ) -> tuple[Lobby, ...]:
+        region = Region(region)
         url = LOBBY_URL.format(region=region, platform=platform.lobby_name)
         try:
             response = await self._client.get(url)
@@ -173,12 +174,13 @@ class KleiClient:
     async def room(
         self,
         row_id: str,
-        region: Region,
+        region: Region | str,
     ) -> Room | None:
         access_token = self.access_token
         if access_token is None:
             msg = "a Klei access token is required to query room details"
             raise ValueError(msg)
+        region = Region(region)
         url = ROOM_URL.format(region=region)
         payload = {
             "__gameId": "DontStarveTogether",

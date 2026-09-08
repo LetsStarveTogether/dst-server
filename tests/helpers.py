@@ -8,7 +8,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Self
 
-from dst_server.game import DriverHealth, rpc
+from dst_server.lua_codec import lua_string
+from dst_server.models.driver import DriverHealth
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.console import StaleGenerationError
 
@@ -24,8 +25,7 @@ def run_lua(source: str, luajit: str, *, driver_path: bool = True) -> bytes:
     if driver_path:
         package_path = f"{root}/src/dst_server/lua/?.lua;" + package_path
     setup = (
-        f"package.path={rpc.lua_string(package_path)}..package.path;"
-        'json=require("json");'
+        f'package.path={lua_string(package_path)}..package.path;json=require("json");'
     )
     result = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]
         [luajit, "-"],

@@ -11,8 +11,11 @@ from typing import Any, cast
 from logbook import Logger
 from pydantic import TypeAdapter
 
+from dst_server.concurrency import cancel_tasks, complete
+from dst_server.configuration.models import ShardName
+from dst_server.configuration.store import ConfigurationStore
 from dst_server.rpc.client import rpc_runtime
-from dst_server.rpc.errors import unwrap_outcome
+from dst_server.rpc.codec import unwrap_outcome
 from dst_server.rpc.schema import SCHEMA_FINGERPRINT, load_schema
 from dst_server.rpc.servants import (
     AgentServant,
@@ -34,8 +37,6 @@ from dst_server.timeouts import (
 
 from . import service
 from .agent import ShardAgent
-from .config import ShardName
-from .configuration import ConfigurationStore
 from .controller import (
     AGENT_KILL_TIMEOUT,
     AGENT_STOP_TIMEOUT,
@@ -274,13 +275,12 @@ async def _serve_master(
             for task in (shutdown_task, failure_task, fatal_task)
             if task is not None
         )
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        await _shield_cleanup(
-            _best_effort(controller.aclose, stack.aclose, agent.aclose)
-        )
+
+        async def cleanup() -> None:
+            await cancel_tasks(*tasks)
+            await _best_effort(controller.aclose, stack.aclose, agent.aclose)
+
+        await complete(cleanup())
 
 
 async def _report_local_failures(
@@ -337,12 +337,11 @@ async def _serve_agent(
             ):
                 return
     finally:
-        await _shield_cleanup(_cleanup_agent(cycle, shutdown_task, fatal_task, agent))
+        await complete(_cleanup_agent(cycle, shutdown_task, fatal_task, agent))
 
 
 async def _registered_cycle(agent: ShardAgent, internal_address: str) -> None:
-    stream: Any | None = None
-    client: Any | None = None
+    stack = AsyncExitStack()
     servant = AgentServant(agent)
     disconnected: asyncio.Future[object] | None = None
     failure: asyncio.Task[object] | None = None
@@ -351,7 +350,9 @@ async def _registered_cycle(agent: ShardAgent, internal_address: str) -> None:
             stream = await capnp.AsyncIoStream.create_unix_connection(
                 f"\0{internal_address}"
             )
+            stack.callback(stream.close)
             client = capnp.TwoPartyClient(stream)
+            stack.callback(client.close)
             registry = client.bootstrap().cast_as(load_schema().WorkerRegistry)
         async with asyncio.timeout(DEFAULT_LIFECYCLE_TIMEOUT):
             response = await registry.register(
@@ -377,18 +378,12 @@ async def _registered_cycle(agent: ShardAgent, internal_address: str) -> None:
             unwrap_outcome(response.result)
             failure = None
     finally:
-        for task in (disconnected, failure):
-            if task is not None:
-                task.cancel()
-        await asyncio.gather(
+        stack.push_async_callback(servant.aclose)
+        stack.push_async_callback(
+            cancel_tasks,
             *(task for task in (disconnected, failure) if task is not None),
-            return_exceptions=True,
         )
-        await servant.aclose()
-        if client is not None:
-            client.close()
-        if stream is not None:
-            stream.close()
+        await complete(stack.aclose())
 
 
 async def _wait_reconnect(
@@ -408,8 +403,7 @@ async def _wait_reconnect(
             fatal.result()
         return False
     finally:
-        retry.cancel()
-        await asyncio.gather(retry, return_exceptions=True)
+        await cancel_tasks(retry)
 
 
 async def _cleanup_agent(
@@ -421,11 +415,8 @@ async def _cleanup_agent(
     # Stop while the registry capability is still live, then release the connection.
     await _best_effort(agent.stop)
     if cycle is not None:
-        cycle.cancel()
-        await asyncio.gather(cycle, return_exceptions=True)
-    for task in (shutdown, fatal):
-        task.cancel()
-    await asyncio.gather(shutdown, fatal, return_exceptions=True)
+        await cancel_tasks(cycle)
+    await cancel_tasks(shutdown, fatal)
     await _best_effort(agent.aclose)
 
 
@@ -438,19 +429,6 @@ async def _best_effort(*operations: _Close) -> None:
                 "Agent cleanup failed: {kind}",
                 kind=type(error).__name__,
             )
-
-
-async def _shield_cleanup(cleanup: Coroutine[object, object, None]) -> None:
-    task = asyncio.create_task(cleanup, name="dst-agent-cleanup")
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-    await task
-    if cancelled:
-        raise asyncio.CancelledError
 
 
 def _install_signal_handlers(
