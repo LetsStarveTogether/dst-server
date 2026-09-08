@@ -18,14 +18,13 @@ from dst_server.errors import (
 )
 from dst_server.models.cluster import ClusterStatus
 from dst_server.rpc import (
-    SCHEMA_FINGERPRINT,
     ClusterClient,
     filesystem_rpc_server,
     load_schema,
     rpc_runtime,
 )
 from dst_server.rpc import transport as rpc_transport
-from dst_server.rpc.codec import encode_model, failure, success, unwrap_outcome
+from dst_server.rpc.codec import encode_model, failure, success
 from dst_server.rpc.transport import filesystem_socket
 
 capnp: Any = pytest.importorskip("capnp")
@@ -131,12 +130,12 @@ def test_filesystem_socket_rejects_invalid_unix_paths(
         pass
 
 
-async def test_real_socket_handshake_success_error_and_root_cleanup(
+async def test_real_socket_success_error_and_root_cleanup(
     tmp_path: Path,
 ) -> None:
     tmp_path.chmod(0o700)
     status = ClusterStatus(epoch=ULID(), phase="stopped", master="Master", shards=())
-    closed: list[asyncio.Event] = []
+    closed = asyncio.Event()
 
     class Cluster(schema.Cluster.Server):
         async def call(self, request: bytes, _context: Any) -> None:
@@ -151,39 +150,15 @@ async def test_real_socket_handshake_success_error_and_root_cleanup(
     class Bootstrap(schema.Bootstrap.Server):
         def __init__(self) -> None:
             self.cluster = Cluster()
-            self.closed = asyncio.Event()
-            closed.append(self.closed)
 
-        async def connect(self, schemaFingerprint: str, _context: Any) -> None:
-            _context.results.result = (
-                success(self.cluster)
-                if schemaFingerprint == SCHEMA_FINGERPRINT
-                else failure(
-                    ErrorInfo(
-                        ErrorCode.INCOMPATIBLE_SCHEMA,
-                        ULID(),
-                        "schema mismatch",
-                    )
-                )
-            )
+        async def connect(self, _context: Any) -> None:
+            _context.results.result = success(self.cluster)
 
         async def aclose(self) -> None:
-            self.closed.set()
+            closed.set()
 
     path = tmp_path / "cluster.sock"
     async with rpc_runtime(), filesystem_rpc_server(path, Bootstrap) as server:
-        stream = await capnp.AsyncIoStream.create_unix_connection(str(path))
-        wire = capnp.TwoPartyClient(stream)
-        bootstrap = wire.bootstrap().cast_as(schema.Bootstrap)
-        incompatible = await bootstrap.connect(schemaFingerprint="0" * 64)
-        with pytest.raises(RemoteError) as mismatch:
-            unwrap_outcome(incompatible.result)
-        assert mismatch.value.error.code is ErrorCode.INCOMPATIBLE_SCHEMA
-        wire.close()
-        stream.close()
-        async with asyncio.timeout(1):
-            await closed[0].wait()
-
         async with await ClusterClient.connect(path) as client:
             assert await client.status() == status
             assert client.shard("Master") is client.shard("Master")
@@ -192,7 +167,7 @@ async def test_real_socket_handshake_success_error_and_root_cleanup(
             assert missing.value.error.code is ErrorCode.NOT_FOUND
 
         async with asyncio.timeout(1):
-            await closed[1].wait()
+            await closed.wait()
         assert not server.connections
 
     assert not path.exists()
@@ -219,8 +194,7 @@ async def test_disconnect_classifies_queries_and_mutations(
             _context.results.result = success()
 
     class Bootstrap(schema.Bootstrap.Server):
-        async def connect(self, schemaFingerprint: str, _context: Any) -> None:
-            assert schemaFingerprint == SCHEMA_FINGERPRINT
+        async def connect(self, _context: Any) -> None:
             _context.results.result = success(Cluster())
 
     path = tmp_path / "cluster.sock"
@@ -253,8 +227,7 @@ async def test_server_shutdown_bounds_capability_cleanup(
         pass
 
     class Bootstrap(schema.Bootstrap.Server):
-        async def connect(self, schemaFingerprint: str, _context: Any) -> None:
-            assert schemaFingerprint == SCHEMA_FINGERPRINT
+        async def connect(self, _context: Any) -> None:
             _context.results.result = success(Cluster())
 
         async def aclose(self) -> None:

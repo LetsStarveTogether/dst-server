@@ -39,7 +39,7 @@ from dst_server.models.snapshot import (
 from dst_server.rpc import servants as servant_module
 from dst_server.rpc.client import ClusterClient, rpc_runtime
 from dst_server.rpc.codec import ERROR, decode, unwrap_outcome
-from dst_server.rpc.schema import SCHEMA_FINGERPRINT, load_schema
+from dst_server.rpc.schema import load_schema
 from dst_server.rpc.servants import (
     AgentServant,
     BootstrapServant,
@@ -244,17 +244,12 @@ async def test_invalid_copied_command_fails_before_opening_capability(
         await client.shard("Master").invoke(command)
 
 
-async def test_unknown_shard_and_fingerprint_are_reported(tmp_path: Path) -> None:
+async def test_unknown_shard_is_reported(tmp_path: Path) -> None:
     controller = FakeController()
     async with connected(tmp_path, controller) as client:
         with pytest.raises(RemoteError) as unknown:
             await client.shard("Unknown").status()
         assert unknown.value.error.code is ErrorCode.NOT_FOUND
-        bootstrap = client._client.bootstrap().cast_as(load_schema().Bootstrap)
-        response = await bootstrap.connect(schemaFingerprint="0" * 64)
-        with pytest.raises(RemoteError) as incompatible:
-            unwrap_outcome(response.result)
-        assert incompatible.value.error.code is ErrorCode.INCOMPATIBLE_SCHEMA
 
 
 @pytest.mark.parametrize(
@@ -715,7 +710,7 @@ async def open_registry(name: str) -> tuple[Any, Any, Any, Any]:
     )
 
 
-async def test_registry_fingerprint_capability_and_disconnect_lifecycle() -> None:
+async def test_registry_capability_and_disconnect_lifecycle() -> None:
     controller = RegistryController()
     target = FakeShard()
     servant = AgentServant(target)
@@ -725,17 +720,7 @@ async def test_registry_fingerprint_capability_and_disconnect_lifecycle() -> Non
         abstract_rpc_server(lambda: WorkerRegistryServant(controller), name),
     ):
         stream, client, registry, disconnected = await open_registry(name)
-        response = await registry.register(schemaFingerprint="0" * 64, agent=servant)
-        with pytest.raises(RemoteError) as failure:
-            unwrap_outcome(response.result)
-        assert failure.value.error.code is ErrorCode.INCOMPATIBLE_SCHEMA
-        unwrap_outcome(
-            (
-                await registry.register(
-                    schemaFingerprint=SCHEMA_FINGERPRINT, agent=servant
-                )
-            ).result
-        )
+        unwrap_outcome((await registry.register(agent=servant)).result)
         remote = controller.registered
         assert (remote.name, remote.master, remote.incarnation) == (
             "Master",
@@ -745,13 +730,7 @@ async def test_registry_fingerprint_capability_and_disconnect_lifecycle() -> Non
         assert await remote.invoke(c.Snapshots(limit=7, before=0)) == target.catalog
         assert target.requests[-1] == c.Snapshots(limit=7, before=0)
         with pytest.raises(RemoteError) as duplicate:
-            unwrap_outcome(
-                (
-                    await registry.register(
-                        schemaFingerprint=SCHEMA_FINGERPRINT, agent=servant
-                    )
-                ).result
-            )
+            unwrap_outcome((await registry.register(agent=servant)).result)
         assert duplicate.value.error.code is ErrorCode.INVALID_STATE
         forwarded = remote.logs.subscribe()
         record = log_record(1, "forwarded")
@@ -779,9 +758,7 @@ async def test_disconnect_during_registration_rolls_back_capability() -> None:
         abstract_rpc_server(lambda: WorkerRegistryServant(controller), name),
     ):
         stream, client, registry, disconnected = await open_registry(name)
-        pending = asyncio.ensure_future(
-            registry.register(schemaFingerprint=SCHEMA_FINGERPRINT, agent=servant)
-        )
+        pending = asyncio.ensure_future(registry.register(agent=servant))
         await controller.registration_entered.wait()
         client.close()
         stream.close()

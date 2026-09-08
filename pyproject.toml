@@ -1,6 +1,6 @@
 [project]
 name = "dst-server"
-version = "0.2.1"
+version = "0.2.2"
 description = "Start and control a Don't Starve Together server process."
 readme = "README.md"
 license = "MIT"

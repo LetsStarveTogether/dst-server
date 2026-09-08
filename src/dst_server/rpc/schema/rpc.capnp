@@ -34,10 +34,10 @@ interface Cluster extends(Endpoint) {
 interface Agent extends(Endpoint) {}
 
 interface Bootstrap {
-  connect @0 (schemaFingerprint :Text) -> (result :Outcome(Cluster));
+  connect @0 () -> (result :Outcome(Cluster));
 }
 
 interface WorkerRegistry {
-  register @0 (schemaFingerprint :Text, agent :Agent) -> (result :Outcome(Unit));
+  register @0 (agent :Agent) -> (result :Outcome(Unit));
   failed @1 () -> (result :Outcome(Unit));
 }

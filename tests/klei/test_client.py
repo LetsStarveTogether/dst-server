@@ -93,26 +93,33 @@ def test_version_page_uses_strict_lexbor_models() -> None:
         ["workshop-1", "Example mod", True, None],
     ],
 )
+@pytest.mark.parametrize(
+    "players_prefix", ["", "return ", " \nreturn\t", "return-- players\n"]
+)
 async def test_klei_client_queries_lobby_and_room_in_order(
     mods_info: object,
+    players_prefix: str,
 ) -> None:
     room = lobby_row() | {
         "tick": 12345,
         "clientmodsoff": False,
         "nat": 1,
         "mods_info": mods_info,
-        "players": """{
+        "players": players_prefix
+        + """{
             {
                 name = "Wilson",
-                kuid = "KU_WILSON",
-                role = "wilson",
-                steam_id = 76561198000000001,
-                ip = "127.0.0.1",
+                netid = "76561198000000001",
+                prefab = "wilson",
+                colour = "FFFFFF",
+                eventlevel = 0,
             },
             {
                 name = "Mod Hero",
-                kuid = "KU_MOD",
-                role = "workshop-123-character",
+                netid = "76561198000000002",
+                prefab = "workshop-123-character",
+                colour = "F02D0EFF",
+                eventlevel = 1,
             },
         }""",
     }
@@ -148,9 +155,11 @@ async def test_klei_client_queries_lobby_and_room_in_order(
     assert lobbies[0].connect_code == "c_connect('127.0.0.1', 10999)"
     assert rooms[0].tick == 12345
     assert rooms[0].mods_info == mods_info
-    assert rooms[0].players[0].role is Role.WILSON
-    assert rooms[0].players[0].steam_id == 76561198000000001
-    assert rooms[0].players[1].role == "workshop-123-character"
+    assert rooms[0].players[0].prefab is Role.WILSON
+    assert rooms[0].players[0].netid == "76561198000000001"
+    assert rooms[0].players[0].colour == "FFFFFF"
+    assert rooms[0].players[0].eventlevel == 0
+    assert rooms[0].players[1].prefab == "workshop-123-character"
     assert calls == [
         ("GET", LOBBY_URL, None),
         (
@@ -165,7 +174,9 @@ async def test_klei_client_queries_lobby_and_room_in_order(
     ]
 
 
-@pytest.mark.parametrize("players", [None, "", "  \n", "{}"])
+@pytest.mark.parametrize(
+    "players", [None, "", "  \n", "{}", "return {  }", "return{}", " \nreturn\t{}"]
+)
 def test_klei_room_empty_players(players: str | None) -> None:
     payload = lobby_row() | {
         "tick": 1,
@@ -180,6 +191,37 @@ def test_klei_room_empty_players(players: str | None) -> None:
     )
 
     assert response.rows[0].players == ()
+
+
+@pytest.mark.parametrize(
+    "players",
+    [
+        "returning {}",
+        'return require("untrusted")',
+        'return {{name=os.execute("untrusted"),netid="platform-id"}}',
+        "return {}, {}",
+        'return {}; print("untrusted")',
+        'return {name="Wilson",netid="platform-id"}',
+        "return {[1]={},[3]={}}",
+        "return {[1]={},named={}}",
+        "return {[1]={},[1]={}}",
+    ],
+)
+def test_klei_room_players_reject_executable_or_non_array_data(players: str) -> None:
+    payload = lobby_row() | {
+        "tick": 1,
+        "clientmodsoff": False,
+        "nat": 1,
+        "players": players,
+    }
+
+    with pytest.raises(ValidationError) as raised:
+        DataResponse[Room].model_validate_json(
+            json.dumps({"GET": [payload]}),
+            context={"region": Region.US_EAST},
+        )
+
+    assert raised.value.errors()[0]["loc"] == ("GET", 0, "players")
 
 
 async def test_klei_client_parses_strict_endpoints() -> None:

@@ -29,7 +29,7 @@ from dst_server.timeouts import (
 )
 
 from .codec import ERROR, decode, decode_model, unwrap_outcome
-from .schema import SCHEMA_FINGERPRINT, load_schema
+from .schema import load_schema
 
 type StreamKind = Literal["logs", "lifecycle", "events"]
 capnp: Any = import_module("capnp")
@@ -178,10 +178,7 @@ class ClusterClient(RemoteEndpoint, ClusterAPI):
                 stream = await capnp.AsyncIoStream.create_unix_connection(fspath(path))
                 client = capnp.TwoPartyClient(stream)
                 response = (
-                    await client
-                    .bootstrap()
-                    .cast_as(load_schema().Bootstrap)
-                    .connect(schemaFingerprint=SCHEMA_FINGERPRINT)
+                    await client.bootstrap().cast_as(load_schema().Bootstrap).connect()
                 )
                 return cls(stream, client, unwrap_outcome(response.result))
         except BaseException:

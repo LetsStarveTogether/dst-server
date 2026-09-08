@@ -16,7 +16,6 @@ class ErrorCode(StrEnum):
     TIMEOUT = "timeout"
     OVERFLOW = "overflow"
     TOPOLOGY_CHANGE_REQUIRED = "topologyChangeRequired"
-    INCOMPATIBLE_SCHEMA = "incompatibleSchema"
     INTERNAL = "internal"
     INDETERMINATE = "indeterminate"
 

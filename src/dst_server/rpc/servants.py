@@ -39,7 +39,7 @@ from dst_server.timeouts import (
 from .client import RemoteEndpoint, StreamKind
 from .client import Subscription as RemoteSubscription
 from .codec import ERROR, encode, encode_model, failure, success
-from .schema import SCHEMA_FINGERPRINT, load_schema
+from .schema import load_schema
 
 capnp: Any = import_module("capnp")
 schema = load_schema()
@@ -343,15 +343,8 @@ class BootstrapServant(_Responder, schema.Bootstrap.Server):
         super().__init__()
         self.cluster = ClusterServant(controller, self._owner)
 
-    async def connect(self, schemaFingerprint: str, _context: Any) -> None:
-        if schemaFingerprint != SCHEMA_FINGERPRINT:
-            _context.results.result = failure(
-                ErrorInfo(
-                    ErrorCode.INCOMPATIBLE_SCHEMA, ULID(), "RPC schema is incompatible"
-                )
-            )
-        else:
-            _context.results.result = success(self.cluster)
+    async def connect(self, _context: Any) -> None:
+        _context.results.result = success(self.cluster)
 
 
 class RemoteAgent(RemoteEndpoint):
@@ -544,22 +537,7 @@ class WorkerRegistryServant(_Responder, schema.WorkerRegistry.Server):
         self._closed = False
         self._register_lock = asyncio.Lock()
 
-    async def register(
-        self,
-        schemaFingerprint: str,
-        agent: Any,
-        _context: Any,
-    ) -> None:
-        if schemaFingerprint != SCHEMA_FINGERPRINT:
-            _context.results.result = failure(
-                ErrorInfo(
-                    ErrorCode.INCOMPATIBLE_SCHEMA,
-                    ULID(),
-                    "RPC schema is incompatible",
-                )
-            )
-            return
-
+    async def register(self, agent: Any, _context: Any) -> None:
         async def register() -> None:
             async with self._register_lock:
                 if self._closed or self.remote is not None:

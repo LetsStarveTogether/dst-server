@@ -4,7 +4,7 @@ import struct
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
-from typing import BinaryIO
+from typing import Any, BinaryIO
 from weakref import ref
 
 import pytest
@@ -366,11 +366,13 @@ def test_consumer_failure_closes_export(saved_cluster: Path) -> None:
         ("private/room-", "https://public.example.test/download?name="),
     ],
 )
-def test_upload_uses_aws_environment_and_closes_stream_on_failure(
+@pytest.mark.parametrize("configuration_source", ["environment", "explicit", "mixed"])
+def test_upload_configuration_and_stream_cleanup(
     saved_cluster: Path,
     monkeypatch: pytest.MonkeyPatch,
     object_prefix: str,
     url_prefix: str | None,
+    configuration_source: str,
 ) -> None:
     requests: list[tuple[str, bytes, dict[str, str]]] = []
     fail_upload = False
@@ -395,14 +397,38 @@ def test_upload_uses_aws_environment_and_closes_stream_on_failure(
         if name.startswith("AWS_"):
             monkeypatch.delenv(name)
     with HTTPServer(("127.0.0.1", 0), Handler) as server:
-        for name, value in {
-            "AWS_ENDPOINT": f"http://127.0.0.1:{server.server_port}",
+        endpoint = f"http://127.0.0.1:{server.server_port}"
+        environment = {
+            "AWS_ENDPOINT": endpoint,
             "AWS_BUCKET": "archive-test",
             "AWS_ACCESS_KEY_ID": "test-access",
             "AWS_SECRET_ACCESS_KEY": "test-secret",
+            "AWS_SESSION_TOKEN": "test-session",
             "AWS_REGION": "unused-region",
-            "AWS_ALLOW_HTTP": "true",
-        }.items():
+        }
+        settings: dict[str, Any] = {}
+        region = "auto"
+        if configuration_source != "environment":
+            region = "test-region"
+            settings = {
+                "endpoint": endpoint,
+                "bucket": "archive-test",
+                "region": region,
+                "access_key_id": SecretStr("test-access"),
+                "secret_access_key": SecretStr("test-secret"),
+                "session_token": SecretStr("test-session"),
+            }
+            environment = (
+                {
+                    **dict.fromkeys(environment, "unused-value"),
+                    "AWS_ENDPOINT": "http://127.0.0.1:1",
+                    "AWS_ENDPOINT_URL_S3": "http://127.0.0.1:1",
+                }
+                if configuration_source == "mixed"
+                else {}
+            )
+        monkeypatch.setenv("AWS_ALLOW_HTTP", "true")
+        for name, value in environment.items():
             monkeypatch.setenv(name, value)
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -411,10 +437,12 @@ def test_upload_uses_aws_environment_and_closes_stream_on_failure(
                 expected = exported.stream.read()
                 exported.stream.seek(6)
                 first = exported.upload(
-                    object_prefix=object_prefix, url_prefix=url_prefix
+                    object_prefix=object_prefix, url_prefix=url_prefix, **settings
                 )
+                monkeypatch.setenv("AWS_SESSION_TOKEN", "test-session")
+                settings["session_token"] = None
                 second = exported.upload(
-                    object_prefix=object_prefix, url_prefix=url_prefix
+                    object_prefix=object_prefix, url_prefix=url_prefix, **settings
                 )
                 assert first == second
                 for result in (first, second):
@@ -431,9 +459,13 @@ def test_upload_uses_aws_environment_and_closes_stream_on_failure(
                     {"object_prefix": 123},
                     {"url_prefix": False},
                     {"object_prefix": "/private/"},
+                    {"access_key_id": "private-raw-key"},
+                    {"secret_access_key": "private-raw-secret"},
+                    {"session_token": "private-raw-token"},
                 ):
-                    with pytest.raises(ValidationError):
+                    with pytest.raises(ValidationError) as error:
                         exported.upload(**invalid)  # ty: ignore[invalid-argument-type]
+                    assert "private-raw-" not in str(error.value)
                 assert len(requests) == 2
                 assert not exported.stream.closed
             assert exported.stream.closed
@@ -442,7 +474,9 @@ def test_upload_uses_aws_environment_and_closes_stream_on_failure(
                 pytest.raises(PermissionDeniedError, match="403"),
                 archive.export_cluster(saved_cluster) as failed,
             ):
-                failed.upload(object_prefix=object_prefix, url_prefix=url_prefix)
+                failed.upload(
+                    object_prefix=object_prefix, url_prefix=url_prefix, **settings
+                )
             assert failed.stream.closed
             assert len(requests) == 3
             assert [body for _, body, _ in requests[:2]] == [expected, expected]
@@ -450,9 +484,10 @@ def test_upload_uses_aws_environment_and_closes_stream_on_failure(
                 assert body.startswith(b"7z\xbc\xaf\x27\x1c")
                 assert headers["content-type"] == "application/x-7z-compressed"
                 assert re.search(
-                    r"Credential=test-access/\d{8}/auto/s3/aws4_request",
+                    rf"Credential=test-access/\d{{8}}/{region}/s3/aws4_request",
                     headers["authorization"],
                 )
+                assert headers["x-amz-security-token"] == "test-session"
         finally:
             server.shutdown()
             thread.join()

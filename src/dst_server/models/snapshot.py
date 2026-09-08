@@ -78,6 +78,14 @@ class _Metadata(FrozenModel):
             msg = f"unsupported snapshot metadata format: {path}"
             raise ValueError(msg)
         value = parse_literal(source.removeprefix("return"), "snapshot metadata")
+        if isinstance(value, dict):
+            for name, model in (("clock", SnapshotClock), ("seasons", SnapshotSeasons)):
+                if isinstance(fields := value.get(name), dict):
+                    value[name] = {
+                        key: item
+                        for key, item in fields.items()
+                        if key in model.model_fields
+                    }
         return cls.model_validate(value)
 
 

@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from ipaddress import IPv4Address
+from re import sub
 from typing import Annotated
 
 from pydantic import (
@@ -33,12 +34,12 @@ class DataResponse[DataT](KleiModel):
 
 class Player(KleiModel):
     name: str
-    kuid: str
-    role: Role | str | None = None
-    steam_id: int | None = None
-    ip: IPv4Address | None = None
+    netid: str
+    prefab: Role | str
+    colour: str
+    eventlevel: int
 
-    @field_validator("role", mode="before")
+    @field_validator("prefab", mode="before")
     @classmethod
     def preserve_custom_role(cls, value: object) -> object:
         return Role(value) if isinstance(value, str) and value in Role else value
@@ -118,7 +119,9 @@ class Room(Lobby):
             return ()
         if not isinstance(value, str):
             return value
-        players = parse_literal(value, "Klei room players")
+        players = parse_literal(
+            sub(r"\A\s*return\b", "", value, count=1), "Klei room players"
+        )
         if players == {}:
             return ()
         if not isinstance(players, list):

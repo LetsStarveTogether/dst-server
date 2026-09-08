@@ -342,7 +342,7 @@ flowchart LR
 
 | 通道 | 用途 |
 | --- | --- |
-| `/cluster/.dst-server.sock` | 公开 Cap'n Proto RPC；连接时校验 schema fingerprint，客户端与 daemon 应使用一致版本。 |
+| `/cluster/.dst-server.sock` | 公开 Cap'n Proto RPC。 |
 | 游戏 FD 3 | 输入 Lua 命令。 |
 | 游戏 FD 4 | 返回命令文本，原始 Lua 需显式 `print`。 |
 | 游戏 FD 5 | 原生 Ready、Session、Saved、Stopping 等生命周期事件。 |
@@ -519,7 +519,6 @@ rootful 宿主路径为 `/srv/dst/000/.dst-server.sock`，容器内为 `/cluster
 各入口只接受声明的命令范围；游戏客户端处理游戏操作，Controller 负责进程生命周期与集群协调。
 
 Cap'n Proto 通过 `call` 传输命令，通过订阅能力传输观测记录。
-握手指纹同时覆盖能力协议与 Pydantic 请求、结果、事件、错误 schema，客户端和 daemon 应使用匹配版本。
 配置传输保留省略字段、显式 `False`、世界覆盖类型，以及保存配置所需的秘密值。
 
 集群结果、状态与观测游标从 [models.cluster](src/dst_server/models/cluster.py) 导入，`DriverHealth` 从 [models.driver](src/dst_server/models/driver.py) 导入。
@@ -698,7 +697,9 @@ if catalog.has_more and catalog.snapshots:
 
 Agent 拒绝路径逃逸、符号链接、无效元数据和查询期间的 session 变化。
 独立读取可使用 `WorldSnapshotMetadata.load(path)` / `PlayerSnapshotMetadata.load(path)`，入口为 [models.snapshot](src/dst_server/models/snapshot.py)。
-加载器只解析 UTF-8 Lua 字面量，支持原生文本文件头与末尾 NUL，拒绝未知字段、错误类型和动态表达式。
+加载器只解析 UTF-8 Lua 字面量，支持原生文本文件头与末尾 NUL。
+忽略 Mod 在 `clock` 和 `seasons` 中追加的字段，已知字段仍严格校验；拒绝其他位置的未知字段、错误类型和动态表达式。
+天数使用标准的 `clock.cycles + 1`，不解释 Mod 独立日历。
 世界模型覆盖 `clock`、`seasons` 及嵌套字段，人物模型提供 `character`，也支持 Mod 角色标识。
 
 `await cluster.rollback_to_day(day, timeout=900)` 返回实际选中的 `Snapshot`。
@@ -754,22 +755,21 @@ SDK 不会随机生成 Klei token。
 导出会检测文件变化，但不能保证在线多分片的原子快照；输入必须保持静止。
 目前提供导出与上传，尚无导入接口。
 
-上传 R2 前，在调用进程设置 [obstore 的 S3 环境变量](https://developmentseed.org/obstore/latest/api/store/aws/#obstore.store.S3Config)：
-
-```shell
-export AWS_ENDPOINT='https://<account-id>.r2.cloudflarestorage.com'
-export AWS_BUCKET='your-bucket'
-export AWS_ACCESS_KEY_ID='your-access-key-id'
-export AWS_SECRET_ACCESS_KEY='your-secret-access-key'
-```
+上传 R2 时可直接传入 S3 连接配置和凭据：
 
 ```python
 from pathlib import Path
+
+from pydantic import SecretStr
 
 from dst_server.archive import export_cluster
 
 with export_cluster(Path("/srv/dst/000")) as archive:
     result = archive.upload(
+        endpoint="https://<account-id>.r2.cloudflarestorage.com",
+        bucket="your-bucket",
+        access_key_id=SecretStr("your-access-key-id"),
+        secret_access_key=SecretStr("your-secret-access-key"),
         object_prefix="rooms/exports/",
         url_prefix="https://downloads.example.com/",
     )
@@ -777,6 +777,25 @@ with export_cluster(Path("/srv/dst/000")) as archive:
 print(result.key)
 print(result.url)
 ```
+
+| 上传参数 | 类型 | 默认值 | 环境变量回退 |
+| --- | --- | --- | --- |
+| `bucket` | `str \| None` | `None` | `AWS_BUCKET` |
+| `endpoint` | `str \| None` | `None` | `AWS_ENDPOINT_URL_S3` 优先，其次 `AWS_ENDPOINT` |
+| `region` | `str` | `"auto"` | 无；参数覆盖 `AWS_REGION` |
+| `access_key_id` | `SecretStr \| None` | `None` | `AWS_ACCESS_KEY_ID` |
+| `secret_access_key` | `SecretStr \| None` | `None` | `AWS_SECRET_ACCESS_KEY` |
+| `session_token` | `SecretStr \| None` | `None` | `AWS_SESSION_TOKEN` |
+| `object_prefix` | `str` | `""` | 无 |
+| `url_prefix` | `str \| None` | `None` | 无 |
+
+三个机密参数必须传入 `SecretStr` 实例，不接受普通字符串。
+机密只在创建 `S3Store` 时解包，且不会写入归档。
+显式值覆盖对应的环境配置，其中 `endpoint` 也会覆盖 `AWS_ENDPOINT_URL_S3`。
+传入 `None` 的字段仍由 [obstore 的环境配置](https://developmentseed.org/obstore/latest/api/store/aws/#obstore.store.S3Config) 提供。
+回退按字段生效：即使两个密钥已显式传入，省略的 `session_token` 仍可能来自环境变量。
+obstore 的其它选项仍沿用其环境变量行为。
+不传连接和机密参数调用 `upload()` 时，继续使用 AWS 环境变量。
 
 `upload()` 从流开头上传，返回含 `key` 和 `url` 字段的 `ArchiveUploadResult`。
 对象 key 为 `object_prefix + archive.filename`，`object_prefix` 默认为空字符串。
@@ -787,8 +806,9 @@ print(result.url)
 `object_prefix` 不能以 `/` 开头，避免存储后端将它剥离后导致返回 key 与实际对象不一致。
 所需的 `/` 或 `?file=` 等分隔符需自行包含。
 查询前缀和末尾分隔符都会保留，URL 不会根据桶名或 S3 endpoint 推导。
-S3 配置仍使用上述 AWS 环境变量，两个前缀没有对应的环境变量。
-`S3Store(region="auto")` 使用 [R2 的 `auto` 区域](https://developers.cloudflare.com/r2/api/s3/api/#bucket-region)，无需设置 `AWS_REGION`。
+两个前缀都是普通字符串，没有对应的环境变量。
+默认 `region="auto"` 使用 [R2 的 `auto` 区域](https://developers.cloudflare.com/r2/api/s3/api/#bucket-region)。
+上传到其它 S3 区域时可显式传入 `region`。
 [obstore 处理 multipart](https://developmentseed.org/obstore/latest/api/put/)，异常向调用方传播，本地临时文件仍会清理。
 失败上传的远端分片不保证立即清理；R2 默认七天后清理，可通过 [生命周期规则](https://developers.cloudflare.com/r2/buckets/object-lifecycles/) 修改。
 

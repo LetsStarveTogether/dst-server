@@ -1,5 +1,5 @@
 from .client import ClusterClient, ShardClient, Subscription, rpc_runtime
-from .schema import SCHEMA_FINGERPRINT, load_schema
+from .schema import load_schema
 from .transport import (
     INTERNAL_RPC_ADDRESS,
     PUBLIC_RPC_SOCKET,
@@ -10,7 +10,6 @@ from .transport import (
 __all__ = [
     "INTERNAL_RPC_ADDRESS",
     "PUBLIC_RPC_SOCKET",
-    "SCHEMA_FINGERPRINT",
     "ClusterClient",
     "ShardClient",
     "Subscription",

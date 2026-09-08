@@ -492,18 +492,3 @@ def parse_request(payload: bytes, *, scope: Scope) -> Request[Any]:
     if envelope.timeout is not None:
         arguments |= {"timeout": envelope.timeout}
     return spec.request.model_validate_json(json.dumps(arguments, allow_nan=False))
-
-
-def schema_contract() -> dict[str, dict[str, dict[str, Any]]]:
-    return {
-        scope: {
-            method: {
-                "request": spec.request.model_json_schema(),
-                "result": spec.response.json_schema(),
-                "mutation": spec.mutation,
-            }
-            for (entry_scope, method), spec in sorted(_OPERATIONS.items())
-            if entry_scope == scope
-        }
-        for scope in _ALL
-    }

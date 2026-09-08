@@ -104,14 +104,6 @@ def test_wire_request_cannot_bypass_scope_or_parameter_validation(
         commands.parse_request(payload, scope="shard")
 
 
-def test_schema_contract_includes_request_and_result_models() -> None:
-    contract = commands.schema_contract()
-    status = contract["shard"]["status"]
-    assert "name" in status["result"]["properties"]
-    assert "timeout" in status["request"]["properties"]
-    assert status["mutation"] is False
-
-
 @pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), True])
 def test_copied_requests_are_revalidated(timeout: object) -> None:
     copied = commands.Save().model_copy(update={"timeout": timeout})

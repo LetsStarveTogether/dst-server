@@ -360,7 +360,7 @@ The master Agent registers in-process; secondary Agents register through the Pod
 
 | Channel | Purpose |
 | --- | --- |
-| `/cluster/.dst-server.sock` | Public Cap'n Proto RPC; connections check a schema fingerprint, so the client and daemon should use matching versions. |
+| `/cluster/.dst-server.sock` | Public Cap'n Proto RPC. |
 | Game FD 3 | Lua command input. |
 | Game FD 4 | Command text output; raw Lua must explicitly `print`. |
 | Game FD 5 | Native lifecycle events such as Ready, Session, Saved, and Stopping. |
@@ -559,8 +559,6 @@ Each endpoint accepts only its declared command scope.
 Game clients handle game operations; controllers own process lifecycle and cluster coordination.
 
 Cap'n Proto carries commands through `call` and observations through subscription capabilities.
-The handshake fingerprint covers the capability schema and Pydantic request, result, event, and error schemas.
-Use matching client and daemon versions.
 Configuration payloads preserve omitted fields, explicit `False`, world override types, and secrets needed for saving.
 
 Import cluster results, statuses, and observation cursors from [models.cluster](src/dst_server/models/cluster.py).
@@ -750,7 +748,9 @@ if catalog.has_more and catalog.snapshots:
 The Agent rejects path escapes, symlinks, invalid metadata, and session changes during a query.
 For standalone reads, use `WorldSnapshotMetadata.load(path)` / `PlayerSnapshotMetadata.load(path)` from [models.snapshot](src/dst_server/models/snapshot.py).
 The loaders parse only UTF-8 Lua literals and support native text headers and trailing NULs.
-They reject unknown fields, wrong types, and dynamic expressions.
+Additional fields in `clock` and `seasons` written by Mods are ignored; known fields retain strict validation.
+Unknown fields elsewhere, wrong types, and dynamic expressions are rejected.
+The day uses the standard `clock.cycles + 1`, without interpreting Mod calendars.
 The world model covers `clock`, `seasons`, and nested fields.
 The player model exposes `character`, including Mod character identifiers.
 
@@ -815,22 +815,21 @@ Export detects file changes but cannot guarantee an atomic snapshot of an online
 The input must remain unchanged.
 Exports and uploads are available; there is no import API yet.
 
-Before uploading to R2, set [obstore's S3 environment variables](https://developmentseed.org/obstore/latest/api/store/aws/#obstore.store.S3Config) in the calling process:
-
-```shell
-export AWS_ENDPOINT='https://<account-id>.r2.cloudflarestorage.com'
-export AWS_BUCKET='your-bucket'
-export AWS_ACCESS_KEY_ID='your-access-key-id'
-export AWS_SECRET_ACCESS_KEY='your-secret-access-key'
-```
+Pass S3 connection settings and credentials directly when uploading to R2:
 
 ```python
 from pathlib import Path
+
+from pydantic import SecretStr
 
 from dst_server.archive import export_cluster
 
 with export_cluster(Path("/srv/dst/000")) as archive:
     result = archive.upload(
+        endpoint="https://<account-id>.r2.cloudflarestorage.com",
+        bucket="your-bucket",
+        access_key_id=SecretStr("your-access-key-id"),
+        secret_access_key=SecretStr("your-secret-access-key"),
         object_prefix="rooms/exports/",
         url_prefix="https://downloads.example.com/",
     )
@@ -838,6 +837,25 @@ with export_cluster(Path("/srv/dst/000")) as archive:
 print(result.key)
 print(result.url)
 ```
+
+| Upload argument | Type | Default | Environment fallback |
+| --- | --- | --- | --- |
+| `bucket` | `str \| None` | `None` | `AWS_BUCKET` |
+| `endpoint` | `str \| None` | `None` | `AWS_ENDPOINT_URL_S3`, then `AWS_ENDPOINT` |
+| `region` | `str` | `"auto"` | None; the argument overrides `AWS_REGION` |
+| `access_key_id` | `SecretStr \| None` | `None` | `AWS_ACCESS_KEY_ID` |
+| `secret_access_key` | `SecretStr \| None` | `None` | `AWS_SECRET_ACCESS_KEY` |
+| `session_token` | `SecretStr \| None` | `None` | `AWS_SESSION_TOKEN` |
+| `object_prefix` | `str` | `""` | None |
+| `url_prefix` | `str \| None` | `None` | None |
+
+The three credential arguments require `SecretStr` instances; plain strings are rejected.
+Secrets are unwrapped only when creating `S3Store` and are never written to the archive.
+Explicit values override the corresponding environment settings, including `AWS_ENDPOINT_URL_S3` for `endpoint`.
+`None` leaves that field to [obstore's environment configuration](https://developmentseed.org/obstore/latest/api/store/aws/#obstore.store.S3Config).
+This fallback applies per field: an omitted `session_token` can still come from the environment when both keys are explicit.
+Other obstore options retain their environment behavior.
+Calling `upload()` without connection or credential arguments continues to use AWS environment variables.
 
 `upload()` reads from the start of the stream and returns `ArchiveUploadResult` with `key` and `url` fields.
 The object key is `object_prefix + archive.filename`; `object_prefix` defaults to an empty string.
@@ -848,8 +866,9 @@ Both prefixes are explicit SDK arguments and are concatenated literally.
 `object_prefix` must not begin with `/`, which the storage backend would otherwise strip from the key.
 Supply any required separators, such as `/` or `?file=`, yourself.
 Query prefixes and trailing separators are preserved, and the URL is never inferred from the bucket or S3 endpoint.
-S3 configuration still uses the AWS environment variables above; there are no environment variables for these prefixes.
-`S3Store(region="auto")` uses [R2's `auto` region](https://developers.cloudflare.com/r2/api/s3/api/#bucket-region), so `AWS_REGION` is unnecessary.
+The two prefixes are ordinary strings and have no corresponding environment variables.
+The default `region="auto"` uses [R2's `auto` region](https://developers.cloudflare.com/r2/api/s3/api/#bucket-region).
+Pass `region` explicitly when uploading to a different S3 region.
 [obstore handles multipart uploads](https://developmentseed.org/obstore/latest/api/put/); errors propagate to the caller, and local temporary files are still cleaned up.
 Remote parts from failed uploads may remain; R2 removes them after seven days by default.
 Configure this through [lifecycle rules](https://developers.cloudflare.com/r2/buckets/object-lifecycles/).

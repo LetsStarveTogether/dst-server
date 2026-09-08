@@ -119,6 +119,43 @@ def test_initial_world_metadata_can_have_only_season_fields(
     assert metadata.day is None
 
 
+@pytest.mark.parametrize(
+    ("clock_fields", "season_fields"),
+    [
+        (
+            "cyclestropical=40,moonphaselockedtropical=false",
+            'seasontropical="mild",lengthstropical={mild=20}',
+        ),
+        (
+            "cyclesplateau=40,segsplateau={day=9,dusk=4,night=3}",
+            'seasonplateau="temperate",preaporkalypseseasondata={}',
+        ),
+    ],
+)
+def test_world_metadata_ignores_mod_clock_and_season_fields(
+    metadata_path: Path, clock_fields: str, season_fields: str
+) -> None:
+    content = (
+        f"return {{clock={{cycles=20,{clock_fields}}},"
+        f'seasons={{season="autumn",{season_fields}}}}}\0'
+    ).encode()
+    metadata_path.write_bytes(content)
+
+    metadata = WorldSnapshotMetadata.load(metadata_path)
+
+    assert metadata.day == 21
+    assert metadata.model_dump(exclude_none=True) == {
+        "clock": {"cycles": 20},
+        "seasons": {"season": "autumn"},
+    }
+    assert metadata_path.read_bytes() == content
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        WorldSnapshotMetadata.model_validate({
+            "clock": {"cyclestropical": 40},
+            "seasons": {"seasonplateau": "temperate"},
+        })
+
+
 @pytest.mark.parametrize("character", ["wilson", "mod_character"])
 def test_player_metadata_uses_character_identifier(
     metadata_path: Path, character: str
@@ -146,9 +183,9 @@ def test_player_metadata_uses_character_identifier(
         b"return {clock={cycles=1+2}}",
         b"return {clock={},clock={}}",
         b'return {character="wilson"}',
-        b"return {clock={moonphasecycle=1}}",
+        b'return {clock={cyclestropical=require("untrusted")}}',
         b"return {clock={cycles=true}}",
-        b'return {clock={cycles="1"}}',
+        b'return {clock={cycles="1",cyclestropical=0}}',
         b"return {clock={cycles=-1}}",
         b"return {clock={remainingtimeinphase=1e999}}",
         b'return {seasons={season="monsoon"}}',

@@ -16,7 +16,7 @@ from dst_server.configuration.models import ShardName
 from dst_server.configuration.store import ConfigurationStore
 from dst_server.rpc.client import rpc_runtime
 from dst_server.rpc.codec import unwrap_outcome
-from dst_server.rpc.schema import SCHEMA_FINGERPRINT, load_schema
+from dst_server.rpc.schema import load_schema
 from dst_server.rpc.servants import (
     AgentServant,
     BootstrapServant,
@@ -355,10 +355,7 @@ async def _registered_cycle(agent: ShardAgent, internal_address: str) -> None:
             stack.callback(client.close)
             registry = client.bootstrap().cast_as(load_schema().WorkerRegistry)
         async with asyncio.timeout(DEFAULT_LIFECYCLE_TIMEOUT):
-            response = await registry.register(
-                schemaFingerprint=SCHEMA_FINGERPRINT,
-                agent=servant,
-            )
+            response = await registry.register(agent=servant)
         unwrap_outcome(response.result)
         disconnected = asyncio.ensure_future(client.on_disconnect())
         while True:

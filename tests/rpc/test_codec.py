@@ -43,12 +43,7 @@ from dst_server.rpc.codec import (
     encode_json_value,
     encode_model,
 )
-from dst_server.rpc.schema import (
-    SCHEMA_FINGERPRINT,
-    _payload_contract,
-    _schema_fingerprint,
-    load_schema,
-)
+from dst_server.rpc.schema import load_schema
 
 
 class ModdedWorldOverrides(WorldOverrides):
@@ -59,12 +54,7 @@ def round_trip[ModelT: BaseModel](value: ModelT) -> ModelT:
     return decode_model(type(value), encode_model(value))
 
 
-def test_rpc_schema_loads_and_has_a_stable_fingerprint() -> None:
-    assert len(SCHEMA_FINGERPRINT) == 64
-    payload = _payload_contract()
-    assert json.loads(payload)["wireFormat"] == 2
-    assert _schema_fingerprint(payload) == SCHEMA_FINGERPRINT
-    assert _schema_fingerprint(payload + b"changed") != SCHEMA_FINGERPRINT
+def test_rpc_schema_loads() -> None:
     assert load_schema().Cluster is not None
     assert load_schema().Subscription is not None
 

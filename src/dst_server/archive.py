@@ -10,7 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryFile
 from typing import Annotated, BinaryIO
 
-from pydantic import ConfigDict, Field, validate_call
+from pydantic import ConfigDict, Field, InstanceOf, SecretStr, validate_call
 
 from dst_server.klei_id import encode_klei_id
 
@@ -33,17 +33,39 @@ class ClusterArchive:
     filename: str
     stream: BinaryIO
 
-    @validate_call(config=ConfigDict(strict=True))
+    @validate_call(config=ConfigDict(strict=True, hide_input_in_errors=True))
     def upload(
         self,
         *,
+        bucket: str | None = None,
+        endpoint: str | None = None,
+        region: str = "auto",
+        access_key_id: InstanceOf[SecretStr] | None = None,
+        secret_access_key: InstanceOf[SecretStr] | None = None,
+        session_token: InstanceOf[SecretStr] | None = None,
         object_prefix: Annotated[str, Field(pattern=r"^(?:[^/]|$)")] = "",
         url_prefix: str | None = None,
     ) -> ArchiveUploadResult:
-        """Upload using AWS environment variables and literal key/URL prefixes."""
+        """Upload with explicit S3 settings overriding AWS environment variables."""
         from obstore.store import S3Store
 
-        store = S3Store(region="auto")
+        settings = {
+            "aws_endpoint_url_s3": endpoint,
+            "access_key_id": access_key_id,
+            "secret_access_key": secret_access_key,
+            "session_token": session_token,
+        }
+        store = S3Store(
+            bucket,
+            region=region,
+            **{
+                name: value.get_secret_value()
+                if isinstance(value, SecretStr)
+                else value
+                for name, value in settings.items()
+                if value is not None
+            },
+        )
         key = f"{object_prefix}{self.filename}"
         self.stream.seek(0)
         store.put(
