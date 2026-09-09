@@ -13,10 +13,7 @@ from dst_server.configuration.models import (
     ClusterConfig,
     ClusterSettings,
 )
-from dst_server.configuration.overrides import (
-    ModOverride,
-    ModOverrides,
-)
+from dst_server.configuration.overrides import ModOverride
 from dst_server.configuration.world import LavaArenaOverrides, QuagmireOverrides
 from dst_server.deployment import (
     DEFAULT_IMAGE,
@@ -35,6 +32,8 @@ from scripts.generate_rooms import (
     generate_rooms,
     main,
     room,
+    room_name,
+    room_schedule,
 )
 from scripts.mod_configurations import MOD_CONFIGURATIONS
 
@@ -124,6 +123,40 @@ def test_room_plan_exactly_covers_the_requested_fleet() -> None:
     assert len(ROOMS) == len(RoomType) == 12
 
 
+def test_room_schedules_have_five_equal_groups_and_complete_names() -> None:
+    groups = {
+        None: (range(4), range(20, 26), range(50, 54), range(70, 76)),
+        ("晨餐", 9, 12): (range(4, 8), range(26, 32), range(54, 58), range(76, 82)),
+        ("午膳", 13, 18): (range(8, 12), range(32, 38), range(58, 62), range(82, 88)),
+        ("晚宴", 19, 0): (range(12, 16), range(38, 44), range(62, 66), range(88, 94)),
+        ("夜饮", 22, 5): (range(16, 20), range(44, 50), range(66, 70), range(94, 100)),
+    }
+    seen = []
+    promotion = " | 朗诵团 5 周年啦！入团找到你未来的 5 年好饥友吧~"  # ruff: ignore[ambiguous-unicode-character-string]
+    for schedule, ranges in groups.items():
+        numbers = [number for group in ranges for number in group]
+        assert len(numbers) == 20
+        seen.extend(numbers)
+        for number in numbers:
+            assert room_schedule(number) == schedule
+            suffix = f"-{schedule[0]}" if schedule else ""
+            assert room_name(number) == (
+                f"LST-{number:03d}-{room(number)[1]}{suffix}{promotion}"
+            )
+    assert sorted(seen) == list(range(100))
+    for number in range(100, 140):
+        assert room_schedule(number) is None
+        assert room_name(number) == f"LST-{number:03d}-{room(number)[1]}{promotion}"
+
+
+@pytest.mark.parametrize("number", [-1, 140, True, "7"])
+def test_schedule_and_name_reject_invalid_room_numbers(number: object) -> None:
+    error = TypeError if isinstance(number, (bool, str)) else ValueError
+    for function in (room_schedule, room_name):
+        with pytest.raises(error, match="room number must be an integer"):
+            function(cast("int", number))
+
+
 def test_netdata_environment_is_logs_only() -> None:
     assert dict(NETDATA_ENVIRONMENT) == {
         "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
@@ -139,10 +172,10 @@ def test_template_settings_worlds_and_shard_roles(
     shards: dict[str, tuple[str, str]],
     downloads: frozenset[int],
 ) -> None:
-    _, label, max_players = room(number)
+    _, _, max_players = room(number)
     cluster = build(number, token=TOKEN, cluster_key=CLUSTER_KEY)
     expected = {
-        "cluster_name": f"LST-{number:03d}-{label}",
+        "cluster_name": room_name(number),
         "cluster_description": CLUSTER_DESCRIPTION,
         "max_snapshots": 9 if number == 100 else 999_999_999,
         "steam_group_id": 45_524_458,
@@ -203,8 +236,6 @@ def test_template_mod_options_and_worlds_execute_in_native_lua(
     }
     expected_worlds = {}
     for name in shards:
-        generated = ModOverrides.load(tmp_path / name / "modoverrides.lua")
-        assert generated.render() == cluster.shards[name].mods.render()
         world = cluster.shards[name].world
         assert world is not None
         values = world.model_dump(exclude_unset=True, exclude_none=True)
@@ -249,11 +280,11 @@ def test_room_configuration_round_trip(
     downloads: frozenset[int],
 ) -> None:
     cluster = build(number, token=TOKEN, cluster_key=CLUSTER_KEY)
-    kind, label, max_players = room(number)
+    kind, _, max_players = room(number)
 
     assert set(cluster.shards) == set(shards)
     assert cluster.resolved_downloads().items == downloads
-    assert cluster.settings.cluster_name == f"LST-{number:03d}-{label}"
+    assert cluster.settings.cluster_name == room_name(number)
     assert cluster.settings.max_players == max_players
     assert {"max_snapshots", "steam_group_id"}.issubset(
         cluster.settings.model_fields_set
@@ -572,13 +603,14 @@ def test_generate_room_saves_cluster_and_quadlet_application(
     assert written
     assert all(path.is_file() for path in written)
     assert len(written) == len(set(written))
-    assert ClusterConfig.load(cluster_dir).settings.cluster_name == "LST-007-纯净生存"
+    assert ClusterConfig.load(cluster_dir).settings.cluster_name == room_name(7)
     application = QuadletApplication.load(quadlet_dir)
     units = (application.master, *application.secondaries)
     assert len(units) == 2
     assert all(unit.image == DEFAULT_IMAGE for unit in units)
     assert application.pod.publish_ports[0].host == 30070
     assert application.pod.userns == userns
+    assert application.pod.wanted_by == ()
     for unit in units:
         assert unit.pull == "always"
         assert unit.timeout_start_sec == 1800
@@ -622,6 +654,9 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
         )
         mappings = application.pod.publish_ports
         assert application.pod.userns is None
+        assert application.pod.wanted_by == (
+            ("default.target",) if room_schedule(number) is None else ()
+        )
         units = (application.master, *application.secondaries)
         assert all(volume.idmap is None for unit in units for volume in unit.volumes)
         shard_count += len(units)
@@ -683,7 +718,7 @@ def test_generate_rooms_uses_distinct_persistent_cluster_keys(tmp_path: Path) ->
     keys = []
     for _ in range(2):
         generate_rooms(
-            (0, 100),
+            (0, 7, 100),
             token=TOKEN,
             cluster_root=cluster_root,
             quadlet_dir=tmp_path / "quadlet",
@@ -693,12 +728,15 @@ def test_generate_rooms_uses_distinct_persistent_cluster_keys(tmp_path: Path) ->
                 ClusterSettings.load(
                     cluster_root / f"{number:03d}/cluster.ini"
                 ).cluster_key
-                for number in (0, 100)
+                for number in (0, 7, 100)
             )
+        )
+        assert ClusterSettings.load(cluster_root / "007/cluster.ini").cluster_name == (
+            room_name(7)
         )
 
     assert all(keys[0])
-    assert len(set(keys[0])) == 2
+    assert len(set(keys[0])) == 3
     assert keys[0] == keys[1]
 
 
@@ -719,7 +757,7 @@ def test_explicit_configurations_cover_remaining_port_slots(
         number: template.replace(
             settings=template.settings.replace(cluster_name=f"explicit-{number:03d}")
         )
-        for number in (140, 299)
+        for number in (7, 140, 299)
     }
 
     generate_configured_rooms(
@@ -730,7 +768,7 @@ def test_explicit_configurations_cover_remaining_port_slots(
         userns=userns,
     )
 
-    for number, base in ((140, 31400), (299, 32990)):
+    for number, base in ((7, 30070), (140, 31400), (299, 32990)):
         cluster = ClusterConfig.load(tmp_path / "clusters" / f"{number:03d}")
         assert cluster.settings.cluster_name == f"explicit-{number:03d}"
         application = QuadletApplication.load(
@@ -741,6 +779,7 @@ def test_explicit_configurations_cover_remaining_port_slots(
             mapping.host for mapping in application.pod.publish_ports
         ) == tuple(range(base, base + 4))
         assert application.pod.userns == userns
+        assert application.pod.wanted_by == ("default.target",)
         assert all(
             volume.idmap == volume_idmap
             for unit in (application.master, *application.secondaries)

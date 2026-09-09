@@ -70,10 +70,10 @@ jobs:
       - name: Setup Python and uv
         uses: astral-sh/setup-uv@v10.0.1
 
-      - name: Install Lua runtimes
+      - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes lua5.1 luajit
+          sudo apt-get install --yes lua5.1 luajit libsystemd-dev pkg-config build-essential
 
       - name: Run tests
         run: uv run --locked --all-extras pytest

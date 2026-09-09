@@ -90,6 +90,13 @@ ROOMS: tuple[RoomDefinition, ...] = (
     (range(135, 140), RoomType.FORGE, "熔炉", 6),
 )
 ROOM_NUMBERS = tuple(number for numbers, _, _, _ in ROOMS for number in numbers)
+_ROOM_SCHEDULES: tuple[tuple[str, int, int] | None, ...] = (
+    None,
+    ("晨餐", 9, 12),
+    ("午膳", 13, 18),
+    ("晚宴", 19, 0),
+    ("夜饮", 22, 5),
+)
 
 
 def room(number: int) -> tuple[RoomType, str, int]:
@@ -101,6 +108,25 @@ def room(number: int) -> tuple[RoomType, str, int]:
             return kind, label, max_players
     msg = "room number must be an integer from 0 through 139"
     raise ValueError(msg)
+
+
+def room_schedule(number: int) -> tuple[str, int, int] | None:
+    room(number)
+    for numbers, _, _, _ in ROOMS[:4]:
+        if number in numbers:
+            group_size = len(numbers) // len(_ROOM_SCHEDULES)
+            return _ROOM_SCHEDULES[(number - numbers.start) // group_size]
+    return None
+
+
+def room_name(number: int) -> str:
+    _, label, _ = room(number)
+    schedule = room_schedule(number)
+    suffix = f"-{schedule[0]}" if schedule else ""
+    return (
+        f"LST-{number:03d}-{label}{suffix}"
+        " | 朗诵团 5 周年啦！入团找到你未来的 5 年好饥友吧~"  # ruff: ignore[ambiguous-unicode-character-string]
+    )
 
 
 def _mods(*workshop_ids: int) -> RoomPreset:
@@ -270,12 +296,12 @@ def build(
     token: SecretStr,
     cluster_key: SecretStr | None = None,
 ) -> ClusterConfig:
-    kind, label, max_players = room(number)
+    kind, _, max_players = room(number)
     cluster = _ROOM_PRESETS[kind].build(
         token=token,
         cluster_key=cluster_key,
         settings=ClusterSettings(
-            cluster_name=f"LST-{number:03d}-{label}",
+            cluster_name=room_name(number),
             cluster_description=CLUSTER_DESCRIPTION,
             cluster_language="zh",
             steam_group_id=45_524_458,
@@ -296,6 +322,7 @@ def generate_configured_room(
     environment: Mapping[str, str] | None = None,
     volume_idmap: str | None = None,
     userns: str | None = None,
+    start_on_boot: bool = True,
 ) -> tuple[Path, ...]:
     for label, directory in (
         ("cluster_dir", cluster_dir),
@@ -315,6 +342,8 @@ def generate_configured_room(
         volume_idmap=volume_idmap,
         userns=userns,
     )
+    if not start_on_boot:
+        application = application.replace(pod=application.pod.replace(wanted_by=()))
     return (*cluster.save(cluster_dir), *application.save(quadlet_dir))
 
 
@@ -339,6 +368,7 @@ def generate_room(
         environment=environment,
         volume_idmap=volume_idmap,
         userns=userns,
+        start_on_boot=room_schedule(number) is None,
     )
 
 

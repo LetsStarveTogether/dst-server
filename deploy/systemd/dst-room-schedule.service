@@ -1,0 +1,8 @@
+[Unit]
+Description=Apply DST room opening hours
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/dst/dst-server
+ExecStart=/srv/dst/dst-server/.venv/bin/python -m scripts.manage_rooms
+TimeoutStartSec=30

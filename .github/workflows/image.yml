@@ -58,10 +58,10 @@ jobs:
       - name: Setup Python and uv
         uses: astral-sh/setup-uv@v10.0.1
 
-      - name: Install Lua runtimes
+      - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes lua5.1 luajit
+          sudo apt-get install --yes lua5.1 luajit libsystemd-dev pkg-config build-essential
 
       - name: Test
         run: uv run --locked --all-extras pytest
@@ -203,6 +203,12 @@ jobs:
       - name: Setup uv for image tests
         if: ${{ matrix.build }}
         uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Install host dependency build tools
+        if: ${{ matrix.build }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libsystemd-dev pkg-config build-essential
 
       - name: Test built image with the real game
         if: ${{ matrix.build }}

@@ -14,6 +14,7 @@ Environment=OTEL_METRICS_EXPORTER=none
 Environment=OTEL_TRACES_EXPORTER=none
 Volume=/srv/dst/000:/cluster:idmap=uids=0-1000-1;gids=0-1000-1
 ContainerName=dst-000-forest
+Timezone=local
 StopTimeout=360
 Notify=true
 

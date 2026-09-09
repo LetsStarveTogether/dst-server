@@ -131,7 +131,8 @@ async def test_close_keeps_detached_tail_failure_and_cleanup_errors(
         if isinstance(failure.value, ExceptionGroup)
         else (failure.value,)
     )
-    assert any("shard background task failed" in str(error) for error in errors)
+    assert agent._fatal_error is not None
+    assert agent._fatal_error in errors
     assert "private outbox" not in str(failure.value)
     if supervisor_fails:
         assert supervisor_error in errors

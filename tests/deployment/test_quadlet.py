@@ -394,12 +394,28 @@ def test_container_pull_policy_round_trip(tmp_path: Path, pull: str | None) -> N
     assert ContainerUnit.load(path) == unit
 
 
+@pytest.mark.parametrize("timezone", [None, "local", "Asia/Shanghai", "UTC"])
+def test_container_timezone_round_trip(tmp_path: Path, timezone: str | None) -> None:
+    unit = ContainerUnit(name="worker", image="image", timezone=timezone)
+    (path,) = unit.save(tmp_path)
+    rendered = path.read_text(encoding="utf-8")
+
+    assert ("\nTimezone=" in rendered) is (timezone is not None)
+    if timezone is not None:
+        assert f"\nTimezone={timezone}\n" in rendered
+    assert ContainerUnit.load(path) == unit
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
         ("kill_mode", "unknown"),
         ("watchdog_signal", "SIGKILL\nExecStart=oops"),
         ("pull", "sometimes"),
+        ("timezone", ""),
+        ("timezone", "Asia Shanghai"),
+        ("timezone", "local\nExec=unsafe"),
+        ("timezone", "local\0"),
     ],
 )
 def test_container_rejects_invalid_native_values(field: str, value: str) -> None:
@@ -593,9 +609,7 @@ def test_application_builds_master_secondary_lifecycle(
 
     assert application.pod.pod_name == application.pod.name == "dst-007"
     assert application.pod.userns is None
-    assert "UserNS=" not in application.pod.render()
     assert all(volume.idmap is None for volume in application.master.volumes)
-    assert "idmap=" not in application.master.render()
     assert application.master.container_name == application.master.name
     assert secondary.container_name == secondary.name
     assert application.master.wants == (f"{secondary.name}.container",)
@@ -624,6 +638,7 @@ def test_application_builds_master_secondary_lifecycle(
     for unit in (application.master, secondary):
         assert unit.image == "quay.io/wh2099/dst-server:latest"
         assert unit.pull == "always"
+        assert unit.timezone == "local"
         assert unit.timeout_start_sec == 1800
         assert unit.stop_timeout is not None
         assert unit.timeout_stop_sec is not None

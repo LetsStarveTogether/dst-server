@@ -298,6 +298,7 @@ class QuadletApplication(RevalidatedFrozenModel):
                 f"{base}-{_escape_unit_name(name)}.container"
                 for name in secondary_names
             ),
+            timezone="local",
             stop_timeout=360,
             notify=True,
             restart="on-failure",

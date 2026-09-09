@@ -7,6 +7,7 @@ import pytest
 from dst_server import mods
 from dst_server.cluster import console, service
 from dst_server.configuration import files as layout
+from dst_server.configuration.overrides import WorkshopDownloads
 from dst_server.deployment import DEFAULT_IMAGE, QuadletApplication
 
 
@@ -39,7 +40,6 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
         quadlet,
         name="dst-000",
     )
-    rendered = "\n".join(application.files().values())
 
     assert len(application.secondaries) == 1
     assert application.pod.networks == ()
@@ -60,13 +60,17 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
         (30003, 27017),
     )
     assert master.exec[3] == "30000"
-    assert "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://10.255.255.254:4317" in rendered
-    assert "DST_SERVER_TELEMETRY_PROFILE=history" in rendered
-    assert "OTEL_METRICS_EXPORTER=none" in rendered
-    assert "OTEL_TRACES_EXPORTER=none" in rendered
     for unit in (master, secondary):
+        assert unit.environment == {
+            "DST_SERVER_CLUSTER_NAME": "dst-000",
+            "DST_SERVER_TELEMETRY_PROFILE": "history",
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+            "OTEL_METRICS_EXPORTER": "none",
+            "OTEL_TRACES_EXPORTER": "none",
+        }
         assert unit.image == DEFAULT_IMAGE
         assert unit.pull == "always"
+        assert unit.timezone == "local"
         assert unit.timeout_start_sec == 1800
         assert unit.notify is True
         assert unit.watchdog_sec == 300
@@ -74,19 +78,13 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
         assert unit.kill_mode == "control-group"
         assert unit.watchdog_signal == "SIGKILL"
         text = (quadlet / f"{unit.name}.container").read_text(encoding="utf-8")
-        assert "Pull=always" in text
-        assert "TimeoutStartSec=1800" in text
-        assert "Notify=true" in text
-        assert "WatchdogSec=300" in text
-        assert "KillMode=control-group" in text
-        assert "WatchdogSignal=SIGKILL" in text
         assert "Health" not in text
 
 
 def test_netdata_deployment_contract_is_consistent() -> None:
     deploy = Path(__file__).parents[2] / "deploy"
     application = QuadletApplication.load(deploy / "quadlet", name="dst-000")
-    address = dict(application.master.environment)[
+    address = application.master.environment[
         "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
     ].removeprefix("http://")
     base_dir = "/srv/otel"
@@ -135,9 +133,9 @@ def test_cluster_and_mod_files_are_prepared(tmp_path: Path) -> None:
     assert install_mods.is_symlink()
     assert install_mods.resolve() == (cluster / "mods").resolve()
     assert (cluster / "mods" / "ugc").is_dir()
-    assert (cluster / "mods" / "dedicated_server_mods_setup.lua").read_text(
-        encoding="utf-8"
-    ) == 'ServerModSetup("7")\nServerModSetup("42")\n'
+    assert WorkshopDownloads.load(
+        cluster / "mods" / "dedicated_server_mods_setup.lua"
+    ) == WorkshopDownloads(items=frozenset({7, 42}))
     assert {shard.name for shard in shards} == {"forest", "cave"}
     assert (
         next(shard for shard in shards if shard.master).console == cluster / "console"

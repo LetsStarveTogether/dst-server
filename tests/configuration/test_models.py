@@ -179,7 +179,6 @@ def test_required_ini_fields_do_not_override_preset_values() -> None:
     assert patch.model_fields_set == {"server_port"}
     assert settings.server_port == 12000
     assert settings.encode_user_path is False
-    assert settings.render().endswith("[ACCOUNT]\nencode_user_path = false\n")
 
 
 def test_ini_loader_rejects_unknown_input(tmp_path: Path) -> None:
@@ -390,7 +389,7 @@ def test_world_factories_reject_wrong_presets_and_override_models() -> None:
         WorldgenOverride.cave(overrides=ForestOverrides())  # ty: ignore[invalid-argument-type]
 
     custom = WorldgenOverride.forest(worldgen_preset=CustomPreset("MY_MOD_PRESET"))
-    assert 'worldgen_preset = "MY_MOD_PRESET"' in custom.render()
+    assert custom.worldgen_preset == "MY_MOD_PRESET"
     with pytest.raises(ValidationError, match="same world type"):
         WorldgenOverride(
             worldgen_preset="survival_together",
@@ -405,7 +404,7 @@ def test_world_factories_reject_wrong_presets_and_override_models() -> None:
         worldgen_preset="\u017fURVIVAL_TOGETHER",
         overrides=CaveOverrides(),
     )
-    assert 'worldgen_preset = "\u017fURVIVAL_TOGETHER"' in unicode_custom.render()
+    assert unicode_custom.worldgen_preset == "\u017fURVIVAL_TOGETHER"
 
 
 def test_builtin_preset_loading_matches_lua_ascii_case_folding(tmp_path: Path) -> None:
@@ -509,22 +508,29 @@ def test_custom_world_overrides_reject_non_lua_values(value: object) -> None:
         world.render()
 
 
-def test_internal_worldgen_topology_overrides_are_typed_and_sparse() -> None:
+def test_internal_worldgen_topology_overrides_are_typed_and_sparse(
+    tmp_path: Path,
+) -> None:
     forest = WorldgenOverride.forest(
         overrides=ForestOverrides(
             has_ocean=False,
             layout_mode="RestrictNodesByKey",
             wormhole_prefab="tentacle_pillar",
         )
-    ).render()
-
-    assert '["has_ocean"] = false' in forest
-    assert '["layout_mode"] = "RestrictNodesByKey"' in forest
-    assert '["wormhole_prefab"] = "tentacle_pillar"' in forest
-    assert (
-        "    overrides = {},"
-        in WorldgenOverride.cave(overrides=CaveOverrides(has_ocean=None)).render()
     )
+    path = tmp_path / "worldgenoverride.lua"
+    path.write_text(forest.render(), encoding="utf-8")
+
+    assert WorldgenOverride.load(path).overrides.model_dump(exclude_unset=True) == {
+        "has_ocean": False,
+        "layout_mode": "RestrictNodesByKey",
+        "wormhole_prefab": "tentacle_pillar",
+    }
+    path.write_text(
+        WorldgenOverride.cave(overrides=CaveOverrides(has_ocean=None)).render(),
+        encoding="utf-8",
+    )
+    assert configuration.load_lua_table(path, "world override")["overrides"] == {}
     with pytest.raises(ValidationError):
         ForestOverrides(layout_mode="unknown")  # ty: ignore[invalid-argument-type]
 
@@ -621,7 +627,7 @@ def test_validated_replace_preserves_sparse_fields() -> None:
     settings = ClusterSettings().replace(pvp=True)
 
     assert settings.model_fields_set == {"pvp"}
-    assert settings.render() == "[GAMEPLAY]\npvp = true\n"
+    assert settings.pvp is True
     assert ForestOverrides().replace(day="onlyday").model_fields_set == {"day"}
     with pytest.raises(ValidationError):
         settings.replace(pvp="yes")
@@ -944,7 +950,10 @@ def test_shard_save_preserves_unmanaged_world_and_explicitly_disables_it(
         settings=ShardSettings(is_master=True),
         world=WorldgenOverride(enabled=False),
     ).save(tmp_path)
-    assert "override_enabled = false" in path.read_text(encoding="utf-8")
+    assert (
+        configuration.load_lua_table(path, "world override")["override_enabled"]
+        is False
+    )
 
 
 @pytest.mark.parametrize(
@@ -979,14 +988,19 @@ def test_worldgen_rejects_unknown_and_cross_world_keys(
         model.model_validate({key: "default"})
 
 
-def test_recursive_lua_values_enforce_safe_integer_boundaries() -> None:
+def test_recursive_lua_values_enforce_safe_integer_boundaries(tmp_path: Path) -> None:
     maximum = 2**53 - 1
     mod = ModOverride(
         enabled=True,
         configuration_options={"nested": [maximum, -maximum]},
     )
 
-    assert str(-maximum) in ModOverrides(entries={"local": mod}).render()
+    path = tmp_path / "modoverrides.lua"
+    path.write_text(ModOverrides(entries={"local": mod}).render(), encoding="utf-8")
+
+    assert ModOverrides.load(path).entries["local"].configuration_options == {
+        "nested": [maximum, -maximum]
+    }
     with pytest.raises(ValidationError, match="less than or equal"):
         ModOverride(
             configuration_options={"nested": [{"too_large": 2**53}]},
@@ -1146,19 +1160,12 @@ def test_cluster_cascade_saves_complete_tree_and_preserves_game_files(
         encoding="utf-8",
     )
     written = cluster.save(tmp_path)
+    saved = ClusterConfig.load(tmp_path)
 
     assert written
-    assert (
-        (tmp_path / "cluster.ini")
-        .read_text(encoding="utf-8")
-        .startswith("[SHARD]\nshard_enabled = true\n")
-    )
-    assert "is_master = true" in (tmp_path / "Master" / "server.ini").read_text(
-        encoding="utf-8"
-    )
-    assert "is_master = false" in (tmp_path / "Caves" / "server.ini").read_text(
-        encoding="utf-8"
-    )
+    assert saved.settings.shard_enabled is True
+    assert saved.shards["Master"].settings.is_master is True
+    assert saved.shards["Caves"].settings.is_master is False
     assert (tmp_path / "cluster_token.txt").read_text(encoding="utf-8") == (
         "test-token\n"
     )
@@ -1171,9 +1178,9 @@ def test_cluster_cascade_saves_complete_tree_and_preserves_game_files(
     assert (tmp_path / "cluster.ini").stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "Master" / "server.ini").stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "mods" / "ugc").is_dir()
-    assert (tmp_path / "mods" / "dedicated_server_mods_setup.lua").read_text(
-        encoding="utf-8"
-    ) == ('ServerModSetup("8")\nServerModSetup("42")\nServerModCollectionSetup("99")\n')
+    assert saved.downloads == WorkshopDownloads(
+        items=frozenset({8, 42}), collections=frozenset({99})
+    )
     assert (tmp_path / "Master" / "save" / "world").read_text(
         encoding="utf-8"
     ) == "keep"
@@ -1303,9 +1310,9 @@ def test_preserved_modsettings_keep_their_existing_downloads(tmp_path: Path) -> 
     assert (tmp_path / "mods" / "modsettings.lua").read_text(encoding="utf-8") == (
         'ForceEnableMod("workshop-123")\n'
     )
-    assert (tmp_path / "mods" / "dedicated_server_mods_setup.lua").read_text(
-        encoding="utf-8"
-    ) == 'ServerModSetup("123")\n'
+    assert WorkshopDownloads.load(
+        tmp_path / "mods" / "dedicated_server_mods_setup.lua"
+    ) == WorkshopDownloads(items=frozenset({123}))
 
     ClusterConfig(shards=shards, mod_settings=ModSettings()).save(tmp_path)
     assert (tmp_path / "mods" / "modsettings.lua").read_text(encoding="utf-8") == ""

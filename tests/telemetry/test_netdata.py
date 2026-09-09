@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import tracemalloc
@@ -22,7 +23,7 @@ from pathlib import Path
 assert sys.argv[1] == "logs"
 arguments = sys.argv[2:]
 query = arguments[arguments.index("--query") + 1] if "--query" in arguments else ""
-print("ARGV|" + "|".join(arguments), file=sys.stderr, flush=True)
+print(json.dumps(arguments), file=sys.stderr, flush=True)
 
 if query == "fail":
     print("partial output", flush=True)
@@ -67,13 +68,16 @@ def request(**changes: object) -> NetdataLogQuery:
     })
 
 
-async def test_query_maps_arguments_and_preserves_records(tmp_path: Path) -> None:
+@pytest.mark.parametrize("query", ["KU_123", "玩家 | --limit 999"])
+async def test_query_maps_arguments_and_preserves_records(
+    tmp_path: Path, query: str
+) -> None:
     logs = make_logs(tmp_path)
     value = request(
         until=datetime(2026, 9, 1, tzinfo=UTC) + timedelta(minutes=5),
         service_namespace="games",
         filters=(("cluster", "dst-000"), ("event", "joined")),
-        query="KU_123",
+        query=query,
         fields=("event_name", "tag"),
         limit=20,
     )
@@ -87,13 +91,33 @@ async def test_query_maps_arguments_and_preserves_records(tmp_path: Path) -> Non
         ("tag", "b"),
     )
     assert result.records[1].fields == ()
-    assert f"--since|{int(value.since.timestamp())}" in result.diagnostics
     assert value.until is not None
-    assert f"--until|{int(value.until.timestamp())}" in result.diagnostics
-    assert "--filter|cluster=dst-000,event=joined" in result.diagnostics
-    assert "--fields|event_name,tag" in result.diagnostics
-    assert "--limit|20|--output|ndjson" in result.diagnostics
-    assert "matched=2 returned=2" in result.diagnostics
+    arguments, diagnostics = result.diagnostics.splitlines()
+    assert json.loads(arguments) == [
+        "--stock-config",
+        str(tmp_path / "stock.yaml"),
+        "--config",
+        str(tmp_path / "otel.yaml"),
+        "--since",
+        str(int(value.since.timestamp())),
+        "--until",
+        str(int(value.until.timestamp())),
+        "--name",
+        "dst-server",
+        "--namespace",
+        "games",
+        "--filter",
+        "cluster=dst-000,event=joined",
+        "--query",
+        query,
+        "--fields",
+        "event_name,tag",
+        "--limit",
+        "20",
+        "--output",
+        "ndjson",
+    ]
+    assert diagnostics == "matched=2 returned=2 window=0..1"
 
 
 @pytest.mark.parametrize(

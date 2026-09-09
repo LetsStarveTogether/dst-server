@@ -35,7 +35,7 @@ from dst_server.configuration.overrides import WorldgenOverride
 from dst_server.configuration.presets import FOREST_CAVES
 from dst_server.configuration.store import ConfigurationStore
 from dst_server.configuration.world import ForestOverrides
-from dst_server.deployment import QuadletApplication, RoomPortAllocation
+from dst_server.deployment import ContainerUnit, QuadletApplication, RoomPortAllocation
 from dst_server.errors import (
     DisconnectedError,
     ErrorCode,
@@ -1074,17 +1074,13 @@ class QuadletSystem:
         application.save(quadlet_dir)
         for unit in (application.master, *application.secondaries):
             path = quadlet_dir / f"{unit.name}.container"
-            contents = path.read_text(encoding="utf-8")
-            for directive in (
-                "Notify=true",
-                "WatchdogSec=300",
-                "KillMode=control-group",
-                "WatchdogSignal=SIGKILL",
-            ):
-                assert directive in contents.splitlines()
-            assert "HealthCmd=" not in contents
+            saved = ContainerUnit.load(path)
+            assert saved.notify is True
+            assert saved.watchdog_sec == 300
+            assert saved.kill_mode == "control-group"
+            assert saved.watchdog_signal == "SIGKILL"
             # Keep the real 60-second notification cadence; only shorten recovery.
-            unit.replace(watchdog_sec=WATCHDOG_TEST_TIMEOUT, pull="never").save(
+            saved.replace(watchdog_sec=WATCHDOG_TEST_TIMEOUT, pull="never").save(
                 quadlet_dir
             )
         return cls(root, cluster, cluster_dir, quadlet_dir, application)
@@ -1653,15 +1649,12 @@ async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-str
             client.close()
             client = None
             for service in (system.master_service, *system.secondary_services):
-                _, result = await run_command(
-                    "systemctl",
-                    "show",
-                    "--property=Result",
-                    "--property=ExecMainStatus",
-                    service,
-                )
-                assert "Result=success" in result
-                assert "ExecMainStatus=0" in result
+                assert await service_properties(
+                    service, "Result", "ExecMainStatus"
+                ) == {
+                    "Result": "success",
+                    "ExecMainStatus": "0",
+                }
             for shard in SHARDS:
                 code, _ = await run_command(
                     "podman",

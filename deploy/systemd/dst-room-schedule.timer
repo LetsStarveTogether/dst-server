@@ -1,0 +1,12 @@
+[Unit]
+Description=Check DST room opening hours every minute
+
+[Timer]
+OnCalendar=minutely
+OnActiveSec=0
+OnClockChange=yes
+OnTimezoneChange=yes
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

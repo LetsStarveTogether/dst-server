@@ -296,6 +296,9 @@ class ContainerUnit(QuadletUnit):
     networks: Annotated[
         tuple[UnitToken, ...], UnitField("Container", "Network", "networks")
     ] = ()
+    timezone: Annotated[
+        UnitToken | None, UnitField("Container", "Timezone", "token")
+    ] = None
     stop_timeout: Annotated[
         Seconds | None, UnitField("Container", "StopTimeout", "integer")
     ] = None
