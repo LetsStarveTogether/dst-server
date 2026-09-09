@@ -2,9 +2,9 @@
 
 This page inventories Screen and Widget files.
 
-The Screen directory contains 135 Lua files.
+The Screen directory contains 136 Lua files.
 
-The Widget directory contains 272 Lua files.
+The Widget directory contains 274 Lua files.
 
 ## `0x83011111` Screen Files
 
@@ -68,6 +68,7 @@ The Widget directory contains 272 Lua files.
 - `scripts/screens/redux/compendiumscreen.lua`
 - `scripts/screens/redux/connectingtogamepopup.lua`
 - `scripts/screens/redux/defaultskinselection.lua`
+- `scripts/screens/redux/feedbackscreen.lua`
 - `scripts/screens/redux/festivaleventscreen.lua`
 - `scripts/screens/redux/genericwaitingpopup.lua`
 - `scripts/screens/redux/groomerpopupgridloadout.lua`
@@ -244,6 +245,7 @@ The Widget directory contains 272 Lua files.
 - `scripts/widgets/nutrientsover.lua`
 - `scripts/widgets/onlinestatus.lua`
 - `scripts/widgets/pagedlist.lua`
+- `scripts/widgets/panel.lua`
 - `scripts/widgets/parasitethrallover.lua`
 - `scripts/widgets/pethealthbadge.lua`
 - `scripts/widgets/pethungerbadge.lua`
@@ -363,6 +365,7 @@ The Widget directory contains 272 Lua files.
 - `scripts/widgets/scrollablelist.lua`
 - `scripts/widgets/secondarystatusdisplays.lua`
 - `scripts/widgets/serversettingstab.lua`
+- `scripts/widgets/shroudenover.lua`
 - `scripts/widgets/skilltreetoast.lua`
 - `scripts/widgets/skinannouncement.lua`
 - `scripts/widgets/skincollector.lua`

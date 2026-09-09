@@ -1,10 +1,10 @@
 # `0x10020000` Source Snapshot
 
-The tracked `scripts` tree contains 4,045 files, including 4,030 Lua files.
+The tracked `scripts` tree contains 4,087 files, including 4,072 Lua files.
 
-The `scripts` submodule is pinned to `6ea1ee2` (build `747465`, authored 2026-08-13).
+The `scripts` submodule is pinned to `64f28a7` (build `752118`, authored 2026-09-10).
 
-Compared with `c2d52ec` (build `740477`), this snapshot modifies 19 existing files without changing the source tree shape.
+Compared with `6ea1ee2` (build `747465`), this snapshot adds 46 files, removes four, and modifies 248.
 
 ## `0x10021111` Purpose
 
@@ -35,26 +35,25 @@ Count tracked files first, use directory totals to choose a runtime topic, and l
 
 - The tracked total includes 15 non-Lua files.
 - They are `scripts/.github/workflows/update.yml`, `scripts/controller.vdf`, and 13 files under `scripts/languages/`.
-- Compared with `c2d52ec` (build `740477`), `6ea1ee2` modifies 19 files and adds, removes, or renames none.
-- The delta contains 979 insertions and 75 deletions across 16 Lua files and three language catalogs.
-- Most of the volume is generated account-item data and localization catalogs.
+- Compared with `6ea1ee2` (build `747465`), the delta contains 30,643 insertions and 5,781 deletions across 298 files.
+- The changed files comprise 296 Lua files, `languages/strings.pot`, and `.github/workflows/update.yml`.
 - Directory totals guide reading effort but do not replace the reference coverage inventory.
 
 ## `0x10024111` Directory Breakdown
 
 | Scope | Lua files | Reading focus |
 | --- | ---: | --- |
-| `scripts/` root | 218 | Startup, global services, and data entry points |
-| `scripts/prefabs/` | 1,594 | The largest entity-assembly area |
-| `scripts/components/` | 821 | Primary server-side behaviour state |
-| `scripts/stategraphs/` | 261 | Action presentation and animation state machines |
-| `scripts/brains/` | 191 | AI decision entry points |
+| `scripts/` root | 222 | Startup, global services, and data entry points |
+| `scripts/prefabs/` | 1,610 | The largest entity-assembly area |
+| `scripts/components/` | 829 | Primary server-side behaviour state |
+| `scripts/stategraphs/` | 264 | Action presentation and animation state machines |
+| `scripts/brains/` | 195 | AI decision entry points |
 | `scripts/behaviours/` | 29 | Behaviour-tree nodes |
-| `scripts/map/` | 444 | World generation, layouts, and world definitions |
-| `scripts/widgets/` | 272 | HUD and UI components |
-| `scripts/screens/` | 135 | Front-end screens |
+| `scripts/map/` | 447 | World generation, layouts, and world definitions |
+| `scripts/widgets/` | 274 | HUD and UI components |
+| `scripts/screens/` | 136 | Front-end screens |
 | `scripts/scenarios/` | 50 | Scenario scripts |
-| `scripts/util/` | 8 | Small utility modules |
+| `scripts/util/` | 9 | Small utility modules |
 | `scripts/languages/` | 2 | Language-loading utilities |
 | `scripts/nis/` | 2 | Cinematic scripts |
 | `scripts/tools/` | 2 | Maintenance and export tools |
@@ -62,19 +61,15 @@ Count tracked files first, use directory totals to choose a runtime topic, and l
 
 ## `0x10024211` Focus Areas
 
-Build `747465` changes these clusters:
+Builds `751350` through `752118` change these clusters:
 
-- Release group 184 adds 16 account items, including nine `SEASIDE` outfits and a beach mystery box.
-- `waterballoon_insect` gains the complete base-prefab, skin initializer, held-symbol, and equip-event path.
-- `body_wathgrithr_ancient` overrides its character-specific upper-arm symbol instead of hiding it.
-- New strings cover store login, online/offline world conversion, and premium-online membership.
-- They have no direct references elsewhere in tracked Lua.
-- `worldroutefollower` clears its current teleport task handle when the callback starts.
-- It can then schedule the next virtual route hop.
-- Cannonball launches deactivate inventory mines and custom traps before marking them airborne.
-- Repaired fumarole shovels use `TUNING.SHOVEL_DAMAGE` rather than axe damage.
-- The AoE spider-healing scan excludes `creaturecorpse` targets that have no health component.
-- The HUD clock scales its higher-resolution face, rim, and hand textures to `0.5` without changing clock state.
+- Virtual rooms move from the removed Vault-specific components into `virtualroommanager`, `virtualroomset`, and `virtualroomteleporter`.
+- `world.lua` installs the shared virtual-room manager and `worldstaticlayouts`; `cave.lua` registers the Vault layout.
+- Prefab, Brain, and StateGraph updates cover Charlie, bat, and rocky bosses and the Atrium ritual.
+- Three new bat-boss cave layouts extend world-generation data.
+- `aoeutil.lua` provides shared area-attack and work helpers.
+- `feedback.lua`, the feedback screen, and screenshot utilities add a feedback path.
+- Entity, combat, customization, and world-settings changes are relevant to native Lua contract checks.
 
 ## `0x10025100` Verification
 
@@ -88,8 +83,8 @@ git ls-files --recurse-submodules scripts/prefabs | rg "\.lua$" | wc -l
 git ls-files --recurse-submodules scripts/components | rg "\.lua$" | wc -l
 git -C scripts rev-parse --short=7 HEAD
 git -C scripts log -1 --format='%as %s'
-git -C scripts diff --shortstat c2d52ec..6ea1ee2
-git -C scripts diff --name-status c2d52ec..6ea1ee2
+git -C scripts diff --shortstat 6ea1ee2..64f28a7
+git -C scripts diff --name-status 6ea1ee2..64f28a7
 ~~~
 
 ### `0x10025111` Next Step

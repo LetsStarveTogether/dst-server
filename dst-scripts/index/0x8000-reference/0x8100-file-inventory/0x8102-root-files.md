@@ -4,10 +4,11 @@ This page inventories tracked files in the `scripts` root and highlights the pri
 
 ## `0x81021111` Root Lua Files
 
-The root contains 218 Lua files.
+The root contains 222 Lua files.
 
 - `scripts/achievements.lua`
 - `scripts/actions.lua`
+- `scripts/aoeutil.lua`
 - `scripts/barterqueue.lua`
 - `scripts/beefalo_clothing.lua`
 - `scripts/behaviourtree.lua`
@@ -59,6 +60,7 @@ The root contains 218 Lua files.
 - `scripts/eventachievements.lua`
 - `scripts/events.lua`
 - `scripts/falloffdefs.lua`
+- `scripts/feedback.lua`
 - `scripts/fileutil.lua`
 - `scripts/firelevel.lua`
 - `scripts/fix_character_strings.lua`
@@ -211,6 +213,8 @@ The root contains 218 Lua files.
 - `scripts/vec3util.lua`
 - `scripts/vector3.lua`
 - `scripts/vecutil.lua`
+- `scripts/versioning.lua`
+- `scripts/versioning_skins.lua`
 - `scripts/voteutil.lua`
 - `scripts/wintersfeastcookedfoods.lua`
 - `scripts/wordfilter.lua`

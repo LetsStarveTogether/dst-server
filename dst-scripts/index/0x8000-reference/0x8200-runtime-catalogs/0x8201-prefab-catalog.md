@@ -1,6 +1,6 @@
 # `0x82010000` Prefab Catalog
 
-The Prefab directory contains 1,594 Lua files.
+The Prefab directory contains 1,610 Lua files.
 
 ## `0x82011111` Prefab Files
 
@@ -60,6 +60,7 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/armor_lavaarena.lua`
 - `scripts/prefabs/armor_lunarplant.lua`
 - `scripts/prefabs/armor_marble.lua`
+- `scripts/prefabs/armor_rocky.lua`
 - `scripts/prefabs/armor_ruins.lua`
 - `scripts/prefabs/armor_sanity.lua`
 - `scripts/prefabs/armor_skeleton.lua`
@@ -77,10 +78,14 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/atrium_gate_pulsesfx.lua`
 - `scripts/prefabs/atrium_key.lua`
 - `scripts/prefabs/atrium_light.lua`
+- `scripts/prefabs/atrium_markers.lua`
 - `scripts/prefabs/atrium_overgrowth.lua`
 - `scripts/prefabs/atrium_pillar.lua`
+- `scripts/prefabs/atrium_ritual_marking.lua`
+- `scripts/prefabs/atrium_ritual_organs.lua`
 - `scripts/prefabs/atrium_rubble.lua`
 - `scripts/prefabs/atrium_statue.lua`
+- `scripts/prefabs/atriumroom_defs.lua`
 - `scripts/prefabs/attunable_classified.lua`
 - `scripts/prefabs/axe.lua`
 - `scripts/prefabs/axe_pickaxe.lua`
@@ -101,7 +106,9 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/bandage_butterflywings.lua`
 - `scripts/prefabs/basalt.lua`
 - `scripts/prefabs/bat.lua`
+- `scripts/prefabs/bat_boss.lua`
 - `scripts/prefabs/batbat.lua`
+- `scripts/prefabs/batbosscave.lua`
 - `scripts/prefabs/batcave.lua`
 - `scripts/prefabs/bathbomb.lua`
 - `scripts/prefabs/battlesong_container.lua`
@@ -275,11 +282,18 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/channel_absorb_fire_fx.lua`
 - `scripts/prefabs/character_fire.lua`
 - `scripts/prefabs/charcoal.lua`
+- `scripts/prefabs/charlie_boss.lua`
+- `scripts/prefabs/charlie_boss_minions.lua`
+- `scripts/prefabs/charlie_boss_projectiles.lua`
+- `scripts/prefabs/charlie_boss_runner.lua`
+- `scripts/prefabs/charlie_boss_trial.lua`
+- `scripts/prefabs/charlie_boss_vines.lua`
 - `scripts/prefabs/charlie_hand.lua`
 - `scripts/prefabs/charlie_heckler.lua`
 - `scripts/prefabs/charlie_lecturn.lua`
 - `scripts/prefabs/charlie_npc.lua`
 - `scripts/prefabs/charlie_stage.lua`
+- `scripts/prefabs/charliearena_lightrays.lua`
 - `scripts/prefabs/charlieresidue.lua`
 - `scripts/prefabs/charlierose.lua`
 - `scripts/prefabs/chessjunk.lua`
@@ -701,6 +715,7 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/livingtree_halloween.lua`
 - `scripts/prefabs/livingtree_root.lua`
 - `scripts/prefabs/livingtree_root_planted.lua`
+- `scripts/prefabs/lobbyvaultroom_defs.lua`
 - `scripts/prefabs/log.lua`
 - `scripts/prefabs/lost_toys.lua`
 - `scripts/prefabs/lucy.lua`
@@ -1075,6 +1090,7 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/rock_light.lua`
 - `scripts/prefabs/rocks.lua`
 - `scripts/prefabs/rocky.lua`
+- `scripts/prefabs/rocky_boss.lua`
 - `scripts/prefabs/rockyherd.lua`
 - `scripts/prefabs/rook.lua`
 - `scripts/prefabs/rope.lua`

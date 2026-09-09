@@ -1,6 +1,6 @@
 # `0x81010000` Complete File Inventory
 
-This page lists all 4,045 paths returned by `git ls-files --recurse-submodules scripts`.
+This page lists all 4,087 paths returned by `git ls-files --recurse-submodules scripts`.
 
 ## `0x81011111` Inventory Source
 
@@ -16,6 +16,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/.github/workflows/update.yml`
 - `scripts/achievements.lua`
 - `scripts/actions.lua`
+- `scripts/aoeutil.lua`
 - `scripts/barterqueue.lua`
 - `scripts/beefalo_clothing.lua`
 - `scripts/behaviours/approach.lua`
@@ -57,6 +58,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/brains/antlionbrain.lua`
 - `scripts/brains/archive_securitypulsebrain.lua`
 - `scripts/brains/babybeefalobrain.lua`
+- `scripts/brains/bat_bossbrain.lua`
 - `scripts/brains/batbrain.lua`
 - `scripts/brains/beardbunnymanbrain.lua`
 - `scripts/brains/beargerbrain.lua`
@@ -88,6 +90,8 @@ git ls-files --recurse-submodules scripts
 - `scripts/brains/catcoonbrain.lua`
 - `scripts/brains/caveventmitebrain.lua`
 - `scripts/brains/centipedebrain.lua`
+- `scripts/brains/charlie_boss_runnerbrain.lua`
+- `scripts/brains/charlie_bossbrain.lua`
 - `scripts/brains/chest_mimicbrain.lua`
 - `scripts/brains/chesterbrain.lua`
 - `scripts/brains/cookiecutterbrain.lua`
@@ -173,6 +177,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/brains/rabbitbrain.lua`
 - `scripts/brains/rabbitking_bunnymanbrain.lua`
 - `scripts/brains/rabbitkingbrain.lua`
+- `scripts/brains/rocky_bossbrain.lua`
 - `scripts/brains/rockybrain.lua`
 - `scripts/brains/rookbrain.lua`
 - `scripts/brains/shadow_bishopbrain.lua`
@@ -273,10 +278,12 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/area_unlock.lua`
 - `scripts/components/areaaware.lua`
 - `scripts/components/armor.lua`
+- `scripts/components/atriumritualorgantracker.lua`
 - `scripts/components/attackdodger.lua`
 - `scripts/components/attunable.lua`
 - `scripts/components/attuner.lua`
 - `scripts/components/aura.lua`
+- `scripts/components/autojiggle.lua`
 - `scripts/components/autosaver.lua`
 - `scripts/components/autoterraformer.lua`
 - `scripts/components/avengingghost.lua`
@@ -352,6 +359,8 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/channelcastable.lua`
 - `scripts/components/channelcaster.lua`
 - `scripts/components/chargingreticule.lua`
+- `scripts/components/charlie_tracker.lua`
+- `scripts/components/charliearenawatcher.lua`
 - `scripts/components/charliecutscene.lua`
 - `scripts/components/chessunlocks.lua`
 - `scripts/components/childspawner.lua`
@@ -817,6 +826,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/rider_replica.lua`
 - `scripts/components/riftspawner.lua`
 - `scripts/components/riftthralltype.lua`
+- `scripts/components/rockybossspawner.lua`
 - `scripts/components/rooted.lua`
 - `scripts/components/ropebridgemanager.lua`
 - `scripts/components/roseinspectable.lua`
@@ -852,6 +862,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/shadowthrall_mimics.lua`
 - `scripts/components/shadowthrallmanager.lua`
 - `scripts/components/shard_autosaver.lua`
+- `scripts/components/shard_charlieinfo.lua`
 - `scripts/components/shard_clock.lua`
 - `scripts/components/shard_daywalkerspawner.lua`
 - `scripts/components/shard_mermkingwatcher.lua`
@@ -925,6 +936,8 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/staffsanity.lua`
 - `scripts/components/stageactingprop.lua`
 - `scripts/components/stageactor.lua`
+- `scripts/components/stalkerinspectable.lua`
+- `scripts/components/stalkermanager.lua`
 - `scripts/components/steeringwheel.lua`
 - `scripts/components/steeringwheeluser.lua`
 - `scripts/components/stewer.lua`
@@ -990,15 +1003,14 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/vanish_on_sleep.lua`
 - `scripts/components/vase.lua`
 - `scripts/components/vasedecoration.lua`
-- `scripts/components/vault_floor_helper.lua`
-- `scripts/components/vault_teleporter.lua`
 - `scripts/components/vaultmusiclistener.lua`
 - `scripts/components/vaultorbteleportdestination.lua`
 - `scripts/components/vaultorbteleporter.lua`
-- `scripts/components/vaultroom.lua`
-- `scripts/components/vaultroommanager.lua`
 - `scripts/components/vaulttorchgrid.lua`
 - `scripts/components/vinebridgemanager.lua`
+- `scripts/components/virtualroommanager.lua`
+- `scripts/components/virtualroomset.lua`
+- `scripts/components/virtualroomteleporter.lua`
 - `scripts/components/wagboss_tracker.lua`
 - `scripts/components/wagpunk_arena_manager.lua`
 - `scripts/components/wagpunk_floor_helper.lua`
@@ -1050,6 +1062,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/worldsettings.lua`
 - `scripts/components/worldsettingstimer.lua`
 - `scripts/components/worldstate.lua`
+- `scripts/components/worldstaticlayouts.lua`
 - `scripts/components/worldtemperature.lua`
 - `scripts/components/worldvoter.lua`
 - `scripts/components/worldwind.lua`
@@ -1110,6 +1123,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/eventachievements.lua`
 - `scripts/events.lua`
 - `scripts/falloffdefs.lua`
+- `scripts/feedback.lua`
 - `scripts/fileutil.lua`
 - `scripts/firelevel.lua`
 - `scripts/fix_character_strings.lua`
@@ -1255,6 +1269,9 @@ git ls-files --recurse-submodules scripts
 - `scripts/map/static_layouts/bargain_start.lua`
 - `scripts/map/static_layouts/barracks.lua`
 - `scripts/map/static_layouts/barracks_two.lua`
+- `scripts/map/static_layouts/batbosscave1.lua`
+- `scripts/map/static_layouts/batbosscave2.lua`
+- `scripts/map/static_layouts/batbosscave3.lua`
 - `scripts/map/static_layouts/bathbombedhotspring.lua`
 - `scripts/map/static_layouts/beefalo_farm.lua`
 - `scripts/map/static_layouts/blue_mushy_entrance.lua`
@@ -1694,6 +1711,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/armor_lavaarena.lua`
 - `scripts/prefabs/armor_lunarplant.lua`
 - `scripts/prefabs/armor_marble.lua`
+- `scripts/prefabs/armor_rocky.lua`
 - `scripts/prefabs/armor_ruins.lua`
 - `scripts/prefabs/armor_sanity.lua`
 - `scripts/prefabs/armor_skeleton.lua`
@@ -1711,10 +1729,14 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/atrium_gate_pulsesfx.lua`
 - `scripts/prefabs/atrium_key.lua`
 - `scripts/prefabs/atrium_light.lua`
+- `scripts/prefabs/atrium_markers.lua`
 - `scripts/prefabs/atrium_overgrowth.lua`
 - `scripts/prefabs/atrium_pillar.lua`
+- `scripts/prefabs/atrium_ritual_marking.lua`
+- `scripts/prefabs/atrium_ritual_organs.lua`
 - `scripts/prefabs/atrium_rubble.lua`
 - `scripts/prefabs/atrium_statue.lua`
+- `scripts/prefabs/atriumroom_defs.lua`
 - `scripts/prefabs/attunable_classified.lua`
 - `scripts/prefabs/axe.lua`
 - `scripts/prefabs/axe_pickaxe.lua`
@@ -1735,7 +1757,9 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/bandage_butterflywings.lua`
 - `scripts/prefabs/basalt.lua`
 - `scripts/prefabs/bat.lua`
+- `scripts/prefabs/bat_boss.lua`
 - `scripts/prefabs/batbat.lua`
+- `scripts/prefabs/batbosscave.lua`
 - `scripts/prefabs/batcave.lua`
 - `scripts/prefabs/bathbomb.lua`
 - `scripts/prefabs/battlesong_container.lua`
@@ -1909,11 +1933,18 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/channel_absorb_fire_fx.lua`
 - `scripts/prefabs/character_fire.lua`
 - `scripts/prefabs/charcoal.lua`
+- `scripts/prefabs/charlie_boss.lua`
+- `scripts/prefabs/charlie_boss_minions.lua`
+- `scripts/prefabs/charlie_boss_projectiles.lua`
+- `scripts/prefabs/charlie_boss_runner.lua`
+- `scripts/prefabs/charlie_boss_trial.lua`
+- `scripts/prefabs/charlie_boss_vines.lua`
 - `scripts/prefabs/charlie_hand.lua`
 - `scripts/prefabs/charlie_heckler.lua`
 - `scripts/prefabs/charlie_lecturn.lua`
 - `scripts/prefabs/charlie_npc.lua`
 - `scripts/prefabs/charlie_stage.lua`
+- `scripts/prefabs/charliearena_lightrays.lua`
 - `scripts/prefabs/charlieresidue.lua`
 - `scripts/prefabs/charlierose.lua`
 - `scripts/prefabs/chessjunk.lua`
@@ -2335,6 +2366,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/livingtree_halloween.lua`
 - `scripts/prefabs/livingtree_root.lua`
 - `scripts/prefabs/livingtree_root_planted.lua`
+- `scripts/prefabs/lobbyvaultroom_defs.lua`
 - `scripts/prefabs/log.lua`
 - `scripts/prefabs/lost_toys.lua`
 - `scripts/prefabs/lucy.lua`
@@ -2709,6 +2741,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/rock_light.lua`
 - `scripts/prefabs/rocks.lua`
 - `scripts/prefabs/rocky.lua`
+- `scripts/prefabs/rocky_boss.lua`
 - `scripts/prefabs/rockyherd.lua`
 - `scripts/prefabs/rook.lua`
 - `scripts/prefabs/rope.lua`
@@ -3366,6 +3399,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/screens/redux/compendiumscreen.lua`
 - `scripts/screens/redux/connectingtogamepopup.lua`
 - `scripts/screens/redux/defaultskinselection.lua`
+- `scripts/screens/redux/feedbackscreen.lua`
 - `scripts/screens/redux/festivaleventscreen.lua`
 - `scripts/screens/redux/genericwaitingpopup.lua`
 - `scripts/screens/redux/groomerpopupgridloadout.lua`
@@ -3536,7 +3570,10 @@ git ls-files --recurse-submodules scripts
 - `scripts/stategraphs/SGcattoy_mouse.lua`
 - `scripts/stategraphs/SGcaveventmite.lua`
 - `scripts/stategraphs/SGcentipede.lua`
+- `scripts/stategraphs/SGcharlie_boss.lua`
+- `scripts/stategraphs/SGcharlie_boss_runner.lua`
 - `scripts/stategraphs/SGcharlie_heckler.lua`
+- `scripts/stategraphs/SGcharlie_npc.lua`
 - `scripts/stategraphs/SGcharlie_stage_post.lua`
 - `scripts/stategraphs/SGchest_mimic.lua`
 - `scripts/stategraphs/SGchester.lua`
@@ -3766,6 +3803,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/util/hitbox.lua`
 - `scripts/util/profanityfilter.lua`
 - `scripts/util/savedata.lua`
+- `scripts/util/screenshotter.lua`
 - `scripts/util/sourcemodifierlist.lua`
 - `scripts/util/textcompleter.lua`
 - `scripts/util/weighted_list.lua`
@@ -3773,6 +3811,8 @@ git ls-files --recurse-submodules scripts
 - `scripts/vec3util.lua`
 - `scripts/vector3.lua`
 - `scripts/vecutil.lua`
+- `scripts/versioning.lua`
+- `scripts/versioning_skins.lua`
 - `scripts/voteutil.lua`
 - `scripts/widgets/animbutton.lua`
 - `scripts/widgets/animspinner.lua`
@@ -3872,6 +3912,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/widgets/nutrientsover.lua`
 - `scripts/widgets/onlinestatus.lua`
 - `scripts/widgets/pagedlist.lua`
+- `scripts/widgets/panel.lua`
 - `scripts/widgets/parasitethrallover.lua`
 - `scripts/widgets/pethealthbadge.lua`
 - `scripts/widgets/pethungerbadge.lua`
@@ -3991,6 +4032,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/widgets/scrollablelist.lua`
 - `scripts/widgets/secondarystatusdisplays.lua`
 - `scripts/widgets/serversettingstab.lua`
+- `scripts/widgets/shroudenover.lua`
 - `scripts/widgets/skilltreetoast.lua`
 - `scripts/widgets/skinannouncement.lua`
 - `scripts/widgets/skincollector.lua`

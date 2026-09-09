@@ -6,6 +6,7 @@ on:
     paths:
       - '.containerignore'
       - '.github/workflows/image.yml'
+      - '.python-version'
       - 'Containerfile'
       - 'src/**'
       - 'tests/system/test_podman.py'
@@ -56,7 +57,7 @@ jobs:
           submodules: true
 
       - name: Setup Python and uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.1.0
 
       - name: Install test dependencies
         run: |
@@ -202,7 +203,7 @@ jobs:
 
       - name: Setup uv for image tests
         if: ${{ matrix.build }}
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.1.0
 
       - name: Install host dependency build tools
         if: ${{ matrix.build }}

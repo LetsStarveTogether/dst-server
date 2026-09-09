@@ -2,7 +2,7 @@
 
 This page inventories world-generation map and scenario files.
 
-The Map directory contains 444 Lua files.
+The Map directory contains 447 Lua files.
 
 The Scenario directory contains 50 Lua files.
 
@@ -105,6 +105,9 @@ The Scenario directory contains 50 Lua files.
 - `scripts/map/static_layouts/bargain_start.lua`
 - `scripts/map/static_layouts/barracks.lua`
 - `scripts/map/static_layouts/barracks_two.lua`
+- `scripts/map/static_layouts/batbosscave1.lua`
+- `scripts/map/static_layouts/batbosscave2.lua`
+- `scripts/map/static_layouts/batbosscave3.lua`
 - `scripts/map/static_layouts/bathbombedhotspring.lua`
 - `scripts/map/static_layouts/beefalo_farm.lua`
 - `scripts/map/static_layouts/blue_mushy_entrance.lua`

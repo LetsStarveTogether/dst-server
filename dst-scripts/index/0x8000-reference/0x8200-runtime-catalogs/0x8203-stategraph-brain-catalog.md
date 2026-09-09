@@ -2,9 +2,9 @@
 
 This page inventories StateGraph, Brain, and Behaviour files.
 
-The StateGraph directory contains 261 Lua files.
+The StateGraph directory contains 264 Lua files.
 
-The Brain directory contains 191 Lua files.
+The Brain directory contains 195 Lua files.
 
 The Behaviour directory contains 29 Lua files.
 
@@ -66,7 +66,10 @@ The Behaviour directory contains 29 Lua files.
 - `scripts/stategraphs/SGcattoy_mouse.lua`
 - `scripts/stategraphs/SGcaveventmite.lua`
 - `scripts/stategraphs/SGcentipede.lua`
+- `scripts/stategraphs/SGcharlie_boss.lua`
+- `scripts/stategraphs/SGcharlie_boss_runner.lua`
 - `scripts/stategraphs/SGcharlie_heckler.lua`
+- `scripts/stategraphs/SGcharlie_npc.lua`
 - `scripts/stategraphs/SGcharlie_stage_post.lua`
 - `scripts/stategraphs/SGchest_mimic.lua`
 - `scripts/stategraphs/SGchester.lua`
@@ -282,6 +285,7 @@ The Behaviour directory contains 29 Lua files.
 - `scripts/brains/antlionbrain.lua`
 - `scripts/brains/archive_securitypulsebrain.lua`
 - `scripts/brains/babybeefalobrain.lua`
+- `scripts/brains/bat_bossbrain.lua`
 - `scripts/brains/batbrain.lua`
 - `scripts/brains/beardbunnymanbrain.lua`
 - `scripts/brains/beargerbrain.lua`
@@ -313,6 +317,8 @@ The Behaviour directory contains 29 Lua files.
 - `scripts/brains/catcoonbrain.lua`
 - `scripts/brains/caveventmitebrain.lua`
 - `scripts/brains/centipedebrain.lua`
+- `scripts/brains/charlie_boss_runnerbrain.lua`
+- `scripts/brains/charlie_bossbrain.lua`
 - `scripts/brains/chest_mimicbrain.lua`
 - `scripts/brains/chesterbrain.lua`
 - `scripts/brains/cookiecutterbrain.lua`
@@ -398,6 +404,7 @@ The Behaviour directory contains 29 Lua files.
 - `scripts/brains/rabbitbrain.lua`
 - `scripts/brains/rabbitking_bunnymanbrain.lua`
 - `scripts/brains/rabbitkingbrain.lua`
+- `scripts/brains/rocky_bossbrain.lua`
 - `scripts/brains/rockybrain.lua`
 - `scripts/brains/rookbrain.lua`
 - `scripts/brains/shadow_bishopbrain.lua`

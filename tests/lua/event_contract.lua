@@ -92,6 +92,7 @@ assert(BufferedAction.Do(action) == true)
 player.bufferedaction = action
 
 world_listeners.ms_playerjoined(TheWorld, player)
+player_listeners.ms_skilltreeinitialized(player)
 world_listeners.ms_playerleft(TheWorld, player)
 world_listeners.ms_playerdisconnected(TheWorld, {
     player = player,
@@ -207,4 +208,4 @@ player_listeners.unequip(player, { item = spear, eslot = "hands", slip = true })
 player_listeners.dropitem(player, { item = spear })
 
 health = driver.health()
-assert(health.events_emitted == 60 and health.errors == 0)
+assert(health.events_emitted == 61 and health.errors == 0)

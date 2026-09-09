@@ -173,6 +173,11 @@ class ShardEnteredEvent(EventRecord[PlayerData]):
     event: Literal["dst.player.shard_entered"]
 
 
+class PlayerLoadedEvent(EventRecord[PlayerData]):
+    event: Literal["dst.player.loaded"]
+    session_id: Identifier
+
+
 class ShardLeftEvent(EventRecord[PlayerData]):
     event: Literal["dst.player.shard_left"]
 

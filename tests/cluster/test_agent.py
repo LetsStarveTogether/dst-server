@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -11,15 +12,18 @@ import pytest
 from ulid import ULID
 
 from dst_server import commands as c
+from dst_server.activity import read_last_login
 from dst_server.cluster import agent as agent_module
 from dst_server.cluster.agent import ShardAgent
 from dst_server.configuration.files import Shard
 from dst_server.errors import IndeterminateError
 from dst_server.events import ObservedGameEvent
+from dst_server.events.player import PlayerLoadedEvent
 from dst_server.events.server import Event, SavedEvent, SessionEvent, UnknownEvent
 from dst_server.events.world import CycleState, StateChangedEvent
 from dst_server.models.cluster import ObservationCursor
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog, WorldSnapshotMetadata
+from dst_server.models.telemetry import TelemetryProfile
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.lifecycle import ObservedLifecycleEvent
 from dst_server.runtime.operational import OperationalRecord
@@ -548,6 +552,98 @@ async def test_relays_release_consumed_records_while_idle(
         await task
 
 
+def player_load(server: SimpleNamespace) -> ObservedGameEvent:
+    return ObservedGameEvent(
+        PlayerLoadedEvent.model_validate({
+            "v": 2,
+            "nonce": server.game_events.nonce,
+            "generation": 1,
+            "session_id": "SESSION",
+            "seq": 1,
+            "event": "dst.player.loaded",
+            "tick": 1,
+            "monotonic_ms": 1,
+            "cycle": 0,
+            "data": {
+                "player": {
+                    "prefab": "wilson",
+                    "guid": 1,
+                    "userid": "KU_TEST",
+                    "position": None,
+                }
+            },
+        }),
+        1_788_998_400_000_000_000,
+    )
+
+
+@pytest.mark.parametrize("profile", ["off", "critical", "history"])
+@pytest.mark.parametrize("logs", [False, True])
+async def test_player_load_is_persisted_before_optional_log_delivery(
+    agent: ShardAgent,
+    running_server: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: TelemetryProfile,
+    logs: bool,
+) -> None:
+    agent.config = agent.config.replace(
+        telemetry=agent.config.telemetry.replace(profile=profile)
+    )
+    running_server.session_id = "SESSION"
+    observed = player_load(running_server)
+    timestamp = datetime.fromtimestamp(observed.observed_timestamp_ns / 1e9, UTC)
+    running_server.read_game_event = AsyncMock(side_effect=[observed, None])
+    shard = agent.cluster_path / agent.name
+
+    def deliver(*_: object, **__: object) -> None:
+        assert read_last_login(shard, "SESSION") == timestamp
+
+    pipeline = SimpleNamespace(logs_enabled=logs, emit_event=Mock(side_effect=deliver))
+    monkeypatch.setattr(agent, "_pipeline", pipeline)
+    await agent._drain_game_events(cast("Server", running_server))
+    if logs and profile != "off":
+        pipeline.emit_event.assert_called_once()
+    else:
+        pipeline.emit_event.assert_not_called()
+    assert read_last_login(shard, "SESSION") == timestamp
+
+
+@pytest.mark.parametrize("native_session", [None, "PREVIOUS_SESSION", "NEXT_SESSION"])
+async def test_login_record_uses_event_session_despite_native_notification_order(
+    agent: ShardAgent, running_server: SimpleNamespace, native_session: str | None
+) -> None:
+    running_server.session_id = native_session
+    running_server.read_game_event = AsyncMock(
+        side_effect=[player_load(running_server), None]
+    )
+
+    await agent._drain_game_events(cast("Server", running_server))
+
+    assert read_last_login(agent.cluster_path / agent.name, "SESSION") is not None
+    assert read_last_login(agent.cluster_path / agent.name, native_session) is None
+
+
+async def test_failed_login_record_write_is_not_silently_ignored(
+    agent: ShardAgent,
+    running_server: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    running_server.session_id = "SESSION"
+    running_server.read_game_event = AsyncMock(
+        side_effect=[player_load(running_server), None]
+    )
+    monkeypatch.setattr(
+        agent_module, "write_last_login", Mock(side_effect=OSError("disk full"))
+    )
+    pipeline = SimpleNamespace(logs_enabled=True, emit_event=Mock())
+    monkeypatch.setattr(agent, "_pipeline", pipeline)
+
+    with pytest.raises(OSError, match="disk full"):
+        await agent._drain_game_events(cast("Server", running_server))
+
+    pipeline.emit_event.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("phase", "critical", "fatal"),
     [
@@ -585,6 +681,98 @@ async def test_background_failure_boundary(
         with pytest.raises(TimeoutError):
             async with asyncio.timeout(0.01):
                 await agent.wait_fatal()
+
+
+@pytest.mark.parametrize("phase", [ShardPhase.STARTING, ShardPhase.RUNNING])
+@pytest.mark.parametrize("failure", [None, "lifecycle", "stdout"])
+async def test_lifecycle_eof_before_process_exit_preserves_input_errors(
+    agent: ShardAgent, phase: ShardPhase, failure: str | None
+) -> None:
+    server = agent._new_server()
+    attach(agent, server, phase)
+    reader = asyncio.StreamReader()
+    error = OSError("private input failure")
+    if failure is None:
+        reader.feed_eof()
+    else:
+        reader.set_exception(error)
+    if failure == "stdout":
+        pump = server.log_task = asyncio.create_task(server.pump_logs(reader))
+    else:
+        pump = server.lifecycle_task = asyncio.create_task(
+            server._pump_lifecycle(reader)
+        )
+    pump.add_done_callback(server._input_finished)
+    try:
+        async with asyncio.timeout(1):
+            await asyncio.gather(pump, agent._attempt_tasks[0], return_exceptions=True)
+        assert server.lifecycle.eof
+        assert server.returncode is None
+        assert not server.closed
+        assert agent._fatal.is_set() is (failure is not None)
+        if failure is not None:
+            assert server.input_error is error
+            with pytest.raises(
+                RuntimeError, match="dst-lifecycle-relay-Master: OSError"
+            ):
+                await agent.wait_fatal()
+            assert "private input failure" not in str(agent._fatal_error)
+    finally:
+        await asyncio.gather(server.finish(), return_exceptions=True)
+        await agent._stopped(server)
+
+
+@pytest.mark.parametrize("stream", ["game", "operational"])
+async def test_lifecycle_eof_does_not_hide_another_relay_ending_early(
+    agent: ShardAgent, monkeypatch: pytest.MonkeyPatch, stream: str
+) -> None:
+    monkeypatch.setattr(
+        agent,
+        f"_drain_{'game_events' if stream == 'game' else stream}",
+        AsyncMock(),
+    )
+    server = agent._new_server()
+    attach(agent, server)
+    server.lifecycle.close()
+    try:
+        async with asyncio.timeout(1):
+            with pytest.raises(RuntimeError, match="unexpected exit"):
+                await agent.wait_fatal()
+    finally:
+        await server.finish()
+        await agent._stopped(server)
+
+
+async def test_spawn_failure_closes_relays_without_poisoning_retry(
+    agent: ShardAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = agent.install_path / "fake-server"
+    executable.write_text(FAKE_SERVER)
+    executable.chmod(0o755)
+    agent.config = agent.config.replace(
+        executable=agent.install_path / "missing" / "server"
+    )
+    attempts: list[Server] = []
+    new_server = agent._new_server
+
+    def create() -> Server:
+        if attempts:
+            agent.config = agent.config.replace(executable=executable)
+        server = new_server()
+        attempts.append(server)
+        return server
+
+    monkeypatch.setattr(agent.supervisor, "_factory", create)
+    agent._activated = True
+    try:
+        async with asyncio.timeout(5):
+            assert (await agent.start()).phase is ShardPhase.RUNNING
+        assert len(attempts) == 2
+        assert attempts[0].child is None
+        assert attempts[0].closed
+        assert not agent._fatal.is_set()
+    finally:
+        await agent.aclose()
 
 
 async def test_close_failure_still_flushes_and_retry_is_idempotent(

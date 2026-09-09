@@ -123,9 +123,11 @@ ROUTES = [
     ),
     (lambda game: game.invoke(c.Reset()), "reset", {}, BOOL_RESPONSE),
     (
-        lambda game: game.invoke(c.Regenerate()),
+        lambda game: game.invoke(
+            c.Regenerate(expected_session_id="SESSION", require_empty=True)
+        ),
         "regenerate_world",
-        {},
+        {"expected_session_id": "SESSION", "require_empty": True},
         BOOL_RESPONSE,
     ),
     (
@@ -446,6 +448,60 @@ async def test_reload_wait_failure_is_indeterminate(
 
 
 @pytest.mark.parametrize(
+    "scenario", ["empty", "session_changed", "player_joined", "manual", "allow_players"]
+)
+async def test_regeneration_rechecks_world_and_players_at_execution(
+    scenario: str, lua_runtime: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = run_lua(
+        f'local scenario="{scenario}";'
+        """
+        TheWorld = { meta = { session_identifier = "SESSION" } }
+        local clients = {}
+        GetPlayerClientTable = function() return clients end
+        local regenerated = false
+        c_regenerateworld = function() regenerated = true end
+        local args = scenario == "manual" and {} or {
+            expected_session_id = TheWorld.meta.session_identifier,
+            require_empty = scenario ~= "allow_players",
+        }
+        local queued = function()
+            return require("dst_server.commands").regenerate_world(args)
+        end
+        -- Conditions may change after a request is queued and before Lua executes it.
+        if scenario == "session_changed" or scenario == "manual" then
+            TheWorld.meta.session_identifier = "NEXT_SESSION"
+        end
+        if scenario == "player_joined" or scenario == "manual"
+            or scenario == "allow_players" then
+            clients[1] = { userid = "KU_LOADING", prefab = nil }
+        end
+        require("dst_server.wire").reply(queued)
+        assert(regenerated == (scenario == "empty" or scenario == "manual"
+            or scenario == "allow_players"))
+        """,
+        lua_runtime,
+    )
+    game, _ = make_game(output.decode())
+    wait = AsyncMock()
+    monkeypatch.setattr(game, "wait_reload", wait)
+    command = (
+        c.Regenerate()
+        if scenario == "manual"
+        else c.Regenerate(
+            expected_session_id="SESSION", require_empty=scenario != "allow_players"
+        )
+    )
+    if scenario in {"session_changed", "player_joined"}:
+        with pytest.raises(RuntimeError, match="lua_error"):
+            await game.invoke(command)
+        wait.assert_not_awaited()
+    else:
+        await game.invoke(command)
+        wait.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
     "scenario",
     [
         "success",
@@ -666,6 +722,8 @@ def test_response_contract_rejects_invalid_results(
         lambda game: game.invoke(
             c.RegenerateShard.model_validate({"preserve_settings": 1})
         ),
+        lambda game: game.invoke(c.Regenerate.model_validate({"require_empty": 1})),
+        lambda game: game.invoke(c.Regenerate(expected_session_id="")),
         lambda game: game.invoke(c.Rollback(count=-1)),
         lambda game: game.invoke(c.RollbackToSnapshot(session_id="", snapshot_id=3)),
         lambda game: game.invoke(
@@ -680,7 +738,7 @@ def test_response_contract_rejects_invalid_results(
         lambda game: game.players.remove("KU_TEST", ""),
         lambda game: game.players.get(""),
     ],
-    ids=range(13),
+    ids=range(15),
 )
 async def test_public_api_rejects_invalid_values(invoke: Invocation) -> None:
     game, executed = make_game()

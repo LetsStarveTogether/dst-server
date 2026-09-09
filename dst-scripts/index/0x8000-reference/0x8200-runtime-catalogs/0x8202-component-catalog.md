@@ -1,6 +1,6 @@
 # `0x82020000` Component Catalog
 
-The Component directory contains 821 Lua files.
+The Component directory contains 829 Lua files.
 
 ## `0x82021111` Component Files
 
@@ -30,10 +30,12 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/area_unlock.lua`
 - `scripts/components/areaaware.lua`
 - `scripts/components/armor.lua`
+- `scripts/components/atriumritualorgantracker.lua`
 - `scripts/components/attackdodger.lua`
 - `scripts/components/attunable.lua`
 - `scripts/components/attuner.lua`
 - `scripts/components/aura.lua`
+- `scripts/components/autojiggle.lua`
 - `scripts/components/autosaver.lua`
 - `scripts/components/autoterraformer.lua`
 - `scripts/components/avengingghost.lua`
@@ -109,6 +111,8 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/channelcastable.lua`
 - `scripts/components/channelcaster.lua`
 - `scripts/components/chargingreticule.lua`
+- `scripts/components/charlie_tracker.lua`
+- `scripts/components/charliearenawatcher.lua`
 - `scripts/components/charliecutscene.lua`
 - `scripts/components/chessunlocks.lua`
 - `scripts/components/childspawner.lua`
@@ -574,6 +578,7 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/rider_replica.lua`
 - `scripts/components/riftspawner.lua`
 - `scripts/components/riftthralltype.lua`
+- `scripts/components/rockybossspawner.lua`
 - `scripts/components/rooted.lua`
 - `scripts/components/ropebridgemanager.lua`
 - `scripts/components/roseinspectable.lua`
@@ -609,6 +614,7 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/shadowthrall_mimics.lua`
 - `scripts/components/shadowthrallmanager.lua`
 - `scripts/components/shard_autosaver.lua`
+- `scripts/components/shard_charlieinfo.lua`
 - `scripts/components/shard_clock.lua`
 - `scripts/components/shard_daywalkerspawner.lua`
 - `scripts/components/shard_mermkingwatcher.lua`
@@ -682,6 +688,8 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/staffsanity.lua`
 - `scripts/components/stageactingprop.lua`
 - `scripts/components/stageactor.lua`
+- `scripts/components/stalkerinspectable.lua`
+- `scripts/components/stalkermanager.lua`
 - `scripts/components/steeringwheel.lua`
 - `scripts/components/steeringwheeluser.lua`
 - `scripts/components/stewer.lua`
@@ -747,15 +755,14 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/vanish_on_sleep.lua`
 - `scripts/components/vase.lua`
 - `scripts/components/vasedecoration.lua`
-- `scripts/components/vault_floor_helper.lua`
-- `scripts/components/vault_teleporter.lua`
 - `scripts/components/vaultmusiclistener.lua`
 - `scripts/components/vaultorbteleportdestination.lua`
 - `scripts/components/vaultorbteleporter.lua`
-- `scripts/components/vaultroom.lua`
-- `scripts/components/vaultroommanager.lua`
 - `scripts/components/vaulttorchgrid.lua`
 - `scripts/components/vinebridgemanager.lua`
+- `scripts/components/virtualroommanager.lua`
+- `scripts/components/virtualroomset.lua`
+- `scripts/components/virtualroomteleporter.lua`
 - `scripts/components/wagboss_tracker.lua`
 - `scripts/components/wagpunk_arena_manager.lua`
 - `scripts/components/wagpunk_floor_helper.lua`
@@ -807,6 +814,7 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/worldsettings.lua`
 - `scripts/components/worldsettingstimer.lua`
 - `scripts/components/worldstate.lua`
+- `scripts/components/worldstaticlayouts.lua`
 - `scripts/components/worldtemperature.lua`
 - `scripts/components/worldvoter.lua`
 - `scripts/components/worldwind.lua`

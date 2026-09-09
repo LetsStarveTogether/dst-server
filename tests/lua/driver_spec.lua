@@ -84,12 +84,48 @@ end
 local scenarios = {}
 
 function scenarios.off()
-    TheWorld.ListenForEvent, TheWorld.WatchWorldState = nil, nil
+    TheWorld.WatchWorldState = nil
     BufferedAction, Shard_UpdateWorldState, GetTick, GetTimeReal = nil, nil, nil, nil
     local driver = install("off")
     assert(driver.call("save", {}) == true and saved)
     assert(#outputs == 0)
 end
+
+local function player_loaded(profile)
+    POSTACTIVATEHANDSHAKE = { NONE = 0, CTS_LOADED = 1, STC_SENDINGSTATE = 2, READY = 3 }
+    local native = require("prefabs/player_common_extensions")
+    -- A player already loaded before installation must not become a new login.
+    player._PostActivateHandshakeState_Server = POSTACTIVATEHANDSHAKE.READY
+    local driver = install(profile)
+    assert(driver.install(options(profile)).events_emitted == 0)
+    native.OnPostActivateHandshake_Server(player, POSTACTIVATEHANDSHAKE.READY)
+    assert(#records("dst.player.loaded") == 0)
+
+    local joining = entity("wilson", 4, "KU_JOINING")
+    joining._PostActivateHandshakeState_Server = POSTACTIVATEHANDSHAKE.NONE
+    joining.PostActivateHandshake = function() end
+    joining.components.skilltreeupdater = { SendFromSkillTreeBlob = function() end }
+    TheWorld:PushEvent("ms_playerjoined", joining)
+    assert(#records("dst.player.loaded") == 0, "joining precedes the loading handshake")
+    assert(#records("dst.player.shard_entered") == (profile == "off" and 0 or 1))
+    driver.install(options(profile))
+    for _, phase in ipairs({ POSTACTIVATEHANDSHAKE.CTS_LOADED, POSTACTIVATEHANDSHAKE.STC_SENDINGSTATE }) do
+        native.OnPostActivateHandshake_Server(joining, phase)
+        assert(#records("dst.player.loaded") == 0, "loading is not yet complete")
+    end
+    native.OnPostActivateHandshake_Server(joining, POSTACTIVATEHANDSHAKE.READY)
+    local loaded = records("dst.player.loaded")
+    assert(#loaded == 1 and loaded[1].data.player.userid == joining.userid)
+    assert(loaded[1].session_id == "SESSION")
+    native.OnPostActivateHandshake_Server(joining, POSTACTIVATEHANDSHAKE.READY)
+    driver.install(options(profile))
+    assert(#records("dst.player.loaded") == 1, "duplicate handshake or install must not renew activity")
+    assert(driver.health().errors == 0)
+end
+
+function scenarios.loaded_off() player_loaded("off") end
+function scenarios.loaded_critical() player_loaded("critical") end
+function scenarios.loaded_history() player_loaded("history") end
 
 function scenarios.active()
     local driver = install()

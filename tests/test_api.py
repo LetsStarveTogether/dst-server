@@ -47,11 +47,15 @@ async def test_cluster_facade_uses_cluster_response_contracts() -> None:
     await cluster.save(timeout=18)
     await cluster.pause(True)
     await cluster.list_players()
+    await cluster.regenerate(
+        expected_session_id="SESSION", require_empty=True, timeout=19
+    )
     assert cluster.requests == [
         c.ClusterStatusQuery(),
         c.ClusterSave(timeout=18),
         c.ClusterPause(paused=True),
         c.LocatePlayers(),
+        c.Regenerate(expected_session_id="SESSION", require_empty=True, timeout=19),
     ]
 
 

@@ -10,6 +10,9 @@ from dst_server.events import GAME_EVENT_ADAPTER
     "scenario",
     [
         "off",
+        "loaded_off",
+        "loaded_critical",
+        "loaded_history",
         "active",
         "empty_actions",
         "critical",

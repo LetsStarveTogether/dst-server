@@ -1,6 +1,7 @@
 import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from time import time_ns
 from typing import TYPE_CHECKING, Any
@@ -9,9 +10,11 @@ from logbook import Logger
 from ulid import ULID
 
 from dst_server import commands as c
+from dst_server.activity import write_last_login
 from dst_server.concurrency import cancel_tasks, complete
 from dst_server.configuration.files import Shard
 from dst_server.errors import IndeterminateError
+from dst_server.events.player import PlayerLoadedEvent
 from dst_server.events.server import SavedEvent, SessionEvent
 from dst_server.models.cluster import (
     GameEventRecord,
@@ -395,11 +398,12 @@ class ShardAgent:
         )
         server = Server(self.config, recorder=recorder)
         server.log_handler = lambda line: self._log(server, line)
+        lifecycle = asyncio.create_task(
+            self._drain_lifecycle(server),
+            name=f"dst-lifecycle-relay-{self.shard.name}",
+        )
         self._attempt_tasks = (
-            asyncio.create_task(
-                self._drain_lifecycle(server),
-                name=f"dst-lifecycle-relay-{self.shard.name}",
-            ),
+            lifecycle,
             asyncio.create_task(
                 self._drain_game_events(server),
                 name=f"dst-game-event-relay-{self.shard.name}",
@@ -412,7 +416,10 @@ class ShardAgent:
         for task in self._attempt_tasks:
             task.add_done_callback(
                 lambda completed: self._background_done(
-                    server, completed, critical=True
+                    server,
+                    completed,
+                    critical=True,
+                    expected_eof=completed is lifecycle and server.lifecycle.eof,
                 )
             )
         return server
@@ -482,24 +489,26 @@ class ShardAgent:
         task: asyncio.Task[None],
         *,
         critical: bool,
+        expected_eof: bool = False,
     ) -> None:
         if task.cancelled():
             return
         error = task.exception()
+        if critical and error is None:
+            error = server.input_error
         if self._fatal.is_set():
             return
-        if not (critical and error is not None) and (
-            self.supervisor.server is not server
-            or (
-                error is None
-                and (
-                    server.returncode is not None
-                    or self.supervisor.status.phase
-                    not in {ShardPhase.STARTING, ShardPhase.RUNNING}
-                )
-            )
-        ):
-            return
+        if not (critical and error is not None):
+            if self.supervisor.server is not server:
+                return
+            if error is None and (
+                expected_eof
+                or server.closed
+                or server.returncode is not None
+                or self.supervisor.status.phase
+                not in {ShardPhase.STARTING, ShardPhase.RUNNING}
+            ):
+                return
         if not critical:
             logger.error(
                 "non-critical shard background task stopped: {shard}: {task}: {kind}",
@@ -508,9 +517,13 @@ class ShardAgent:
                 kind=type(error).__name__ if error is not None else "unexpected exit",
             )
             return
-        self._fatal_error = RuntimeError(
-            f"shard background task failed: {self.shard.name}"
+        message = (
+            f"shard background task failed: {self.shard.name}: {task.get_name()}: "
+            f"{type(error).__name__ if error is not None else 'unexpected exit'} "
+            f"(phase={self.supervisor.status.phase}, returncode={server.returncode})"
         )
+        logger.error(message)
+        self._fatal_error = RuntimeError(message)
         self._fatal.set()
 
     async def _drain_lifecycle(self, server: Server) -> None:
@@ -541,6 +554,21 @@ class ShardAgent:
     async def _drain_game_events(self, server: Server) -> None:
         attempt = ULID.from_str(server.game_events.nonce)
         while (observed := await server.read_game_event()) is not None:
+            if isinstance(observed.record, PlayerLoadedEvent):
+                # The native session notification can arrive after this game event.
+                await complete(
+                    asyncio.to_thread(
+                        write_last_login,
+                        self.cluster_path / self.name,
+                        observed.record.session_id,
+                        datetime.fromtimestamp(
+                            observed.observed_timestamp_ns / 1_000_000_000, UTC
+                        ),
+                    )
+                )
+                if self.config.telemetry.profile == "off":
+                    del observed
+                    continue
             if self._pipeline is not None and self._pipeline.logs_enabled:
                 self._pipeline.emit_event(
                     observed, attributes=server.recorder.attributes()

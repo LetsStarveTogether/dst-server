@@ -24,6 +24,7 @@ from .player import (
     MigrationStartedEvent,
     PickedEvent,
     PlantedEvent,
+    PlayerLoadedEvent,
     RevivedEvent,
     ShardEnteredEvent,
     ShardLeftEvent,
@@ -43,6 +44,7 @@ from .world import (
 
 type GameEvent = Annotated[
     ShardEnteredEvent
+    | PlayerLoadedEvent
     | ShardLeftEvent
     | DisconnectedEvent
     | MigrationStartedEvent

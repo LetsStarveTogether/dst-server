@@ -198,6 +198,13 @@ function player_events.attach(player)
         return
     end
     state.players[player] = true
+    -- Completed world loads, including migration, renew room activity even with telemetry off.
+    player:ListenForEvent("ms_skilltreeinitialized", telemetry.guard("player.ms_skilltreeinitialized", function()
+        telemetry.emit("dst.player.loaded", { player = values.entity_ref(player) })
+    end, true))
+    if state.requested_profile == "off" then
+        return
+    end
     attach_lifecycle(player)
     if state.requested_profile == "history" then
         attach_combat(player)

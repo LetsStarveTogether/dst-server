@@ -34,6 +34,7 @@
 
 需要 Linux、Podman（支持 Quadlet）、systemd 和 [uv](https://docs.astral.sh/uv/getting-started/installation/)。
 项目要求 Python `>=3.14.7`，`uv run` 会按项目配置准备 Python 与依赖。
+Mod 更新器的清理流程依赖 [Python 3.14.7 的进程等待修复](https://github.com/python/cpython/pull/154171)。
 以下命令由拥有集群目录的普通用户执行。
 
 1. 获取项目，并在 [Klei 专服管理页面](https://accounts.klei.com/account/game/servers?game=DontStarveTogether) 创建 token。
@@ -122,10 +123,16 @@ cluster/
 | `mods/` | 共享下载清单、Mod 内容和缓存，见 [Mod 管理](#mod-管理)。 |
 | `.dst-server.sock`、`console` | 运行时创建的集群 RPC socket 与主分片恢复 FIFO。 |
 | `<secondary>/console` | 次分片恢复 FIFO。 |
+| `<shard>/save/session/<session_id>/.last_login` | 最后一次玩家成功加载世界的 UTC ISO 8601 时间，仅一行，导出时排除。 |
 
 `cluster.ini`、`cluster_token.txt` 和每个分片的 `server.ini` 必须存在，且只能有一个主分片。
 根目录中除 `mods` 外的子目录都视为分片，因此备份应放在集群目录外。
 受管配置和分片目录不能使用符号链接；准备阶段会补齐缺失的权限名单与 Mod 支持文件。
+
+客户端完成世界加载握手后，Agent 覆写 `.last_login`；跨分片迁移完成加载也会更新。
+关闭遥测仍会记录，重启保留时间，新世界使用自己的 session 目录。
+[activity.py](src/dst_server/activity.py) 的 `read_last_login(shard_directory, session_id)` 对缺失、空白或无效记录返回 `None`。
+导出也会排除写入中断遗留的时间记录临时文件。
 
 ### 分片与端口
 
@@ -917,12 +924,13 @@ SDK 使用 `TelemetrySettings(profile=..., actions=...)`，通过 `ServerConfig.
 
 | Profile | 采集内容 |
 | --- | --- |
-| `off` | 不安装游戏事件 Hook，保留管理 RPC |
+| `off` | 仅保留本地登录时间 Hook 和管理 RPC |
 | `critical` | 玩家进入、离开、出生、死亡复活、迁移、落水与坠落；重要实体死亡、分片连接、Boss、裂隙和世界状态 |
 | `history` | 增加战斗、物品、玩家状态、技能、猎犬预警、钓鱼、种植和允许列表中的 Action 结果 |
 
 - 实体死亡仅记录玩家、带 `epic` 标签的实体，或可归因于玩家的死亡。
 - `spawned` 表示新角色生成，尚未完成出生定位，位置为 `null`；进入分片由 `shard_entered` 表达。
+  `loaded` 表示客户端完成加载握手；`off` 时 Agent 只更新本地时间记录。
 - `incident` 记录实际进入原版落水或坠落状态，只保留玩家和事故类型；进食包含普通食物与 Wortox 灵魂。
 - `history` 的默认 Action 列表见 [遥测配置](src/dst_server/telemetry/config.py)；`actions=()` 仅关闭 Action 包装。
 - Profile 不关闭 Python 运行诊断、Metrics 或 Traces，也不删除已有历史。

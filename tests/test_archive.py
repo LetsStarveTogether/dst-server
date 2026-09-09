@@ -255,6 +255,29 @@ def test_export_generates_keys_only_when_recipient_saves(
     assert recipient.settings.cluster_key is None
 
 
+def test_export_omits_local_login_timestamps(
+    saved_cluster: Path, tmp_path: Path
+) -> None:
+    for shard in ("forest", "cave"):
+        session = saved_cluster / shard / "save/session/0123456789ABCDEF"
+        for filename in (".last_login", "..last_login.abcd1234"):
+            (session / filename).write_text(
+                "2026-09-10T08:00:00+00:00\n", encoding="utf-8"
+            )
+        (session / ".world_metadata").write_bytes(b"hidden world metadata")
+    destination = tmp_path / "extracted"
+    with (
+        archive.export_cluster(saved_cluster) as exported,
+        SevenZipFile(exported.stream) as compressed,
+    ):
+        compressed.extractall(destination)
+    for shard in ("forest", "cave"):
+        session = destination / "001" / shard / "save/session/0123456789ABCDEF"
+        assert not (session / ".last_login").exists()
+        assert not (session / "..last_login.abcd1234").exists()
+        assert (session / ".world_metadata").read_bytes() == b"hidden world metadata"
+
+
 @pytest.mark.parametrize("source_encoded", [True, False])
 def test_export_uses_source_encoding_for_player_paths(
     saved_cluster: Path, monkeypatch: pytest.MonkeyPatch, source_encoded: bool

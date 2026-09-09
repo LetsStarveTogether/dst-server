@@ -80,15 +80,15 @@ function driver.install(options)
     state.requested_profile = profile
     state.action_allowlist = action_allowlist
     state.installed = true
-    if profile == "off" then
-        return driver.health()
-    end
-
     local ok = pcall(function()
+        local world_events = require("dst_server.world_events")
+        world_events.install_players()
+        if profile == "off" then
+            return
+        end
         if type(GetTick) ~= "function" or type(GetTimeReal) ~= "function" then
             error("required telemetry clock is unavailable")
         end
-        local world_events = require("dst_server.world_events")
         world_events.install_shard()
         world_events.install_world()
         if profile == "history" and next(action_allowlist) ~= nil then
@@ -96,7 +96,7 @@ function driver.install(options)
         end
     end)
     if ok then
-        state.telemetry_active = true
+        state.telemetry_active = profile ~= "off"
     else
         require("dst_server.telemetry").report("install", "installation_failed")
     end

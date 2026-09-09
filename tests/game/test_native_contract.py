@@ -206,6 +206,7 @@ def native_handlers(tmp_path_factory: pytest.TempPathFactory) -> Path:
     assert len(handlers) == 2
     definitions = []
     for filename, name in (
+        ("componentutil.lua", "IsRangedWeapon"),
         ("prefabs/player_common.lua", "OnNewSpawn"),
         ("networking.lua", "SpawnNewPlayerOnServerFromSim"),
     ):

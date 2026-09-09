@@ -77,9 +77,9 @@ type RoomDefinition = tuple[range, RoomType, str, int]
 
 ROOMS: tuple[RoomDefinition, ...] = (
     (range(20), RoomType.PURE_SURVIVAL, "纯净生存", 9),
-    (range(20, 50), RoomType.PURE_ENDLESS, "纯净无尽", 6),
+    (range(20, 50), RoomType.PURE_ENDLESS, "纯净无尽", 9),
     (range(50, 70), RoomType.SEMI_SURVIVAL, "半纯生存", 9),
-    (range(70, 100), RoomType.SEMI_ENDLESS, "半纯无尽", 6),
+    (range(70, 100), RoomType.SEMI_ENDLESS, "半纯无尽", 9),
     (range(100, 110), RoomType.AFK, "挂皮肤", 64),
     (range(110, 115), RoomType.LIGHTS_OUT_SURVIVAL, "永夜生存", 9),
     (range(115, 120), RoomType.LIGHTS_OUT_ENDLESS, "永夜无尽", 6),
@@ -121,12 +121,12 @@ def room_schedule(number: int) -> tuple[str, int, int] | None:
 
 def room_name(number: int) -> str:
     _, label, _ = room(number)
+    name = f"LST-{number:03d}-{label}"
     schedule = room_schedule(number)
-    suffix = f"-{schedule[0]}" if schedule else ""
-    return (
-        f"LST-{number:03d}-{label}{suffix}"
-        " | 朗诵团 5 周年啦！入团找到你未来的 5 年好饥友吧~"  # ruff: ignore[ambiguous-unicode-character-string]
-    )
+    if schedule:
+        suffix, start, end = schedule
+        return f"{name}-{suffix} | 每日 {start}-{end} 开放"
+    return f"{name} | 朗诵团 5 周年啦！入团找到你未来的 5 年好饥友吧~"  # ruff: ignore[ambiguous-unicode-character-string]
 
 
 def _mods(*workshop_ids: int) -> RoomPreset:

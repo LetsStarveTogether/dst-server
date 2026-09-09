@@ -8,13 +8,14 @@ import socket
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, closing, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
+import logbook
 import pytest
 from pydantic import JsonValue, SecretStr
 from ulid import ULID
@@ -22,6 +23,7 @@ from ulid import ULID
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
 from dst_server import commands as c
+from dst_server.activity import read_last_login
 from dst_server.archive import export_cluster
 from dst_server.cluster.agent import ShardAgent
 from dst_server.cluster.controller import AgentEndpoint, ClusterController
@@ -91,6 +93,12 @@ SYSTEM_QUADLET_ROOT = Path("/run/containers/systemd")
 QUADLET_GENERATOR = Path("/usr/lib/systemd/system-generators/podman-system-generator")
 SHARDS = ("cave", "forest")
 MASTER = "forest"
+
+
+@pytest.fixture(autouse=True)  # ruff: ignore[pytest-fixture-autouse]
+def capture_game_logs() -> Iterator[None]:
+    with logbook.StderrHandler(level=logbook.INFO).applicationbound():
+        yield
 
 
 @pytest.fixture(scope="session", autouse=True)  # ruff: ignore[pytest-fixture-autouse]
@@ -223,7 +231,7 @@ def make_server(
     *,
     log_handler: Callable[[str], None] | None = None,
     shard: str = "forest",
-    network: str = "none",
+    pod: str | None = None,
 ) -> Server:
     wrapper = root / f"podman-dst-server-{shard}"
     command = [
@@ -234,8 +242,7 @@ def make_server(
         "--name",
         container_name,
         "--preserve-fds=3",
-        "--network",
-        network,
+        *(("--pod", pod) if pod is not None else ("--network", "none")),
         "--workdir",
         "/install/bin64",
         "--volume",
@@ -431,15 +438,27 @@ async def running_sharded_cluster(
         shard: f"dst-snapshot-{shard}-{str(ULID()).lower()}"
         for shard in ("forest", "cave")
     }
+    pod = f"dst-snapshot-{str(ULID()).lower()}"
     agents: dict[str, ShardAgent] = {}
     try:
+        await run_command(
+            "podman",
+            "pod",
+            "create",
+            "--name",
+            pod,
+            "--network",
+            "none",
+            "--share",
+            "net",
+        )
         for shard in ("forest", "cave"):
             config = make_server(
                 root,
                 cluster,
                 names[shard],
                 shard=shard,
-                network="none" if shard == "forest" else f"container:{names['forest']}",
+                pod=pod,
             ).config
             install = root / shard
             executable = install / "bin64" / Path(GAME_EXECUTABLE).name
@@ -466,8 +485,75 @@ async def running_sharded_cluster(
                     for agent in agents.values():
                         tasks.create_task(agent.aclose())
             finally:
-                for name in reversed(names.values()):
-                    await remove_container(name)
+                await run_command(
+                    "podman", "pod", "rm", "--force", "--time", "0", "--ignore", pod
+                )
+
+
+async def test_player_loaded_login_survives_restart_but_not_regeneration(
+    tmp_path: Path,
+) -> None:
+    async with running_sharded_cluster(tmp_path) as (controller, agents):
+        sessions = {
+            shard: (await agent.invoke(c.Runtime())).session_id
+            for shard, agent in agents.items()
+        }
+        master = agents[MASTER]
+        shard_directory = tmp_path / "cluster" / MASTER
+        marker = shard_directory / "save/session" / sessions[MASTER] / ".last_login"
+        snapshots = await master.invoke(c.Snapshots())
+        assert snapshots.snapshots
+        assert not marker.exists()
+        userid = "KU_1234567_"
+        with closing(controller.subscribe_events()) as events:
+
+            async def observe(
+                event_type: type[player.ShardEnteredEvent | player.PlayerLoadedEvent],
+            ) -> GameEventRecord:
+                async with asyncio.timeout(OPERATION_TIMEOUT):
+                    while True:
+                        record = (await events.next(1))[0]
+                        if (
+                            record.shard == MASTER
+                            and isinstance(record.event, event_type)
+                            and record.event.data.player.userid == userid
+                        ):
+                            return record
+
+            # Exercise the native handshake on a real entity without a network client.
+            await master.invoke(
+                c.ExecuteJson(
+                    source="DST_LOGIN_PLAYER=SpawnPrefab('wilson');"
+                    f"DST_LOGIN_PLAYER.userid={lua_string(userid)};return true"
+                )
+            )
+            await observe(player.ShardEnteredEvent)
+            assert not marker.exists()
+            await master.invoke(
+                c.ExecuteJson(
+                    source="DST_LOGIN_PLAYER:OnPostActivateHandshake_Server("
+                    "POSTACTIVATEHANDSHAKE.READY);return true"
+                )
+            )
+            loaded = await observe(player.PlayerLoadedEvent)
+        assert loaded.event.session_id == sessions[MASTER]
+        timestamp = datetime.fromtimestamp(loaded.observed_timestamp_ns / 1e9, UTC)
+        assert read_last_login(shard_directory, sessions[MASTER]) == timestamp
+        assert marker.read_text(encoding="utf-8") == f"{timestamp.isoformat()}\n"
+        assert await master.invoke(c.Snapshots()) == snapshots
+        await controller.restart()
+        for shard, agent in agents.items():
+            assert (await agent.invoke(c.Runtime())).session_id == sessions[shard]
+        assert read_last_login(shard_directory, sessions[MASTER]) == timestamp
+        await controller.regenerate(
+            expected_session_id=sessions[MASTER],
+            require_empty=True,
+            timeout=STARTUP_TIMEOUT,
+        )
+        for shard, agent in agents.items():
+            session = (await agent.invoke(c.Runtime())).session_id
+            assert session != sessions[shard]
+            assert read_last_login(tmp_path / "cluster" / shard, session) is None
 
 
 async def test_rollback_to_day_restores_both_shards_and_player_saves(

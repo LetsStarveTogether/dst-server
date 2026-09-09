@@ -69,7 +69,7 @@ RUN installed_version="$(sed -n 's/\r$//; /^[0-9][0-9]*$/p' /install/version.txt
 # Install Python dependencies before the SDK to preserve the dependency layer.
 USER root
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY .python-version pyproject.toml uv.lock README.md LICENSE ./
 RUN uv sync --locked --extra otel --no-install-project --no-editable
 
 COPY src ./src

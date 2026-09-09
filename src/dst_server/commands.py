@@ -156,6 +156,8 @@ class Rollback(Request[None]):
 class Regenerate(Request[None]):
     method = "regenerate"
     timeout: Timeout = DEFAULT_RELOAD_TIMEOUT
+    expected_session_id: Identifier | None = None
+    require_empty: bool | None = None
 
 
 class RegenerateShard(Request[None]):

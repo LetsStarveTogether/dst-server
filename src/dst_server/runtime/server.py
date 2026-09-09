@@ -111,6 +111,10 @@ class Server:  # ruff:ignore[too-many-public-methods]
         return None if self.child is None else self.child.returncode
 
     @property
+    def input_error(self) -> BaseException | None:
+        return self._input_error
+
+    @property
     def session_id(self) -> str | None:
         return self.lifecycle.session_id
 

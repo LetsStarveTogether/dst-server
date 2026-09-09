@@ -23,7 +23,17 @@ function commands.reset()
     return true
 end
 
-function commands.regenerate_world()
+function commands.regenerate_world(args)
+    if args.expected_session_id ~= nil then
+        local expected = values.required_string(args, "expected_session_id")
+        if TheWorld == nil or TheWorld.meta == nil or TheWorld.meta.session_identifier ~= expected then
+            error("world regeneration requires the expected session")
+        end
+    end
+    if args.require_empty ~= nil and values.required_boolean(args, "require_empty")
+        and #GetPlayerClientTable() > 0 then
+        error("world regeneration requires an empty room")
+    end
     c_regenerateworld()
     return true
 end

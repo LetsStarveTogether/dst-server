@@ -230,6 +230,8 @@ def _save_files(  # ruff: ignore[complex-structure, too-many-branches]
             if path.exists() or path.is_symlink():
                 paths.append(path)
         for source in sorted(paths):
+            if source.name == ".last_login" or source.name.startswith("..last_login."):
+                continue
             state = source.lstat()
             if stat.S_ISDIR(state.st_mode) and source.is_relative_to(root):
                 continue

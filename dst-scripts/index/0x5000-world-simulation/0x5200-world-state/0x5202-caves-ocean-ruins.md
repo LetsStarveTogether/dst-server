@@ -10,9 +10,9 @@ This page separates cave environment rules, surface ocean systems, and ruins gen
 
 ## `0x52021121` Cave Environment
 
-`scripts/prefabs/cave_network.lua` adds five cave-specific components.
+`scripts/prefabs/cave_network.lua` adds four cave-specific components.
 
-They are `caveweather`, `quaker`, `nightmareclock`, `vault_floor_helper`, and `fumarolelocaltemperature`, but not `weather`.
+They are `caveweather`, `quaker`, `nightmareclock`, and `fumarolelocaltemperature`, but not `weather`.
 
 ## `0x52021131` Ocean Ownership
 
@@ -28,7 +28,7 @@ Surface `forest.lua` adds `WaveComponent`, `wavemanager`, and `oceanicemanager`.
 | `scripts/prefabs/forest.lua` | `common_postinit` | Initializes waves and surface ocean presentation |
 | `scripts/prefabs/forest.lua` | `master_postinit` | Adds `worldwind`, `oceanicemanager`, and surface ecology managers |
 | `scripts/prefabs/cave.lua` | `master_postinit` | Adds cave spawners, `caveins`, `riftspawner`, and ruins managers |
-| `scripts/prefabs/cave_network.lua` | `custom_postinit` | Adds cave weather, quake, nightmare, Vault-floor, and local-temperature components |
+| `scripts/prefabs/cave_network.lua` | `custom_postinit` | Adds cave weather, quake, nightmare, and local-temperature components |
 | `scripts/components/caveweather.lua` | `OnUpdate` | Broadcasts cave precipitation, acid rain, and moisture |
 | `scripts/components/fumarolelocaltemperature.lua` | `GetTemperatureAtXZ` | Blends cave fumarole-area and shared world temperatures |
 | `scripts/components/quaker.lua` | `StartQuake` | Handles quake warnings, debris, sound, and forced quakes |
@@ -38,7 +38,7 @@ Surface `forest.lua` adds `WaveComponent`, `wavemanager`, and `oceanicemanager`.
 | `scripts/components/oceanicemanager.lua` | `CreateIceAtPoint` | Creates and breaks ocean ice and fixes displaced objects |
 | `scripts/components/dockmanager.lua` | `DestroyDockAtPoint` | Fixes objects displaced by dock removal |
 | `scripts/components/walkableplatform.lua` | `DestroyObjectsOnPlatform` | Cleans up objects when a platform is destroyed |
-| `scripts/components/vaultroom.lua` | `_getunloadaction` | Selects entity persistence behaviour when a Vault room unloads |
+| `scripts/components/virtualroomset.lua` | `_GetEntUnloadAction` | Selects entity persistence behaviour when a virtual room unloads |
 | `scripts/map/tasks/ruins.lua` | `AddTask` | Defines ruins task structure |
 | `scripts/map/rooms/cave/ruins.lua` | `AddRoom` | Defines ruins rooms, distributions, and static layouts |
 | `scripts/prefabs/atrium_gate.lua` | `OnDestabilizeExplode` | Pushes `resetruins` after gate destabilization |
@@ -49,7 +49,7 @@ Surface `forest.lua` adds `WaveComponent`, `wavemanager`, and `oceanicemanager`.
 
 ### `0x52022111` Cave Network Search
 
-Search `cave_network.lua` for its five `AddComponent` calls.
+Search `cave_network.lua` for its four `AddComponent` calls.
 
 `caveweather`, `quaker`, and `nightmareclock` are the main cave environment signal sources.
 
@@ -108,7 +108,9 @@ flowchart TD
 
 In `cave.lua`, `master_postinit` adds `caveins`, `hounded`, `retrofitcavemap_anr`, `riftspawner`, and `miasmamanager`.
 
-It also adds `ruinsshadelingspawner` and `vaultroommanager` on the Master Simulation.
+It also adds `ruinsshadelingspawner`, `rockybossspawner`, and `atriumritualorgantracker` on the Master Simulation.
+
+`world.lua` adds the shared `virtualroommanager` and `worldstaticlayouts`; `cave.lua` registers the Vault layout.
 
 ### `0x52023121` Cave Network Assembly
 
@@ -220,7 +222,7 @@ These components affect water and platform rules across worlds.
 
 The cave gel spawn in `prefabs/cave.lua` excludes topology ids containing `Vault`.
 
-When a virtual room unloads, `vaultroom.lua` preserves an owner with a migration pet.
+When a virtual room unloads, `virtualroomset.lua` keeps an owner with a migration pet unless it is tagged `forcedtosavethroughvirtualrooms`.
 
 `minotaur.lua` disables minimap revealability after `ATRIUM_KEY_FOUND`.
 
@@ -240,7 +242,7 @@ The other three are `DestroyDockAtPoint`, `DestroyIceAtPoint`, and `DestroyObjec
 
 ~~~bash
 rg -n \
-  -e "AddComponent\\(\"(caveweather|quaker|nightmareclock|vault_floor_helper|fumarolelocaltemperature|caveins)\"\\)" \
+  -e "AddComponent\\(\"(caveweather|quaker|nightmareclock|fumarolelocaltemperature|caveins)\"\\)" \
   -e "AddComponent\\(\"(wavemanager|oceanicemanager|waterphysics|walkableplatformmanager|dockmanager)\"\\)" \
   -e "PushEvent\\(\"(weathertick|nightmarephasechanged|nightmareclocktick)" \
   -e "PushEvent\\(\"(warnquake|startquake|endquake|icefloebreak)\"" \
@@ -268,7 +270,7 @@ rg -n \
   -e "SetEnabled\\(false\\)|MUSHSPORE|crowding" \
   -e "sparktask|perishable|depleted" \
   scripts/prefabs/cave.lua \
-  scripts/components/vaultroom.lua \
+  scripts/components/virtualroomset.lua \
   scripts/prefabs/minotaur.lua \
   scripts/prefabs/trap_fumarole.lua \
   scripts/prefabs/moonstorm_spark.lua \

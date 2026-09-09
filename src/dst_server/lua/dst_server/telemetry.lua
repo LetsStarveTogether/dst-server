@@ -71,9 +71,9 @@ function telemetry.emit(event_name, data)
     end
 end
 
-function telemetry.guard(stage, callback)
+function telemetry.guard(stage, callback, always)
     return function(...)
-        if not state.telemetry_active then return end
+        if not state.telemetry_active and not always then return end
         if not pcall(callback, ...) then
             telemetry.report(stage, "callback_failed")
         end

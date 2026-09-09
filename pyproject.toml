@@ -32,19 +32,19 @@ dev = [
     "prek>=0.5.2",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.16.6",
-    "rumdl>=0.2.68",
-    "ty>=0.0.79",
+    "ruff>=0.16.7",
+    "rumdl>=0.2.71",
+    "ty>=0.0.80",
 ]
 
 [build-system]
-requires = ["uv_build~=0.12.10"]
+requires = ["uv_build~=0.12.13"]
 build-backend = "uv_build"
 
 [tool.ruff]
 fix = true
 preview = true
-required-version = '>=0.16.6'
+required-version = '>=0.16.7'
 
 [tool.ruff.lint]
 select = ['ALL']

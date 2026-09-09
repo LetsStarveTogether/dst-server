@@ -557,10 +557,19 @@ class ClusterController(ClusterAPI):
             before = catalog.snapshots[-1].snapshot_id
 
     async def _regenerate(
-        self, completion_timeout: float = DEFAULT_RELOAD_TIMEOUT
+        self,
+        expected_session_id: str | None = None,
+        require_empty: bool | None = None,
+        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
         await self._reload(
-            lambda master: master.invoke(c.Regenerate(timeout=completion_timeout)),
+            lambda master: master.invoke(
+                c.Regenerate(
+                    expected_session_id=expected_session_id,
+                    require_empty=require_empty,
+                    timeout=completion_timeout,
+                )
+            ),
             completion_timeout,
         )
 

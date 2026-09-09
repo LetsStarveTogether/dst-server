@@ -153,8 +153,20 @@ class ClusterAPI(_LifecycleAPI):
     ) -> None:
         return await self.invoke(c.Rollback(count=count, timeout=timeout))
 
-    async def regenerate(self, *, timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
-        return await self.invoke(c.Regenerate(timeout=timeout))
+    async def regenerate(
+        self,
+        *,
+        expected_session_id: str | None = None,
+        require_empty: bool | None = None,
+        timeout: float = DEFAULT_RELOAD_TIMEOUT,
+    ) -> None:
+        return await self.invoke(
+            c.Regenerate(
+                expected_session_id=expected_session_id,
+                require_empty=require_empty,
+                timeout=timeout,
+            )
+        )
 
     async def is_whitelisted(self, userid: str) -> bool:
         return await self.invoke(c.IsWhitelisted(userid=userid))

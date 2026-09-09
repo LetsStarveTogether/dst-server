@@ -1062,11 +1062,13 @@ async def test_save_and_reload_coordinate_every_shard_from_master_once(
 
         await instance.reset(timeout=11)
         await instance.rollback(2, timeout=12)
-        await instance.regenerate(timeout=13)
+        await instance.regenerate(
+            expected_session_id="SESSION", require_empty=True, timeout=13
+        )
         for command in (
             c.Reset(timeout=11),
             c.Rollback(count=2, timeout=12),
-            c.Regenerate(timeout=13),
+            c.Regenerate(expected_session_id="SESSION", require_empty=True, timeout=13),
         ):
             assert command in master.requests
             assert command not in secondary.requests

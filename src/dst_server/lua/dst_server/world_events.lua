@@ -4,11 +4,19 @@ local telemetry = require("dst_server.telemetry")
 local values = require("dst_server.values")
 local world_events = {}
 
-function world_events.install_world()
+function world_events.install_players()
     TheWorld:ListenForEvent("ms_playerjoined", telemetry.guard("world.ms_playerjoined", function(_, player)
         player_events.attach(player)
-        telemetry.emit("dst.player.shard_entered", { player = values.entity_ref(player) })
-    end))
+        if state.telemetry_active then
+            telemetry.emit("dst.player.shard_entered", { player = values.entity_ref(player) })
+        end
+    end, true))
+    for _, player in ipairs(AllPlayers) do
+        player_events.attach(player)
+    end
+end
+
+function world_events.install_world()
     TheWorld:ListenForEvent("ms_playerleft", telemetry.guard("world.ms_playerleft", function(_, player)
         telemetry.emit("dst.player.shard_left", { player = values.entity_ref(player) })
     end))
@@ -106,10 +114,6 @@ function world_events.install_world()
                 value = value,
             })
         end))
-    end
-
-    for _, player in ipairs(AllPlayers) do
-        player_events.attach(player)
     end
 end
 

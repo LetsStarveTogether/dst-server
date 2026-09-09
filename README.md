@@ -35,6 +35,7 @@ Both languages include the complete module documentation.
 
 You need Linux, Podman with Quadlet support, systemd, and [uv](https://docs.astral.sh/uv/getting-started/installation/).
 The project requires Python `>=3.14.7`; `uv run` prepares Python and dependencies from the project configuration.
+Mod updater cleanup relies on the [Python 3.14.7 process-wait fix](https://github.com/python/cpython/pull/154171).
 Run these commands as the regular user who owns the cluster directory.
 
 1. Clone the project and create a token on the [Klei dedicated server page](https://accounts.klei.com/account/game/servers?game=DontStarveTogether).
@@ -127,11 +128,17 @@ cluster/
 | `mods/` | Shared download list, Mod content, and cache; see [Mod management](#mod-management). |
 | `.dst-server.sock`, `console` | Cluster RPC socket and master shard recovery FIFO, created at runtime. |
 | `<secondary>/console` | Secondary shard recovery FIFO. |
+| `<shard>/save/session/<session_id>/.last_login` | Last successful player load, as one UTC ISO 8601 timestamp; excluded from exports. |
 
 `cluster.ini`, `cluster_token.txt`, and every shard's `server.ini` must exist, with exactly one master shard.
 Every subdirectory of the cluster root except `mods` is treated as a shard, so keep backups outside the cluster directory.
 Managed configuration and shard directories cannot be symlinks.
 Preparation creates missing permission lists and Mod support files.
+
+Agents overwrite `.last_login` after the client finishes the world-loading handshake, including migration between shards.
+Recording works with telemetry disabled; restarting preserves the time, while a new world has its own session directory.
+`read_last_login(shard_directory, session_id)` in [activity.py](src/dst_server/activity.py) returns `None` for missing, empty, or invalid records.
+Exports also omit temporary files left by interrupted timestamp writes.
 
 ### Shards and Ports
 
@@ -990,13 +997,14 @@ The SDK uses `TelemetrySettings(profile=..., actions=...)`, passed through `Serv
 
 | Profile | Collected data |
 | --- | --- |
-| `off` | No game event Hooks; management RPC remains available |
+| `off` | Only the local login timestamp hook; management RPC remains available |
 | `critical` | Player joins, departures, spawns, deaths, revivals, migration, drowning, and falls; significant entity deaths, shard connections, bosses, rifts, and world state |
 | `history` | Adds combat, items, player state, skills, hound warnings, fishing, planting, and allowlisted Action results |
 
 - Entity deaths are recorded only for players, entities tagged `epic`, or deaths attributable to a player.
 - `spawned` marks a newly created character before spawn positioning, so its position is `null`.
   `shard_entered` marks entry into a shard.
+  `loaded` follows the completed client handshake; with `off`, Agents only update the local timestamp.
 - `incident` records actual entry into native drowning or falling states, keeping only the player and incident type.
   Eating includes ordinary food and Wortox souls.
 - See [telemetry configuration](src/dst_server/telemetry/config.py) for the default `history` Action list.

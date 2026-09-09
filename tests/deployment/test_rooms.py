@@ -140,8 +140,11 @@ def test_room_schedules_have_five_equal_groups_and_complete_names() -> None:
         for number in numbers:
             assert room_schedule(number) == schedule
             suffix = f"-{schedule[0]}" if schedule else ""
+            message = (
+                f" | 每日 {schedule[1]}-{schedule[2]} 开放" if schedule else promotion
+            )
             assert room_name(number) == (
-                f"LST-{number:03d}-{room(number)[1]}{suffix}{promotion}"
+                f"LST-{number:03d}-{room(number)[1]}{suffix}{message}"
             )
     assert sorted(seen) == list(range(100))
     for number in range(100, 140):

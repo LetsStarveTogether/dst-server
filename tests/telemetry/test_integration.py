@@ -58,6 +58,7 @@ def event_server(relay: ShardAgent, *events: ObservedGameEvent) -> Server:
         "Server",
         SimpleNamespace(
             config=relay.config,
+            lifecycle=SimpleNamespace(eof=False),
             game_events=SimpleNamespace(nonce=events[0].record.nonce),
             recorder=SimpleNamespace(
                 attributes=Mock(return_value={"dst.shard.name": "forest"})
@@ -168,7 +169,10 @@ async def test_telemetry_relays_start_before_process_readiness_and_are_critical(
     monkeypatch.setattr(relay, "_drain_operational", AsyncMock(side_effect=failures[1]))
     calls: list[tuple[str, bool]] = []
 
-    def done(_: Server, task: asyncio.Task[None], *, critical: bool) -> None:
+    def done(
+        _: Server, task: asyncio.Task[None], *, critical: bool, expected_eof: bool
+    ) -> None:
+        del expected_eof
         task.exception()
         calls.append((task.get_name(), critical))
 
@@ -178,6 +182,7 @@ async def test_telemetry_relays_start_before_process_readiness_and_are_critical(
     await asyncio.gather(*relay._attempt_tasks, return_exceptions=True)
     await asyncio.sleep(0)
 
+    assert ("dst-lifecycle-relay-forest", True) in calls
     assert ("dst-game-event-relay-forest", True) in calls
     assert ("dst-operational-relay-forest", True) in calls
 

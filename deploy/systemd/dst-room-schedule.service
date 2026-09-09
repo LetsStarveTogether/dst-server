@@ -1,5 +1,6 @@
 [Unit]
 Description=Apply DST room opening hours
+OnSuccess=dst-room-recycle.service
 
 [Service]
 Type=oneshot
