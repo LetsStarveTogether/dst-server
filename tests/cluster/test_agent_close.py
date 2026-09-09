@@ -35,9 +35,9 @@ async def test_cancelled_close_keeps_tail_relays_until_shared_cleanup_finishes(
     completed: list[str] = []
     server = Server(agent.config)
 
-    async def persist_tail() -> None:
+    async def drain_tail() -> None:
         await release.wait()
-        completed.append("persisted")
+        completed.append("drained")
 
     async def stop() -> None:
         entered.set()
@@ -49,7 +49,7 @@ async def test_cancelled_close_keeps_tail_relays_until_shared_cleanup_finishes(
     monkeypatch.setattr(agent.supervisor, "_close", stop_mock)
     pipeline = Mock(shutdown=AsyncMock())
     agent._pipeline = cast("Pipeline", pipeline)
-    tail = asyncio.create_task(persist_tail())
+    tail = asyncio.create_task(drain_tail())
     agent._attempt_tasks = (tail,)
     first = asyncio.create_task(agent.aclose())
     second: asyncio.Task[None] | None = None
@@ -72,7 +72,7 @@ async def test_cancelled_close_keeps_tail_relays_until_shared_cleanup_finishes(
             await second
         await agent.aclose()
 
-        assert completed == ["persisted", "stopped"]
+        assert completed == ["drained", "stopped"]
         stop_mock.assert_awaited_once()
         pipeline.shutdown.assert_awaited_once()
     finally:
@@ -99,12 +99,12 @@ async def test_close_keeps_detached_tail_failure_and_cleanup_errors(
     server = Server(agent.config)
     agent.supervisor._server = server
 
-    async def persist_tail() -> None:
+    async def drain_tail() -> None:
         await release.wait()
-        message = "private outbox write failed"
+        message = "private event stream failed"
         raise OSError(message)
 
-    tail = asyncio.create_task(persist_tail())
+    tail = asyncio.create_task(drain_tail())
     agent._attempt_tasks = (tail,)
     supervisor_error = RuntimeError("supervisor cleanup failed")
     pipeline_error = OSError("pipeline cleanup failed")
@@ -133,7 +133,7 @@ async def test_close_keeps_detached_tail_failure_and_cleanup_errors(
     )
     assert agent._fatal_error is not None
     assert agent._fatal_error in errors
-    assert "private outbox" not in str(failure.value)
+    assert "private event stream" not in str(failure.value)
     if supervisor_fails:
         assert supervisor_error in errors
     if pipeline_fails:

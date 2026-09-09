@@ -95,7 +95,6 @@ def test_otel_resource_uses_explicit_cluster_name(
     assert service.configure_otel(config) is pipeline
     configure.assert_called_once_with(
         resource_attributes={"dst.cluster.name": "dst-042"},
-        outbox_path=Path("/cluster/forest/.telemetry.sqlite3"),
     )
 
 

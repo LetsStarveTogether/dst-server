@@ -12,7 +12,7 @@ The default image is `quay.io/wh2099/dst-server:latest`; use `:beta` for the tes
 
 - **Deploy**: generate game configuration and Quadlet units for forests, caves, and shared Mods.
 - **Manage**: query players and worlds, save, roll back, restart, and administer games through local RPC.
-- **Record**: collect game events as needed, using local logs or durable OTLP Logs delivery.
+- **Record**: collect game events as needed, using local logs or OTLP Logs export.
 
 ## Contents
 
@@ -27,7 +27,7 @@ Both languages include the complete module documentation.
 | [RPC and game SDK](#rpc-and-game-sdk) | [Connection example](#connecting-to-a-cluster) · [Shared requests](#shared-requests-and-validation) · [API index](#api-index) · [Emoji and Emote](#emoji-and-emote-enums) |
 | [Saves and exports](#saves-and-exports) | [File reference](#save-files) · [Snapshots and rollback](#snapshot-queries-and-rollback-by-day) · [Exports and R2](#exports-and-r2-uploads) |
 | [Mod management](#mod-management) | [Updaters](#choosing-an-updater) · [Downloads and activation](#declaring-downloads-and-activation) · [Workshop SDK](#standalone-workshop-sdk) |
-| [Telemetry and historical logs](#telemetry-and-historical-logs) | [Collection scope](#collection-scope) · [OTLP](#otlp-configuration) · [Delivery](#durable-delivery) · [Log boundaries](#log-boundaries) · [Netdata](#netdata-deployment-and-queries) · [Troubleshooting](#telemetry-troubleshooting) |
+| [Telemetry and historical logs](#telemetry-and-historical-logs) | [Collection scope](#collection-scope) · [OTLP](#otlp-configuration) · [Delivery](#in-memory-delivery) · [Log boundaries](#log-boundaries) · [Netdata](#netdata-deployment-and-queries) · [Troubleshooting](#telemetry-troubleshooting) |
 | [Utilities](#utilities) | Klei services, player path encoding, Lua annotations |
 | [Development and validation](#development-and-validation) | [Module boundaries](#module-boundaries), dependencies, check commands, source index |
 
@@ -127,7 +127,6 @@ cluster/
 | `mods/` | Shared download list, Mod content, and cache; see [Mod management](#mod-management). |
 | `.dst-server.sock`, `console` | Cluster RPC socket and master shard recovery FIFO, created at runtime. |
 | `<secondary>/console` | Secondary shard recovery FIFO. |
-| `<shard>/.telemetry.sqlite3` | Durable delivery database, created when OTLP Logs is enabled. |
 
 `cluster.ini`, `cluster_token.txt`, and every shard's `server.ini` must exist, with exactly one master shard.
 Every subdirectory of the cluster root except `mods` is treated as a shard, so keep backups outside the cluster directory.
@@ -443,7 +442,7 @@ For typed APIs, also check `driver_health` / `driver_error`.
 
 EOF or an incomplete response on FD 4 makes the Console unavailable.
 If the game still runs but typed requests fail, check `driver_error` and `health()`.
-Failures in critical observation streams or telemetry persistence can make the Agent exit.
+Failures in critical observation streams can make the Agent exit.
 The process manager then restarts the container.
 
 ### Saving and World Reloads
@@ -981,7 +980,7 @@ See [WorkshopUpdater](src/dst_server/mods/workshop.py) and [SteamCMD](src/dst_se
 
 Game events and runtime diagnostics use OpenTelemetry Logs; management operations use Traces.
 Metrics track processes, players, actions, and event counts.
-Collection scope, export configuration, and historical delivery are controlled separately.
+Collection scope, export configuration, and receiver retention are controlled separately.
 A shard's `ready` status does not indicate telemetry health.
 
 ### Collection Scope
@@ -1007,9 +1006,11 @@ The SDK uses `TelemetrySettings(profile=..., actions=...)`, passed through `Serv
 ### OTLP Configuration
 
 The image includes OTLP dependencies; install `dst-server[otel]` when using the SDK independently.
-Logs use the native asynchronous `grpc.aio` client with OTLP protobuf messages.
-The exporter supports TLS and client certificates, metadata headers, compression, deadlines, and channel cleanup.
-Metrics and Traces use the OpenTelemetry exporters and remain outside the durable Logs outbox.
+Logs use the OpenTelemetry SDK's `LoggerProvider`, `BatchLogRecordProcessor`, and gRPC `OTLPLogExporter`.
+Metrics and Traces also use the OpenTelemetry SDK exporters.
+The SDK handles endpoints, headers, TLS, compression, timeouts, and record limits.
+Logs default to at most 128 attributes per record; compression can be unset or `gzip`.
+For mTLS, configure the CA certificate and both the client key and certificate through the SDK environment variables.
 Agents initialize export when any of these variables is set:
 
 - `OTEL_EXPORTER_OTLP_ENDPOINT`
@@ -1024,7 +1025,7 @@ Agents initialize export when any of these variables is set:
 | `OTEL_LOGS_EXPORTER`, `OTEL_METRICS_EXPORTER`, `OTEL_TRACES_EXPORTER` | Support only `otlp` and `none`; default to `otlp` |
 | `OTEL_EXPORTER_OTLP_*` | Configure endpoints, headers, certificates, compression, and timeouts; transport always uses gRPC |
 | No endpoint, or Logs set to `none` | Game events become local `DST_EVENT\|...` logs and are published to live subscriptions |
-| Dependency, initialization, or persistence failure after export is explicitly enabled | The Agent exits with an error; no automatic fallback to local logs |
+| Dependency or initialization failure after export is explicitly enabled | The Agent exits with an error; no automatic fallback to local logs |
 
 Place the Logs configuration for Netdata on the same host under Quadlet's `[Container]`:
 
@@ -1042,15 +1043,16 @@ Rooms `000–099` and `110–119` use `history`; the other templates use the def
 Without Netdata, keep local logs as described in [Quick start](#quick-start).
 When calling `QuadletApplication.for_cluster()` directly, pass environment variables through `telemetry_environment`.
 
-### Durable Delivery
+### In-Memory Delivery
 
 ```mermaid
 flowchart LR
     Lua["Lua game events"] --> Validate["Python validation and bounded queue"]
     Validate --> Agent["ShardAgent"]
     Runtime["Runtime diagnostics"] --> Agent
-    Agent -->|"Logs enabled"| Disk["Shard SQLite outbox"]
-    Disk -->|"Retry; acknowledge on success"| Receiver["OTLP receiver"]
+    Agent -->|"Logs enabled"| Queue["SDK bounded memory queue"]
+    Queue -->|"Background batch export"| Receiver["OTLP receiver"]
+    Agent --> Live["Live subscriptions"]
     Agent -->|"Logs disabled"| Local["Local logs"]
 ```
 
@@ -1062,23 +1064,21 @@ Valid events enter a queue of 1,024 entries, waiting when full; queued records r
 Validation failures count toward `telemetry_invalid`.
 Events not yet queued before closure or cancellation count toward `telemetry_dropped`.
 
-| Boundary | Guarantees and limits |
+| Boundary | Behavior and limits |
 | --- | --- |
-| Storage | One `/cluster/<shard>/.telemetry.sqlite3` per shard, with one writer process |
-| Commit point | Durable only after SQLite commits with `synchronous=FULL`; game events are then published to live subscriptions |
-| Delivery semantics | At least once after commit; crashes before commit can lose records, and lost acknowledgments can cause duplicates |
-| Network outages | Independent retries while accepting new disk writes; unacknowledged records resume after restart |
-| Permanent errors or partial rejection | Quarantines the entire batch, preserving original content without blocking later batches; no automatic resend |
-| Capacity | 256 MiB of payload by default, shared by pending and quarantined records; SQLite pages and WAL use additional space |
-| Full storage, corruption, or schema mismatch | Preserves existing files and reports an error; full storage rejects new writes and fails the Agent, without evicting unacknowledged history |
-| Metrics, Traces, and live subscriptions | Bypass the outbox and do not have these durability guarantees |
+| Submission | Synchronously adds records to memory; event consumption and live subscriptions do not wait for network export |
+| SDK queue | Defaults to 2,048 records, batches of up to 512, and a one-second schedule delay; a full queue discards the oldest records |
+| Export failures | The SDK retries transient errors within the export timeout, which defaults to ten seconds; failed or rejected records are discarded |
+| Shutdown and restart | Shutdown asks the SDK to finish pending export; records may be lost, and restarting does not replay them |
 
-The persistence and delivery implementations are [outbox.py](src/dst_server/telemetry/outbox.py) and [exporter.py](src/dst_server/telemetry/exporter.py).
-Replay preserves original observation times, resource attributes, and UIDs; records are deleted only after acknowledgment.
+Logs are never persisted locally for export, and receiver recovery only allows subsequent batches to be exported.
+The SDK queue and export losses do not count toward the input counters `telemetry_invalid` or `telemetry_dropped`.
+Old `.telemetry.sqlite3` files and their `-wal` / `-shm` companions are not read, migrated, or deleted.
+After stopping the shard, you can remove those files manually.
 A game event's `log.record.uid` is `nonce:generation:seq`, useful for identifying duplicates.
 Do not assume the backend deduplicates automatically.
 Lua's `events_emitted` is only the highest allocated output sequence number; output failures can leave gaps.
-It does not confirm Python validation, persistence, or delivery.
+It does not confirm Python validation or delivery.
 
 ### Log Boundaries
 
@@ -1086,14 +1086,14 @@ Python reads merged game stdout and stderr and can no longer distinguish their s
 FD 3 command input, FD 4 responses, and FD 5 lifecycle events stay separate.
 Matching markers in stdout do not complete commands, advance Sessions, or confirm saves.
 The standard CLI writes Agent logs through Logbook to container stdout.
-Ordinary Logbook records do not automatically enter the OTLP outbox.
+Ordinary Logbook records are not automatically exported through OTLP.
 Structured game events and allowlisted runtime diagnostics keep their explicit routing.
 When Podman uses its journald driver, conmon forwards this output to the journal.
 
 | Input | Handling |
 | --- | --- |
 | Ordinary logs, unknown errors, and stack traces | Preserves text, including the original logs for recognized diagnostics |
-| Valid events with Logs enabled | Consumes the raw event line and writes it to the outbox without duplicating it in local event logs |
+| Valid events with Logs enabled | Consumes the raw event line and queues it in SDK memory without duplicating it in local event logs |
 | Valid events with Logs disabled | Converts them to `DST_EVENT\|...`; frequent events still increase journal volume |
 | Recognized but invalid events | Emits warnings limited by reason, without echoing the payload |
 | `DST_OTEL` embedded in chat, source locations, or error bodies | Preserves it as an ordinary log |
@@ -1144,7 +1144,7 @@ Lua tests execute native logging functions with varied output order.
 Actual journald storage and terminal rendering need separate verification in the deployment environment.
 
 Events can contain player `userid`, entities, coordinates, actions, and item history.
-Apply the same access controls to local logs and the outbox.
+Apply the same access controls to local logs and receiver storage.
 The collector does not specifically collect chat, console, passwords, or tokens, but does not redact every string.
 For example, Action `reason` can contain sensitive text returned by a Mod.
 Disabling OTLP does not delete local logs; switching profiles does not delete persistent history.
@@ -1169,7 +1169,6 @@ After installing the configuration:
 3. Run `systemctl daemon-reload` and `systemctl restart netdata`.
    Confirm that the receiver is listening before starting rooms.
 
-The receiver accepts backlogs up to nine years old.
 Retention is bounded by nine years, 1 TB, and 500,000 files, so individual logs are not guaranteed nine years of retention.
 The dedicated address does not provide authentication.
 Across hosts or when isolating untrusted containers, configure TLS, authentication, and network access controls.
@@ -1209,21 +1208,19 @@ asyncio.run(main())
 
 ### Telemetry Troubleshooting
 
-`await cluster.shard(name).status()` returns driver and delivery status; `health()` actively queries the current Lua driver.
+`await cluster.shard(name).status()` returns driver status and input counters.
+`health()` actively queries the current Lua driver.
 
 | Observation | Action |
 | --- | --- |
 | `driver_health.telemetry_status=disabled` | The profile is `off`; change configuration and restart if game events are needed |
-| `active` | Hooks are installed; check delivery status next |
+| `active` | Hooks are installed; check the SDK export logs and receiver next |
 | `degraded` / `failed` | A callback errored / installation failed; inspect `last_error` and `errors`; installation is not retried within the same Lua module state |
 | Rising `telemetry_invalid` / `telemetry_dropped` | Check encoding, size, schema, nonce, and shutdown-related rejection reasons |
-| Rising `telemetry_delivery.pending` | Check `last_error`, the receiver, TLS, credentials, and disk |
-| Nonzero `telemetry_delivery.quarantined` | Permanent or partial rejection; fix the cause and preserve the database; no quarantine management CLI exists yet |
-| `storage_*` or Agent startup failure | Check directory permissions, disk, capacity, and database ownership |
+| SDK export errors or missing receiver records | Check the endpoint, receiver, TLS, credentials, and SDK logs; failed records are not retained for recovery |
+| Agent startup failure after enabling export | Check OTLP dependencies and SDK configuration |
 
-`telemetry_delivery.bytes` measures payload usage.
-`last_error` exposes only an error category, not arbitrary receiver error text.
-`telemetry_delivery=None` means no pipeline was established; an existing pipeline with Logs disabled can return all zeros.
+Shard status does not expose export delivery counters.
 
 [Back to contents](#contents)
 
@@ -1276,7 +1273,7 @@ The SDK separates data and formats from game processes, cluster coordination, an
 | [runtime](src/dst_server/runtime) | Game processes, FD protocols, command confirmation, driver readiness, and Supervisor retries. |
 | [cluster](src/dst_server/cluster) | Agent registration, topology, coordinated operations, observation subscriptions, and daemon assembly. |
 | [rpc](src/dst_server/rpc) | Cap'n Proto connections and capabilities, validated payload transport, and remote subscriptions. |
-| [telemetry](src/dst_server/telemetry) | Collection, SQLite outbox, OTLP encoding, and asynchronous export. |
+| [telemetry](src/dst_server/telemetry) | Collection and OpenTelemetry SDK export. |
 | [archive.py](src/dst_server/archive.py) | Save export, credential removal, 7z archives, and object storage uploads. |
 | [concurrency.py](src/dst_server/concurrency.py) / [timeouts.py](src/dst_server/timeouts.py) | Cancellation-safe cleanup and shared deadline handling. |
 | [klei](src/dst_server/klei) / [annotations](src/dst_server/annotations) / [netdata.py](src/dst_server/netdata.py) | External queries, Lua annotation generation, and historical log queries. |
@@ -1292,7 +1289,6 @@ The `otel` extra supplies OTLP and gRPC dependencies, and `export` supplies 7z a
 
 Tests are grouped by behavior: configuration, deployment, Mods, runtime, cluster, RPC, game/Lua, telemetry, and utilities.
 Hypothesis checks Lua value round trips and byte stream chunking.
-It also compares outbox append/acknowledge/quarantine/reopen sequences with a reference model.
 Process and transport tests use local pipes, Unix sockets, and HTTP/gRPC services.
 Explicit synchronization gates exercise cancellation races.
 

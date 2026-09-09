@@ -11,7 +11,7 @@
 
 - **部署**：生成游戏配置与 Quadlet，统一管理森林、洞穴和 Mod。
 - **管理**：通过本地 RPC 查询玩家与世界，执行保存、回档、重启和管理操作。
-- **记录**：按需采集游戏事件，使用本地日志或持久化 OTLP Logs 交付。
+- **记录**：按需采集游戏事件，使用本地日志或 OTLP Logs 导出。
 
 ## 目录
 
@@ -26,7 +26,7 @@
 | [RPC 与游戏 SDK](#rpc-与游戏-sdk) | [连接示例](#连接集群) · [共享请求](#共享请求与验证) · [接口索引](#接口索引) · [表情与动作](#表情与动作枚举) |
 | [存档与导出](#存档与导出) | [文件说明](#存档文件) · [查询与回档](#快照查询与按天回档) · [导出与 R2](#导出与-r2-上传) |
 | [Mod 管理](#mod-管理) | [更新器](#选择更新器) · [下载与启用](#声明下载与启用) · [Workshop SDK](#独立-workshop-sdk) |
-| [遥测与历史日志](#遥测与历史日志) | [采集范围](#采集范围) · [OTLP](#otlp-配置) · [交付](#持久交付) · [日志边界](#日志边界) · [Netdata](#netdata-部署与查询) · [排障](#遥测排障) |
+| [遥测与历史日志](#遥测与历史日志) | [采集范围](#采集范围) · [OTLP](#otlp-配置) · [交付](#内存交付) · [日志边界](#日志边界) · [Netdata](#netdata-部署与查询) · [排障](#遥测排障) |
 | [辅助工具](#辅助工具) | Klei 服务、玩家路径编码、Lua 注解 |
 | [开发与验证](#开发与验证) | [模块边界](#模块边界)、依赖、检查命令、源码索引 |
 
@@ -122,7 +122,6 @@ cluster/
 | `mods/` | 共享下载清单、Mod 内容和缓存，见 [Mod 管理](#mod-管理)。 |
 | `.dst-server.sock`、`console` | 运行时创建的集群 RPC socket 与主分片恢复 FIFO。 |
 | `<secondary>/console` | 次分片恢复 FIFO。 |
-| `<shard>/.telemetry.sqlite3` | 启用 OTLP Logs 后创建的持久交付数据库。 |
 
 `cluster.ini`、`cluster_token.txt` 和每个分片的 `server.ini` 必须存在，且只能有一个主分片。
 根目录中除 `mods` 外的子目录都视为分片，因此备份应放在集群目录外。
@@ -416,7 +415,7 @@ Quadlet 设置 `WatchdogSec=300`，连续五分钟无通知则重启容器。
 watchdog 只表明管理事件循环活跃；`status.ready` 只表明存活游戏已报告原生就绪，类型化接口需另查 `driver_health` / `driver_error`。
 
 FD 4 出现 EOF 或不完整响应会使 Console 不可用；游戏仍运行但类型化请求失败时，检查 `driver_error` 和 `health()`。
-关键观察流异常或遥测持久化失败可使 Agent 退出，由进程管理器重启容器。
+关键观察流异常可使 Agent 退出，由进程管理器重启容器。
 
 ### 保存与世界重载
 
@@ -909,7 +908,7 @@ Workshop 元数据与旧格式下载使用 HTTPX2，显式传入 `SteamCMD.proxy
 ## 遥测与历史日志
 
 游戏事件与运行诊断使用 OpenTelemetry Logs，管理操作使用 Traces，进程、玩家、动作和事件计数使用 Metrics。
-采集范围、导出配置和历史交付分别控制，分片 `ready` 不代表遥测健康。
+采集范围、导出配置和接收端保留策略分别控制，分片 `ready` 不代表遥测健康。
 
 ### 采集范围
 
@@ -931,9 +930,11 @@ SDK 使用 `TelemetrySettings(profile=..., actions=...)`，通过 `ServerConfig.
 ### OTLP 配置
 
 镜像已包含 OTLP 依赖；独立使用 SDK 时安装 `dst-server[otel]`。
-Logs 使用原生异步 `grpc.aio` 客户端与 OTLP protobuf 消息。
-导出器支持 TLS 与客户端证书、metadata headers、压缩、截止时间和 channel 清理。
-Metrics 和 Traces 使用 OpenTelemetry 导出器，不经过持久 Logs outbox。
+Logs 使用 OpenTelemetry SDK 的 `LoggerProvider`、`BatchLogRecordProcessor` 和 gRPC `OTLPLogExporter`。
+Metrics 和 Traces 同样使用 OpenTelemetry SDK 导出器。
+endpoint、headers、TLS、压缩、超时和记录限制均由 SDK 处理。
+Logs 默认每条最多 128 个属性，压缩可不设置或使用 `gzip`。
+mTLS 通过 SDK 环境变量配置 CA 证书以及客户端私钥和证书。
 设置以下任一变量后，Agent 初始化导出：
 
 - `OTEL_EXPORTER_OTLP_ENDPOINT`
@@ -948,7 +949,7 @@ Metrics 和 Traces 使用 OpenTelemetry 导出器，不经过持久 Logs outbox�
 | `OTEL_LOGS_EXPORTER`、`OTEL_METRICS_EXPORTER`、`OTEL_TRACES_EXPORTER` | 仅支持 `otlp`、`none`，默认 `otlp` |
 | `OTEL_EXPORTER_OTLP_*` | 配置 endpoint、headers、证书、压缩和超时；传输固定使用 gRPC |
 | 无 endpoint 或 Logs 为 `none` | 游戏事件写入本地 `DST_EVENT\|...` 并发布给实时订阅 |
-| 显式启用后的依赖、初始化或持久化写入失败 | Agent 报错退出，不自动回退到本地日志 |
+| 显式启用后的依赖或初始化失败 | Agent 报错退出，不自动回退到本地日志 |
 
 同机 Netdata 的 Logs 配置放在 Quadlet 的 `[Container]`：
 
@@ -965,15 +966,16 @@ Environment=OTEL_TRACES_EXPORTER=none
 没有 Netdata 时，按 [快速开始](#快速开始) 保留本地日志即可。
 直接调用 `QuadletApplication.for_cluster()` 时，通过 `telemetry_environment` 显式传入环境变量。
 
-### 持久交付
+### 内存交付
 
 ```mermaid
 flowchart LR
     Lua["Lua 游戏事件"] --> Validate["Python 校验与有界队列"]
     Validate --> Agent["ShardAgent"]
     Runtime["运行诊断"] --> Agent
-    Agent -->|"Logs 已启用"| Disk["分片 SQLite outbox"]
-    Disk -->|"重试，成功后确认"| Receiver["OTLP 接收端"]
+    Agent -->|"Logs 已启用"| Queue["SDK 有界内存队列"]
+    Queue -->|"后台批量导出"| Receiver["OTLP 接收端"]
+    Agent --> Live["实时订阅"]
     Agent -->|"Logs 未启用"| Local["本地日志"]
 ```
 
@@ -982,34 +984,32 @@ Python 校验类型、字段、UTF-8 和当前进程 nonce；`DST_OTEL|` 加 JSO
 合法事件进入容量 1,024 的队列，满时等待，关闭后仍可消费已入队记录。
 校验拒绝计入 `telemetry_invalid`；关闭或取消前尚未入队的事件计入 `telemetry_dropped`。
 
-| 边界 | 保证与限制 |
+| 边界 | 行为与限制 |
 | --- | --- |
-| 持久化位置 | 每分片一个 `/cluster/<shard>/.telemetry.sqlite3`，只允许一个写入进程 |
-| 提交时机 | SQLite `synchronous=FULL` 提交后才算持久化；游戏事件随后发布给实时订阅 |
-| 交付语义 | 提交后至少一次；提交前崩溃仍可能丢失，确认丢失可能重复交付 |
-| 网络中断 | 独立重试，继续接受落盘；重启后恢复未确认记录 |
-| 永久错误、部分拒收 | 隔离整个批次，保留原始内容，不阻塞后续批次；不自动重发 |
-| 容量 | 默认 256 MiB payload，积压与隔离共同计入；SQLite 页和 WAL 另占空间 |
-| 满额、损坏、schema 不匹配 | 保留已有文件并报错，满额拒绝新写入并使 Agent 失败，不淘汰未确认历史 |
-| Metrics、Traces、实时订阅 | 不经过 outbox，没有上述持久交付保证 |
+| 提交 | 同步提交到内存，事件消费和实时订阅不等待网络导出 |
+| SDK 队列 | 默认 2,048 条，每批最多 512 条，调度间隔一秒；队列满时丢弃最旧记录 |
+| 导出失败 | SDK 在导出超时内重试临时错误，默认超时十秒；最终失败或被拒收的记录直接丢弃 |
+| 关闭与重启 | 关闭时请求 SDK 完成待导出记录，仍允许丢失；重启不重放 |
 
-持久化与交付实现分别位于 [outbox.py](src/dst_server/telemetry/outbox.py) 和 [exporter.py](src/dst_server/telemetry/exporter.py)。
-重放保留原始观察时间、资源属性和 UID，确认成功才删除记录。
+Logs 不为导出在本地持久化，接收端恢复后仅能继续导出后续批次。
+SDK 队列或导出丢失不计入入口计数 `telemetry_invalid`、`telemetry_dropped`。
+程序不读取、迁移或删除旧 `.telemetry.sqlite3`、`.telemetry.sqlite3-wal`、`.telemetry.sqlite3-shm` 文件。
+停服后可手工清理这些文件。
 游戏事件的 `log.record.uid` 为 `nonce:generation:seq`，可用于辨认重复，不能假定后端自动去重。
-Lua `events_emitted` 只是已分配输出序号的高水位；输出失败可能留下缺号，不代表 Python 已校验、落盘或送达。
+Lua `events_emitted` 只是已分配输出序号的高水位；输出失败可能留下缺号，不代表 Python 已校验或送达。
 
 ### 日志边界
 
 游戏 stdout 与 stderr 合流后由 Python 读取，无法再区分来源。
 FD 3 命令输入、FD 4 命令响应、FD 5 生命周期保持独立；stdout 中的相同标记不完成命令、推进 Session 或确认保存。
 标准 CLI 通过 Logbook 将 Agent 日志写到容器 stdout。
-普通 Logbook 记录不会自动进入 OTLP outbox，结构化游戏事件和白名单运行诊断保持显式分流。
+普通 Logbook 记录不会自动通过 OTLP 导出，结构化游戏事件和白名单运行诊断保持显式分流。
 Podman 使用 journald driver 时由 conmon 转交 journal。
 
 | 输入 | 处理方式 |
 | --- | --- |
 | 普通日志、未知报错、堆栈 | 保留文本；已识别诊断也保留原始日志 |
-| 合法事件，Logs 已启用 | 消费原始事件行，写入 outbox，不重复写本地事件日志 |
+| 合法事件，Logs 已启用 | 消费原始事件行，提交到 SDK 内存队列，不重复写本地事件日志 |
 | 合法事件，Logs 未启用 | 转成 `DST_EVENT\|...`；高频事件仍增加 journal 体积 |
 | 已识别但无效的事件 | 按原因限次警告，不回显 payload |
 | 聊天、源码位置、错误正文中嵌入 `DST_OTEL` | 保留为普通日志 |
@@ -1047,7 +1047,7 @@ Podman 使用 journald driver 时由 conmon 转交 journal。
 [RPC](tests/game/test_protocol.py) 验证特殊 Unicode 和截断预算，[CLI](tests/telemetry/test_integration.py) 验证本地与 OTLP 分流。
 真实 journald 存储和终端渲染需在部署环境另行验证。
 
-事件可能包含玩家 `userid`、实体、坐标、动作与物品历史，本地日志与 outbox 应采用相同访问控制。
+事件可能包含玩家 `userid`、实体、坐标、动作与物品历史，本地日志与接收端存储应采用相同访问控制。
 采集器不专门采集聊天、console、密码或 token，但不自动脱敏所有字符串；例如 Action `reason` 可含 Mod 返回的敏感文本。
 关闭 OTLP 不删除本地日志，切换 Profile 不删除持久化历史。
 
@@ -1069,7 +1069,7 @@ Podman 使用 journald driver 时由 conmon 转交 journal。
 2. 执行 `networkctl reload` 和 `networkctl reconfigure lo`，确认 `ip address show dev lo` 包含 `10.255.255.254/32`。
 3. 执行 `systemctl daemon-reload` 和 `systemctl restart netdata`，确认接收端监听后再启动房间。
 
-接收端允许九年内积压；保留同时受九年、1 TB、500,000 文件约束，不保证每条日志保留九年。
+保留同时受九年、1 TB、500,000 文件约束，不保证每条日志保留九年。
 专用地址不提供身份认证；跨主机或隔离不可信容器时需配置 TLS、鉴权和网络访问控制。
 
 `NetdataLogs` 在宿主直接执行 `/usr/lib/netdata/plugins.d/otel-plugin`，读取 `/etc/netdata/otel.yaml`。
@@ -1107,20 +1107,18 @@ asyncio.run(main())
 
 ### 遥测排障
 
-`await cluster.shard(name).status()` 返回驱动与交付状态；`health()` 主动查询当前 Lua driver。
+`await cluster.shard(name).status()` 返回驱动状态与入口计数；`health()` 主动查询当前 Lua driver。
 
 | 观察结果 | 处理 |
 | --- | --- |
 | `driver_health.telemetry_status=disabled` | Profile 为 `off`，需要游戏事件时修改配置并重启 |
-| `active` | Hook 已安装，继续检查交付状态 |
+| `active` | Hook 已安装，继续检查 SDK 导出日志和接收端 |
 | `degraded` / `failed` | 回调曾出错 / 安装失败；检查 `last_error`、`errors`，同一 Lua module state 不自动重试安装 |
 | `telemetry_invalid` / `telemetry_dropped` 增长 | 检查编码、大小、schema、nonce 和关闭相关拒绝原因 |
-| `telemetry_delivery.pending` 增长 | 检查 `last_error`、接收端、TLS、凭据与磁盘 |
-| `telemetry_delivery.quarantined` 非零 | 永久拒绝或部分拒收；修复条件并保留数据库，当前没有隔离记录管理 CLI |
-| `storage_*` 或 Agent 启动失败 | 检查目录权限、磁盘、容量和数据库占用 |
+| SDK 导出报错或接收端缺失记录 | 检查 endpoint、接收端、TLS、凭据和 SDK 日志；失败记录不会保留等待恢复 |
+| 启用导出后 Agent 启动失败 | 检查 OTLP 依赖和 SDK 配置 |
 
-`telemetry_delivery.bytes` 是 payload 用量；`last_error` 只返回错误类别，不返回接收端任意错误正文。
-`telemetry_delivery=None` 表示未建立 pipeline；已建立但 Logs 关闭时可返回全零状态。
+分片状态不提供导出交付计数。
 
 [返回目录](#目录)
 
@@ -1169,7 +1167,7 @@ SDK 将数据与格式、游戏进程、集群协调和传输分开。
 | [runtime](src/dst_server/runtime) | 游戏进程、FD 协议、命令确认、driver 就绪与 Supervisor 重试。 |
 | [cluster](src/dst_server/cluster) | Agent 注册、拓扑、协调操作、观测订阅与 daemon 组装。 |
 | [rpc](src/dst_server/rpc) | Cap'n Proto 连接与能力、经过验证的 payload 传输和远端订阅。 |
-| [telemetry](src/dst_server/telemetry) | 采集、SQLite outbox、OTLP 编码与异步导出。 |
+| [telemetry](src/dst_server/telemetry) | 采集与 OpenTelemetry SDK 导出。 |
 | [archive.py](src/dst_server/archive.py) | 存档导出、凭据清理、7z 归档与对象存储上传。 |
 | [concurrency.py](src/dst_server/concurrency.py) / [timeouts.py](src/dst_server/timeouts.py) | 取消时的完整清理与共享截止时间处理。 |
 | [klei](src/dst_server/klei) / [annotations](src/dst_server/annotations) / [netdata.py](src/dst_server/netdata.py) | 外部查询、Lua 注解生成与历史日志查询。 |
@@ -1184,7 +1182,7 @@ Logbook 继续负责应用日志，`python-ulid` 提供进程尝试、revision �
 ### 测试与检查
 
 测试按行为分组，覆盖配置、部署、Mod、runtime、cluster、RPC、游戏/Lua、遥测与辅助工具。
-Hypothesis 验证 Lua 值往返、字节流分块，以及 outbox 写入、确认、隔离、重开序列与参考模型的不变量。
+Hypothesis 验证 Lua 值往返和字节流分块。
 进程和传输测试使用本地管道、Unix socket、HTTP/gRPC 服务，并以显式同步门闩验证取消竞态。
 
 先安装 Lua 5.1、LuaJIT 和 just，并初始化游戏源码子模块；仓库的子模块 URL 使用 GitHub SSH。

@@ -36,7 +36,6 @@ from dst_server.models.snapshot import (
     SnapshotSeasons,
     WorldSnapshotMetadata,
 )
-from dst_server.models.telemetry import DeliveryStatus
 from dst_server.rpc.codec import (
     decode_json_value,
     decode_model,
@@ -138,7 +137,7 @@ def test_cluster_configuration_round_trip_preserves_presence_and_secrets() -> No
     assert restored.token.get_secret_value() == "pds-g^rpc-token"
 
 
-def test_shard_status_with_telemetry_delivery_round_trip_and_validation() -> None:
+def test_shard_status_with_telemetry_counters_round_trip_and_validation() -> None:
     status = ShardRuntimeStatus(
         name="forest",
         is_master=True,
@@ -146,9 +145,8 @@ def test_shard_status_with_telemetry_delivery_round_trip_and_validation() -> Non
         phase=ShardPhase.RUNNING,
         ready=True,
         telemetry_profile="history",
-        telemetry_delivery=DeliveryStatus(
-            pending=1, quarantined=2, bytes=3, last_error="offline"
-        ),
+        telemetry_invalid=1,
+        telemetry_dropped=2,
     )
 
     encoded = encode_model(status)
@@ -156,15 +154,14 @@ def test_shard_status_with_telemetry_delivery_round_trip_and_validation() -> Non
 
     assert restored == status
     assert restored.model_fields_set == status.model_fields_set
-    assert isinstance(restored.telemetry_delivery, DeliveryStatus)
     for field, value in (
-        ("pending", "1"),
-        ("bytes", True),
-        ("last_error", 3),
+        ("telemetry_invalid", "1"),
+        ("telemetry_dropped", True),
+        ("telemetry_dropped", -1),
         ("unknown", 0),
     ):
         invalid = json.loads(encoded)
-        invalid["telemetry_delivery"][field] = value
+        invalid[field] = value
         with pytest.raises(ValidationError):
             decode_model(ShardRuntimeStatus, json.dumps(invalid).encode())
 

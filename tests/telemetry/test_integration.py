@@ -1,10 +1,12 @@
 import asyncio
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from opentelemetry.sdk._logs.export import LogRecordExportResult
 from ulid import ULID
 
 from dst_server.cluster import agent as agent_module
@@ -68,62 +70,41 @@ def event_server(relay: ShardAgent, *events: ObservedGameEvent) -> Server:
     )
 
 
-async def test_game_relay_waits_for_durable_commit_before_broadcast(
+async def test_game_relay_keeps_broadcasting_while_export_is_unavailable(
     relay: ShardAgent,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed = observation(str(ULID()))
-    server = event_server(relay, observed)
-    entered = asyncio.Event()
-    committed = asyncio.Event()
+    entered = Event()
+    release = Event()
 
-    async def persist(*_: object, **__: object) -> None:
+    def export(_records: object) -> LogRecordExportResult:
         entered.set()
-        await committed.wait()
+        assert release.wait(3)
+        return LogRecordExportResult.FAILURE
 
-    pipeline = SimpleNamespace(
-        logs_enabled=True, emit_event=AsyncMock(side_effect=persist)
-    )
-    relay._pipeline = cast("otel.Pipeline", pipeline)
+    monkeypatch.setenv("OTEL_LOGS_EXPORTER", "otlp")
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "none")
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "none")
+    monkeypatch.setenv("OTEL_BLRP_MAX_EXPORT_BATCH_SIZE", "1")
+    monkeypatch.setattr(otel, "OTLPLogExporter", Mock(return_value=Mock(export=export)))
+    pipeline = relay._pipeline = otel.configure()
     subscription = relay.game_events.subscribe()
-    drain = asyncio.create_task(relay._drain_game_events(server))
-    receive = asyncio.create_task(subscription.next(1))
     try:
+        await relay._drain_game_events(event_server(relay, observed))
+        assert await asyncio.to_thread(entered.wait, 1)
+        later = observation(observed.record.nonce, generation=2)
         async with asyncio.timeout(1):
-            await entered.wait()
-        assert not receive.done()
-        committed.set()
-        await drain
-        (record,) = await receive
-        assert record.event == observed.record
-        assert record.observed_timestamp_ns == observed.observed_timestamp_ns
-        assert record.event.session_id == "ORIGINAL_SESSION"
-        pipeline.emit_event.assert_awaited_once_with(
-            observed, attributes={"dst.shard.name": "forest"}
-        )
+            await relay._drain_game_events(event_server(relay, later))
+            records = await subscription.next(2)
+        assert [record.event for record in records] == [observed.record, later.record]
+        assert records[0].observed_timestamp_ns == observed.observed_timestamp_ns
+        assert records[0].event.session_id == "ORIGINAL_SESSION"
+        assert not (relay.cluster_path / relay.name / ".telemetry.sqlite3").exists()
     finally:
-        committed.set()
-        drain.cancel()
-        receive.cancel()
-        await asyncio.gather(drain, receive, return_exceptions=True)
-
-
-async def test_persistence_failure_is_not_reported_as_delivered(
-    relay: ShardAgent,
-) -> None:
-    observed = observation(str(ULID()))
-    server = event_server(relay, observed)
-    pipeline = SimpleNamespace(
-        logs_enabled=True, emit_event=AsyncMock(side_effect=OSError("disk full"))
-    )
-    relay._pipeline = cast("otel.Pipeline", pipeline)
-    publish = Mock()
-    relay.game_events.publish = publish
-
-    with pytest.raises(OSError, match="disk full"):
-        await relay._drain_game_events(server)
-
-    publish.assert_not_called()
-    cast("AsyncMock", server.read_game_event).assert_awaited_once()
+        release.set()
+        subscription.close()
+        await pipeline.shutdown()
 
 
 async def test_local_mode_preserves_each_generation_and_does_not_need_otel(
@@ -159,12 +140,12 @@ async def test_operational_relay_uses_source_identity_time_and_severity(
             recorder=SimpleNamespace(attributes=Mock(return_value={})),
         ),
     )
-    pipeline = SimpleNamespace(logs_enabled=True, emit_operational=AsyncMock())
+    pipeline = SimpleNamespace(logs_enabled=True, emit_operational=Mock())
     relay._pipeline = cast("otel.Pipeline", pipeline)
 
     await relay._drain_operational(server)
 
-    pipeline.emit_operational.assert_awaited_once()
+    pipeline.emit_operational.assert_called_once()
     kwargs = pipeline.emit_operational.call_args.kwargs
     assert kwargs["event_name"] == record.event_name
     assert kwargs["body"] == record.body
@@ -179,7 +160,7 @@ async def test_telemetry_relays_start_before_process_readiness_and_are_critical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = event_server(relay, observation(str(ULID())))
-    failures = [OSError("outbox inaccessible"), OSError("outbox inaccessible")]
+    failures = [OSError("event stream failed"), OSError("event stream failed")]
     monkeypatch.setattr(agent_module, "Server", Mock(return_value=server))
     monkeypatch.setattr(agent_module.console, "forward", AsyncMock())
     monkeypatch.setattr(relay, "_drain_lifecycle", AsyncMock())
@@ -201,7 +182,7 @@ async def test_telemetry_relays_start_before_process_readiness_and_are_critical(
     assert ("dst-operational-relay-forest", True) in calls
 
 
-async def test_finished_process_does_not_hide_persistence_failure(
+async def test_finished_process_does_not_hide_event_stream_failure(
     relay: ShardAgent,
 ) -> None:
     server = event_server(relay, observation(str(ULID())))
@@ -215,7 +196,7 @@ async def test_finished_process_does_not_hide_persistence_failure(
 
     async def fail() -> None:
         await asyncio.sleep(0)
-        message = "uncommitted process tail"
+        message = "unread process tail"
         raise OSError(message)
 
     task = asyncio.create_task(fail(), name="dst-operational-relay-forest")
@@ -277,8 +258,8 @@ def test_child_log_routing_reaches_the_actual_cli_stdout(
     enabled = pipeline_mode == "logs_enabled"
     pipeline = SimpleNamespace(
         logs_enabled=enabled,
-        emit_event=AsyncMock(),
-        emit_operational=AsyncMock(),
+        emit_event=Mock(),
+        emit_operational=Mock(),
     )
     if pipeline_mode != "none":
         relay._pipeline = cast("otel.Pipeline", pipeline)
@@ -348,10 +329,8 @@ def test_child_log_routing_reaches_the_actual_cli_stdout(
     assert relay._log_sequence == len(rpc_lines)
     assert relay._game_sequence == int(kind == "event")
     assert server.telemetry_invalid == int(kind == "invalid_payload")
-    assert pipeline.emit_event.await_count == int(enabled and kind == "event")
-    assert pipeline.emit_operational.await_count == int(
-        enabled and kind == "diagnostic"
-    )
+    assert pipeline.emit_event.call_count == int(enabled and kind == "event")
+    assert pipeline.emit_operational.call_count == int(enabled and kind == "diagnostic")
     if enabled and kind == "event":
         assert pipeline.emit_event.call_args.args[0].record == event
     if enabled and kind == "diagnostic":
@@ -360,28 +339,7 @@ def test_child_log_routing_reaches_the_actual_cli_stdout(
         }
 
 
-async def test_delivery_backlog_and_quarantine_are_visible_in_runtime_status(
-    relay: ShardAgent,
-) -> None:
-    from dst_server.models.telemetry import DeliveryStatus
-
-    status = DeliveryStatus(
-        pending=17, quarantined=2, bytes=4096, last_error="partial_rejection"
-    )
-    relay._pipeline = cast(
-        "otel.Pipeline", SimpleNamespace(status=Mock(return_value=status))
-    )
-
-    runtime = await relay.runtime_status()
-
-    assert runtime.telemetry_delivery is not None
-    assert runtime.telemetry_delivery.pending == 17
-    assert runtime.telemetry_delivery.quarantined == 2
-    assert runtime.telemetry_delivery.bytes == 4096
-    assert runtime.telemetry_delivery.last_error == "partial_rejection"
-
-
-def test_otel_uses_persistent_separate_shard_outboxes(
+def test_otel_preserves_resource_identity_without_storage_configuration(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -398,13 +356,12 @@ def test_otel_uses_persistent_separate_shard_outboxes(
             telemetry_cluster="dst-042",
         )
         service.configure_otel(config, instance_id=incarnation)
-        assert configure.call_args.kwargs["outbox_path"] == (
-            tmp_path / "042" / shard / ".telemetry.sqlite3"
+        configure.assert_called_with(
+            resource_attributes={
+                "dst.cluster.name": "dst-042",
+                "service.instance.id": incarnation,
+            }
         )
-        assert configure.call_args.kwargs["resource_attributes"] == {
-            "dst.cluster.name": "dst-042",
-            "service.instance.id": incarnation,
-        }
 
 
 def test_requested_otel_configuration_failure_is_explicit(
@@ -412,15 +369,15 @@ def test_requested_otel_configuration_failure_is_explicit(
 ) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4317")
     monkeypatch.setattr(
-        otel, "configure", Mock(side_effect=OSError("database unavailable"))
+        otel, "configure", Mock(side_effect=ValueError("invalid exporter"))
     )
 
-    with pytest.raises(OSError, match="database unavailable"):
+    with pytest.raises(ValueError, match="invalid exporter"):
         service.configure_otel(ServerConfig(shard="forest"))
 
 
 @pytest.mark.parametrize("disabled", [False, True])
-def test_local_mode_does_not_open_outbox_or_import_exporter(
+def test_local_mode_does_not_configure_otel(
     monkeypatch: pytest.MonkeyPatch,
     disabled: bool,
 ) -> None:
@@ -434,11 +391,3 @@ def test_local_mode_does_not_open_outbox_or_import_exporter(
 
     assert service.configure_otel(ServerConfig(shard="forest")) is None
     configure.assert_not_called()
-
-
-def test_netdata_accepts_replays_through_its_retention_window() -> None:
-    configuration = (Path(__file__).parents[2] / "deploy/netdata/otel.yaml").read_text(
-        encoding="utf-8"
-    )
-
-    assert '  ingest:\n    max_age: "9 years"\n' in configuration

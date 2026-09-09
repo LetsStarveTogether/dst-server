@@ -1,17 +1,23 @@
 import asyncio
 import os
-import random
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
-from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Protocol, cast
 
-import grpc
 from opentelemetry import metrics, trace
+from opentelemetry._logs import Logger, SeverityNumber  # ruff: ignore[import-private-name]
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (  # ruff: ignore[import-private-name]
+    OTLPLogExporter,
+)
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk._logs import LoggerProvider  # ruff: ignore[import-private-name]
+from opentelemetry.sdk._logs.export import (  # ruff: ignore[import-private-name]
+    BatchLogRecordProcessor,
+)
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
@@ -21,25 +27,11 @@ from opentelemetry.util.types import AttributeValue
 from pydantic import JsonValue
 from ulid import ULID
 
-from dst_server.concurrency import cancel_tasks, complete
-from dst_server.models.telemetry import DeliveryStatus
-
-from .exporter import (
-    MAX_EXPORT_BYTES,
-    RETRYABLE_CODES,
-    LogsExporter,
-    OTLPSettings,
-    batch,
-    encode_log,
-    retry_after,
-)
-from .outbox import Outbox
+from dst_server.concurrency import complete
 
 if TYPE_CHECKING:
     from dst_server.events import ObservedGameEvent
 
-RETRY_INITIAL_SECONDS = 1.0
-RETRY_MAX_SECONDS = 30.0
 _globals_installed = False
 _global_lock = Lock()
 
@@ -75,37 +67,22 @@ def _otlp_exporter_enabled(variable: str) -> bool:
 @dataclass(slots=True)
 class Pipeline:
     resource: Resource
-    outbox: Outbox | None = None
-    sender: LogsExporter | None = None
+    logger_provider: LoggerProvider | None = field(default=None, repr=False)
     meter_provider: MeterProvider | None = field(default=None, repr=False)
     tracer_provider: TracerProvider | None = field(default=None, repr=False)
+    _logger: Logger | None = field(default=None, init=False, repr=False)
     _closed: bool = field(default=False, init=False)
-    _worker: asyncio.Task[None] | None = field(default=None, init=False)
     _shutdown_task: asyncio.Task[None] | None = field(default=None, init=False)
-    _writes: set[asyncio.Task[int]] = field(default_factory=set, init=False)
-    _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _last_error: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        if (self.outbox is None) != (self.sender is None):
-            message = "OTLP Logs requires both an outbox and an exporter"
-            raise ValueError(message)
-        if self.outbox is not None and self.sender is not None:
-            self._worker = asyncio.create_task(
-                self._deliver(self.outbox, self.sender), name="dst-otel-delivery"
-            )
+        if self.logger_provider is not None:
+            self._logger = self.logger_provider.get_logger("dst-server")
 
     @property
     def logs_enabled(self) -> bool:
-        return self.outbox is not None
+        return self._logger is not None
 
-    def status(self) -> DeliveryStatus:
-        status = self.outbox.stats() if self.outbox is not None else DeliveryStatus()
-        return (
-            status.replace(last_error=self._last_error) if self._last_error else status
-        )
-
-    async def emit_event(
+    def emit_event(
         self,
         observed: ObservedGameEvent,
         *,
@@ -127,7 +104,7 @@ class Pipeline:
             values["dst.session.id"] = event.session_id
         if event.cycle is not None:
             values["dst.world.cycle"] = event.cycle
-        await self.emit_operational(
+        self.emit_operational(
             event_name=event.event,
             body=event.data.model_dump(mode="json"),
             observed_timestamp_ns=observed.observed_timestamp_ns,
@@ -135,7 +112,7 @@ class Pipeline:
             attributes=values,
         )
 
-    async def emit_operational(
+    def emit_operational(
         self,
         *,
         event_name: str,
@@ -147,149 +124,45 @@ class Pipeline:
         if self._closed:
             message = "OpenTelemetry pipeline is closed"
             raise RuntimeError(message)
-        if self.outbox is None:
+        if self._logger is None:
             return
-        payload = encode_log(
-            self.resource,
-            event_name=event_name,
-            body=body,
-            observed_timestamp_ns=observed_timestamp_ns,
-            severity_text=severity_text,
-            attributes=attributes,
-        )
-        pending = asyncio.create_task(asyncio.to_thread(self.outbox.append, payload))
-        self._writes.add(pending)
+        values = dict(attributes or {})
+        values.setdefault("log.record.uid", str(ULID()))
+        severity_text = severity_text.upper()
         try:
-            await complete(pending)
-        finally:
-            if not pending.cancelled() and pending.exception() is not None:
-                self._last_error = "storage_write_failed"
-            self._writes.discard(pending)
-            self._wake.set()
-
-    async def _wait_retry(self, delay: float) -> None:
-        await asyncio.sleep(delay)
-
-    async def _send(
-        self, sender: LogsExporter, payload: bytes
-    ) -> tuple[str | None, int | None]:
-        delay = RETRY_INITIAL_SECONDS
-        while True:
-            wait = delay * random.uniform(0.8, 1.2)  # ruff: ignore[suspicious-non-cryptographic-random-usage]
-            try:
-                response = await sender.export(payload)
-            except grpc.RpcError as error:
-                code = cast("grpc.Call", error).code()
-                retry = retry_after(error)
-                reason = f"export_{code.name.lower()}" if code else "export_unknown"
-                self._last_error = reason
-                if code not in RETRYABLE_CODES and not (
-                    code is grpc.StatusCode.RESOURCE_EXHAUSTED and retry is not None
-                ):
-                    return reason, None
-                if retry is not None:
-                    wait = retry
-            except Exception:
-                self._last_error = "export_failed"
-            else:
-                self._last_error = None
-                rejected = response.partial_success.rejected_log_records
-                if rejected < 0:
-                    return "invalid_export_response", None
-                return ("partial_success", rejected) if rejected else (None, None)
-            await self._wait_retry(wait)
-            delay = min(delay * 2, RETRY_MAX_SECONDS)
-
-    async def _persist_result(
-        self,
-        outbox: Outbox,
-        identities: tuple[int, ...],
-        reason: str | None,
-        rejected: int | None,
-    ) -> None:
-        while True:
-            try:
-                if reason is None:
-                    await complete(asyncio.to_thread(outbox.acknowledge, identities))
-                else:
-                    await complete(
-                        asyncio.to_thread(
-                            outbox.quarantine, identities, reason, rejected=rejected
-                        )
-                    )
-            except Exception:
-                self._last_error = "storage_result_failed"
-                await self._wait_retry(RETRY_INITIAL_SECONDS)
-            else:
-                self._last_error = None
-                return
-
-    async def _deliver(self, outbox: Outbox, sender: LogsExporter) -> None:
-        while True:
-            self._wake.clear()
-            try:
-                rows = await complete(
-                    asyncio.to_thread(outbox.read_batch, max_bytes=MAX_EXPORT_BYTES)
-                )
-            except Exception:
-                self._last_error = "storage_read_failed"
-                await self._wait_retry(RETRY_INITIAL_SECONDS)
-                continue
-            if not rows:
-                await self._wake.wait()
-                continue
-            identities, payload, invalid = batch(rows)
-            del rows
-            if invalid:
-                await self._persist_result(
-                    outbox, invalid, "invalid_stored_payload", None
-                )
-            result = await self._send(sender, payload) if identities else None
-            del payload
-            if result is not None:
-                await self._persist_result(outbox, identities, *result)
+            severity_number = SeverityNumber[severity_text]
+        except KeyError:
+            message = "unknown OpenTelemetry severity"
+            raise ValueError(message) from None
+        self._logger.emit(
+            event_name=event_name,
+            body=deepcopy(dict(body)),
+            timestamp=observed_timestamp_ns,
+            observed_timestamp=observed_timestamp_ns,
+            severity_text=severity_text,
+            severity_number=severity_number,
+            attributes=values,
+        )
 
     async def shutdown(self) -> None:
         if self._shutdown_task is None:
             self._closed = True
-            self._shutdown_task = asyncio.create_task(self._shutdown())
+            resources = tuple(
+                provider
+                for provider in (
+                    self.logger_provider,
+                    self.tracer_provider,
+                    self.meter_provider,
+                )
+                if provider is not None
+            )
+            self._shutdown_task = asyncio.create_task(
+                asyncio.to_thread(_shutdown_resources, resources)
+            )
         await complete(self._shutdown_task)
 
-    async def _shutdown(self) -> None:
-        if self._writes:
-            await asyncio.gather(*self._writes, return_exceptions=True)
-        if self._worker is not None:
-            await cancel_tasks(self._worker)
-        failures: list[BaseException] = []
-        if self.sender is not None:
-            try:
-                await self.sender.aclose()
-            except BaseException as error:
-                failures.append(error)
-        if self.outbox is not None:
-            try:
-                await asyncio.to_thread(self.outbox.close)
-            except BaseException as error:
-                failures.append(error)
-        resources = tuple(
-            provider
-            for provider in (self.tracer_provider, self.meter_provider)
-            if provider is not None
-        )
-        try:
-            await asyncio.to_thread(_shutdown_resources, resources)
-        except BaseException as error:
-            failures.append(error)
-        if len(failures) == 1:
-            raise failures[0]
-        if failures:
-            message = "failed to close OpenTelemetry pipeline"
-            raise BaseExceptionGroup(message, failures)
 
-
-def _providers(
-    resource: Resource, enabled: Mapping[str, bool]
-) -> tuple[MeterProvider, TracerProvider]:
+def _create_pipeline(resource: Resource, enabled: Mapping[str, bool]) -> Pipeline:
     resources: list[_ShutdownResource] = []
     pending: _ShutdownResource | None = None
     try:  # ruff: ignore[too-many-statements-in-try-clause]
@@ -314,6 +187,21 @@ def _providers(
             pending = processor
             tracer_provider.add_span_processor(processor)
             pending = None
+        logger_provider = None
+        if enabled["LOGS"]:
+            logger_provider = LoggerProvider(
+                resource=resource, shutdown_on_exit=False, meter_provider=meter_provider
+            )
+            resources.insert(0, logger_provider)
+            log_exporter = OTLPLogExporter(meter_provider=meter_provider)
+            pending = log_exporter
+            log_processor = BatchLogRecordProcessor(
+                log_exporter, meter_provider=meter_provider
+            )
+            pending = log_processor
+            logger_provider.add_log_record_processor(log_processor)
+            pending = None
+        return Pipeline(resource, logger_provider, meter_provider, tracer_provider)
     except BaseException as error:
         if pending is not None:
             resources.insert(0, pending)
@@ -323,12 +211,10 @@ def _providers(
             message = "failed to configure OpenTelemetry providers"
             raise BaseExceptionGroup(message, [error, cleanup_error]) from None
         raise
-    return meter_provider, tracer_provider
 
 
 def configure(
     *,
-    outbox_path: Path,
     resource_attributes: Mapping[str, AttributeValue] | None = None,
 ) -> Pipeline:
     global _globals_installed  # ruff: ignore[global-statement]
@@ -346,30 +232,10 @@ def configure(
     resource = Resource.create(attributes)
     if str(resource.attributes.get("service.name", "")).startswith("unknown_service"):
         resource = resource.merge(Resource({"service.name": "dst-server"}))
-    settings = OTLPSettings.from_environment() if enabled["LOGS"] else None
-    if settings is not None:
-        asyncio.get_running_loop()
-    meter_provider, tracer_provider = _providers(resource, enabled)
-    outbox = None
-    try:
-        sender = None
-        if settings is not None:
-            outbox = Outbox(outbox_path)
-            sender = LogsExporter(settings)
-        pipeline = Pipeline(resource, outbox, sender, meter_provider, tracer_provider)
-    except BaseException as error:
-        try:
-            _shutdown_resources((tracer_provider, meter_provider))
-        except BaseException as cleanup_error:
-            message = "failed to configure OpenTelemetry"
-            raise BaseExceptionGroup(message, [error, cleanup_error]) from None
-        finally:
-            if outbox is not None:
-                outbox.close()
-        raise
+    pipeline = _create_pipeline(resource, enabled)
     with _global_lock:
         if not _globals_installed:
-            metrics.set_meter_provider(meter_provider)
-            trace.set_tracer_provider(tracer_provider)
+            metrics.set_meter_provider(cast("MeterProvider", pipeline.meter_provider))
+            trace.set_tracer_provider(cast("TracerProvider", pipeline.tracer_provider))
             _globals_installed = True
     return pipeline

@@ -4,8 +4,6 @@ endpoint:
   path: "10.255.255.254:4317"
 
 logs:
-  ingest:
-    max_age: "9 years"
   rotation:
     default:
       max_file_size: "100MB"

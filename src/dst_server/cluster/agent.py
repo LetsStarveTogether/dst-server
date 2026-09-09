@@ -144,9 +144,6 @@ class ShardAgent:
             telemetry_profile=self.config.telemetry.profile,
             telemetry_invalid=server.telemetry_invalid if server is not None else 0,
             telemetry_dropped=server.telemetry_dropped if server is not None else 0,
-            telemetry_delivery=(
-                self._pipeline.status() if self._pipeline is not None else None
-            ),
             external_port=self.external_port,
             error_id=self._failure_id,
             error="DST shard failed" if self._failure_id is not None else None,
@@ -545,7 +542,7 @@ class ShardAgent:
         attempt = ULID.from_str(server.game_events.nonce)
         while (observed := await server.read_game_event()) is not None:
             if self._pipeline is not None and self._pipeline.logs_enabled:
-                await self._pipeline.emit_event(
+                self._pipeline.emit_event(
                     observed, attributes=server.recorder.attributes()
                 )
             else:
@@ -569,7 +566,7 @@ class ShardAgent:
     async def _drain_operational(self, server: Server) -> None:
         while (record := await server.read_operational_event()) is not None:
             if self._pipeline is not None and self._pipeline.logs_enabled:
-                await self._pipeline.emit_operational(
+                self._pipeline.emit_operational(
                     event_name=record.event_name,
                     body=record.body,
                     observed_timestamp_ns=record.observed_timestamp_ns,
