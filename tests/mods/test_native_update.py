@@ -35,14 +35,13 @@ def native_updater(
     tmp_path: Path,
     outputs: list[str],
     *,
-    delay: float = 0,
     returncode: int = 0,
 ) -> tuple[Path, Path]:
     source = (
         UPDATER
         + f"\noutputs = {outputs!r}\n"
         + "print(outputs[min(attempt, len(outputs)) - 1], end='', flush=True)\n"
-        + f"time.sleep({delay!r})\nsys.exit({returncode!r})\n"
+        + f"sys.exit({returncode!r})\n"
     )
     return write_updater(tmp_path, source)
 
@@ -179,17 +178,34 @@ async def test_attempts_share_the_outer_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executable, ugc = native_updater(
+    executable, ugc = write_updater(
         tmp_path,
-        [TIMEOUT + "\n" + COMPLETE, COMPLETE],
-        delay=1.2,
+        UPDATER
+        + f"\nif attempt == 1:\n    print({TIMEOUT!r})\n"
+        + "else:\n    print('READY', flush=True)\n    time.sleep(60)\n",
     )
-    monkeypatch.setattr(mods, "UPDATE_PROCESS_TIMEOUT", 2)
+    real_timeout = asyncio.timeout
+    deadline = real_timeout(None)
+    monkeypatch.setattr(
+        asyncio,
+        "timeout",
+        lambda delay: (
+            deadline if delay == mods.UPDATE_PROCESS_TIMEOUT else real_timeout(delay)
+        ),
+    )
     existing_tasks = asyncio.all_tasks()
 
-    with pytest.raises(TimeoutError):
-        await mods.update(executable, ugc, attempts=2)
+    def expire_after_retry_is_ready(line: str) -> None:
+        if line == "READY":
+            deadline.reschedule(asyncio.get_running_loop().time())
 
+    async with real_timeout(5):
+        with pytest.raises(TimeoutError):
+            await mods.update(
+                executable, ugc, attempts=2, log_handler=expire_after_retry_is_ready
+            )
+
+    assert deadline.expired()
     assert (ugc / "attempts").read_text() == "2"
     assert await asyncio.to_thread(process_stopped, int((ugc / "pid").read_text()))
     assert asyncio.all_tasks() == existing_tasks

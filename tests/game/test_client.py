@@ -1,6 +1,5 @@
 import math
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,6 +9,7 @@ from pydantic import ValidationError
 from dst_server import commands as c
 from dst_server.errors import IndeterminateCommandError
 from dst_server.game import GameClient
+from dst_server.game.client import _METHODS
 from dst_server.game.rpc import (
     BOOL_RESPONSE,
     DRIVER_RESPONSE,
@@ -29,52 +29,17 @@ from dst_server.game.rpc import (
     WORLD_RESPONSE,
     ResponseAdapter,
     Success,
+    response_adapter,
 )
 from dst_server.models import Item, Stat
-from dst_server.telemetry import TelemetrySettings
-from dst_server.telemetry.recorder import Recorder
+from dst_server.models.console import ConsoleResult
 from dst_server.timeouts import DEFAULT_RELOAD_TIMEOUT
+from tests.game.helpers import make_game
 from tests.helpers import run_lua, structured_result
 
 MAX_GIVE_ITEMS = 64
 
 type Invocation = Callable[[GameClient], Awaitable[object]]
-
-
-def make_game(response: str = "") -> tuple[GameClient, list[str]]:
-    commands: list[str] = []
-
-    async def execute(command: str) -> str:  # ruff:ignore[unused-async]
-        commands.append(command)
-        return response
-
-    async def execute_reload(  # ruff:ignore[unused-async]
-        command: str,
-        completion_timeout: float,
-    ) -> tuple[str, int, float]:
-        del completion_timeout
-        commands.append(command)
-        return response, 0, float("inf")
-
-    async def wait_reload(  # ruff:ignore[unused-async]
-        generation: int,
-        deadline: float,
-    ) -> None:
-        del generation, deadline
-
-    game = GameClient(
-        shard="Master",
-        lua_directory=Path("/lua"),
-        telemetry=TelemetrySettings(),
-        execute=execute,
-        execute_ready=execute,
-        execute_reload=execute_reload,
-        wait_reload=wait_reload,
-        recorder=Recorder("cluster", "Master"),
-        session_id=lambda: "SESSION",
-        nonce="01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    )
-    return game, commands
 
 
 ROUTES = [
@@ -259,6 +224,12 @@ ROUTES = [
         {"source": "return {answer=42}"},
         JSON_RESPONSE,
     ),
+    (
+        lambda game: game.invoke(c.Evaluate(source="1 + 2")),
+        "evaluate",
+        {"source": "1 + 2"},
+        response_adapter(ConsoleResult),
+    ),
 ]
 
 VOID_METHODS = {
@@ -279,6 +250,10 @@ RELOAD_METHODS = {
     "rollback",
     "rollback_to_snapshot",
 }
+
+
+def test_routing_cases_cover_every_registered_game_method() -> None:
+    assert {method for _, method, _, _ in ROUTES} == {*_METHODS.values(), "save"}
 
 
 @pytest.mark.parametrize(

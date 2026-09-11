@@ -98,7 +98,7 @@ def agent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ShardAgent:
         Mock(return_value=config),
     )
     return ShardAgent(
-        Shard("Master", True, tmp_path / "console"),
+        Shard("Master", True),
         install_path=tmp_path,
         cluster_path=tmp_path,
     )
@@ -332,7 +332,7 @@ async def test_activate_is_idempotent_and_guards_start_and_restart(
     await agent.restart()
 
     assert activate.call_count == 2
-    activate.assert_called_with(agent.install_path, agent.cluster_path, agent.shard)
+    activate.assert_called_with(agent.install_path, agent.cluster_path)
     configure.assert_called_once_with(agent.config, instance_id=agent.incarnation)
     supervisor.start.assert_awaited_once()
     supervisor.restart.assert_awaited_once()

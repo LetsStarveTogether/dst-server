@@ -25,6 +25,7 @@ interface Subscription {
 interface Endpoint {
   call @0 (request :Data) -> (result :Outcome(Data));
   subscribe @1 (kind :Text) -> (result :Outcome(Subscription));
+  describe @2 () -> (result :Outcome(Data));
 }
 
 interface Cluster extends(Endpoint) {

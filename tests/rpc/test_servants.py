@@ -2,7 +2,7 @@
 import asyncio
 import gc
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -48,6 +48,7 @@ from dst_server.rpc.servants import (
 )
 from dst_server.rpc.transport import abstract_rpc_server, filesystem_rpc_server
 from tests.cluster.test_controller import controller as make_controller
+from tests.helpers import wait_for_event
 
 capnp: Any = pytest.importorskip("capnp")
 type Hook = Callable[[c.Request[Any]], Awaitable[Any]]
@@ -168,12 +169,15 @@ async def connected(
 ) -> AsyncIterator[ClusterClient]:
     tmp_path.chmod(0o700)
     path = tmp_path / "cluster.sock"
+    watchdog = asyncio.timeout(5)
     async with (
+        watchdog,
         rpc_runtime(),
         filesystem_rpc_server(path, lambda: BootstrapServant(controller)),
         await ClusterClient.connect(path) as client,
     ):
         yield client
+    assert not watchdog.expired(), "RPC test exceeded its watchdog"
 
 
 async def test_typed_commands_cross_real_capabilities(tmp_path: Path) -> None:
@@ -202,6 +206,42 @@ async def test_typed_commands_cross_real_capabilities(tmp_path: Path) -> None:
             c.Snapshots(limit=17, before=0),
             c.RollbackToDay(day=21, timeout=6),
         ]
+
+
+async def test_discovery_and_raw_calls_use_public_registry(tmp_path: Path) -> None:
+    controller = FakeController()
+    async with connected(tmp_path, controller) as client:
+        methods = {method.name: method for method in await client.describe()}
+        assert methods == {
+            method.name: method for method in c.describe_operations("cluster")
+        }
+        assert "activate" not in methods
+        assert "rollback_to_snapshot" not in methods
+        assert "execute" not in methods
+        assert methods["status"].mutation is False
+        assert methods["status"].arguments_schema["properties"] == {}
+        assert methods["announce"].arguments_schema["required"] == ["message"]
+        assert methods["announce"].arguments_schema["additionalProperties"] is False
+        assert all(method.description for method in methods.values())
+        assert await client.call("status") == controller.value.model_dump(
+            mode="json", exclude_unset=True
+        )
+        assert await client.call("announce", {"message": "hello"}, timeout=1.5) is None
+        assert controller.requests[-1] == c.Announce(message="hello", timeout=1.5)
+        shard = client.shard("Master")
+        shard_methods = {method.name: method for method in await shard.describe()}
+        assert "evaluate" in shard_methods
+        assert "activate" not in shard_methods
+        assert await shard.call("execute", {"source": "return 1"}) == "return 1"
+        with pytest.raises(ValueError, match="not available"):
+            await client.call("activate")
+        with pytest.raises(ValueError, match="reserved fields"):
+            await client.call("status", {"timeout": 1})
+        previous = len(controller.requests)
+        with pytest.raises(RemoteError) as invalid:
+            await client.call("announce", {"message": 1})
+        assert invalid.value.error.code is ErrorCode.INVALID_ARGUMENT
+        assert len(controller.requests) == previous
 
 
 @pytest.mark.parametrize(
@@ -297,15 +337,16 @@ async def test_workflow_budget_starts_after_controller_lock(
         tmp_path.chmod(0o700)
         path = tmp_path / "cluster.sock"
         async with (
+            asyncio.timeout(5),
             rpc_runtime(),
             filesystem_rpc_server(path, lambda: BootstrapServant(controller)),
             await ClusterClient.connect(path) as client,
         ):
             pending = asyncio.create_task(client.invoke(command_type(timeout=0.1)))
-            await received.wait()
+            await wait_for_event(received, pending)
             timer = asyncio.get_running_loop().call_later(0.15, elapsed.set)
             try:
-                await elapsed.wait()
+                await wait_for_event(elapsed, pending)
             finally:
                 timer.cancel()
             assert not pending.done()
@@ -330,9 +371,11 @@ async def test_workflow_budget_starts_after_controller_lock(
         if controller._lock.locked():
             controller._lock.release()
         if pending is not None:
-            with suppress(BaseException):
-                await pending
-        await controller.aclose()
+            pending.cancel()
+        async with asyncio.timeout(5):
+            if pending is not None:
+                await asyncio.gather(pending, return_exceptions=True)
+            await controller.aclose()
 
 
 @pytest.mark.parametrize(
@@ -357,24 +400,27 @@ async def test_remote_errors_are_typed_and_do_not_expose_exception_messages(
         assert "secret" not in str(failure.value)
 
 
+@pytest.mark.parametrize("raw", [False, True])
 @pytest.mark.parametrize("mutation", [False, True])
 async def test_invalid_result_preserves_uncertainty(
-    tmp_path: Path, mutation: bool
+    tmp_path: Path, mutation: bool, raw: bool
 ) -> None:
     controller = FakeController()
     controller.hook = AsyncMock(return_value=object())
     async with connected(tmp_path, controller) as client:
         command = c.Start() if mutation else c.ClusterStatusQuery()
+        pending = client.call(command.method) if raw else client.invoke(command)
         with pytest.raises(RemoteError) as failure:
-            await client.invoke(command)
+            await pending
         assert failure.value.error.code is (
             ErrorCode.INDETERMINATE if mutation else ErrorCode.INTERNAL
         )
 
 
+@pytest.mark.parametrize("raw", [False, True])
 @pytest.mark.parametrize("disconnect", [False, True])
 async def test_accepted_mutation_survives_caller_loss(
-    tmp_path: Path, disconnect: bool
+    tmp_path: Path, disconnect: bool, raw: bool
 ) -> None:
     entered, release, completed = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -386,39 +432,62 @@ async def test_accepted_mutation_survives_caller_loss(
     controller = FakeController()
     controller.hook = mutate
     async with connected(tmp_path, controller) as client:
-        pending = asyncio.create_task(client.start())
-        await entered.wait()
-        if disconnect:
-            client.close()
-        else:
+        pending = asyncio.create_task(client.call("start") if raw else client.start())
+        try:
+            await wait_for_event(entered, pending)
+            if disconnect:
+                client.close()
+            else:
+                pending.cancel("caller cancelled")
+            done, _ = await asyncio.wait((pending,), timeout=1)
+            assert pending in done
+            expected = IndeterminateError if disconnect else asyncio.CancelledError
+            with pytest.raises(expected) as failure:
+                pending.result()
+            if not disconnect:
+                assert pending.cancelled()
+                assert failure.value.args == ("caller cancelled",)
+                assert failure.value.__notes__ == [
+                    (
+                        "RPC mutation result could not be confirmed; "
+                        "the operation may still be running."
+                    )
+                ]
+            release.set()
+            await wait_for_event(completed)
+        finally:
+            release.set()
             pending.cancel()
-        with pytest.raises(IndeterminateError):
-            await pending
-        release.set()
-        async with asyncio.timeout(1):
-            await completed.wait()
+            async with asyncio.timeout(5):
+                await asyncio.gather(pending, return_exceptions=True)
 
 
-async def test_query_cancellation_reaches_handler(tmp_path: Path) -> None:
-    entered, cancelled = asyncio.Event(), asyncio.Event()
+@pytest.mark.parametrize("raw", [False, True])
+async def test_query_cancellation_reaches_handler(tmp_path: Path, raw: bool) -> None:
+    entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def query(_: c.Request[Any]) -> None:
         entered.set()
         try:
-            await asyncio.Event().wait()
+            await release.wait()
         finally:
             cancelled.set()
 
     controller = FakeController()
     controller.hook = query
     async with connected(tmp_path, controller) as client:
-        pending = asyncio.create_task(client.status())
-        await entered.wait()
-        pending.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await pending
-        async with asyncio.timeout(1):
-            await cancelled.wait()
+        pending = asyncio.create_task(client.call("status") if raw else client.status())
+        try:
+            await wait_for_event(entered, pending)
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(pending), timeout=1)
+            await wait_for_event(cancelled)
+        finally:
+            release.set()
+            pending.cancel()
+            async with asyncio.timeout(5):
+                await asyncio.gather(pending, return_exceptions=True)
 
 
 async def test_subscription_overflow_is_recoverable_and_close_releases(
@@ -468,7 +537,11 @@ async def test_repeated_connections_release_subscriptions_and_roots(
         return servant
 
     path = tmp_path / "cluster.sock"
-    async with rpc_runtime(), filesystem_rpc_server(path, bootstrap) as server:
+    async with (
+        asyncio.timeout(5),
+        rpc_runtime(),
+        filesystem_rpc_server(path, bootstrap) as server,
+    ):
         for sequence in range(10):
             async with (
                 await ClusterClient.connect(path) as client,
@@ -532,9 +605,10 @@ async def test_remote_relay_releases_delivered_batch() -> None:
         assert all(reference() is None for reference in references)
     finally:
         source.close()
-        await relay
         outgoing.close()
-        await agent.aclose()
+        async with asyncio.timeout(5):
+            await relay
+            await agent.aclose()
 
 
 async def test_remote_reconnect_does_not_retain_failed_stream_frames(
@@ -564,15 +638,14 @@ async def test_remote_reconnect_does_not_retain_failed_stream_frames(
         agent._pump(cast("Any", BrokenSubscription()), "logs", agent.logs, LogRecord)
     )
     try:
-        async with asyncio.timeout(1):
-            await reconnecting.wait()
+        await wait_for_event(reconnecting, pump)
         assert references
         assert references[0]() is None
     finally:
         pump.cancel()
-        with suppress(asyncio.CancelledError):
-            await pump
-        await agent.aclose()
+        async with asyncio.timeout(5):
+            await asyncio.gather(pump, return_exceptions=True)
+            await agent.aclose()
 
 
 async def test_remote_agent_close_releases_capability() -> None:
@@ -584,7 +657,8 @@ async def test_remote_agent_close_releases_capability() -> None:
     agent = RemoteAgent(capability)
     del capability
 
-    await agent.aclose()
+    async with asyncio.timeout(5):
+        await agent.aclose()
 
     assert reference() is None
 
@@ -615,13 +689,13 @@ async def test_client_releases_encoded_request_while_waiting(
     client = ClusterClient(None, None, SimpleNamespace(call=send))
     pending = asyncio.create_task(client.status())
     try:
-        await sent.wait()
+        await wait_for_event(sent, pending)
         assert references
         assert references[0]() is None
     finally:
         pending.cancel()
-        with suppress(asyncio.CancelledError):
-            await pending
+        async with asyncio.timeout(5):
+            await asyncio.gather(pending, return_exceptions=True)
 
 
 async def test_call_releases_native_request_before_running_handler(
@@ -650,11 +724,14 @@ async def test_call_releases_native_request_before_running_handler(
     async with connected(tmp_path, controller) as client:
         pending = asyncio.create_task(client.shard("Master").execute("x" * 1024 * 1024))
         try:
-            async with asyncio.timeout(1):
-                await entered.wait()
-        finally:
+            await wait_for_event(entered, pending)
             release.set()
             await pending
+        finally:
+            release.set()
+            pending.cancel()
+            async with asyncio.timeout(5):
+                await asyncio.gather(pending, return_exceptions=True)
 
 
 async def test_connection_timeout_covers_socket_creation(
@@ -670,8 +747,9 @@ async def test_connection_timeout_covers_socket_creation(
         "capnp",
         SimpleNamespace(AsyncIoStream=SimpleNamespace(create_unix_connection=blocked)),
     )
-    with pytest.raises(TimeoutError):
-        await ClusterClient.connect("unused", timeout=0.01)
+    async with asyncio.timeout(5):
+        with pytest.raises(TimeoutError):
+            await ClusterClient.connect("unused", timeout=0.01)
 
 
 class RegistryController:
@@ -715,36 +793,45 @@ async def test_registry_capability_and_disconnect_lifecycle() -> None:
     target = FakeShard()
     servant = AgentServant(target)
     name = f"dst-registry-{ULID()}"
-    async with (
-        rpc_runtime(),
-        abstract_rpc_server(lambda: WorkerRegistryServant(controller), name),
-    ):
-        stream, client, registry, disconnected = await open_registry(name)
-        unwrap_outcome((await registry.register(agent=servant)).result)
-        remote = controller.registered
-        assert (remote.name, remote.master, remote.incarnation) == (
-            "Master",
-            True,
-            str(target.value.agent_incarnation),
-        )
-        assert await remote.invoke(c.Snapshots(limit=7, before=0)) == target.catalog
-        assert target.requests[-1] == c.Snapshots(limit=7, before=0)
-        with pytest.raises(RemoteError) as duplicate:
-            unwrap_outcome((await registry.register(agent=servant)).result)
-        assert duplicate.value.error.code is ErrorCode.INVALID_STATE
-        forwarded = remote.logs.subscribe()
-        record = log_record(1, "forwarded")
-        target.logs.publish(record)
-        async with asyncio.timeout(1):
-            assert await forwarded.next(1) == (record,)
-        forwarded.close()
-        unwrap_outcome((await registry.failed()).result)
-        client.close()
-        stream.close()
-        async with asyncio.timeout(1):
+    try:
+        async with (
+            asyncio.timeout(5),
+            rpc_runtime(),
+            abstract_rpc_server(lambda: WorkerRegistryServant(controller), name),
+        ):
+            stream, client, registry, disconnected = await open_registry(name)
+            try:
+                unwrap_outcome((await registry.register(agent=servant)).result)
+                remote = controller.registered
+                assert (remote.name, remote.master, remote.incarnation) == (
+                    "Master",
+                    True,
+                    str(target.value.agent_incarnation),
+                )
+                assert (
+                    await remote.invoke(c.Snapshots(limit=7, before=0))
+                    == target.catalog
+                )
+                assert target.requests[-1] == c.Snapshots(limit=7, before=0)
+                with pytest.raises(RemoteError) as duplicate:
+                    unwrap_outcome((await registry.register(agent=servant)).result)
+                assert duplicate.value.error.code is ErrorCode.INVALID_STATE
+                forwarded = remote.logs.subscribe()
+                try:
+                    record = log_record(1, "forwarded")
+                    target.logs.publish(record)
+                    assert await forwarded.next(1) == (record,)
+                finally:
+                    forwarded.close()
+                unwrap_outcome((await registry.failed()).result)
+            finally:
+                client.close()
+                stream.close()
             await disconnected
-            await controller.unregistered.wait()
-    await servant.aclose()
+            await wait_for_event(controller.unregistered)
+    finally:
+        async with asyncio.timeout(5):
+            await servant.aclose()
     assert not target.logs._subscriptions
 
 
@@ -753,20 +840,31 @@ async def test_disconnect_during_registration_rolls_back_capability() -> None:
     target = FakeShard()
     servant = AgentServant(target)
     name = f"dst-registry-race-{ULID()}"
-    async with (
-        rpc_runtime(),
-        abstract_rpc_server(lambda: WorkerRegistryServant(controller), name),
-    ):
-        stream, client, registry, disconnected = await open_registry(name)
-        pending = asyncio.ensure_future(registry.register(agent=servant))
-        await controller.registration_entered.wait()
-        client.close()
-        stream.close()
-        await disconnected
-        controller.registration_release.set()
-        with suppress(BaseException):
-            await pending
-        async with asyncio.timeout(1):
-            await controller.unregistered.wait()
-    await servant.aclose()
+    try:
+        async with (
+            asyncio.timeout(5),
+            rpc_runtime(),
+            abstract_rpc_server(lambda: WorkerRegistryServant(controller), name),
+        ):
+            stream, client, registry, disconnected = await open_registry(name)
+            pending = asyncio.ensure_future(registry.register(agent=servant))
+            try:
+                await wait_for_event(controller.registration_entered, pending)
+                client.close()
+                stream.close()
+                await disconnected
+                controller.registration_release.set()
+                with pytest.raises(capnp.KjException):
+                    await pending
+                await wait_for_event(controller.unregistered)
+            finally:
+                controller.registration_release.set()
+                client.close()
+                stream.close()
+                pending.cancel()
+                async with asyncio.timeout(5):
+                    await asyncio.gather(pending, return_exceptions=True)
+    finally:
+        async with asyncio.timeout(5):
+            await servant.aclose()
     assert not target.logs._subscriptions

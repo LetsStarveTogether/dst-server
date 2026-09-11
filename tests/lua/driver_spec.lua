@@ -425,18 +425,19 @@ function scenarios.print_boundary()
     local driver = install()
     local size = assert(tonumber(arg[3]), "line size is required")
     PRINT_SOURCE = arg[4] == "source"
-    local wire = require("dst_server.wire")
-    local encode = wire.encode
-    wire.encode = function(value)
-        local encoded = encode(value)
-        if value.event == "dst.world.state_changed" then
-            -- JSON whitespace makes the exact transport boundary independent of field ordering.
-            encoded = encoded .. string.rep(" ", size - #"DST_OTEL|" - #encoded)
-        end
-        return encoded
+    local tags = {}
+    for index = 1, 512 do tags[index] = "x" end
+    Shard_UpdateWorldState("2", REMOTESHARDSTATE.READY, table.concat(tags, ","), nil, "Caves")
+    -- Measure a real event, then enlarge its tags while keeping each identifier valid.
+    local extra = size - #outputs[1]
+    for index = 1, #tags do
+        local length = 1 + math.floor(extra / #tags) + (index <= extra % #tags and 1 or 0)
+        assert(length >= 1 and length <= 128)
+        tags[index] = string.rep("x", length)
     end
-    TheWorld.watchers.cycles(TheWorld, 2)
-    assert(driver.health().events_emitted == 1)
+    outputs[1] = nil
+    Shard_UpdateWorldState("2", REMOTESHARDSTATE.READY, table.concat(tags, ","), nil, "Caves")
+    assert(driver.health().events_emitted == 2)
     assert(driver.health().errors == (size > 65536 and 1 or 0))
 end
 

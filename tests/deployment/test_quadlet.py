@@ -619,12 +619,14 @@ def test_application_builds_master_secondary_lifecycle(
     assert secondary.after == secondary.binds_to == (master_source,)
     assert application.master.exec == (
         "/app/.venv/bin/dst-server",
+        "agent",
         "master",
         "--external-port",
         "30070",
     )
     assert secondary.exec == (
         "/app/.venv/bin/dst-server",
+        "agent",
         "serve",
         "--external-port",
         "30072",
@@ -638,6 +640,7 @@ def test_application_builds_master_secondary_lifecycle(
     for unit in (application.master, secondary):
         assert unit.image == "quay.io/wh2099/dst-server:latest"
         assert unit.pull == "always"
+        assert unit.log_driver == "journald"
         assert unit.timezone == "local"
         assert unit.timeout_start_sec == 1800
         assert unit.stop_timeout is not None
@@ -793,71 +796,205 @@ def test_application_save_rejects_stale_member(
         application.save(output)
 
 
-def _external_port(unit: ContainerUnit) -> int | None:
-    if "--external-port" not in unit.exec:
-        return None
-    return int(unit.exec[unit.exec.index("--external-port") + 1])
+def test_application_replacing_ports_preserves_container_commands(
+    application: QuadletApplication,
+) -> None:
+    first, steam, _secondary, secondary_steam = application.pod.publish_ports
+    pod = application.pod.replace(
+        publish_ports=(first.replace(host=32000), steam, secondary_steam),
+    )
+
+    updated = application.replace(pod=pod)
+
+    assert updated.pod == pod
+    assert updated.master == application.master
+    assert updated.secondaries == application.secondaries
+    assert application.pod.publish_ports[0].host == 30070
 
 
 @pytest.mark.parametrize(
-    ("mapping_index", "host", "expected"),
+    "drop_in",
     [
-        pytest.param(0, 32000, (32000, 30072), id="change-master"),
-        pytest.param(2, 32002, (30070, 32002), id="change-secondary"),
-        pytest.param(0, None, (None, 30072), id="unpublish-master"),
-        pytest.param(2, None, (30070, None), id="unpublish-secondary"),
+        "dst-007-Master.container.d",
+        "dst-007-.container.d",
+        "dst-.container.d",
+        "container.d",
     ],
 )
-def test_application_syncs_changed_player_ports(
-    application: QuadletApplication,
-    mapping_index: int,
-    host: int | None,
-    expected: tuple[int | None, int | None],
+def test_application_keeps_native_drop_ins_separate(
+    tmp_path: Path, application: QuadletApplication, drop_in: str
 ) -> None:
-    mappings = list(application.pod.publish_ports)
-    if host is None:
-        del mappings[mapping_index]
-    else:
-        mappings[mapping_index] = mappings[mapping_index].replace(host=host)
+    output = tmp_path / "quadlet"
+    override = output / drop_in / "10-proxy.conf"
+    override.parent.mkdir(parents=True)
+    content = "[Container]\nEnvironment=DST_SERVER_MOD_PROXY=http://proxy:1080\n"
+    override.write_text(content)
 
+    application.save(output)
+    loaded = QuadletApplication.load(output)
+    updated = loaded.replace(master=loaded.master.replace(image="example:new"))
+    updated.save(output)
+
+    assert QuadletApplication.load(output) == updated
+    assert "DST_SERVER_MOD_PROXY" not in updated.master.environment
+    assert override.read_text() == content
+
+
+def test_application_refuses_to_edit_an_overridden_field_before_writing(
+    tmp_path: Path, application: QuadletApplication
+) -> None:
+    output = tmp_path / "quadlet"
+    application.save(output)
+    override = output / f"{application.master.name}.container.d/20-image.conf"
+    override.parent.mkdir()
+    override.write_text("[Container]\nImage=example:override\n")
+    before = {path: (output / path).read_bytes() for path in application.files()}
     updated = application.replace(
-        pod=application.pod.replace(publish_ports=tuple(mappings)),
+        pod=application.pod.replace(description="Changed description"),
+        master=application.master.replace(image="example:requested"),
     )
 
-    assert (
-        tuple(_external_port(unit) for unit in (updated.master, *updated.secondaries))
-        == expected
-    )
+    with pytest.raises(ValueError, match=r"Container.Image is overridden"):
+        updated.save(output)
+    with pytest.raises(ValueError, match=r"Container.Image is overridden"):
+        updated.master.save(output)
+
+    assert before == {
+        path: (output / path).read_bytes() for path in application.files()
+    }
+    assert QuadletApplication.load(output) == application
 
 
-def test_application_syncs_new_ports_and_rejects_partial_allocation(
-    tmp_path: Path,
-    cluster: ClusterConfig,
+def test_more_specific_drop_in_replaces_same_named_shared_drop_in(
+    tmp_path: Path, application: QuadletApplication
 ) -> None:
-    application = QuadletApplication.for_cluster(cluster, tmp_path / "cluster")
-    mappings = RoomPortAllocation(number=7).mappings(cluster)
-
-    published = application.replace(
-        pod=application.pod.replace(publish_ports=mappings),
+    output = tmp_path / "quadlet"
+    application.save(output)
+    shared = output / "container.d/20-override.conf"
+    shared.parent.mkdir()
+    shared.write_text("[Container]\nImage=example:shared\n")
+    specific = output / f"{application.master.name}.container.d/20-override.conf"
+    specific.parent.mkdir()
+    specific.write_text("[Unit]\nDescription=Specific unit\n")
+    updated = application.replace(
+        master=application.master.replace(image="example:new")
     )
 
-    assert tuple(
-        _external_port(unit) for unit in (published.master, *published.secondaries)
-    ) == (30070, 30072)
-    with pytest.raises(ValueError, match="partial new mappings"):
-        application.replace(
-            pod=application.pod.replace(publish_ports=mappings[:1]),
-        )
+    updated.save(output)
+
+    assert QuadletApplication.load(output) == updated
+    assert shared.read_text() == "[Container]\nImage=example:shared\n"
 
 
-def test_application_does_not_sync_an_explicit_unit(
+def test_application_patch_keeps_native_values_outside_the_requested_changes(
     application: QuadletApplication,
 ) -> None:
-    first, *remaining = application.pod.publish_ports
-    pod = application.pod.replace(
-        publish_ports=(first.replace(host=32000), *remaining),
+    native = application.replace(
+        pod=application.pod.replace(networks=("private.network",)),
+        master=application.master.replace(timeout_start_sec=900, nice=5),
+    )
+    requested = application.replace(
+        pod=application.pod.replace(wanted_by=()),
+        master=application.master.replace(image="example:new"),
     )
 
-    updated = application.replace(pod=pod, master=application.master)
+    result = native.patch(application, requested)
 
-    assert _external_port(updated.master) == 30070
+    assert result == native.replace(
+        pod=native.pod.replace(wanted_by=()),
+        master=native.master.replace(image="example:new"),
+    )
+
+
+@pytest.mark.parametrize("caves", [False, True])
+def test_application_patch_handles_changed_shards(tmp_path: Path, caves: bool) -> None:
+    previous = QuadletApplication.for_cluster(
+        make_cluster(caves=not caves), tmp_path / "room"
+    )
+    updated = QuadletApplication.for_cluster(
+        make_cluster(caves=caves), tmp_path / "room"
+    )
+    native = previous.replace(master=previous.master.replace(nice=5))
+
+    result = native.patch(previous, updated)
+
+    assert result == updated.replace(master=updated.master.replace(nice=5))
+
+
+def test_application_patch_rejects_mismatched_native_units(
+    tmp_path: Path, application: QuadletApplication, cluster: ClusterConfig
+) -> None:
+    other = QuadletApplication.for_cluster(cluster, tmp_path / "other")
+
+    with pytest.raises(ValueError, match="units do not match"):
+        other.patch(application, application)
+
+
+def test_application_save_preserves_unchanged_native_units(
+    tmp_path: Path, application: QuadletApplication
+) -> None:
+    application.save(tmp_path)
+    untouched = (
+        tmp_path / f"{application.pod.name}.pod",
+        tmp_path / f"{application.secondaries[0].name}.container",
+    )
+    for path in untouched:
+        path.write_text(
+            "# Native room configuration\n" + path.read_text().replace("=", " = ", 1)
+        )
+    before = {path: path.read_bytes() for path in untouched}
+    updated = application.replace(
+        master=application.master.replace(image="example:new")
+    )
+
+    written = updated.save(tmp_path)
+
+    assert written == (tmp_path / f"{application.master.name}.container",)
+    assert QuadletApplication.load(tmp_path) == updated
+    assert before == {path: path.read_bytes() for path in untouched}
+    assert updated.save(tmp_path) == ()
+
+
+def test_updating_native_legacy_images_preserves_commands_and_untouched_pod(
+    tmp_path: Path, application: QuadletApplication
+) -> None:
+    application.save(tmp_path)
+    original = {}
+    for unit in (application.master, *application.secondaries):
+        old = unit.replace(exec=(unit.exec[0], *unit.exec[2:]))
+        old.save(tmp_path)
+        original[old.name] = old.exec
+    pod = tmp_path / f"{application.pod.name}.pod"
+    pod.write_text("# Native pod settings\n" + pod.read_text())
+    before = pod.read_bytes()
+    native = QuadletApplication.load(tmp_path, legacy=True)
+    requested = application.replace(
+        master=application.master.replace(image="example:new"),
+        secondaries=tuple(
+            unit.replace(image="example:new") for unit in application.secondaries
+        ),
+    )
+
+    written = native.patch(application, requested).save(tmp_path)
+    loaded = QuadletApplication.load(tmp_path, legacy=True)
+
+    assert set(written) == {tmp_path / f"{name}.container" for name in original}
+    assert {
+        unit.name: unit.exec for unit in (loaded.master, *loaded.secondaries)
+    } == original
+    assert all(
+        unit.image == "example:new" for unit in (loaded.master, *loaded.secondaries)
+    )
+    assert pod.read_bytes() == before
+
+
+def test_deployment_preflight_rejects_a_dangling_unit_symlink(
+    tmp_path: Path, application: QuadletApplication
+) -> None:
+    target = tmp_path / f"{application.master.name}.container"
+    target.symlink_to(tmp_path / "missing")
+
+    with pytest.raises(ValueError, match="symlink"):
+        application.validate_save(tmp_path)
+
+    assert tuple(tmp_path.iterdir()) == (target,)

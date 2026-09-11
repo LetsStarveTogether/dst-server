@@ -4,6 +4,7 @@ local methods = {}
 
 for _, source in ipairs({
     require("dst_server.commands"),
+    require("dst_server.console"),
     require("dst_server.player_queries"),
     require("dst_server.world_queries"),
 }) do

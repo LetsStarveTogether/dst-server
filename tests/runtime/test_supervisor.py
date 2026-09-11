@@ -17,6 +17,7 @@ from dst_server.runtime.supervisor import (
     ShardSupervisor,
     ShardSupervisorStatus,
 )
+from tests.helpers import wait_for_event
 
 
 class Clock:
@@ -288,19 +289,30 @@ async def test_action_interrupts_nonstable_startup(
     server = ProcessStub(start_gate=asyncio.Event())
     supervisor = managed_supervisor("Forest", Factory(server, ProcessStub()))
     starting = asyncio.create_task(supervisor.start())
-    await server.started.wait()
-    await wait_phase(supervisor, ShardPhase.STARTING)
+    acting: asyncio.Task[object] | None = None
+    try:
+        await wait_for_event(server.started, starting)
+        await wait_phase(supervisor, ShardPhase.STARTING)
 
-    await getattr(supervisor, action)()
-    result = await starting
+        acting = asyncio.create_task(getattr(supervisor, action)())
+        await asyncio.wait_for(asyncio.shield(acting), timeout=5)
+        result = await asyncio.wait_for(asyncio.shield(starting), timeout=5)
 
-    if action == "restart":
-        assert result.desired is ShardDesired.RUNNING
-        assert supervisor.status.phase is ShardPhase.RUNNING
-    elif action == "aclose":
-        assert supervisor.status.phase is ShardPhase.UNAVAILABLE
-    else:
-        assert result.phase is ShardPhase.STOPPED
+        if action == "restart":
+            assert result.desired is ShardDesired.RUNNING
+            assert supervisor.status.phase is ShardPhase.RUNNING
+        elif action == "aclose":
+            assert supervisor.status.phase is ShardPhase.UNAVAILABLE
+        else:
+            assert result.phase is ShardPhase.STOPPED
+    finally:
+        async with asyncio.timeout(5):
+            if server.start_gate is not None:
+                server.start_gate.set()
+            pending = (starting,) if acting is None else (starting, acting)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def test_stop_wins_retry_completion_race(
@@ -360,13 +372,24 @@ async def test_force_action_upgrades_in_progress_stop(
     supervisor = managed_supervisor("Forest", Factory(server))
     await supervisor.start()
     stopping = asyncio.create_task(supervisor.stop())
-    await server.stop_started.wait()
+    acting: asyncio.Task[object] | None = None
+    try:
+        await wait_for_event(server.stop_started, stopping)
 
-    await getattr(supervisor, action)()
-    await stopping
+        acting = asyncio.create_task(getattr(supervisor, action)())
+        await asyncio.wait_for(asyncio.shield(acting), timeout=5)
+        await asyncio.wait_for(asyncio.shield(stopping), timeout=5)
 
-    assert (server.stop_calls, server.kill_calls) == (1, 1)
-    assert server.returncode == -signal.SIGKILL
+        assert (server.stop_calls, server.kill_calls) == (1, 1)
+        assert server.returncode == -signal.SIGKILL
+    finally:
+        async with asyncio.timeout(5):
+            if server.stop_gate is not None:
+                server.stop_gate.set()
+            pending = (stopping,) if acting is None else (stopping, acting)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def test_live_process_remains_retryable_after_kill_failure(

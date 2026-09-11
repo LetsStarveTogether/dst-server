@@ -1,61 +1,20 @@
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
+from typing import Any
 
+import pytest
+
+from dst_server import commands as c
 from dst_server.events import GAME_EVENT_ADAPTER
-from dst_server.game.rpc import (
-    BOOL_RESPONSE,
-    DRIVER_RESPONSE,
-    INT_RESPONSE,
-    INVENTORY_RESPONSE,
-    JSON_RESPONSE,
-    MODS_RESPONSE,
-    PLAYER_IDS_RESPONSE,
-    PLAYER_RESPONSE,
-    PLAYERS_RESPONSE,
-    ROOM_RESPONSE,
-    RUNTIME_RESPONSE,
-    SHARDS_RESPONSE,
-    WORLD_RESPONSE,
-    ResponseAdapter,
-)
+from dst_server.game.client import _METHODS
+from dst_server.game.rpc import BOOL_RESPONSE, response_adapter
 
 PREFIX = "DST_OTEL|"
 
-RPC_ADAPTERS: dict[str, ResponseAdapter[object]] = {
-    "health": DRIVER_RESPONSE,
-    "get_room": ROOM_RESPONSE,
-    "get_world": WORLD_RESPONSE,
-    "get_runtime": RUNTIME_RESPONSE,
-    "get_mods": MODS_RESPONSE,
-    "get_shards": SHARDS_RESPONSE,
-    "get_players": PLAYERS_RESPONSE,
-    "get_player": PLAYER_RESPONSE,
-    "get_player_inventory": INVENTORY_RESPONSE,
-    "announce": BOOL_RESPONSE,
-    "save": BOOL_RESPONSE,
-    "set_server_paused": BOOL_RESPONSE,
-    "reset": BOOL_RESPONSE,
-    "regenerate_world": BOOL_RESPONSE,
-    "regenerate_shard": BOOL_RESPONSE,
-    "rollback": BOOL_RESPONSE,
-    "kick_player": BOOL_RESPONSE,
-    "ban_player": BOOL_RESPONSE,
-    "get_blocklist": PLAYER_IDS_RESPONSE,
-    "is_blocked": BOOL_RESPONSE,
-    "unban_player": BOOL_RESPONSE,
-    "is_whitelisted": BOOL_RESPONSE,
-    "whitelist_player": BOOL_RESPONSE,
-    "unwhitelist_player": BOOL_RESPONSE,
-    "set_player_vitals": BOOL_RESPONSE,
-    "kill_player": BOOL_RESPONSE,
-    "revive_player": BOOL_RESPONSE,
-    "despawn_player": BOOL_RESPONSE,
-    "migrate_player": BOOL_RESPONSE,
-    "teleport_player": BOOL_RESPONSE,
-    "give_item": INT_RESPONSE,
-    "remove_item": INT_RESPONSE,
-    "execute_script": JSON_RESPONSE,
-}
+RPC_ADAPTERS = {
+    method: response_adapter(c.operation("agent", command.method).result_type or bool)
+    for command, method in _METHODS.items()
+} | {"save": BOOL_RESPONSE}
 
 
 def run_lua_contract(script: str, luajit: str) -> list[str]:
@@ -102,38 +61,141 @@ def test_all_real_lua_event_producers_match_python_contract(luajit: str) -> None
     assert all(event.session_id == "SESSION" for event in events)
 
 
-def test_all_real_lua_rpc_methods_match_python_contracts(luajit: str) -> None:
+@pytest.fixture(scope="module")
+def rpc_data(luajit: str) -> dict[str, Any]:
     lines = run_lua_contract("rpc_contract.lua", luajit)
     responses = dict(line.split("|", 1) for line in lines)
 
+    assert len(responses) == len(lines), "duplicate method responses"
     assert responses.keys() == RPC_ADAPTERS.keys()
+    data = {}
     for method, adapter in RPC_ADAPTERS.items():
-        adapter.validate_json(responses[method], strict=True)
+        response = adapter.validate_json(responses[method], strict=True)
+        assert response.ok, method
+        data[method] = response.model_dump(mode="json")["data"]
 
-    players = PLAYERS_RESPONSE.validate_json(responses["get_players"], strict=True)
-    loading_player = PLAYER_RESPONSE.validate_json(
-        responses["get_player"],
-        strict=True,
-    )
-    assert players.ok
-    assert players.data[1].prefab is None
-    assert loading_player.ok
-    assert loading_player.data is not None
-    assert loading_player.data.prefab is None
+    return data
 
-    blocklist = PLAYER_IDS_RESPONSE.validate_json(
-        responses["get_blocklist"],
-        strict=True,
-    )
-    assert blocklist.ok
-    assert blocklist.data == ("KU_BLOCKED", "KU_KEEP", "Steam_ONLY")
-    for method in (
-        "is_blocked",
-        "unban_player",
-        "is_whitelisted",
-        "whitelist_player",
-        "unwhitelist_player",
-    ):
-        membership = BOOL_RESPONSE.validate_json(responses[method], strict=True)
-        assert membership.ok
-        assert membership.data is True
+
+def test_registered_lua_queries(rpc_data: dict[str, Any]) -> None:
+    data = rpc_data
+    assert data["health"] == {
+        "protocol": 2,
+        "generation": 1,
+        "telemetry_status": "disabled",
+        "last_error": None,
+        "events_emitted": 0,
+        "errors": 0,
+    }
+    assert data["get_room"]["name"] == "Test Room"
+    assert data["get_room"]["player_count"] == 2
+    assert data["get_room"]["max_players"] == 6
+    assert data["get_room"]["playstyle"] is None
+    assert data["get_world"]["age"] == 1000
+    assert data["get_world"]["day"] == 11
+    assert data["get_world"]["phase"] == "day"
+    assert data["get_world"]["season"] == "autumn"
+    assert data["get_runtime"]["session_id"] == "SESSION"
+    assert data["get_runtime"]["snapshot"] == 26
+    assert data["get_snapshots"] == {
+        "session_id": "SESSION",
+        "snapshots": [
+            {
+                "snapshot_id": 25,
+                "world_file": "save/session/SESSION/0000000025",
+                "metadata": None,
+            }
+        ],
+        "has_more": True,
+    }
+    assert data["get_mods"] == [
+        {"id": "workshop-1", "name": "Test Mod", "version": "1.2.3"}
+    ]
+    assert data["get_shards"] == [
+        {"id": "1", "name": "Master", "is_current": True, "ready": True, "tags": []},
+        {
+            "id": "2",
+            "name": "Caves",
+            "is_current": False,
+            "ready": True,
+            "tags": ["cave"],
+        },
+    ]
+
+
+def test_lua_player_values_and_loading_state(rpc_data: dict[str, Any]) -> None:
+    data = rpc_data
+    player, loading = data["get_players"]
+    assert player["userid"] == "KU_TEST"
+    assert player["position"] == {"x": 1, "y": 0, "z": 2}
+    assert player["age"] == {"seconds": 100, "days": 2, "display_days": 3}
+    assert player["vitals"] == {
+        "health": {
+            "current": 80,
+            "maximum": 100,
+            "percent": 0.8,
+            "is_dead": False,
+            "is_invincible": False,
+        },
+        "hunger": {"current": 50, "maximum": 100, "percent": 0.5},
+        "sanity": {"current": 60, "maximum": 100, "percent": 0.6},
+        "temperature": {"current": 25, "maximum": 70},
+        "moisture": {"current": 10, "maximum": 100, "percent": 0.1},
+    }
+    assert player["state"]["skill_xp"] == 10
+    assert player["state"]["available_skill_points"] == 2
+    assert player["state"]["activated_skills"] == ["wilson_torch_1"]
+    assert loading == data["get_player"]
+    assert loading["userid"] == "KU_LOADING"
+    assert loading["prefab"] is None
+    assert loading["age"] is None
+    assert loading["vitals"] is None
+
+
+def test_lua_inventory_values(rpc_data: dict[str, Any]) -> None:
+    inventory = rpc_data["get_player_inventory"]
+    assert inventory["userid"] == "KU_TEST"
+    assert inventory["items"] == [
+        {
+            "slot": 1,
+            "item": {
+                "prefab": "twigs",
+                "guid": 100,
+                "skin": "classic",
+                "stack_size": 3,
+                "moisture_percent": 0.1,
+                "uses_percent": 0.8,
+                "freshness_percent": 0.7,
+                "fuel_percent": 0.6,
+                "armor_percent": 0.5,
+                "charge_percent": 0.4,
+            },
+        }
+    ]
+    assert inventory["equipment"][0]["slot"] == "hands"
+    assert inventory["equipment"][0]["item"]["prefab"] == "axe"
+    assert inventory["active_item"]["prefab"] == "torch"
+    assert inventory["overflow"]["prefab"] == "backpack"
+    assert inventory["overflow"]["slots"][0]["slot"] == 2
+    assert inventory["overflow"]["slots"][0]["item"]["prefab"] == "rocks"
+
+
+def test_lua_mutation_results(rpc_data: dict[str, Any]) -> None:
+    data = rpc_data
+    assert data["get_blocklist"] == ["KU_BLOCKED", "KU_KEEP", "Steam_ONLY"]
+    for method, adapter in RPC_ADAPTERS.items():
+        if adapter is BOOL_RESPONSE:
+            assert data[method] is True, method
+    assert data["give_item"] == 1
+    assert data["remove_item"] == 1
+    assert data["execute_script"] == {"answer": 42}
+    assert data["evaluate"] == {
+        "output": "",
+        "values": [
+            {"type": "number", "text": "3"},
+            {"type": "string", "text": "中文"},
+            {"type": "nil", "text": "nil"},
+        ],
+        "error": None,
+        "truncated": False,
+    }

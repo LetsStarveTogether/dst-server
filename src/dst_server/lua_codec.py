@@ -23,7 +23,10 @@ from pydantic import AfterValidator, BeforeValidator, Field, JsonValue
 
 MAX_SAFE_LUA_INTEGER = 2**53 - 1
 MAX_LUA_BYTE = 255
-LUA_STRING_ESCAPE = re.compile(r'\\(?:(\r?\n)|([0-9]{1,3})|(["\\]))')
+LUA_STRING_ESCAPE = re.compile(
+    r"""\\(?:(\r\n|\n\r|[\r\n])|([0-9]{1,3})|([abfnrtv"'\\]))"""
+)
+LUA_CHARACTER_ESCAPES = str.maketrans("abfnrtv", "\a\b\f\n\r\t\v")
 KLEI_FILE_HEADER = re.compile(r"\AKLEI[ \t]+1[ \t]+(?=return\b)")
 
 
@@ -164,7 +167,9 @@ def _decode_lua_string(raw: str) -> str:
                 raise ValueError(msg)
             value.append(byte)
         else:
-            value.extend(cast(str, match.group(3)).encode())
+            value.extend(
+                cast(str, match.group(3)).translate(LUA_CHARACTER_ESCAPES).encode()
+            )
         position = match.end()
     literal = raw[position:]
     if "\\" in literal:
@@ -175,11 +180,11 @@ def _decode_lua_string(raw: str) -> str:
 
 
 def _lua_string_node(node: Node, description: str) -> str:
-    if (
-        not isinstance(node, String)
-        or node.delimiter is not StringDelimiter.DOUBLE_QUOTE
-    ):
-        msg = f"{description} must be a canonical double-quoted string"
+    if not isinstance(node, String) or node.delimiter not in {
+        StringDelimiter.SINGLE_QUOTE,
+        StringDelimiter.DOUBLE_QUOTE,
+    }:
+        msg = f"{description} must be a quoted string"
         raise ValueError(msg)
     try:
         return _decode_lua_string(node.raw)

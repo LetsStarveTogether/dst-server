@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       build_target:
-        description: 'Build target (latest, beta, or both)'
+        description: 'Build target on current main (latest, beta, or both)'
         required: false
         default: 'both'
         type: choice
@@ -30,12 +30,17 @@ on:
         required: false
         default: false
         type: boolean
+      no_cache:
+        description: 'Rebuild without using cached image layers'
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
 concurrency:
-  group: image-${{ github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   BUILDS_URL: https://s3.amazonaws.com/dstbuilds/builds.json
@@ -45,6 +50,7 @@ env:
 jobs:
   test:
     name: Test Python supervisor
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -69,6 +75,7 @@ jobs:
 
   detect:
     name: Resolve image versions
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
@@ -159,7 +166,7 @@ jobs:
                 created,
                 image_tag: target.tag,
                 version,
-                version_tag: version,
+                version_tag: target.channel === 'beta' ? `beta-${version}` : version,
               });
             }
 
@@ -169,6 +176,7 @@ jobs:
   image:
     name: ${{ matrix.build && 'Build' || 'Skip' }} ${{ matrix.image_tag }} ${{ matrix.version }}
     needs: [detect, test]
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -178,9 +186,28 @@ jobs:
       max-parallel: 1
       matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
     steps:
+      - name: Check build source
+        if: ${{ matrix.build }}
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { data } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
+            if (context.ref !== 'refs/heads/main' || context.sha !== data.object.sha) {
+              throw new Error('Refusing to build an image from a superseded or non-main commit.');
+            }
+
       - name: Checkout
         if: ${{ matrix.build }}
         uses: actions/checkout@v7
+
+      - name: Log in to registry for build cache
+        if: ${{ matrix.build }}
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          printf '%s' "$REGISTRY_PASSWORD" | podman login quay.io \
+            --username "$REGISTRY_USERNAME" --password-stdin
 
       - name: Build image
         if: ${{ matrix.build }}
@@ -190,6 +217,12 @@ jobs:
           image: ${{ env.IMAGE_NAME }}
           tags: ${{ matrix.version_tag }} ${{ matrix.image_tag }}
           containerfiles: Containerfile
+          layers: true
+          extra-args: |
+            --pull=always
+            --cache-from=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}
+            --cache-to=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}
+            ${{ inputs.no_cache && '--no-cache' || '' }}
           build-args: |
             BETA=${{ matrix.beta }}
             GAME_VERSION=${{ matrix.version }}
@@ -213,7 +246,7 @@ jobs:
 
       - name: Test built image with the real game
         if: ${{ matrix.build }}
-        timeout-minutes: 30
+        timeout-minutes: 40
         env:
           DST_SERVER_EXPECTED_REVISION: ${{ github.sha }}
           DST_SERVER_EXPECTED_VERSION: ${{ matrix.version }}
@@ -223,6 +256,16 @@ jobs:
           podman save "$DST_SERVER_IMAGE" | sudo podman load
           sudo --preserve-env=DST_SERVER_EXPECTED_REVISION,DST_SERVER_EXPECTED_VERSION,DST_SERVER_IMAGE,DST_SERVER_PODMAN_TEST \
             "$(command -v uv)" run --locked --all-extras pytest -m system tests/system/test_podman.py
+
+      - name: Check publish source
+        if: ${{ matrix.build }}
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { data } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
+            if (context.ref !== 'refs/heads/main' || context.sha !== data.object.sha) {
+              throw new Error('Refusing to publish an image from a superseded or non-main commit.');
+            }
 
       - name: Push to registry
         if: ${{ matrix.build }}

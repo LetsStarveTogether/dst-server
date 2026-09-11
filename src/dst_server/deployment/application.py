@@ -13,18 +13,19 @@ from .models import (
     ContainerUnit,
     PodUnit,
     PortMapping,
+    QuadletUnit,
     VolumeMount,
     _validate_unit_name,
 )
-from .quadlet import references_pod
+from .quadlet import references_pod, validate_update
 
 DEFAULT_IMAGE = "quay.io/wh2099/dst-server:latest"
 DEFAULT_TARGET = "default.target"
 MAX_ROOM_SLOT = 299
 MAX_ROOM_SHARDS = 4
 ROOM_PORTS_PER_SLOT = 10
-SERVE_COMMAND = ("/app/.venv/bin/dst-server", "serve")
-MASTER_COMMAND = ("/app/.venv/bin/dst-server", "master")
+SERVE_COMMAND = ("/app/.venv/bin/dst-server", "agent", "serve")
+MASTER_COMMAND = ("/app/.venv/bin/dst-server", "agent", "master")
 CLUSTER_ENVIRONMENT = "DST_SERVER_CLUSTER_NAME"
 
 
@@ -94,32 +95,13 @@ class RoomPortAllocation(RevalidatedFrozenModel):
         )
 
 
-def _sync_external_port(
-    unit: ContainerUnit,
-    replacements: Mapping[int, int | None],
-    addition: int | None,
-) -> ContainerUnit:
-    command = list(unit.exec)
-    try:
-        index = command.index("--external-port") + 1
-    except ValueError:
-        if addition is None:
-            return unit
-        index = command.index("--") if "--" in command else len(command)
-        command[index:index] = ("--external-port", str(addition))
-    else:
-        try:
-            previous = int(command[index])
-        except ValueError, IndexError:
-            return unit
-        if previous not in replacements and addition is None:
-            return unit
-        replacement = replacements.get(previous, addition)
-        if replacement is None:
-            del command[index - 1 : index + 1]
-        else:
-            command[index] = str(replacement)
-    return unit.replace(exec=tuple(command))
+def _import_command(unit: ContainerUnit) -> ContainerUnit:
+    """Normalize commands for recognition, leaving native Exec values intact."""
+    for command in (MASTER_COMMAND, SERVE_COMMAND):
+        previous = (command[0], command[-1])
+        if unit.exec[: len(previous)] == previous:
+            return unit.replace(exec=(*command, *unit.exec[len(previous) :]))
+    return unit
 
 
 class QuadletApplication(RevalidatedFrozenModel):
@@ -144,7 +126,7 @@ class QuadletApplication(RevalidatedFrozenModel):
         secondary_sources = tuple(f"{name}.container" for name in secondary_names)
         if any((
             self.master.pod != pod_source,
-            self.master.exec[: len(MASTER_COMMAND)] != MASTER_COMMAND,
+            _import_command(self.master).exec[: len(MASTER_COMMAND)] != MASTER_COMMAND,
             bool(self.master.requires),
             bool(self.master.binds_to),
             bool(self.master.after),
@@ -165,7 +147,7 @@ class QuadletApplication(RevalidatedFrozenModel):
                 )
                 raise ValueError(msg)
             if any((
-                secondary.exec[: len(SERVE_COMMAND)] != SERVE_COMMAND,
+                _import_command(secondary).exec[: len(SERVE_COMMAND)] != SERVE_COMMAND,
                 bool(secondary.requires),
                 bool(secondary.wants),
                 secondary.binds_to != (master_source,),
@@ -174,55 +156,6 @@ class QuadletApplication(RevalidatedFrozenModel):
                 msg = f"Quadlet secondary has invalid master binding: {secondary.name}"
                 raise ValueError(msg)
         return self
-
-    def replace(self, **changes: object) -> Self:
-        if "pod" in changes:
-            pod = PodUnit.model_validate(changes["pod"])
-            units = (self.master, *self.secondaries)
-            old_udp = tuple(
-                mapping
-                for mapping in self.pod.publish_ports
-                if mapping.protocol == "udp"
-            )
-            new_udp = tuple(
-                mapping for mapping in pod.publish_ports if mapping.protocol == "udp"
-            )
-            new_hosts = {mapping.container: mapping.host for mapping in new_udp}
-            replacements = {
-                mapping.host: new_hosts.get(mapping.container)
-                for mapping in old_udp
-                if mapping.host != new_hosts.get(mapping.container)
-            }
-            additions: dict[str, int] = {}
-            if not old_udp:
-                implicit_units = (() if "master" in changes else (self.master,)) + (
-                    () if "secondaries" in changes else self.secondaries
-                )
-                if new_udp and len(new_udp) != 2 * len(units) and implicit_units:
-                    msg = "cannot infer player ports from partial new mappings"
-                    raise ValueError(msg)
-                if len(new_udp) == 2 * len(units):
-                    additions = {
-                        unit.name: mapping.host
-                        for unit, mapping in zip(units, new_udp[::2], strict=True)
-                    }
-            if replacements or additions:
-                if "master" not in changes:
-                    changes["master"] = _sync_external_port(
-                        self.master,
-                        replacements,
-                        additions.get(self.master.name),
-                    )
-                if "secondaries" not in changes:
-                    changes["secondaries"] = tuple(
-                        _sync_external_port(
-                            unit,
-                            replacements,
-                            additions.get(unit.name),
-                        )
-                        for unit in self.secondaries
-                    )
-        return super().replace(**changes)
 
     @classmethod
     def for_cluster(
@@ -291,6 +224,7 @@ class QuadletApplication(RevalidatedFrozenModel):
             environment=environment,
             image=image,
             pull="always",
+            log_driver="journald",
             pod=pod_source,
             volumes=(volume,),
             container_name=_podman_name(master_unit_name),
@@ -339,7 +273,9 @@ class QuadletApplication(RevalidatedFrozenModel):
         return cls(pod=pod, master=master, secondaries=secondaries)
 
     @classmethod
-    def load(cls, directory: Path, *, name: str | None = None) -> Self:
+    def load(
+        cls, directory: Path, *, name: str | None = None, legacy: bool = False
+    ) -> Self:
         if directory.is_symlink():
             msg = f"Quadlet directory cannot be a symlink: {directory}"
             raise ValueError(msg)
@@ -361,7 +297,10 @@ class QuadletApplication(RevalidatedFrozenModel):
             if references_pod(path, pod_source)
         )
         masters = tuple(
-            unit for unit in units if unit.exec[: len(MASTER_COMMAND)] == MASTER_COMMAND
+            unit
+            for unit in units
+            if (_import_command(unit) if legacy else unit).exec[: len(MASTER_COMMAND)]
+            == MASTER_COMMAND
         )
         if len(masters) != 1:
             msg = f"expected exactly one Quadlet master, found {len(masters)}"
@@ -373,6 +312,39 @@ class QuadletApplication(RevalidatedFrozenModel):
             secondaries=tuple(unit for unit in units if unit is not master),
         )
 
+    def patch(self, previous: Self, updated: Self) -> Self:
+        """Apply the requested model changes without resetting native unit settings."""
+        actual = {unit.name: unit for unit in (self.master, *self.secondaries)}
+        expected = {
+            unit.name: unit for unit in (previous.master, *previous.secondaries)
+        }
+        if self.pod.name != previous.pod.name or actual.keys() != expected.keys():
+            msg = "native Quadlet units do not match the room configuration"
+            raise ValueError(msg)
+
+        def patch_unit[T: QuadletUnit](unit: T, before: T, after: T) -> T:
+            return unit.replace(**{
+                name: getattr(after, name)
+                for name in type(after).model_fields
+                if getattr(before, name) != getattr(after, name)
+            })
+
+        def patch_container(unit: ContainerUnit) -> ContainerUnit:
+            if unit.name not in expected:
+                return unit
+            return patch_unit(actual[unit.name], expected[unit.name], unit)
+
+        return self.replace(
+            pod=patch_unit(self.pod, previous.pod, updated.pod),
+            master=patch_container(updated.master),
+            secondaries=tuple(patch_container(unit) for unit in updated.secondaries),
+        )
+
+    def validate_updates(self, directory: Path) -> None:
+        """Do not change base values whose native drop-ins still override them."""
+        for unit in (self.pod, self.master, *self.secondaries):
+            validate_update(directory / f"{unit.name}.{unit.section.lower()}", unit)
+
     def files(self) -> dict[Path, str]:
         validated = type(self).model_validate(self)
         files = {Path(f"{validated.pod.name}.pod"): validated.pod.render()}
@@ -383,8 +355,9 @@ class QuadletApplication(RevalidatedFrozenModel):
         })
         return files
 
-    def save(self, directory: Path) -> tuple[Path, ...]:
+    def validate_save(self, directory: Path) -> None:
         files = self.files()
+        self.validate_updates(directory)
         if directory.is_dir() and not directory.is_symlink():
             pod_source = f"{self.pod.name}.pod"
             unexpected = sorted(
@@ -395,4 +368,13 @@ class QuadletApplication(RevalidatedFrozenModel):
             if unexpected:
                 msg = f"unmanaged Quadlet units would remain active: {unexpected}"
                 raise ValueError(msg)
+
+    def save(self, directory: Path) -> tuple[Path, ...]:
+        self.validate_save(directory)
+        files = {}
+        for unit in (self.pod, self.master, *self.secondaries):
+            relative = Path(f"{unit.name}.{unit.section.lower()}")
+            path = directory / relative
+            if not path.exists() or type(unit).load(path) != unit:
+                files[relative] = unit.render()
         return write_files(directory, files)

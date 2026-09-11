@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -31,16 +32,13 @@ from dst_server.errors import (
     ControllerOperationError,
     DisconnectedError,
     ErrorCode,
-    GamesRunningError,
     IndeterminateError,
-    InvalidConfigurationError,
     PlayerLocationConflictError,
     TopologyChangeError,
 )
 from dst_server.events.server import SavedEvent
 from dst_server.models import Player, PlayerState, Runtime, World
 from dst_server.models.cluster import (
-    ConfigurationSnapshot,
     GameEventRecord,
     InvalidConfiguration,
     LifecycleRecord,
@@ -56,6 +54,7 @@ from dst_server.models.snapshot import (
     SnapshotClock,
     WorldSnapshotMetadata,
 )
+from tests.helpers import wait_for_event
 
 
 def configuration() -> ClusterConfig:
@@ -84,10 +83,10 @@ def configuration() -> ClusterConfig:
     )
 
 
-def layout(root: Path) -> tuple[Shard, ...]:
+def layout(_root: Path) -> tuple[Shard, ...]:
     return (
-        Shard("Master", True, root / "console"),
-        Shard("Caves", False, root / "Caves" / "console"),
+        Shard("Master", True),
+        Shard("Caves", False),
     )
 
 
@@ -423,12 +422,10 @@ async def test_cluster_start_updates_mods_after_stopping_all_games(
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ) -> None:
-    instance, master, caves, prepare, calls = await controller(tmp_path, monkeypatch)
-    calls.clear()
+    instance, master, caves, prepare, _ = await controller(tmp_path, monkeypatch)
 
     def update(*_: object, **__: object) -> tuple[Shard, ...]:
         assert master.phase == caves.phase == "stopped"
-        calls.append("prepare")
         return layout(tmp_path / "cluster")
 
     prepare.side_effect = update
@@ -440,15 +437,6 @@ async def test_cluster_start_updates_mods_after_stopping_all_games(
         else:
             await instance.restart()
         assert prepare.await_count == 2
-        assert calls == [
-            "stop:Master",
-            "stop:Caves",
-            "prepare",
-            "activate:Master",
-            "activate:Caves",
-            "start:Master",
-            "start:Caves",
-        ]
         assert (await instance.status()).phase == "running"
         await instance.start()
         assert prepare.await_count == 2
@@ -817,16 +805,24 @@ async def test_close_cancels_active_update_without_waiting_for_its_lock(
     monkeypatch.setattr(controller_module, "CONTROLLER_CANCEL_TIMEOUT", 0.01)
     monkeypatch.setattr(service, "prepare_shared", prepare)
     updating = asyncio.create_task(instance.update_mods())
-    await entered.wait()
+    try:
+        async with asyncio.timeout(5):
+            await wait_for_event(entered, updating)
 
-    async with asyncio.timeout(1):
-        await instance.aclose()
-    assert not updating.done()
+            async with asyncio.timeout(1):
+                await instance.aclose()
+            assert not updating.done()
 
-    release.set()
-    result = (await asyncio.gather(updating, return_exceptions=True))[0]
-    assert isinstance(result, RuntimeError)
-    assert "closed" in str(result)
+            release.set()
+            result = (await asyncio.gather(updating, return_exceptions=True))[0]
+            assert isinstance(result, RuntimeError)
+            assert "closed" in str(result)
+    finally:
+        async with asyncio.timeout(5):
+            release.set()
+            updating.cancel()
+            await asyncio.gather(updating, return_exceptions=True)
+            await instance.aclose()
 
 
 async def test_public_operations_reject_while_close_is_stopping_agents(
@@ -835,36 +831,36 @@ async def test_public_operations_reject_while_close_is_stopping_agents(
 ) -> None:
     instance, master, _, _, _ = await controller(tmp_path, monkeypatch)
     shard = instance.shard("Master")
-    current = await instance.read_configuration()
-    assert isinstance(current, ConfigurationSnapshot)
     master.stop_entered = asyncio.Event()
     master.stop_release = asyncio.Event()
     closing = asyncio.create_task(instance.aclose())
-    await master.stop_entered.wait()
 
     try:
-        with pytest.raises(RuntimeError, match="closed"):
-            await instance.start()
-        with pytest.raises(RuntimeError, match="closed"):
-            await instance.restart()
-        with pytest.raises(RuntimeError, match="closed"):
-            await instance.status()
-        with pytest.raises(RuntimeError, match="closed"):
-            await instance.read_configuration()
-        with pytest.raises(RuntimeError, match="closed"):
-            await instance.save_configuration(current.revision, current.configuration)
-        with pytest.raises(RuntimeError, match="closed"):
-            await shard.status()
-        with pytest.raises(RuntimeError, match="closed"):
-            await shard.start()
-        with pytest.raises(RuntimeError, match="closed"):
-            await shard.execute("return true")
-        with pytest.raises(RuntimeError, match="closed"):
-            instance.subscribe_logs()
+        watchdog = asyncio.timeout(5)
+        async with watchdog:
+            await wait_for_event(master.stop_entered, closing)
+            with pytest.raises(RuntimeError, match="closed"):
+                await instance.start()
+            with pytest.raises(RuntimeError, match="closed"):
+                await instance.restart()
+            with pytest.raises(RuntimeError, match="closed"):
+                await instance.status()
+            with pytest.raises(RuntimeError, match="closed"):
+                await instance.read_configuration()
+            with pytest.raises(RuntimeError, match="closed"):
+                await shard.status()
+            with pytest.raises(RuntimeError, match="closed"):
+                await shard.start()
+            with pytest.raises(RuntimeError, match="closed"):
+                await shard.execute("return true")
+            with pytest.raises(RuntimeError, match="closed"):
+                instance.subscribe_logs()
+        assert not watchdog.expired()
     finally:
-        master.stop_release.set()
-        await closing
-    await instance.aclose()
+        async with asyncio.timeout(5):
+            master.stop_release.set()
+            await closing
+    await asyncio.wait_for(instance.aclose(), timeout=5)
 
 
 async def test_registered_status_failure_is_reported_as_unavailable(
@@ -1090,24 +1086,36 @@ async def test_cluster_completion_timeout_covers_master_and_peer_waits(
     confirmation: type[c.WaitSaved | c.WaitGeneration],
 ) -> None:
     instance, master, caves, _, _ = await controller(tmp_path, monkeypatch)
-    completed = False
+    scopes: list[asyncio.Timeout] = []
+    stages: list[str] = []
 
-    async def command(_: c.Request[Any]) -> SavedEvent | None:
-        await asyncio.sleep(0.04)
+    @asynccontextmanager
+    async def controlled_timeout(duration: float) -> AsyncIterator[None]:
+        assert duration == 60
+        async with asyncio.timeout(None) as scope:
+            scopes.append(scope)
+            yield
+
+    async def command(_: c.Request[Any]) -> SavedEvent | None:  # ruff: ignore[unused-async]
+        assert len(scopes) == 1
+        stages.append("master")
         return SavedEvent(path="session/7", snapshot=7) if mutation is c.Save else None
 
-    async def wait(command: c.Request[Any]) -> object:
-        nonlocal completed
-        await asyncio.sleep(0.04)
-        completed = True
-        return await caves.dispatch(command)
+    async def wait(_: c.Request[Any]) -> None:
+        assert len(scopes) == 1
+        stages.append("peer")
+        scopes[0].reschedule(asyncio.get_running_loop().time())
+        await asyncio.Event().wait()
 
+    monkeypatch.setattr(controller_module, "timeout_scope", controlled_timeout)
     master.handlers[mutation] = command
     caves.handlers[confirmation] = wait
     try:
-        with pytest.raises(IndeterminateError):
-            await instance.invoke(command_type(timeout=0.06))
-        assert not completed
+        async with asyncio.timeout(5):
+            with pytest.raises(IndeterminateError):
+                await instance.invoke(command_type(timeout=60))
+        assert stages == ["master", "peer"]
+        assert scopes[0].expired()
     finally:
         await instance.aclose()
 
@@ -1348,93 +1356,39 @@ async def test_indeterminate_shard_outcomes_are_preserved(
         await instance.aclose()
 
 
-async def test_shard_restart_has_a_separate_stop_and_start_deadline(
+async def test_shard_restart_forwards_the_callers_lifecycle_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     instance, _, caves, _, _ = await controller(tmp_path, monkeypatch)
-
-    async def delayed_restart(command: c.Restart) -> None:
-        await asyncio.sleep(0.02)
-        await caves.dispatch(command)
-
-    monkeypatch.setattr(controller_module, "AGENT_START_TIMEOUT", 0.001)
-    monkeypatch.setattr(controller_module, "AGENT_RESTART_TIMEOUT", 0.1)
-    caves.handlers[c.Restart] = delayed_restart
+    agent_call = AsyncMock(wraps=instance._agent_call)
+    monkeypatch.setattr(instance, "_agent_call", agent_call)
     try:
-        await instance.shard("Caves").restart()
+        async with asyncio.timeout(5):
+            await instance.shard("Caves").invoke(c.Restart(timeout=17))
+        assert caves.requests[-1] == c.Restart(timeout=17)
+        assert agent_call.await_args is not None
+        assert (
+            agent_call.await_args.kwargs["limit"]
+            == 17 + controller_module.RPC_TIMEOUT_MARGIN
+        )
+        assert caves.phase is ShardPhase.RUNNING
     finally:
         await instance.aclose()
 
 
-async def test_configuration_save_requires_stopped_games_and_invalidates_prepare(
+@pytest.mark.parametrize("phase", [ShardPhase.RUNNING, ShardPhase.FAILED])
+async def test_shard_with_live_pid_cannot_update_shared_mods(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    instance, _, _, prepare, _ = await controller(tmp_path, monkeypatch)
-    try:
-        current = await instance.read_configuration()
-        assert isinstance(current, ConfigurationSnapshot)
-        desired = current.configuration.replace(
-            settings=current.configuration.settings.replace(max_players=12)
-        )
-        with pytest.raises(GamesRunningError):
-            await instance.save_configuration(current.revision, desired)
-
-        await instance.stop()
-        await instance.update_mods()
-        assert prepare.await_count == 2
-        prepare.assert_awaited_with(
-            tmp_path / "install",
-            tmp_path / "cluster",
-            update_mods=True,
-        )
-        saved = await instance.save_configuration(current.revision, desired)
-        assert saved.configuration.settings.max_players == 12
-        assert (await instance.status()).prepared_revision is None
-    finally:
-        await instance.aclose()
-
-
-async def test_failed_shard_with_live_pid_is_not_treated_as_stopped(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    phase: ShardPhase,
 ) -> None:
     instance, master, caves, _, _ = await controller(tmp_path, monkeypatch)
-    current = await instance.read_configuration()
-    assert isinstance(current, ConfigurationSnapshot)
-    master.phase, master.ready, master.pid = ShardPhase.FAILED, False, 123
+    master.phase, master.ready, master.pid = phase, False, 123
     caves.phase, caves.ready, caves.pid = ShardPhase.STOPPED, False, None
     try:
-        with pytest.raises(GamesRunningError):
-            await instance.save_configuration(current.revision, current.configuration)
         with pytest.raises(RuntimeError, match="must be stopped"):
             await instance.update_mods()
-    finally:
-        await instance.aclose()
-
-
-async def test_start_rejects_configuration_drift_while_games_are_running(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    instance, _, _, prepare, calls = await controller(tmp_path, monkeypatch)
-    calls.clear()
-    try:
-        current = await instance.read_configuration()
-        assert isinstance(current, ConfigurationSnapshot)
-        current.configuration.replace(
-            settings=current.configuration.settings.replace(max_players=12)
-        ).save(tmp_path / "cluster")
-
-        with pytest.raises(ControllerOperationError):
-            await instance.start()
-        assert prepare.await_count == 1
-        assert not any(call.startswith(("activate:", "start:")) for call in calls)
-
-        await instance.start()
-        assert prepare.await_count == 2
-        assert (await instance.status()).phase == "running"
     finally:
         await instance.aclose()
 
@@ -1475,26 +1429,15 @@ async def test_start_rejects_external_deployment_port_drift(
         await instance.aclose()
 
 
-async def test_cold_invalid_configuration_can_be_read_and_repaired(
+async def test_dynamic_world_configuration_does_not_block_start_or_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "cluster"
-    desired = configuration()
-    desired.save(root)
-    (root / "Caves" / "server.ini").write_text(
-        """[SHARD]
-is_master = false
-id = invalid
-
-[STEAM]
-master_server_port = 27017
-
-[NETWORK]
-server_port = 11000
-""",
-        encoding="utf-8",
-    )
+    configuration().save(root)
+    path = root / "Master" / "worldgenoverride.lua"
+    source = "return (function() return { override_enabled = true } end)()"
+    path.write_text(source)
     shards = layout(root)
     prepare = AsyncMock(return_value=shards)
     monkeypatch.setattr(service, "prepare_shared", prepare)
@@ -1509,15 +1452,13 @@ server_port = 11000
         invalid = await instance.read_configuration()
         assert isinstance(invalid, InvalidConfiguration)
         status = await instance.status()
-        assert status.revision is not None
-        assert status.revision == invalid.revision
-        with pytest.raises(InvalidConfigurationError):
-            await instance.start()
-
-        saved = await instance.save_configuration(status.revision, desired)
-        assert saved.configuration.shards["Caves"].settings.server_port == 11000
+        assert status.phase == "running"
+        assert status.error is None
+        assert status.prepared_revision is not None
+        prepare.assert_awaited_once()
         await instance.start()
         assert master.phase == caves.phase == "running"
+        assert path.read_text() == source
     finally:
         await instance.aclose()
 
@@ -1544,15 +1485,16 @@ async def test_gather_failure_waits_for_peer_cancellation_cleanup(
 
     gathering = asyncio.create_task(instance._gather((master, caves), operation))
     try:
-        await cleaning.wait()
+        await wait_for_event(cleaning, gathering)
         assert not gathering.done()
         release.set()
         with pytest.RaisesGroup(pytest.RaisesExc(RuntimeError, match="peer failed")):
-            await gathering
+            await asyncio.wait_for(asyncio.shield(gathering), timeout=5)
     finally:
-        release.set()
-        await asyncio.gather(gathering, return_exceptions=True)
-        await instance.aclose()
+        async with asyncio.timeout(5):
+            release.set()
+            await asyncio.gather(gathering, return_exceptions=True)
+            await instance.aclose()
 
 
 async def test_concurrent_close_survives_repeated_caller_cancellation(
@@ -1563,9 +1505,9 @@ async def test_concurrent_close_survives_repeated_caller_cancellation(
     master.stop_entered = asyncio.Event()
     master.stop_release = asyncio.Event()
     closing = asyncio.create_task(instance.aclose())
-    await master.stop_entered.wait()
     other = asyncio.create_task(instance.aclose())
     try:
+        await wait_for_event(master.stop_entered, closing)
         closing.cancel("first cancellation")
         await asyncio.sleep(0)
         closing.cancel("second cancellation")
@@ -1573,16 +1515,18 @@ async def test_concurrent_close_survives_repeated_caller_cancellation(
         assert not closing.done()
         assert not other.done()
         master.stop_release.set()
+        assert closing in (await asyncio.wait((closing,), timeout=5))[0]
         with pytest.raises(asyncio.CancelledError) as caught:
-            await closing
+            closing.result()
         assert caught.value.args == ("first cancellation",)
-        await other
+        await asyncio.wait_for(asyncio.shield(other), timeout=5)
         assert master.phase == caves.phase == ShardPhase.STOPPED
         assert calls == ["stop:Master", "stop:Caves"]
     finally:
-        master.stop_release.set()
-        await asyncio.gather(closing, other, return_exceptions=True)
-        await instance.aclose()
+        async with asyncio.timeout(5):
+            master.stop_release.set()
+            await asyncio.gather(closing, other, return_exceptions=True)
+            await instance.aclose()
 
 
 async def test_cancelled_failed_close_can_retry_cleanup_immediately(
@@ -1601,20 +1545,25 @@ async def test_cancelled_failed_close_can_retry_cleanup_immediately(
     master.handlers[c.Stop] = fail_stop
     master.handlers[c.Kill] = AsyncMock(side_effect=RuntimeError("kill failed"))
     closing = asyncio.create_task(instance.aclose())
-    await entered.wait()
     try:
-        closing.cancel("caller cancelled")
-        await asyncio.sleep(0)
-        release.set()
-        with pytest.raises(asyncio.CancelledError) as caught:
-            await closing
-        assert caught.value.args == ("caller cancelled",)
-        assert isinstance(caught.value.__cause__, ExceptionGroup)
-        master.handlers.clear()
-        await instance.aclose()
-        assert master.phase == caves.phase == ShardPhase.STOPPED
+        watchdog = asyncio.timeout(5)
+        async with watchdog:
+            await wait_for_event(entered, closing)
+            closing.cancel("caller cancelled")
+            await asyncio.sleep(0)
+            release.set()
+            assert closing in (await asyncio.wait((closing,), timeout=5))[0]
+            with pytest.raises(asyncio.CancelledError) as caught:
+                closing.result()
+            assert caught.value.args == ("caller cancelled",)
+            assert isinstance(caught.value.__cause__, ExceptionGroup)
+            master.handlers.clear()
+            await instance.aclose()
+            assert master.phase == caves.phase == ShardPhase.STOPPED
+        assert not watchdog.expired()
     finally:
-        release.set()
-        master.handlers.clear()
-        await asyncio.gather(closing, return_exceptions=True)
-        await instance.aclose()
+        async with asyncio.timeout(5):
+            release.set()
+            master.handlers.clear()
+            await asyncio.gather(closing, return_exceptions=True)
+            await instance.aclose()

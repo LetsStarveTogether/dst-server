@@ -1,7 +1,7 @@
 import asyncio
 import json
+import tracemalloc
 from pathlib import Path
-from types import CoroutineType
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
@@ -12,7 +12,7 @@ from dst_server.events.server import SavedEvent
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime import server as server_module
 from dst_server.runtime.console import Console
-from tests.helpers import StubWriter, feed_frame, next_frame
+from tests.helpers import StubWriter, feed_frame, next_frame, wait_for_event
 
 
 @pytest.mark.parametrize("kind", ["log", "stats", "log-then-stats"])
@@ -34,28 +34,33 @@ async def test_idle_stdout_releases_large_temporary_lines(
         return await read_line(reader)
 
     monkeypatch.setattr(server_module, "read_line", lambda _: read())
-    operation = server.pump_logs(reader)
-    pumping = asyncio.create_task(operation)
-    reader.feed_data(
-        (b"DST_Stats|" if kind == "stats" else b"[00:00:01]: ")
-        + b"x" * 1_000_000
-        + b"\n"
-        + (b"DST_Stats|1\n" if kind == "log-then-stats" else b"")
-    )
+    pumping = asyncio.create_task(server.pump_logs(reader))
+    was_tracing = tracemalloc.is_tracing()
+    tracemalloc.start()
+    baseline = tracemalloc.get_traced_memory()[0]
     try:
-        await asyncio.wait_for(idle.wait(), 1)
-        frame = cast("CoroutineType", operation).cr_frame
-        assert frame is not None
-        retained = {
-            name: len(value)
-            for name, value in frame.f_locals.items()
-            if isinstance(value, (bytes, str)) and len(value) > 4096
-        }
-        assert retained == {}
-    finally:
+        reader.feed_data(
+            (b"DST_Stats|" if kind == "stats" else b"[00:00:01]: ")
+            + b"x" * 1_000_000
+            + b"\n"
+            + (b"DST_Stats|1\n" if kind == "log-then-stats" else b"")
+        )
+        await wait_for_event(idle, pumping)
+        if pumping.done():
+            pumping.result()
+            pytest.fail("stdout pump exited before EOF")
+        # Count actual retained allocations, including containers and helper frames.
+        assert tracemalloc.get_traced_memory()[0] - baseline < 250_000
         reader.feed_eof()
-        await pumping
-        await server.finish()
+        await asyncio.wait_for(pumping, timeout=5)
+    finally:
+        async with asyncio.timeout(5):
+            if not was_tracing:
+                tracemalloc.stop()
+            reader.feed_eof()
+            pumping.cancel()
+            await asyncio.gather(pumping, return_exceptions=True)
+            await server.finish()
 
 
 async def observations(server: Server) -> list[Any]:

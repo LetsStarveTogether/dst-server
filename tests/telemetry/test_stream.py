@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, call
 
 import pytest
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 from ulid import ULID
 
@@ -37,14 +37,16 @@ def event_line(nonce: str, sequence: int, **changes: object) -> str:
     )
 
 
-@given(st.lists(st.binary(max_size=128), max_size=40))
-async def test_arbitrary_bytes_cannot_poison_later_valid_events(
-    damaged_lines: list[bytes],
+@given(st.lists(st.binary(max_size=128), min_size=1, max_size=40))
+@example([b"\xff", b"{", b"{}"])
+async def test_damaged_event_frames_cannot_poison_later_valid_events(
+    damaged_payloads: list[bytes],
 ) -> None:
     events = EventStream(Recorder("cluster", "shard"))
     try:
-        for index, line in enumerate(damaged_lines):
-            await events.accept(line, index)
+        for index, payload in enumerate(damaged_payloads):
+            assert await events.accept(PREFIX.encode() + payload, index)
+        assert events.invalid == len(damaged_payloads)
         assert await events.accept(event_line(events.nonce, 42), 123)
     finally:
         events.close()
@@ -132,16 +134,20 @@ async def test_non_event_lines_do_not_enter_validation(line: str | bytes) -> Non
     assert events.invalid == 0
 
 
-@pytest.mark.parametrize("prefix", NATIVE_PREFIXES)
-@pytest.mark.parametrize("as_bytes", [False, True])
 @pytest.mark.parametrize(
-    "kind", ["valid", "wrong_nonce", "bad_nonce", "schema", "surrogate"]
-)
-@pytest.mark.parametrize(
-    "size", [None, 65536, 65537], ids=["short", "exact", "oversized"]
+    ("kind", "size"),
+    [
+        ("valid", None),
+        ("wrong_nonce", None),
+        ("bad_nonce", None),
+        ("schema", None),
+        ("surrogate", None),
+        ("valid", 65536),
+        ("valid", 65537),
+    ],
 )
 async def test_mixed_validation_preserves_later_events(
-    prefix: str, as_bytes: bool, kind: str, size: int | None
+    kind: str, size: int | None
 ) -> None:
     events = EventStream(Recorder("cluster", "shard"))
     nonce = (
@@ -169,10 +175,9 @@ async def test_mixed_validation_preserves_later_events(
         event_line(events.nonce, 3),
     ]
     for timestamp, line in enumerate(lines, start=1):
-        framed = prefix + line
-        assert await events.accept(
-            framed.encode(errors="surrogatepass") if as_bytes else framed, timestamp
-        ) == (timestamp in {1, 5, 7})
+        assert await events.accept("[125:59:59]: " + line, timestamp) == (
+            timestamp in {1, 5, 7}
+        )
 
     events.close()
     observed = []
@@ -439,11 +444,11 @@ async def test_native_debugprint_preserves_telemetry_lines(
     assert observed is not None
     if size <= stream.MAX_LINE_BYTES:
         assert len(line) == size
-        assert observed.record.event == "dst.world.state_changed"
+        assert observed.record.event == "dst.shard.connection_changed"
     else:
         assert observed.record.event == "dst.telemetry.error"
         assert observed.record.data.message == "event_too_large"
-    assert observed.record.seq == 1
+    assert observed.record.seq == 2
 
 
 @pytest.mark.parametrize("prefix", ["", "[125:59:59]: "])

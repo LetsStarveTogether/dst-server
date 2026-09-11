@@ -47,11 +47,11 @@ def generate_components(input_dir: Path, max_workers: int | None = None) -> str:
                 executor.map(component_definition, files, repeat(input_dir.name))
             )
 
-    definitions = sorted(results)
-    return "\n".join(content for _, content in definitions)
+    definitions = "\n".join(content for _, content in sorted(results))
+    return f"---@meta\n\n{definitions}" if definitions else ""
 
 
 def generate_modutil(input_file: Path) -> str:
     content = input_file.read_text(encoding="utf-8")
-    definitions = parse_modutil(content, input_file.stem)
-    return "\n".join(definitions) + ("\n" if definitions else "")
+    definitions = "\n".join(parse_modutil(content, input_file.stem))
+    return f"---@meta\n\n{definitions}\n" if definitions else ""

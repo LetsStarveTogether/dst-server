@@ -20,8 +20,6 @@ import pytest
 from pydantic import JsonValue, SecretStr
 from ulid import ULID
 
-sys.path.insert(0, str(Path(__file__).parents[2]))
-
 from dst_server import commands as c
 from dst_server.activity import read_last_login
 from dst_server.archive import export_cluster
@@ -40,9 +38,7 @@ from dst_server.configuration.world import ForestOverrides
 from dst_server.deployment import ContainerUnit, QuadletApplication, RoomPortAllocation
 from dst_server.errors import (
     DisconnectedError,
-    ErrorCode,
     IndeterminateCommandError,
-    RemoteError,
 )
 from dst_server.events import player
 from dst_server.events import server as server_events
@@ -54,15 +50,15 @@ from dst_server.models.cluster import (
     ConfigurationSnapshot,
     GameEventRecord,
     LifecycleRecord,
-    LogRecord,
     ShardRuntimeStatus,
 )
 from dst_server.netdata import NetdataLogQuery, NetdataLogs
+from dst_server.presets.lst import NETDATA_ENVIRONMENT, fleet_room
+from dst_server.rooms import Room, RoomStore
 from dst_server.rpc import ClusterClient, Subscription, rpc_runtime
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.supervisor import MAX_ATTEMPTS
 from dst_server.telemetry import TelemetrySettings
-from scripts.generate_rooms import NETDATA_ENVIRONMENT, build
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 IMAGE = os.environ.get("DST_SERVER_IMAGE", "")
@@ -91,6 +87,9 @@ CLEANUP_TIMEOUT = 30
 WATCHDOG_TEST_TIMEOUT = 90
 SYSTEM_QUADLET_ROOT = Path("/run/containers/systemd")
 QUADLET_GENERATOR = Path("/usr/lib/systemd/system-generators/podman-system-generator")
+HAS_QUADLET_RUNTIME = (
+    Path("/run/systemd/system").is_dir() and QUADLET_GENERATOR.is_file()
+)
 SHARDS = ("cave", "forest")
 MASTER = "forest"
 
@@ -163,7 +162,6 @@ async def run_command(
     process = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
     )
     output = (await communicate(process, seconds)).decode(errors="replace")
     returncode = process.returncode
@@ -192,11 +190,10 @@ async def container_name() -> AsyncIterator[str]:
     await remove_container(name)
 
 
-def write_cluster(
-    root: Path, *, configured: bool = False, encode_user_path: bool = True
-) -> Path:
-    cluster = root / "cluster"
-    ClusterConfig(
+def single_shard_configuration(
+    *, configured: bool = False, encode_user_path: bool = True
+) -> ClusterConfig:
+    return ClusterConfig(
         settings=ClusterSettings(
             cluster_name=str(ULID()),
             offline_cluster=True,
@@ -219,6 +216,15 @@ def write_cluster(
                 ),
             )
         },
+    )
+
+
+def write_cluster(
+    root: Path, *, configured: bool = False, encode_user_path: bool = True
+) -> Path:
+    cluster = root / "cluster"
+    single_shard_configuration(
+        configured=configured, encode_user_path=encode_user_path
     ).save(cluster)
     return cluster
 
@@ -657,11 +663,65 @@ async def test_rollback_to_day_restores_both_shards_and_player_saves(
             ]
 
 
+async def check_console_contract(client: ClusterClient) -> None:
+    shard = client.shard(MASTER)
+    methods = {method.name: method for method in await shard.describe()}
+    assert methods["evaluate"].mutation
+    assert methods["evaluate"].scope == "shard"
+    evaluated = await shard.evaluate(
+        'local x = 2\nprint("cli-console", x)\nreturn x + 1, nil, false'
+    )
+    assert "cli-console" in evaluated.output
+    assert [(value.type, value.text) for value in evaluated.values] == [
+        ("number", "3"),
+        ("nil", "nil"),
+        ("boolean", "false"),
+    ]
+    assert evaluated.error is None
+    failed = await shard.evaluate(
+        '(function() rawset(_G, "DST_CLI_COUNT", '
+        '(rawget(_G, "DST_CLI_COUNT") or 0) + 1); '
+        'error("console-failure") end)()'
+    )
+    assert failed.error is not None
+    assert failed.error.kind == "runtime"
+    assert "console-failure" in failed.error.message
+    counted = await shard.call("evaluate", {"source": 'rawget(_G, "DST_CLI_COUNT")'})
+    assert isinstance(counted, dict)
+    assert counted["values"] == [{"type": "number", "text": "1"}]
+    invalid = await shard.evaluate("local =")
+    assert invalid.error is not None
+    assert invalid.error.kind == "compile"
+    for source in (
+        'for i = 1, 8192 do print("x") end; return 42',
+        'print(string.rep("x", 65536)); return 42',
+    ):
+        bounded = await shard.evaluate(source)
+        assert bounded.error is None
+        assert bounded.truncated
+        assert bounded.output.startswith("x")
+        assert len(bounded.output.encode()) <= 2048
+        assert [(value.type, value.text) for value in bounded.values] == [
+            ("number", "42")
+        ]
+        recovered = await shard.evaluate('print("after-limit"); return 1 + 2')
+        assert recovered.error is None
+        assert not recovered.truncated
+        assert recovered.output == "after-limit"
+        assert [(value.type, value.text) for value in recovered.values] == [
+            ("number", "3")
+        ]
+
+
 async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(
     tmp_path: Path,
     container_name: str,
 ) -> None:
-    cluster = write_cluster(tmp_path)
+    rooms = RoomStore(tmp_path)
+    rooms.save(Room(number=299, cluster=single_shard_configuration()))
+    cluster = rooms.path(299)
+    assert (cluster / "cluster.ini").is_file()
+    assert (cluster / MASTER / "server.ini").is_file()
     client: ClusterClient | None = None
     lifecycle: Subscription[LifecycleRecord] | None = None
     try:  # ruff: ignore[too-many-statements-in-try-clause]
@@ -678,15 +738,43 @@ async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(
             f"{cluster}:/cluster:idmap={VOLUME_IDMAP}",
             IMAGE,
             "dst-server",
+            "agent",
             "master",
         )
         async with rpc_runtime():
             client, status = await wait_for_client(
                 cluster / ".dst-server.sock",
-                lambda value: value.phase == "running",
+                _startup_phase,
             )
-            assert len(status.shards) == 1
-            assert status.shards[0].ready
+            assert [(shard.name, shard.ready) for shard in status.shards] == [
+                (MASTER, True)
+            ]
+            await check_console_contract(client)
+            assert not (cluster / "console").exists()
+            _, output = await run_command(
+                sys.executable,
+                "-m",
+                "dst_server",
+                "--cluster-root",
+                str(tmp_path),
+                "--json",
+                "console",
+                "1 + 2",
+                "--room",
+                "299",
+            )
+            assert json.loads(output) == [
+                {
+                    "room": 299,
+                    "ok": True,
+                    "result": {
+                        "output": "",
+                        "values": [{"type": "number", "text": "3"}],
+                        "error": None,
+                        "truncated": False,
+                    },
+                }
+            ]
             _, process_status = await run_command(
                 "podman", "exec", container_name, "cat", "/proc/1/status"
             )
@@ -977,10 +1065,10 @@ def available_room_allocation(cluster: ClusterConfig) -> RoomPortAllocation:
                     else socket.SOCK_STREAM
                 )
                 reservation = socket.socket(socket.AF_INET, kind)
+                reservations.append(reservation)
                 reservation.bind(
                     ("0.0.0.0", mapping.host)  # ruff: ignore[hardcoded-bind-all-interfaces]
                 )
-                reservations.append(reservation)
         except OSError:
             continue
         finally:
@@ -1014,6 +1102,15 @@ def _shard(status: ClusterStatus, name: str) -> ShardRuntimeStatus:
     return next(shard for shard in status.shards if shard.name == name)
 
 
+def _startup_phase(
+    status: ClusterStatus, expected: Literal["running", "waitingAgents"] = "running"
+) -> bool:
+    assert status.phase != "failed", (
+        f"cluster startup failed: {status.error}\n{status.model_dump_json(indent=2)}"
+    )
+    return status.phase == expected
+
+
 async def wait_for_status(
     client: ClusterClient,
     predicate: Callable[[ClusterStatus], bool],
@@ -1033,16 +1130,19 @@ async def wait_for_client(
     async with asyncio.timeout(STARTUP_TIMEOUT):
         while True:
             client: ClusterClient | None = None
+            accepted = False
             try:
                 client = await ClusterClient.connect(socket_path)
                 status = await client.status()
             except OSError, DisconnectedError:
-                if client is not None:
-                    client.close()
+                pass
             else:
                 if predicate(status):
+                    accepted = True
                     return client, status
-                client.close()
+            finally:
+                if client is not None and not accepted:
+                    client.close()
             await asyncio.sleep(0.5)
 
 
@@ -1052,7 +1152,9 @@ async def next_matching[RecordT](
 ) -> RecordT:
     async with asyncio.timeout(OPERATION_TIMEOUT):
         while True:
-            for record in await subscription.next():
+            records = await subscription.next()
+            assert records, "subscription closed before the expected record"
+            for record in records:
                 if predicate(record):
                     return record
 
@@ -1082,6 +1184,27 @@ async def wait_for_game_shards(client: ClusterClient, count: int) -> None:
             if len(shards) == count and all(shard.ready for shard in shards):
                 return
             await asyncio.sleep(0.5)
+
+
+async def emit_player_event(
+    client: ClusterClient, events: Subscription[GameEventRecord], shard: str
+) -> str:
+    userid = str(ULID())
+    await client.shard(shard).execute_json(
+        "local value=SpawnPrefab('wilson');"
+        f"value.userid={lua_string(userid)};"
+        "TheWorld:PushEvent('ms_playerjoined',value);"
+        "value:Remove();return true"
+    )
+    event = await next_matching(
+        events,
+        lambda record: (
+            isinstance(record.event, player.ShardEnteredEvent)
+            and record.event.data.player.userid == userid
+        ),
+    )
+    assert event.shard == shard
+    return userid
 
 
 async def service_properties(service: str, *properties: str) -> dict[str, str]:
@@ -1120,7 +1243,6 @@ async def verify_watchdog_notifications(service: str) -> None:
 @dataclass(slots=True)
 class QuadletSystem:
     root: Path
-    cluster: ClusterConfig
     cluster_dir: Path
     quadlet_dir: Path
     application: QuadletApplication
@@ -1129,12 +1251,11 @@ class QuadletSystem:
     @classmethod
     def create(cls, root: Path) -> QuadletSystem:
         prefix = f"dst-sdk-test-{str(ULID()).lower()}"
-        cluster_dir = root / "cluster"
-        cluster = build(
+        cluster = fleet_room(
             0,
             token=SecretStr(""),
             cluster_key=SecretStr("quadlet-system-test-key"),
-        )
+        ).cluster
         cluster = cluster.replace(
             settings=cluster.settings.replace(
                 offline_cluster=True,
@@ -1143,7 +1264,11 @@ class QuadletSystem:
                 pause_when_empty=False,
             )
         )
-        cluster.save(cluster_dir)
+        allocation = available_room_allocation(cluster)
+        rooms = RoomStore(root)
+        cluster_dir = rooms.path(allocation.number)
+        rooms.save(Room(number=allocation.number, cluster=cluster))
+        assert (cluster_dir / "cluster.ini").is_file()
         environment = NETDATA_ENVIRONMENT | {"DST_SERVER_TELEMETRY_PROFILE": "history"}
         if os.environ.get("DST_SERVER_NETDATA_TEST") != "1":
             environment["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = "http://127.0.0.1:9"
@@ -1152,7 +1277,7 @@ class QuadletSystem:
             cluster_dir,
             name=prefix,
             image=IMAGE,
-            allocation=available_room_allocation(cluster),
+            allocation=allocation,
             telemetry_environment=environment,
             volume_idmap=VOLUME_IDMAP,
         )
@@ -1169,7 +1294,7 @@ class QuadletSystem:
             saved.replace(watchdog_sec=WATCHDOG_TEST_TIMEOUT, pull="never").save(
                 quadlet_dir
             )
-        return cls(root, cluster, cluster_dir, quadlet_dir, application)
+        return cls(root, cluster_dir, quadlet_dir, application)
 
     @property
     def prefix(self) -> str:
@@ -1202,14 +1327,36 @@ class QuadletSystem:
     def socket_path(self) -> Path:
         return self.cluster_dir / ".dst-server.sock"
 
-    async def install(self, *sources: str) -> None:
+    async def install(self) -> None:
         await asyncio.to_thread(SYSTEM_QUADLET_ROOT.mkdir, parents=True, exist_ok=True)
-        for source in sources:
+        for source in (
+            f"{self.prefix}.pod",
+            f"{self.application.master.name}.container",
+            *(f"{unit.name}.container" for unit in self.application.secondaries),
+        ):
             target = SYSTEM_QUADLET_ROOT / source
             if target not in self.installed:
                 self.installed.append(target)
             await asyncio.to_thread(shutil.copy2, self.quadlet_dir / source, target)
         await run_command("systemctl", "daemon-reload")
+
+    @asynccontextmanager
+    async def running(self) -> AsyncIterator[ClusterClient]:
+        try:  # ruff: ignore[too-many-statements-in-try-clause]
+            await run_command(
+                "systemctl", "start", self.master_service, seconds=STARTUP_TIMEOUT
+            )
+            async with rpc_runtime():
+                client, status = await wait_for_client(self.socket_path, _startup_phase)
+                with closing(client):
+                    assert not status.missing_shards
+                    assert {shard.name for shard in status.shards} == set(SHARDS)
+                    assert all(shard.ready for shard in status.shards)
+                    await wait_for_game_shards(client, len(SHARDS))
+                    yield client
+        except BaseException as error:
+            error.add_note(await self.diagnostics())
+            raise
 
     async def container_id(self, shard: str) -> str:
         _, value = await run_command(
@@ -1229,23 +1376,6 @@ class QuadletSystem:
             self.pod_name,
         )
         return value.strip()
-
-    async def wait_for_games(self) -> None:
-        async with asyncio.timeout(STARTUP_TIMEOUT):
-            while True:
-                found = []
-                for shard in SHARDS:
-                    code, processes = await run_command(
-                        "podman",
-                        "top",
-                        self.container_name(shard),
-                        "args",
-                        check=False,
-                    )
-                    found.append(code == 0 and GAME_EXECUTABLE in processes)
-                if all(found):
-                    return
-                await asyncio.sleep(0.5)
 
     async def diagnostics(self) -> str:
         _, units = await run_command(
@@ -1320,72 +1450,38 @@ class QuadletSystem:
 
 @pytest.fixture
 async def quadlet_system(tmp_path: Path) -> AsyncIterator[QuadletSystem]:
+    if not HAS_QUADLET_RUNTIME:
+        pytest.skip("systemd Quadlet runtime is unavailable")
     system = QuadletSystem.create(tmp_path)
     try:
+        await system.install()
         yield system
     finally:
         await system.cleanup()
 
 
-@pytest.mark.skipif(
-    os.geteuid() != 0
-    or not Path("/run/systemd/system").is_dir()
-    or not QUADLET_GENERATOR.is_file(),
-    reason="systemd Quadlet runtime is unavailable",
-)
-async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-structure, too-many-branches, too-many-locals, too-many-statements]
+async def test_quadlet_waits_for_all_agents_and_keeps_watchdog_alive(
     quadlet_system: QuadletSystem,
 ) -> None:
     system = quadlet_system
-    pod_source = f"{system.prefix}.pod"
-    master_source = f"{system.application.master.name}.container"
-    secondary_sources = tuple(
-        f"{unit.name}.container" for unit in system.application.secondaries
+    await run_command("systemctl", "mask", "--runtime", *system.secondary_services)
+    await run_command(
+        "systemctl", "start", system.master_service, seconds=STARTUP_TIMEOUT
     )
-    client: ClusterClient | None = None
-    logs: Subscription[LogRecord] | None = None
-    events: Subscription[GameEventRecord] | None = None
-    lifecycle: Subscription[LifecycleRecord] | None = None
-    process_fds: list[int] = []
-    try:  # ruff: ignore[too-many-statements-in-try-clause]
-        await system.install(pod_source, master_source, *secondary_sources)
-        await run_command(
-            "systemctl",
-            "mask",
-            "--runtime",
-            *system.secondary_services,
+    async with rpc_runtime():
+        observer, waiting = await wait_for_client(
+            system.socket_path, lambda status: _startup_phase(status, "waitingAgents")
         )
-        await run_command(
-            "systemctl",
-            "start",
-            system.master_service,
-            seconds=STARTUP_TIMEOUT,
-        )
-
-        async with rpc_runtime():
-            observer, waiting = await wait_for_client(
-                system.socket_path,
-                lambda status: status.phase == "waitingAgents",
+        with closing(observer):
+            assert waiting.missing_shards == ("cave",)
+            _, processes = await run_command(
+                "podman", "top", system.container_name(MASTER), "args"
             )
-            try:
-                assert waiting.missing_shards == ("cave",)
-                _, processes = await run_command(
-                    "podman",
-                    "top",
-                    system.container_name(MASTER),
-                    "args",
-                )
-                assert GAME_EXECUTABLE not in processes
-                await verify_watchdog_notifications(system.master_service)
-                assert (await observer.status()).phase == "waitingAgents"
-            finally:
-                observer.close()
-
+            assert GAME_EXECUTABLE not in processes
+            await verify_watchdog_notifications(system.master_service)
+            assert (await observer.status()).phase == "waitingAgents"
             await run_command(
-                "systemctl",
-                "unmask",
-                "--runtime",
-                *system.secondary_services,
+                "systemctl", "unmask", "--runtime", *system.secondary_services
             )
             await run_command("systemctl", "daemon-reload")
             await run_command(
@@ -1394,220 +1490,234 @@ async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-str
                 *system.secondary_services,
                 seconds=STARTUP_TIMEOUT,
             )
-            await system.wait_for_games()
-
-            client, status = await wait_for_client(
-                system.socket_path,
-                lambda value: value.phase == "running",
-            )
+            status = await wait_for_status(observer, _startup_phase)
+            assert not status.missing_shards
             assert all(shard.ready for shard in status.shards)
-            assert all(shard.telemetry_profile == "history" for shard in status.shards)
-            assert {shard.external_port for shard in status.shards} == {
-                mapping.host for mapping in system.application.pod.publish_ports[::2]
-            }
-            for shard in status.shards:
-                _, processes = await run_command(
-                    "podman",
-                    "top",
-                    system.container_name(shard.name),
-                    "args",
-                )
-                game = [
-                    line for line in processes.splitlines() if GAME_EXECUTABLE in line
-                ]
-                assert len(game) == 1
-                assert f"-external_port {shard.external_port}" in game[0]
-            _, pod = await run_command("podman", "pod", "inspect", system.pod_name)
-            bindings = json.loads(pod)[0]["InfraConfig"]["PortBindings"]
-            assert {
-                (
-                    int(value["HostPort"]),
-                    int(container.rsplit("/", 1)[0]),
-                    container.rsplit("/", 1)[1],
-                )
-                for container, values in bindings.items()
-                for value in values
-            } == {
-                (mapping.host, mapping.container, mapping.protocol)
-                for mapping in system.application.pod.publish_ports
-            }
+            await wait_for_game_shards(observer, len(SHARDS))
 
-            configuration = await client.read_configuration()
-            assert isinstance(configuration, ConfigurationSnapshot)
-            with pytest.raises(RemoteError) as rejected:
-                await client.save_configuration(
-                    configuration.revision,
-                    configuration.configuration,
-                )
-            assert rejected.value.error.code is ErrorCode.INVALID_STATE
-            assert (await client.shard(MASTER).room()).is_dedicated is True
-            assert await client.shard(MASTER).execute_json(
-                "return {mode=TheNet:GetDefaultGameMode(),"
-                "players=TheNet:GetDefaultMaxPlayers()}"
-            ) == {"mode": "survival", "players": 9}
-            saved = await client.save()
-            assert {name for name, _ in saved.shards} == set(SHARDS)
-            await client.stop()
-            await wait_for_status(client, lambda value: value.phase == "stopped")
-            configuration = await client.read_configuration()
-            assert isinstance(configuration, ConfigurationSnapshot)
-            desired = configuration.configuration.replace(
-                settings=configuration.configuration.settings.replace(max_players=8)
-            )
-            updated = await client.save_configuration(
-                configuration.revision,
-                desired,
-            )
-            assert updated.revision != configuration.revision
-            reread = await client.read_configuration()
-            assert isinstance(reread, ConfigurationSnapshot)
-            assert reread.revision == updated.revision
-            assert reread.configuration.settings.max_players == 8
-            await client.start()
-            await wait_for_status(client, lambda value: value.phase == "running")
-            assert (
-                await client.shard(MASTER).execute_json(
-                    "return TheNet:GetDefaultMaxPlayers()"
-                )
-                == 8
-            )
 
-            logs = await client.subscribe_logs()
-            events = await client.subscribe_events()
-            marker = f"DST_RPC_{ULID()}"
+async def test_quadlet_publishes_each_shard_port(
+    quadlet_system: QuadletSystem,
+) -> None:
+    system = quadlet_system
+    async with system.running() as client:
+        status = await client.status()
+        assert all(shard.telemetry_profile == "history" for shard in status.shards)
+        assert {shard.external_port for shard in status.shards} == {
+            mapping.host for mapping in system.application.pod.publish_ports[::2]
+        }
+        for shard in status.shards:
+            _, processes = await run_command(
+                "podman", "top", system.container_name(shard.name), "args"
+            )
+            games = [line for line in processes.splitlines() if GAME_EXECUTABLE in line]
+            assert len(games) == 1
+            assert f"-external_port {shard.external_port}" in games[0]
+        _, pod = await run_command("podman", "pod", "inspect", system.pod_name)
+        bindings = json.loads(pod)[0]["InfraConfig"]["PortBindings"]
+        assert {
+            (
+                int(value["HostPort"]),
+                int(container.rsplit("/", 1)[0]),
+                container.rsplit("/", 1)[1],
+            )
+            for container, values in bindings.items()
+            for value in values
+        } == {
+            (mapping.host, mapping.container, mapping.protocol)
+            for mapping in system.application.pod.publish_ports
+        }
+
+
+async def test_quadlet_native_configuration_preserves_game_writes_and_stopped_edits(
+    quadlet_system: QuadletSystem,
+) -> None:
+    system = quadlet_system
+    rooms = RoomStore(system.root)
+    number = int(system.cluster_dir.name)
+    assert rooms.load(number).cluster.settings.max_players == 9
+    async with system.running() as client:
+        configuration = await client.read_configuration()
+        assert isinstance(configuration, ConfigurationSnapshot)
+        assert configuration.configuration.settings.max_players == 9
+        master = client.shard(MASTER)
+        assert (await master.room()).is_dedicated is True
+        assert await master.execute_json(
+            "return {mode=TheNet:GetDefaultGameMode(),"
+            "players=TheNet:GetDefaultMaxPlayers()}"
+        ) == {"mode": "survival", "players": 9}
+        sessions = {
+            shard: (await client.shard(shard).runtime()).session_id for shard in SHARDS
+        }
+        await master.execute_json(
+            "TheWorld.topology.overrides.day='onlynight';return true"
+        )
+        saved = await client.save()
+        assert {name for name, _ in saved.shards} == set(SHARDS)
+        world = rooms.load(number).cluster.shards[MASTER].world
+        assert world is not None
+        assert isinstance(world.overrides, ForestOverrides)
+        assert world.overrides.day == "onlynight"
+
+    await run_command("systemctl", "stop", *system.services)
+    rooms.save(rooms.load(number).edit("/cluster/settings/max_players", 8))
+    assert ClusterConfig.load(system.cluster_dir).settings.max_players == 8
+    async with system.running() as client:
+        assert (
             await client.shard(MASTER).execute_json(
-                "TheWorld:DoTaskInTime(0,function()"
-                f"print({lua_string(marker)}) end);return true"
+                "return TheNet:GetDefaultMaxPlayers()"
             )
-            await next_matching(logs, lambda record: marker in record.line)
-            async with asyncio.timeout(OPERATION_TIMEOUT):
-                while True:
-                    _, journal = await run_command(
-                        "journalctl",
-                        "--unit",
-                        system.master_service,
-                        "--grep",
-                        marker,
-                        "--no-pager",
-                        "--output=cat",
-                        check=False,
-                    )
-                    if marker in journal:
-                        break
-                    await asyncio.sleep(0.5)
-            userid = str(ULID())
-            await client.shard(MASTER).execute_json(
-                "local value=SpawnPrefab('wilson');"
-                f"value.userid={lua_string(userid)};"
-                "TheWorld:PushEvent('ms_playerjoined',value);"
-                "value:Remove();return true"
-            )
-            event = await next_matching(
-                events,
-                lambda record: (
-                    isinstance(record.event, player.ShardEnteredEvent)
-                    and record.event.data.player.userid == userid
-                ),
-            )
-            assert event.shard == MASTER
-            if os.environ.get("DST_SERVER_NETDATA_TEST") == "1":
-                fields = await netdata_player_fields(userid)
-                assert fields["body.player.userid"] == userid
-                assert fields["attributes.dst.cluster.name"] == system.prefix
-                assert fields["attributes.dst.shard.name"] == MASTER
-            else:
-                assert (await client.status()).phase == "running"
+            == 8
+        )
+        assert {
+            shard: (await client.shard(shard).runtime()).session_id for shard in SHARDS
+        } == sessions
+        reread = await client.read_configuration()
+        assert isinstance(reread, ConfigurationSnapshot)
+        assert reread.configuration.settings.max_players == 8
 
-            before = status = await client.status()
-            master_before = _shard(before, MASTER)
-            cave_before = _shard(before, "cave")
-            container_ids = {
-                shard: await system.container_id(shard) for shard in SHARDS
-            }
-            pod_id = await system.pod_id()
-            assert master_before.pid is not None
+
+async def test_quadlet_delivers_logs_to_rpc_and_journal_and_player_events(
+    quadlet_system: QuadletSystem,
+) -> None:
+    system = quadlet_system
+    async with (
+        system.running() as client,
+        await client.subscribe_logs() as logs,
+        await client.subscribe_events() as events,
+    ):
+        marker = f"DST_RPC_{ULID()}"
+        await client.shard(MASTER).execute_json(
+            "TheWorld:DoTaskInTime(0,function()"
+            f"print({lua_string(marker)}) end);return true"
+        )
+        await next_matching(logs, lambda record: marker in record.line)
+        async with asyncio.timeout(OPERATION_TIMEOUT):
+            while True:
+                _, journal = await run_command(
+                    "journalctl",
+                    "--unit",
+                    system.master_service,
+                    "--grep",
+                    marker,
+                    "--no-pager",
+                    "--output=cat",
+                    check=False,
+                )
+                if marker in journal:
+                    break
+                await asyncio.sleep(0.5)
+        userid = await emit_player_event(client, events, MASTER)
+        if os.environ.get("DST_SERVER_NETDATA_TEST") == "1":
+            fields = await netdata_player_fields(userid)
+            assert fields["body.player.userid"] == userid
+            assert fields["attributes.dst.cluster.name"] == system.prefix
+            assert fields["attributes.dst.shard.name"] == MASTER
+        assert (await client.status()).phase == "running"
+
+
+async def test_quadlet_game_crash_retries_without_replacing_containers(
+    quadlet_system: QuadletSystem,
+) -> None:
+    system = quadlet_system
+    async with system.running() as client, await client.subscribe_logs() as logs:
+        before = await client.status()
+        master_before = _shard(before, MASTER)
+        cave_before = _shard(before, "cave")
+        container_ids = {shard: await system.container_id(shard) for shard in SHARDS}
+        assert master_before.pid is not None
+        await run_command(
+            "podman",
+            "exec",
+            system.container_name(MASTER),
+            "kill",
+            "-KILL",
+            str(master_before.pid),
+        )
+        recovered = await wait_for_status(
+            client,
+            lambda value: (
+                value.phase == "running"
+                and _shard(value, MASTER).game_attempt != master_before.game_attempt
+            ),
+        )
+        await wait_for_game_shards(client, len(SHARDS))
+        assert _shard(recovered, "cave").game_attempt == cave_before.game_attempt
+        assert {
+            shard: await system.container_id(shard) for shard in SHARDS
+        } == container_ids
+        marker = f"DST_RETRY_{ULID()}"
+        await client.shard(MASTER).execute_json(
+            "TheWorld:DoTaskInTime(0,function()"
+            f"print({lua_string(marker)}) end);return true"
+        )
+        await next_matching(logs, lambda record: marker in record.line)
+
+
+async def test_quadlet_retry_exhaustion_stops_all_games_and_allows_manual_start(
+    quadlet_system: QuadletSystem,
+) -> None:
+    system = quadlet_system
+    async with system.running() as client:
+        current = await client.status()
+        for _ in range(MAX_ATTEMPTS - _shard(current, MASTER).retry_attempt + 1):
+            attempt = _shard(current, MASTER)
+            assert attempt.pid is not None
             await run_command(
                 "podman",
                 "exec",
                 system.container_name(MASTER),
                 "kill",
                 "-KILL",
-                str(master_before.pid),
+                str(attempt.pid),
             )
-            recovered = await wait_for_status(
-                client,
-                lambda value: (
-                    value.phase == "running"
-                    and _shard(value, MASTER).game_attempt != master_before.game_attempt
-                ),
-            )
-            await wait_for_game_shards(client, len(SHARDS))
-            assert _shard(recovered, "cave").game_attempt == cave_before.game_attempt
-            assert {
-                shard: await system.container_id(shard) for shard in SHARDS
-            } == container_ids
-            retry_marker = f"DST_RETRY_{ULID()}"
-            await client.shard(MASTER).execute_json(
-                "TheWorld:DoTaskInTime(0,function()"
-                f"print({lua_string(retry_marker)}) end);return true"
-            )
-            await next_matching(logs, lambda record: retry_marker in record.line)
-
-            current = recovered
-            for _ in range(MAX_ATTEMPTS - _shard(current, MASTER).retry_attempt + 1):
-                attempt = _shard(current, MASTER)
-                assert attempt.pid is not None
-                await run_command(
-                    "podman",
-                    "exec",
-                    system.container_name(MASTER),
-                    "kill",
-                    "-KILL",
-                    str(attempt.pid),
-                )
-                current = await wait_for_status(
-                    client,
-                    lambda value, previous=attempt.game_attempt: (
-                        value.phase == "failed"
-                        or (
-                            value.phase == "running"
-                            and _shard(value, MASTER).game_attempt != previous
-                        )
-                    ),
-                )
             current = await wait_for_status(
                 client,
-                lambda value: (
+                lambda value, previous=attempt.game_attempt: (
                     value.phase == "failed"
-                    and value.error == "shard retry budget exhausted"
-                    and all(shard.pid is None for shard in value.shards)
+                    or (
+                        value.phase == "running"
+                        and _shard(value, MASTER).game_attempt != previous
+                    )
                 ),
             )
-            for shard in SHARDS:
-                _, processes = await run_command(
-                    "podman", "top", system.container_name(shard), "args"
-                )
-                assert GAME_EXECUTABLE not in processes
-            await client.start()
-            current = await wait_for_status(
-                client,
-                lambda value: value.phase == "running",
-            )
-            assert all(shard.ready for shard in current.shards)
-
-            container_ids = {
-                shard: await system.container_id(shard) for shard in SHARDS
-            }
-            incarnations = {
-                shard.name: shard.agent_incarnation for shard in current.shards
-            }
-            attempts = {shard.name: shard.game_attempt for shard in current.shards}
-            cave_service = f"{system.container_name('cave')}.service"
-            properties = await service_properties(cave_service, "NRestarts")
-            restarts = int(properties["NRestarts"])
+        await wait_for_status(
+            client,
+            lambda value: (
+                value.phase == "failed"
+                and value.error == "shard retry budget exhausted"
+                and all(shard.pid is None for shard in value.shards)
+            ),
+        )
+        for shard in SHARDS:
             _, processes = await run_command(
-                "podman", "top", system.container_name("cave"), "hpid"
+                "podman", "top", system.container_name(shard), "args"
             )
+            assert GAME_EXECUTABLE not in processes
+        await client.start()
+        current = await wait_for_status(client, lambda value: value.phase == "running")
+        assert all(shard.ready for shard in current.shards)
+        await wait_for_game_shards(client, len(SHARDS))
+
+
+async def test_quadlet_watchdog_reaps_frozen_agent_and_reconnects_event_stream(
+    quadlet_system: QuadletSystem,
+) -> None:
+    system = quadlet_system
+    process_fds: list[int] = []
+    async with system.running() as client, await client.subscribe_events() as events:
+        before = await client.status()
+        container_ids = {shard: await system.container_id(shard) for shard in SHARDS}
+        pod_id = await system.pod_id()
+        incarnations = {shard.name: shard.agent_incarnation for shard in before.shards}
+        attempts = {shard.name: shard.game_attempt for shard in before.shards}
+        cave_service = f"{system.container_name('cave')}.service"
+        properties = await service_properties(cave_service, "NRestarts")
+        restarts = int(properties["NRestarts"])
+        _, processes = await run_command(
+            "podman", "top", system.container_name("cave"), "hpid"
+        )
+        try:
             process_fds.extend(
                 os.pidfd_open(int(process.strip()))
                 for process in processes.splitlines()[1:]
@@ -1615,11 +1725,7 @@ async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-str
             assert len(process_fds) >= 2
             frozen_since = f"@{int(datetime.now(UTC).timestamp())}"
             await run_command(
-                "podman",
-                "kill",
-                "--signal",
-                "STOP",
-                system.container_name("cave"),
+                "podman", "kill", "--signal", "STOP", system.container_name("cave")
             )
             current = await wait_for_status(
                 client,
@@ -1628,137 +1734,97 @@ async def test_quadlet_cluster_lifecycle_and_faults(  # ruff: ignore[complex-str
                     and _shard(value, "cave").agent_incarnation != incarnations["cave"]
                 ),
             )
-            assert await system.container_id("cave") != container_ids["cave"]
-            assert await system.container_id(MASTER) == container_ids[MASTER]
-            assert await system.pod_id() == pod_id
-            properties = await service_properties(cave_service, "NRestarts")
-            assert int(properties["NRestarts"]) == restarts + 1
             assert all(select.select([fd], [], [], 0)[0] for fd in process_fds)
+        finally:
             for fd in process_fds:
                 os.close(fd)
-            process_fds.clear()
-            _, journal = await run_command(
-                "journalctl",
-                "--unit",
-                cave_service,
-                "--since",
-                frozen_since,
-                "--output=cat",
-                "--no-pager",
-            )
-            assert "Watchdog timeout" in journal
-            assert "left-over" not in journal
-            assert "remains running" not in journal
-            assert "stop-post' timed out" not in journal
-            assert _shard(current, MASTER).agent_incarnation == incarnations[MASTER]
-            assert all(
-                _shard(current, shard).game_attempt != attempts[shard]
-                for shard in SHARDS
-            )
-            cave_userid = str(ULID())
-            await client.shard("cave").execute_json(
-                "local value=SpawnPrefab('wilson');"
-                f"value.userid={lua_string(cave_userid)};"
-                "TheWorld:PushEvent('ms_playerjoined',value);"
-                "value:Remove();return true"
-            )
-            replacement_event = await next_matching(
-                events,
-                lambda record: (
-                    isinstance(record.event, player.ShardEnteredEvent)
-                    and record.event.data.player.userid == cave_userid
-                ),
-            )
-            assert replacement_event.shard == "cave"
+        assert await system.container_id("cave") != container_ids["cave"]
+        assert await system.container_id(MASTER) == container_ids[MASTER]
+        assert await system.pod_id() == pod_id
+        properties = await service_properties(cave_service, "NRestarts")
+        assert int(properties["NRestarts"]) == restarts + 1
+        _, journal = await run_command(
+            "journalctl",
+            "--unit",
+            cave_service,
+            "--since",
+            frozen_since,
+            "--output=cat",
+            "--no-pager",
+        )
+        assert "Watchdog timeout" in journal
+        assert "left-over" not in journal
+        assert "remains running" not in journal
+        assert "stop-post' timed out" not in journal
+        assert _shard(current, MASTER).agent_incarnation == incarnations[MASTER]
+        assert all(
+            _shard(current, shard).game_attempt != attempts[shard] for shard in SHARDS
+        )
+        await wait_for_game_shards(client, len(SHARDS))
+        await emit_player_event(client, events, "cave")
 
-            container_ids = {
-                shard: await system.container_id(shard) for shard in SHARDS
-            }
-            epoch = current.epoch
-            await run_command(
-                "podman",
-                "kill",
-                "--signal",
-                "KILL",
-                system.container_name(MASTER),
-            )
-            async with asyncio.timeout(STARTUP_TIMEOUT):
-                while True:
-                    try:
-                        await client.status()
-                    except DisconnectedError:
-                        break
-                    await asyncio.sleep(0.5)
-            client.close()
-            client, current = await wait_for_client(
-                system.socket_path,
-                lambda value: value.phase == "running",
-            )
-            await wait_for_game_shards(client, len(SHARDS))
-            assert current.epoch != epoch
+
+async def test_quadlet_master_container_crash_recreates_shards_in_existing_pod(
+    quadlet_system: QuadletSystem,
+) -> None:
+    system = quadlet_system
+    async with system.running() as client:
+        before = await client.status()
+        container_ids = {shard: await system.container_id(shard) for shard in SHARDS}
+        pod_id = await system.pod_id()
+        await run_command(
+            "podman", "kill", "--signal", "KILL", system.container_name(MASTER)
+        )
+        async with asyncio.timeout(STARTUP_TIMEOUT):
+            while True:
+                try:
+                    await client.status()
+                except DisconnectedError:
+                    break
+                await asyncio.sleep(0.5)
+        replacement, current = await wait_for_client(
+            system.socket_path, lambda value: value.phase == "running"
+        )
+        with closing(replacement):
+            await wait_for_game_shards(replacement, len(SHARDS))
+            assert current.epoch != before.epoch
             assert await system.pod_id() == pod_id
-            recovered_ids = await asyncio.gather(
-                *(system.container_id(shard) for shard in SHARDS)
-            )
-            assert all(
-                recovered != container_ids[shard]
-                for shard, recovered in zip(SHARDS, recovered_ids, strict=True)
-            )
-
-            lifecycle = await client.subscribe_lifecycle()
-            stopping = asyncio.create_task(
-                wait_for_stopping(lifecycle, frozenset(SHARDS))
-            )
-            try:
-                await run_command(
-                    "systemctl",
-                    "stop",
-                    system.pod_service,
-                    seconds=OPERATION_TIMEOUT,
-                )
-                assert await stopping == set(SHARDS)
-            finally:
-                stopping.cancel()
-                await asyncio.gather(stopping, return_exceptions=True)
-            with suppress(Exception):
-                await lifecycle.close()
-            lifecycle = None
-            client.close()
-            client = None
-            for service in (system.master_service, *system.secondary_services):
-                assert await service_properties(
-                    service, "Result", "ExecMainStatus"
-                ) == {
-                    "Result": "success",
-                    "ExecMainStatus": "0",
-                }
             for shard in SHARDS:
-                code, _ = await run_command(
-                    "podman",
-                    "container",
-                    "exists",
-                    system.container_name(shard),
-                    check=False,
-                )
-                assert code == 1
+                assert await system.container_id(shard) != container_ids[shard]
+
+
+async def test_quadlet_pod_stop_delivers_stopping_and_reaps_all_containers(
+    quadlet_system: QuadletSystem,
+) -> None:
+    system = quadlet_system
+    async with system.running() as client:
+        lifecycle = await client.subscribe_lifecycle()
+        stopping = asyncio.create_task(wait_for_stopping(lifecycle, frozenset(SHARDS)))
+        try:
+            await run_command(
+                "systemctl", "stop", system.pod_service, seconds=OPERATION_TIMEOUT
+            )
+            assert await stopping == set(SHARDS)
+        finally:
+            stopping.cancel()
+            await asyncio.gather(stopping, return_exceptions=True)
+            with suppress(DisconnectedError):
+                await lifecycle.close()
+        for service in (system.master_service, *system.secondary_services):
+            assert await service_properties(service, "Result", "ExecMainStatus") == {
+                "Result": "success",
+                "ExecMainStatus": "0",
+            }
+        for shard in SHARDS:
             code, _ = await run_command(
-                "podman", "pod", "exists", system.pod_name, check=False
+                "podman",
+                "container",
+                "exists",
+                system.container_name(shard),
+                check=False,
             )
             assert code == 1
-    except BaseException as error:
-        error.add_note(await system.diagnostics())
-        raise
-    finally:
-        for fd in process_fds:
-            os.close(fd)
-        if logs is not None:
-            with suppress(Exception):
-                await logs.close()
-        if events is not None:
-            with suppress(Exception):
-                await events.close()
-        if lifecycle is not None:
-            with suppress(Exception):
-                await lifecycle.close()
-        if client is not None:
-            client.close()
+        code, _ = await run_command(
+            "podman", "pod", "exists", system.pod_name, check=False
+        )
+        assert code == 1

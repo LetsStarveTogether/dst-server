@@ -1,11 +1,10 @@
 import os
-import stat
 from pathlib import Path
 
 import pytest
 
 from dst_server import mods
-from dst_server.cluster import console, service
+from dst_server.cluster import service
 from dst_server.configuration import files as layout
 from dst_server.configuration.overrides import WorkshopDownloads
 from dst_server.deployment import DEFAULT_IMAGE, QuadletApplication
@@ -47,8 +46,15 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
     master = application.master
     secondary = application.secondaries[0]
     assert master.name == "dst-000-forest"
-    assert master.exec[1] == "master"
-    assert secondary.exec[1:] == ("serve", "--external-port", "30002", "--", "cave")
+    assert master.exec[1:3] == ("agent", "master")
+    assert secondary.exec[1:] == (
+        "agent",
+        "serve",
+        "--external-port",
+        "30002",
+        "--",
+        "cave",
+    )
     assert master.wants == (f"{secondary.name}.container",)
     assert secondary.after == secondary.binds_to == (f"{master.name}.container",)
     assert tuple(
@@ -59,7 +65,7 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
         (30002, 11000),
         (30003, 27017),
     )
-    assert master.exec[3] == "30000"
+    assert master.exec[4] == "30000"
     for unit in (master, secondary):
         assert unit.environment == {
             "DST_SERVER_CLUSTER_NAME": "dst-000",
@@ -70,6 +76,7 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
         }
         assert unit.image == DEFAULT_IMAGE
         assert unit.pull == "always"
+        assert unit.log_driver == "journald"
         assert unit.timezone == "local"
         assert unit.timeout_start_sec == 1800
         assert unit.notify is True
@@ -124,6 +131,10 @@ def test_cluster_and_mod_files_are_prepared(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    setup = cluster / "mods/dedicated_server_mods_setup.lua"
+    setup.parent.mkdir()
+    setup.write_text(WorkshopDownloads(items=frozenset({7, 42})).render())
+
     layout.prepare(cluster)
     mod_ids = mods.prepare_shared(cluster)
     mods.activate(install, cluster)
@@ -137,9 +148,7 @@ def test_cluster_and_mod_files_are_prepared(tmp_path: Path) -> None:
         cluster / "mods" / "dedicated_server_mods_setup.lua"
     ) == WorkshopDownloads(items=frozenset({7, 42}))
     assert {shard.name for shard in shards} == {"forest", "cave"}
-    assert (
-        next(shard for shard in shards if shard.master).console == cluster / "console"
-    )
+    assert next(shard for shard in shards if shard.master).name == "forest"
     assert all(
         (cluster / name).is_file()
         for name in ("adminlist.txt", "blocklist.txt", "whitelist.txt")
@@ -233,41 +242,6 @@ def test_discovery_rejects_native_invalid_boolean_and_shard_symlink(
         layout.discover(tmp_path)
 
 
-def test_workshop_parser_ignores_missing_files_and_sorts(tmp_path: Path) -> None:
-    first = tmp_path / "one.lua"
-    first.write_text(
-        "return {\n"
-        '    ["workshop-10"] = { enabled = true },\n'
-        '    ["workshop-2"] = { enabled = true },\n'
-        '    ["workshop-7"] = { enabled = false,\n'
-        '        configuration_options = { note = "workshop-99" } },\n'
-        "}\n",
-        encoding="utf-8",
-    )
-
-    assert mods.workshop_ids((first, tmp_path / "missing.lua")) == (2, 10)
-
-
-def test_console_ensure_replaces_regular_file(tmp_path: Path) -> None:
-    path = tmp_path / "console"
-    path.touch()
-
-    console.ensure(path)
-    console.ensure(path)
-
-    assert stat.S_ISFIFO(path.stat().st_mode)
-
-
-def test_console_ensure_refuses_directory(tmp_path: Path) -> None:
-    path = tmp_path / "console"
-    path.mkdir()
-
-    with pytest.raises(IsADirectoryError, match="console path is a directory"):
-        console.ensure(path)
-
-    assert path.is_dir()
-
-
 async def test_prepare_shared_skips_updater_without_mods(
     service_layout: tuple[Path, Path],
 ) -> None:
@@ -298,7 +272,7 @@ async def test_activate_shard_and_create_server_config(
 
     shards = await service.prepare_shared(install, cluster, update_mods=False)
     selected = next(value for value in shards if value.name == "cave")
-    service.activate_shard(install, cluster, selected)
+    service.activate_shard(install, cluster)
     config = service.create_server_config(
         install,
         cluster,
@@ -314,7 +288,7 @@ async def test_activate_shard_and_create_server_config(
         "30007",
     )
     assert not (cluster / "console").exists()
-    assert (cluster / "cave" / "console").is_fifo()
+    assert not (cluster / "cave" / "console").exists()
 
 
 async def test_prepare_shared_updates_collection_only_setup(
@@ -358,7 +332,7 @@ async def test_prepare_shared_validates_layout_before_replacing_mods(
     sentinel.touch()
     (cluster / "forest").mkdir()
 
-    with pytest.raises(FileNotFoundError, match=r"server\.ini"):
+    with pytest.raises(ValueError, match="no DST shard directories"):
         await service.prepare_shared(install, cluster, update_mods=False)
 
     assert sentinel.is_file()

@@ -7,10 +7,11 @@ from typing import Self, cast
 import httpx2
 from logbook import Logger
 from pydantic import SecretStr
+from selectolax.lexbor import LexborHTMLParser
 
 from .enums import Platform, Region
 from .lobby import Capabilities, DataResponse, Lobby, Room
-from .version import Builds, Version, VersionPage
+from .version import Builds, Version
 
 BUILD_URL = "https://s3.amazonaws.com/dstbuilds/builds.json"
 VERSION_URL = "https://kleiforums.com/game-updates/dst/"
@@ -86,19 +87,20 @@ class KleiClient:
         return latest
 
     async def get_versions(self) -> tuple[Version, ...]:
-        return (await self.get_version_page()).versions
-
-    async def get_version_page(self) -> VersionPage:
         response = await self._client.get(VERSION_URL)
         response.raise_for_status()
-        page = VersionPage.model_validate(response.text)
-        logger.info(
-            "Klei version page loaded: {page}/{page_count} ({count} rows)",
-            page=page.page,
-            page_count=page.page_count,
-            count=len(page.versions),
+        versions = tuple(
+            sorted(
+                (
+                    Version.model_validate(row)
+                    for row in LexborHTMLParser(response.text).css("li.cCmsRecord_row")
+                ),
+                key=lambda version: (version.date, version.number),
+                reverse=True,
+            )
         )
-        return page
+        logger.info("Klei versions loaded: {count} rows", count=len(versions))
+        return versions
 
     async def get_regions(self) -> tuple[str, ...]:
         response = await self._client.get(REGION_URL)

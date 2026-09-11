@@ -1,8 +1,12 @@
 import asyncio
 import json
 import math
+import os
+import signal
+import socket
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import tracemalloc
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -16,9 +20,9 @@ from tests.helpers import process_stopped
 FAKE_PLUGIN = r"""#!/usr/bin/env python3
 import json
 import os
+import socket
 import sys
 import time
-from pathlib import Path
 
 assert sys.argv[1] == "logs"
 arguments = sys.argv[2:]
@@ -38,7 +42,8 @@ if query == "invalid":
     print('{"timestamp_ns":', flush=True)
     raise SystemExit(0)
 if query.startswith("hang:"):
-    Path(query.removeprefix("hang:")).write_text(str(os.getpid()), encoding="utf-8")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as ready:
+        ready.sendto(str(os.getpid()).encode(), query.removeprefix("hang:"))
     time.sleep(60)
 
 print(json.dumps({
@@ -166,16 +171,49 @@ async def test_process_error_preserves_complete_output(tmp_path: Path) -> None:
     assert failure.value.stderr.endswith(b"query failed\n")
 
 
-async def test_query_timeout_kills_and_reaps_process(tmp_path: Path) -> None:
-    process_id = tmp_path / "pid"
-
-    with pytest.raises(TimeoutError):
-        await make_logs(tmp_path).query(
-            request(query=f"hang:{process_id}"),
-            completion_timeout=0.5,
+@pytest.mark.parametrize("finish", ["timeout", "cancel"])
+async def test_interrupted_query_kills_and_reaps_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish: str
+) -> None:
+    loop = asyncio.get_running_loop()
+    real_timeout = asyncio.timeout
+    deadline = real_timeout(None)
+    monkeypatch.setattr(
+        asyncio,
+        "timeout",
+        lambda delay: deadline if delay == 42 else real_timeout(delay),
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as ready:
+        address = str(tmp_path / "ready")
+        ready.bind(address)
+        ready.setblocking(False)
+        pending = asyncio.create_task(
+            make_logs(tmp_path).query(
+                request(query=f"hang:{address}"), completion_timeout=42
+            )
         )
-
-    assert process_stopped(int(process_id.read_text(encoding="utf-8")))
+        completed = asyncio.gather(pending, return_exceptions=True)
+        process_fd = None
+        try:
+            async with real_timeout(5):
+                process_id = int(await loop.sock_recv(ready, 32))
+            process_fd = os.pidfd_open(process_id)
+            if finish == "timeout":
+                deadline.reschedule(loop.time())
+            else:
+                pending.cancel()
+            (outcome,) = await asyncio.wait_for(asyncio.shield(completed), 5)
+            error = TimeoutError if finish == "timeout" else asyncio.CancelledError
+            assert isinstance(outcome, error)
+            assert deadline.expired() == (finish == "timeout")
+            assert await asyncio.to_thread(process_stopped, process_id)
+        finally:
+            pending.cancel()
+            if process_fd is not None:
+                with suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(process_fd, signal.SIGKILL)
+                os.close(process_fd)
+            await asyncio.wait_for(asyncio.shield(completed), 5)
 
 
 async def test_query_timeout_includes_waiting_for_a_query_slot(tmp_path: Path) -> None:
@@ -246,24 +284,6 @@ async def test_query_rejects_invalid_deadlines_before_creating_process(
 def test_query_rejects_invalid_concurrency(value: object) -> None:
     with pytest.raises(ValueError, match="positive integer"):
         NetdataLogs(max_concurrency=cast("int", value))
-
-
-async def test_cancellation_kills_and_reaps_child(tmp_path: Path) -> None:
-    process_id = tmp_path / "pid"
-    pending = asyncio.create_task(
-        make_logs(tmp_path).query(request(query=f"hang:{process_id}"))
-    )
-    try:
-        async with asyncio.timeout(3):
-            while not process_id.exists() or not process_id.read_text():  # ruff: ignore[async-busy-wait]
-                await asyncio.sleep(0.005)
-        pending.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await pending
-        assert process_stopped(int(process_id.read_text(encoding="utf-8")))
-    finally:
-        pending.cancel()
-        await asyncio.gather(pending, return_exceptions=True)
 
 
 @pytest.mark.parametrize("timestamp", [-1, True, 1 << 64])

@@ -188,7 +188,14 @@ def load_ini[Settings: BaseModel](
 ) -> Settings:
     try:
         return parse_ini(read_text(path), model, include=include)
-    except (ConfigError, OSError) as error:
+    except ConfigError as error:
+        line = getattr(error, "lineno", None)
+        if line is None and (errors := getattr(error, "errors", ())):
+            line = errors[0][0]
+        location = f" at line {line}" if line is not None else ""
+        msg = f"invalid DST INI configuration: {path}: {type(error).__name__}{location}"
+        raise ValueError(msg) from None
+    except OSError as error:
         msg = f"invalid DST INI configuration: {path}: {error}"
         raise ValueError(msg) from error
 
@@ -300,7 +307,9 @@ def save_cluster(  # ruff: ignore[complex-structure, too-many-branches, too-many
         unexpected = sorted(
             path.name
             for path in directory.iterdir()
-            if path.is_dir() and path.name not in expected
+            if path.is_dir()
+            and not path.name.startswith(".")
+            and path.name not in expected
         )
         if unexpected:
             msg = f"unmanaged shard directories would remain active: {unexpected}"
@@ -372,23 +381,20 @@ def save_cluster(  # ruff: ignore[complex-structure, too-many-branches, too-many
 class Shard:
     name: str
     master: bool
-    console: Path
 
 
 def shard_directories(cluster: Path) -> tuple[Path, ...]:
     validate_directory(cluster)
     directories = []
     for path in sorted(cluster.iterdir(), key=lambda item: item.name.casefold()):
-        if path.name == "mods":
+        if path.name == "mods" or path.name.startswith("."):
             continue
         if path.is_symlink():
             if path.is_dir():
                 msg = f"DST shard directory cannot be a symlink: {path}"
                 raise ValueError(msg)
             continue
-        if path.is_dir():
-            if not configuration_file_exists(path / "server.ini"):
-                raise FileNotFoundError(path / "server.ini")
+        if path.is_dir() and configuration_file_exists(path / "server.ini"):
             directories.append(path)
     if not directories:
         msg = f"no DST shard directories found in {cluster}"
@@ -404,11 +410,7 @@ def discover(cluster: Path) -> tuple[Shard, ...]:
     shards = []
     for path in shard_directories(cluster):
         master = read_master(path / "server.ini")
-        shards.append(
-            Shard(
-                path.name, master, cluster / "console" if master else path / "console"
-            )
-        )
+        shards.append(Shard(path.name, master))
     masters = [shard.name for shard in shards if shard.master]
     if len(masters) != 1:
         msg = f"expected exactly one master shard, found {len(masters)}: {masters}"

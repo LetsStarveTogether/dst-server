@@ -218,6 +218,9 @@ class QuadletUnit(RevalidatedFrozenModel):
         return render(type(self).model_validate(self))
 
     def save(self, directory: Path) -> tuple[Path, ...]:
+        from .quadlet import validate_update
+
+        validate_update(directory / f"{self.name}.{self.section.lower()}", self)
         return write_files(
             directory, {Path(f"{self.name}.{self.section.lower()}"): self.render()}
         )
@@ -266,6 +269,9 @@ class ContainerUnit(QuadletUnit):
     pull: Annotated[
         Literal["always", "missing", "never", "newer"] | None,
         UnitField("Container", "Pull"),
+    ] = None
+    log_driver: Annotated[
+        UnitToken | None, UnitField("Container", "LogDriver", "token")
     ] = None
     description: Annotated[BareUnitValue, UnitField("Unit", "Description", "text")] = ""
     requires: Annotated[

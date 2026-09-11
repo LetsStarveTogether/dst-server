@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import socket
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
@@ -296,12 +295,10 @@ def test_importing_a_package_does_not_initialize_its_subsystems(module: str) -> 
     )
 
 
-def test_installed_help_runs_without_third_party_packages() -> None:
+def test_installed_cli_and_module_expose_the_same_commands() -> None:
     entrypoint = Path(sys.executable).with_name("dst-server")
-    source = Path(__file__).parents[2] / "src"
     result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
-        [sys.executable, "-S", str(entrypoint), "--help"],
-        env={**os.environ, "PYTHONPATH": str(source)},
+        [sys.executable, str(entrypoint), "--help"],
         check=False,
         capture_output=True,
         text=True,
@@ -309,12 +306,22 @@ def test_installed_help_runs_without_third_party_packages() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
-    assert all(command in result.stdout for command in ("prepare", "master", "serve"))
-    assert "healthcheck" not in result.stdout
+    assert all(
+        command in result.stdout for command in ("room", "console", "rpc", "agent")
+    )
+    module = subprocess.run(
+        [sys.executable, "-m", "dst_server", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert module.stdout == result.stdout
 
 
 @pytest.mark.parametrize(
-    "arguments", [("--help",), ("master", "--help"), ("serve", "--help")]
+    "arguments",
+    [("--help",), ("agent", "master", "--help"), ("agent", "serve", "--help")],
 )
 def test_installed_help_does_not_import_runtime_dependencies(
     tmp_path: Path,
@@ -342,5 +349,11 @@ runpy.run_path(entrypoint, run_name="__main__")
     )
     assert result.stderr == ""
     modules = json.loads(report.read_text())
-    assert "dst_server.health" not in modules
-    assert not HEAVY_MODULES.intersection(name.split(".")[0] for name in modules)
+    assert not {
+        "capnp",
+        "dbus_fast",
+        "pystemd",
+        "prompt_toolkit",
+        "dst_server.cluster.daemon",
+        "dst_server.host.service",
+    }.intersection(modules)

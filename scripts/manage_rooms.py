@@ -9,8 +9,8 @@ from pathlib import Path
 from pystemd.dbuslib import DBus
 from pystemd.systemd1 import Manager
 
+from dst_server.presets.lst import ROOM_NUMBERS, room_schedule
 from dst_server.rpc import ClusterClient, rpc_runtime
-from scripts.generate_rooms import ROOM_NUMBERS, room_schedule
 
 logger = logging.getLogger(__name__)
 ANNOUNCE_MINUTES = 8

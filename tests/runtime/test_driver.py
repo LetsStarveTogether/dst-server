@@ -19,6 +19,7 @@ from tests.helpers import (
     feed_frame,
     next_frame,
     structured_result,
+    wait_for_event,
 )
 
 
@@ -278,7 +279,7 @@ async def test_session_while_request_waits_for_console_installs_first(
         install_end,
         structured_result(health(1).model_dump(mode="json")).encode(),
     )
-    await installing
+    await asyncio.wait_for(asyncio.shield(installing), timeout=5)
     writer.commands.clear()
 
     ready_checked = asyncio.Event()
@@ -292,34 +293,43 @@ async def test_session_while_request_waits_for_console_installs_first(
     monkeypatch.setattr(server.driver, "wait_ready", observe_ready)
     await server.console.lock.acquire()
     request = asyncio.create_task(server.game.request_save())
-    await ready_checked.wait()
-    server.lifecycle.handle(
-        server_events.SessionEvent(session_id="NEW"),
-        server.driver.session_started,
-    )
-    server.console.lock.release()
+    try:
+        async with asyncio.timeout(5):
+            await wait_for_event(ready_checked, request)
+            server.lifecycle.handle(
+                server_events.SessionEvent(session_id="NEW"),
+                server.driver.session_started,
+            )
+            server.console.lock.release()
 
-    install_start, install_end, install_command = await next_frame(writer)
-    assert b"driver.install" in install_command
-    feed_frame(
-        reader,
-        install_start,
-        install_end,
-        structured_result(health(2, generation=1).model_dump(mode="json")).encode(),
-    )
-    request_start, request_end, request_command = await next_frame(writer)
-    assert b"save" in request_command
-    feed_frame(
-        reader,
-        request_start,
-        request_end,
-        structured_result(data=True).encode(),
-    )
+            install_start, install_end, install_command = await next_frame(writer)
+            assert b"driver.install" in install_command
+            feed_frame(
+                reader,
+                install_start,
+                install_end,
+                structured_result(
+                    health(2, generation=1).model_dump(mode="json")
+                ).encode(),
+            )
+            request_start, request_end, request_command = await next_frame(writer)
+            assert b"save" in request_command
+            feed_frame(
+                reader,
+                request_start,
+                request_end,
+                structured_result(data=True).encode(),
+            )
 
-    await asyncio.wait_for(request, 1)
-    assert server.driver.installed_generation == 1
-    assert server.driver_health.events_emitted == 2
-    assert len(writer.commands) == 2
+            await asyncio.wait_for(request, 1)
+            assert server.driver.installed_generation == 1
+            assert server.driver_health.events_emitted == 2
+            assert len(writer.commands) == 2
+    finally:
+        async with asyncio.timeout(5):
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+            await server.finish()
 
 
 @pytest.mark.parametrize("old_fails", [False, True], ids=["success", "failure"])
@@ -481,18 +491,20 @@ async def test_repeated_close_does_not_interrupt_install_cleanup() -> None:
 
     driver = Driver(install, "cluster", "shard")
     installing = asyncio.create_task(driver.install(0))
-    await started.wait()
     try:
+        await wait_for_event(started, installing)
         driver.close()
-        await cleaning.wait()
+        await wait_for_event(cleaning, installing)
         driver.close()
         release.set()
         with pytest.raises(RuntimeError, match="closed"):
-            await installing
+            await asyncio.wait_for(asyncio.shield(installing), timeout=5)
         assert cleaned.is_set()
     finally:
-        release.set()
-        await asyncio.gather(installing, return_exceptions=True)
+        async with asyncio.timeout(5):
+            release.set()
+            driver.close()
+            await asyncio.gather(installing, return_exceptions=True)
 
 
 async def test_accepted_events_update_immutable_live_health() -> None:

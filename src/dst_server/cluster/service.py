@@ -15,8 +15,6 @@ from dst_server.mods import SteamCMD
 from dst_server.runtime import ServerConfig
 from dst_server.telemetry import TelemetrySettings
 
-from . import console
-
 if TYPE_CHECKING:
     from dst_server.telemetry.otel import Pipeline
 
@@ -113,11 +111,9 @@ async def prepare_shared(
 def activate_shard(
     install_path: Path,
     cluster_path: Path,
-    shard: layout.Shard,
 ) -> None:
     install_path, cluster_path = install_path.resolve(), cluster_path.resolve()
     mods.activate(install_path, cluster_path)
-    console.ensure(shard.console)
 
 
 def create_server_config(

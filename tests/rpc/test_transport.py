@@ -1,5 +1,6 @@
 # ruff: file-ignore[blocking-path-method-in-async-function, invalid-argument-name]
 import asyncio
+import json
 import socket
 import stat
 from collections.abc import AsyncIterator
@@ -9,6 +10,7 @@ from typing import Any
 import pytest
 from ulid import ULID
 
+from dst_server import commands as c
 from dst_server.errors import (
     DisconnectedError,
     ErrorCode,
@@ -24,8 +26,9 @@ from dst_server.rpc import (
     rpc_runtime,
 )
 from dst_server.rpc import transport as rpc_transport
-from dst_server.rpc.codec import encode_model, failure, success
+from dst_server.rpc.codec import encode, encode_model, failure, success
 from dst_server.rpc.transport import filesystem_socket
+from tests.helpers import wait_for_event
 
 capnp: Any = pytest.importorskip("capnp")
 schema = load_schema()
@@ -158,7 +161,11 @@ async def test_real_socket_success_error_and_root_cleanup(
             closed.set()
 
     path = tmp_path / "cluster.sock"
-    async with rpc_runtime(), filesystem_rpc_server(path, Bootstrap) as server:
+    async with (
+        asyncio.timeout(5),
+        rpc_runtime(),
+        filesystem_rpc_server(path, Bootstrap) as server,
+    ):
         async with await ClusterClient.connect(path) as client:
             assert await client.status() == status
             assert client.shard("Master") is client.shard("Master")
@@ -171,6 +178,78 @@ async def test_real_socket_success_error_and_root_cleanup(
         assert not server.connections
 
     assert not path.exists()
+
+
+@pytest.mark.parametrize("mutation", [False, True])
+async def test_raw_call_uses_server_metadata_for_locally_unknown_methods(
+    tmp_path: Path, mutation: bool
+) -> None:
+    tmp_path.chmod(0o700)
+    entered, release = asyncio.Event(), asyncio.Event()
+    method = c.MethodDescription(
+        name="future_method",
+        scope="cluster",
+        description="A method known only to the server.",
+        arguments_schema={"type": "object"},
+        result_schema={"type": "string"},
+        default_timeout=0.125,
+        mutation=mutation,
+    )
+
+    class Cluster(schema.Cluster.Server):
+        async def describe(self, _context: Any) -> None:
+            _context.results.result = success(encode(c.METHOD_DESCRIPTIONS, (method,)))
+
+        async def call(self, request: bytes, _context: Any) -> None:
+            payload = json.loads(request)
+            assert payload == {
+                "method": "future_method",
+                "arguments": {"value": "hello"},
+                "timeout": 0.125,
+            }
+            entered.set()
+            await release.wait()
+
+    class Bootstrap(schema.Bootstrap.Server):
+        async def connect(self, _context: Any) -> None:
+            _context.results.result = success(Cluster())
+
+    with pytest.raises(ValueError, match="not available"):
+        c.operation("cluster", method.name)
+    path = tmp_path / "cluster.sock"
+    watchdog = asyncio.timeout(5)
+    async with (
+        watchdog,
+        rpc_runtime(),
+        filesystem_rpc_server(path, Bootstrap),
+        await ClusterClient.connect(path) as client,
+    ):
+        assert await client.describe() == (method,)
+        pending = asyncio.create_task(client.call(method.name, {"value": "hello"}))
+        try:
+            await wait_for_event(entered, pending)
+            pending.cancel()
+            done, _ = await asyncio.wait((pending,), timeout=1)
+            assert pending in done
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                pending.result()
+            assert pending.cancelled()
+            assert getattr(cancelled.value, "__notes__", []) == (
+                [
+                    (
+                        "RPC mutation result could not be confirmed; "
+                        "the operation may still be running."
+                    )
+                ]
+                if mutation
+                else []
+            )
+        finally:
+            release.set()
+            pending.cancel()
+            async with asyncio.timeout(5):
+                await asyncio.gather(pending, return_exceptions=True)
+    assert not watchdog.expired(), "RPC test exceeded its watchdog"
 
 
 @pytest.mark.parametrize(
@@ -198,19 +277,26 @@ async def test_disconnect_classifies_queries_and_mutations(
             _context.results.result = success(Cluster())
 
     path = tmp_path / "cluster.sock"
-    async with rpc_runtime(), filesystem_rpc_server(path, Bootstrap) as server:
+    async with (
+        asyncio.timeout(5),
+        rpc_runtime(),
+        filesystem_rpc_server(path, Bootstrap) as server,
+    ):
         client = await ClusterClient.connect(path)
         pending = asyncio.create_task(getattr(client, method)())
-        await entered.wait()
-        for connection, stream in tuple(server.connections):
-            connection.close()
-            stream.close()
         try:
+            await wait_for_event(entered, pending)
+            for connection, stream in tuple(server.connections):
+                connection.close()
+                stream.close()
             with pytest.raises(expected):
-                await pending
+                await asyncio.wait_for(asyncio.shield(pending), timeout=1)
         finally:
             release.set()
             client.close()
+            pending.cancel()
+            async with asyncio.timeout(5):
+                await asyncio.gather(pending, return_exceptions=True)
 
 
 async def test_server_shutdown_bounds_capability_cleanup(
@@ -238,10 +324,14 @@ async def test_server_shutdown_bounds_capability_cleanup(
                 cleanup_cancelled.set()
 
     path = tmp_path / "cluster.sock"
-    async with rpc_runtime():
-        async with filesystem_rpc_server(path, Bootstrap) as server:
-            client = await ClusterClient.connect(path)
-        client.close()
+    async with asyncio.timeout(5), rpc_runtime():
+        client = None
+        try:
+            async with filesystem_rpc_server(path, Bootstrap) as server:
+                client = await ClusterClient.connect(path)
+        finally:
+            if client is not None:
+                client.close()
 
     assert cleanup_started.is_set()
     assert cleanup_cancelled.is_set()
@@ -264,12 +354,18 @@ async def test_failed_connection_bootstrap_is_owned_and_reaped(
         raise RuntimeError(message)
 
     path = tmp_path / "cluster.sock"
-    async with rpc_runtime(), filesystem_rpc_server(path, bootstrap) as server:
+    async with (
+        asyncio.timeout(5),
+        rpc_runtime(),
+        filesystem_rpc_server(path, bootstrap) as server,
+    ):
         stream = await capnp.AsyncIoStream.create_unix_connection(str(path))
-        await asyncio.wait_for(accepted.wait(), 1)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        stream.close()
+        try:
+            await wait_for_event(accepted)
+            while server.tasks:  # ruff: ignore[async-busy-wait]
+                await asyncio.sleep(0)
+        finally:
+            stream.close()
         assert not server.connections
         assert not server.tasks
 

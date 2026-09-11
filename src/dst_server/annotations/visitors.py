@@ -2,9 +2,9 @@ from typing import Any
 
 from luaparser import ast
 
-from .values import LuaType, construct_value, infer_type
+from .values import LuaType, infer_type
 
-type ReturnInfo = tuple[list[LuaType], str]
+type ReturnInfo = list[LuaType]
 
 BANNED_NAMES = ("inst", "GetDebugString")
 DEFAULT_VAR = "_l"
@@ -45,13 +45,6 @@ def anonymous_function(node: Any) -> Any | None:
     return values[0]
 
 
-def pretty_value(node: Any) -> str:
-    try:
-        return ast.to_pretty_str(node)
-    except Exception:
-        return "variable"
-
-
 class ReturnVisitor(ast.ASTRecursiveVisitor):
     def __init__(self) -> None:
         self.returns: list[ReturnInfo] = []
@@ -69,10 +62,7 @@ class ReturnVisitor(ast.ASTRecursiveVisitor):
         if self.function_depth:
             return
         values = getattr(node, "values", ())
-        self.returns.append((
-            [infer_type(value) for value in values],
-            ", ".join(pretty_value(value) for value in values),
-        ))
+        self.returns.append([infer_type(value) for value in values])
 
 
 def return_info(body: Any) -> list[ReturnInfo]:
@@ -104,8 +94,8 @@ class BaseVisitor(ast.ASTVisitor):
             elif parameter != "self":
                 annotations.append(f"---@param {parameter} any")
 
-        if returns and returns[-1][0]:
-            annotations.append(f"---@return {', '.join(returns[-1][0])}")
+        if returns and returns[-1]:
+            annotations.append(f"---@return {', '.join(returns[-1])}")
 
         return annotations
 
@@ -118,15 +108,7 @@ class BaseVisitor(ast.ASTVisitor):
         source_prefix: str = "",
     ) -> str:
         lines = self.build_annotations(parameters, returns, node, source_prefix)
-        function = f"function {name}({', '.join(parameters)})"
-
-        if returns:
-            return_types, return_source = returns[-1]
-            value = construct_value(return_types, return_source)
-            lines.append(f"{function} return {value} end")
-        else:
-            lines.append(f"{function} end")
-
+        lines.append(f"function {name}({', '.join(parameters)}) end")
         return "\n".join(lines)
 
 
@@ -142,7 +124,7 @@ class ComponentVisitor(BaseVisitor):
         self.class_name = class_name
         self.folder_name = folder_name
         self.methods: list[str] = []
-        self.fields: dict[str, tuple[LuaType | None, str | None]] = {}
+        self.fields: dict[str, LuaType] = {}
 
     def visit_Method(self, node: Any) -> bool:
         name = method_name(node, self.class_name)
@@ -175,20 +157,10 @@ class ComponentVisitor(BaseVisitor):
         if name in BANNED_NAMES or name in self.processed:
             return
 
-        value_type = None
-        value_source = None
-        if node.values:
-            value = node.values[0]
-            value_type = infer_type(value)
-            value_source = (
-                "function() end"
-                if isinstance(value, (ast.Function, ast.Method, ast.AnonymousFunction))
-                else pretty_value(value)
+        if self.fields.get(name) in {None, LuaType.ANY}:
+            self.fields[name] = (
+                infer_type(node.values[0]) if node.values else LuaType.ANY
             )
-
-        current = self.fields.get(name)
-        if current is None or current[0] in {None, LuaType.ANY}:
-            self.fields[name] = value_type, value_source
 
     def record_function(self, name: str, node: Any) -> None:
         if name in BANNED_NAMES or name in self.processed:
@@ -206,16 +178,11 @@ class ComponentVisitor(BaseVisitor):
         )
 
     def definitions(self) -> tuple[list[str], list[str]]:
-        fields = sorted(self.fields.items())
         annotations = [
-            f"---@field {name} {value_type or 'any'}"
-            for name, (value_type, _) in fields
+            f"---@field {name} {value_type}"
+            for name, value_type in sorted(self.fields.items())
         ]
-        values = [
-            f"{self.local_var}.{name}={construct_value(value_type, source)}"
-            for name, (value_type, source) in fields
-        ]
-        return annotations, [*self.methods, *values]
+        return annotations, self.methods
 
 
 class ModutilVisitor(BaseVisitor):

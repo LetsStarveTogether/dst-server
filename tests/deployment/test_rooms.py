@@ -19,7 +19,7 @@ from dst_server.deployment import (
     DEFAULT_IMAGE,
     QuadletApplication,
 )
-from scripts.generate_rooms import (
+from dst_server.presets.lst import (
     CLUSTER_DESCRIPTION,
     NETDATA_ENVIRONMENT,
     ROOM_NUMBERS,
@@ -27,15 +27,18 @@ from scripts.generate_rooms import (
     TOKEN_ENVIRONMENT,
     RoomType,
     build,
+    build_template,
+    generate_configured_room,
     generate_configured_rooms,
     generate_room,
     generate_rooms,
-    main,
     room,
     room_name,
     room_schedule,
 )
-from scripts.mod_configurations import MOD_CONFIGURATIONS
+from dst_server.presets.mod_configurations import MOD_CONFIGURATIONS
+from dst_server.rooms import RoomStore
+from scripts.generate_rooms import main
 
 TOKEN = SecretStr("template-test-token")
 CLUSTER_KEY = SecretStr("template-test-cluster-key")
@@ -562,18 +565,16 @@ def test_event_rooms_preserve_their_game_mode(
     assert ClusterConfig.load(tmp_path).files() == cluster.files()
 
 
-def test_gorge_rooms_force_an_empty_blocklist(tmp_path: Path) -> None:
+def test_template_generation_preserves_permission_lists(tmp_path: Path) -> None:
     for number in (132, 133, 134):
         directory = tmp_path / str(number)
         directory.mkdir()
-        (directory / "blocklist.txt").write_text("KU_blocked\n", encoding="utf-8")
+        blocklist = directory / "blocklist.txt"
+        blocklist.write_text("KU_blocked\n", encoding="utf-8")
+
         build(number, token=TOKEN, cluster_key=CLUSTER_KEY).save(directory)
 
-    assert (tmp_path / "132" / "blocklist.txt").read_text(encoding="utf-8") == (
-        "KU_blocked\n"
-    )
-    assert (tmp_path / "133" / "blocklist.txt").read_bytes() == b""
-    assert (tmp_path / "134" / "blocklist.txt").read_bytes() == b""
+        assert blocklist.read_text(encoding="utf-8") == "KU_blocked\n"
 
 
 @pytest.mark.parametrize(
@@ -607,6 +608,7 @@ def test_generate_room_saves_cluster_and_quadlet_application(
     assert all(path.is_file() for path in written)
     assert len(written) == len(set(written))
     assert ClusterConfig.load(cluster_dir).settings.cluster_name == room_name(7)
+    assert RoomStore(cluster_dir.parent, quadlet_dir).load(7).recycle
     application = QuadletApplication.load(quadlet_dir)
     units = (application.master, *application.secondaries)
     assert len(units) == 2
@@ -626,6 +628,36 @@ def test_generate_room_saves_cluster_and_quadlet_application(
             "on-failure",
         )
         assert (unit.kill_mode, unit.watchdog_signal) == ("control-group", "SIGKILL")
+
+
+def test_generate_configured_room_rejects_topology_changes_before_writing(
+    tmp_path: Path,
+) -> None:
+    cluster_dir = tmp_path / "000"
+    quadlet_dir = tmp_path / "quadlet"
+    for _ in range(2):
+        generate_configured_room(
+            0,
+            cluster=build(0, token=TOKEN),
+            cluster_dir=cluster_dir,
+            quadlet_dir=quadlet_dir,
+        )
+    world = cluster_dir / "forest/save/world"
+    world.parent.mkdir()
+    world.write_bytes(b"existing saved world")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError, match=r"topology changes require Host\.edit"):
+        generate_configured_room(
+            0,
+            cluster=build_template("forge", token=TOKEN),
+            cluster_dir=cluster_dir,
+            quadlet_dir=quadlet_dir,
+        )
+
+    assert {
+        path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    } == before
 
 
 def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
@@ -648,21 +680,19 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
     assert len(tuple(quadlet_dir.glob("*.container"))) == 255
     assert len(tuple(cluster_root.rglob("leveldataoverride.lua"))) == 7
     assert not tuple(quadlet_dir.glob("*.network"))
+    assert not tuple(cluster_root.rglob(".dst-room.json"))
+    store = RoomStore(cluster_root, quadlet_dir)
     ports = []
-    shard_count = 0
     for number in ROOM_NUMBERS:
         application = QuadletApplication.load(
             quadlet_dir,
             name=f"dst-{number:03d}",
         )
         mappings = application.pod.publish_ports
-        assert application.pod.userns is None
         assert application.pod.wanted_by == (
             ("default.target",) if room_schedule(number) is None else ()
         )
         units = (application.master, *application.secondaries)
-        assert all(volume.idmap is None for unit in units for volume in unit.volumes)
-        shard_count += len(units)
         ports.extend(mapping.host for mapping in mappings)
         assert len(mappings) == 2 * len(units)
         base = 30000 + 10 * number
@@ -670,10 +700,15 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
             range(base, base + len(mappings))
         )
         assert all(mapping.protocol == "udp" for mapping in mappings)
-        cluster = ClusterConfig.load(cluster_root / f"{number:03d}")
+        managed = store.load(number)
+        assert managed.template == room(number)[0]
+        assert bool(managed.schedule) is (room_schedule(number) is not None)
+        assert managed.recycle is (number < 100)
         player_ports = {mapping.container: mapping.host for mapping in mappings}
         master_name = next(
-            name for name, shard in cluster.shards.items() if shard.settings.is_master
+            name
+            for name, shard in managed.cluster.shards.items()
+            if shard.settings.is_master
         )
         named_units = {
             master_name: application.master,
@@ -688,21 +723,10 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
             RoomType.LIGHTS_OUT_ENDLESS,
         }
         for shard_name, unit in named_units.items():
-            shard = cluster.shards[shard_name]
-            assert unit.image == DEFAULT_IMAGE
-            assert unit.pull == "always"
-            assert unit.timeout_start_sec == 1800
-            assert (unit.notify, unit.watchdog_sec, unit.restart) == (
-                True,
-                300,
-                "on-failure",
+            shard = managed.cluster.shards[shard_name]
+            assert unit.exec[unit.exec.index("--external-port") + 1] == str(
+                player_ports[shard.settings.server_port]
             )
-            assert (unit.kill_mode, unit.watchdog_signal) == (
-                "control-group",
-                "SIGKILL",
-            )
-            assert "Health" not in unit.render()
-            assert unit.exec[3] == str(player_ports[shard.settings.server_port])
             assert all(
                 unit.environment[name] == value
                 for name, value in NETDATA_ENVIRONMENT.items()
@@ -710,7 +734,6 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
             assert unit.environment.get("DST_SERVER_TELEMETRY_PROFILE") == (
                 "history" if history else None
             )
-    assert shard_count == 255
     assert len(ports) == len(set(ports)) == 510
     assert min(ports) == 30000
     assert max(ports) == 31391

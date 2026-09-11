@@ -1,0 +1,6 @@
+[Unit]
+Description=Regenerate idle online DST rooms
+
+[Service]
+Type=oneshot
+ExecStart=@PYTHON@ -m dst_server --cluster-root @ROOT@ --quadlet-dir @QUADLET@ maintenance recycle

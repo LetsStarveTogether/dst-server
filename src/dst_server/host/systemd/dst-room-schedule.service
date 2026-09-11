@@ -1,0 +1,9 @@
+[Unit]
+Description=Apply DST room opening hours
+OnSuccess=dst-room-recycle.service
+OnFailure=dst-room-recycle.service
+
+[Service]
+Type=oneshot
+ExecStart=@PYTHON@ -m dst_server --cluster-root @ROOT@ --quadlet-dir @QUADLET@ schedule run
+TimeoutStartSec=120

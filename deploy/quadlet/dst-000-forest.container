@@ -5,8 +5,9 @@ Wants=dst-000-cave.container
 [Container]
 Image=quay.io/wh2099/dst-server:latest
 Pull=always
+LogDriver=journald
 Pod=dst-000.pod
-Exec=/app/.venv/bin/dst-server master --external-port 30000
+Exec=/app/.venv/bin/dst-server agent master --external-port 30000
 Environment=DST_SERVER_CLUSTER_NAME=dst-000
 Environment=DST_SERVER_TELEMETRY_PROFILE=history
 Environment=OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://10.255.255.254:4317

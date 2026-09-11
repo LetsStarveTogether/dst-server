@@ -1,18 +1,10 @@
 import math
 
 import pytest
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 from ulid import ULID
 
 from dst_server import commands
-from dst_server.configuration.models import (
-    ClusterConfig,
-    ClusterSettings,
-    ShardConfig,
-    ShardSettings,
-)
-from dst_server.configuration.overrides import WorldgenOverride
-from dst_server.configuration.world import ForestOverrides
 from dst_server.models.cluster import ObservationCursor
 from dst_server.timeouts import DEFAULT_COMMAND_TIMEOUT, DEFAULT_RELOAD_TIMEOUT
 
@@ -111,33 +103,3 @@ def test_copied_requests_are_revalidated(timeout: object) -> None:
         commands.operation("shard", copied)
     with pytest.raises(ValidationError):
         commands.encode_request(copied)
-
-
-def test_configuration_request_preserves_sparse_fields_and_secrets() -> None:
-    configuration = ClusterConfig(
-        settings=ClusterSettings(cluster_password=SecretStr("private"), pvp=False),
-        shards={
-            "Master": ShardConfig(
-                settings=ShardSettings(encode_user_path=False),
-                world=WorldgenOverride.forest(
-                    overrides=ForestOverrides(day="onlynight")
-                ),
-            )
-        },
-        token=SecretStr("pds-g^request-token"),
-    )
-    command = commands.SaveConfiguration(
-        expected_revision=ULID(), configuration=configuration
-    )
-    restored = commands.parse_request(commands.encode_request(command), scope="cluster")
-    assert isinstance(restored, commands.SaveConfiguration)
-    assert restored == command
-    assert restored.configuration.model_fields_set == configuration.model_fields_set
-    assert restored.configuration.settings.model_fields_set == {
-        "cluster_password",
-        "pvp",
-    }
-    assert restored.configuration.shards["Master"].settings.model_fields_set == {
-        "encode_user_path"
-    }
-    assert restored.configuration.token.get_secret_value() == "pds-g^request-token"

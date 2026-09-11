@@ -9,8 +9,9 @@ import pytest
 from opentelemetry.sdk._logs.export import LogRecordExportResult
 from ulid import ULID
 
+from dst_server import cli
 from dst_server.cluster import agent as agent_module
-from dst_server.cluster import cli, daemon, service
+from dst_server.cluster import daemon, service
 from dst_server.cluster.agent import ShardAgent
 from dst_server.configuration.files import Shard
 from dst_server.events import GAME_EVENT_ADAPTER, ObservedGameEvent
@@ -26,7 +27,7 @@ def relay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ShardAgent:
         agent_module.service, "create_server_config", Mock(return_value=config)
     )
     return ShardAgent(
-        Shard("forest", True, tmp_path / "console"),
+        Shard("forest", True),
         install_path=tmp_path,
         cluster_path=tmp_path,
     )
@@ -163,7 +164,6 @@ async def test_telemetry_relays_start_before_process_readiness_and_are_critical(
     server = event_server(relay, observation(str(ULID())))
     failures = [OSError("event stream failed"), OSError("event stream failed")]
     monkeypatch.setattr(agent_module, "Server", Mock(return_value=server))
-    monkeypatch.setattr(agent_module.console, "forward", AsyncMock())
     monkeypatch.setattr(relay, "_drain_lifecycle", AsyncMock())
     monkeypatch.setattr(relay, "_drain_game_events", AsyncMock(side_effect=failures[0]))
     monkeypatch.setattr(relay, "_drain_operational", AsyncMock(side_effect=failures[1]))
@@ -222,9 +222,7 @@ async def test_stopped_waits_for_both_telemetry_tails(relay: ShardAgent) -> None
         await release.wait()
         completed.append(name)
 
-    fifo = asyncio.create_task(tail("fifo"))
     tails = tuple(asyncio.create_task(tail(name)) for name in ("game", "runtime"))
-    relay._fifo_task = fifo
     relay._attempt_tasks = tails
     stop = asyncio.create_task(relay._stopped(server))
     try:
@@ -233,11 +231,10 @@ async def test_stopped_waits_for_both_telemetry_tails(relay: ShardAgent) -> None
         release.set()
         await stop
         assert completed == ["game", "runtime"]
-        assert fifo.cancelled()
     finally:
         release.set()
         stop.cancel()
-        await asyncio.gather(stop, fifo, *tails, return_exceptions=True)
+        await asyncio.gather(stop, *tails, return_exceptions=True)
 
 
 @pytest.mark.parametrize("pipeline_mode", ["none", "logs_disabled", "logs_enabled"])
@@ -311,7 +308,7 @@ def test_child_log_routing_reaches_the_actual_cli_stdout(
 
     monkeypatch.setattr(daemon, "master", master)
     monkeypatch.setenv("DST_SERVER_TELEMETRY_PROFILE", "off")
-    assert cli.main(("master",)) == 0
+    assert cli.main(("agent", "master")) == 0
 
     ordinary = kind in {
         "ordinary",

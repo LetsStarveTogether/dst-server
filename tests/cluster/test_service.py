@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from dst_server import cli as cluster_cli
 from dst_server import mods
-from dst_server.cluster import cli as cluster_cli
 from dst_server.cluster import daemon, service
 from dst_server.runtime import ServerConfig
 from dst_server.telemetry import TelemetrySettings, otel
@@ -19,7 +19,7 @@ def test_cli_reads_telemetry_profile_from_environment(
     monkeypatch.setenv("DST_SERVER_TELEMETRY_PROFILE", profile)
     monkeypatch.setattr(daemon, "serve", serving)
 
-    assert cluster_cli.main(("serve", "forest")) == 7
+    assert cluster_cli.main(("agent", "serve", "forest")) == 7
     serving.assert_awaited_once_with(
         telemetry=TelemetrySettings.model_validate({"profile": profile}),
         shard="forest",
@@ -58,29 +58,28 @@ def test_cli_routes_commands_once(
         service if target == "prepare_shared" else daemon, target, action
     )
 
-    assert cluster_cli.main(command) == 0
+    assert cluster_cli.main(("agent", *command)) == 0
     action.assert_awaited_once_with(**expected)
 
 
 @pytest.mark.parametrize(
-    ("command", "profile", "error"),
+    ("command", "profile", "exit_code"),
     [
-        (("serve", "--external-port", "1023", "cave"), None, SystemExit),
-        (("serve", "--master", "forest"), None, SystemExit),
-        (("serve", "forest"), "verbose", ValueError),
+        (("serve", "--external-port", "1023", "cave"), None, 2),
+        (("serve", "--master", "forest"), None, 2),
+        (("serve", "forest"), "verbose", 1),
     ],
 )
 def test_cli_rejects_invalid_arguments_and_environment(
     monkeypatch: pytest.MonkeyPatch,
     command: tuple[str, ...],
     profile: str | None,
-    error: type[BaseException],
+    exit_code: int,
 ) -> None:
     if profile is not None:
         monkeypatch.setenv("DST_SERVER_TELEMETRY_PROFILE", profile)
 
-    with pytest.raises(error):
-        cluster_cli.main(command)
+    assert cluster_cli.main(("agent", *command)) == exit_code
 
 
 def test_otel_resource_uses_explicit_cluster_name(
@@ -134,8 +133,16 @@ async def test_prepare_keeps_native_as_default_and_accepts_dynamic_setup(
     monkeypatch.setenv("DST_SERVER_MOD_PROXY", "http://download.invalid:1080")
     monkeypatch.setattr(mods, "update_native", update)
 
+    override = cluster / "forest/modoverrides.lua"
+    override.write_text(
+        'local id = "42"; return {["workshop-" .. id] = {enabled = true}}'
+    )
+    setup = cluster / "mods/dedicated_server_mods_setup.lua"
+    original = {path: path.read_bytes() for path in (override, setup)}
+
     shards = await service.prepare_shared(install, cluster)
 
+    assert {path: path.read_bytes() for path in original} == original
     update.assert_awaited_once()
     assert update.call_args.kwargs["proxy"] == "http://download.invalid:1080"
     assert update.call_args.args == (
@@ -196,7 +203,7 @@ async def test_prepare_selects_steamcmd_and_passes_items_and_collections(
     assert factory.call_count == 2
     for updater, call in zip(updaters, factory.call_args_list, strict=True):
         updater.update.assert_awaited_once_with(
-            frozenset({7, 42}), collections=frozenset({99})
+            frozenset({42}), collections=frozenset({99})
         )
         client, destination = call.args
         assert client.executable == expected
@@ -306,3 +313,31 @@ async def test_failed_steamcmd_update_preserves_previous_install_mods(
 
     assert not previous_mods.is_symlink()
     assert sentinel.read_bytes() == b"previous installation"
+
+
+async def test_startup_preserves_native_configuration_and_saved_world(
+    tmp_path: Path,
+) -> None:
+    from dst_server.configuration import files
+    from dst_server.configuration.store import ConfigurationStore
+
+    install, cluster = mod_service_paths(tmp_path, "")
+    world = cluster / "forest/worldgenoverride.lua"
+    world.write_text('local preset = "SURVIVAL_TOGETHER"; return {preset = preset}')
+    saved = cluster / "forest/save/world"
+    saved.parent.mkdir()
+    saved.write_bytes(b"existing world")
+    inactive = cluster / "cave"
+    inactive.mkdir()
+    (inactive / "modoverrides.lua").write_text("inactive Lua")
+    before = {
+        path: path.read_bytes()
+        for path in (world, saved, inactive / "modoverrides.lua")
+    }
+    expected = (files.Shard("forest", True),)
+
+    assert ConfigurationStore(cluster).shards == expected
+    assert files.discover(cluster) == expected
+    assert await service.prepare_shared(install, cluster, update_mods=False) == expected
+
+    assert {path: path.read_bytes() for path in before} == before

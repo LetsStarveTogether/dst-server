@@ -189,6 +189,39 @@ def test_ini_loader_rejects_unknown_input(tmp_path: Path) -> None:
         ClusterSettings.load(path)
 
 
+@pytest.mark.parametrize(
+    ("source", "line", "error"),
+    [
+        ("cluster_password = PRIVATE_INI_SECRET\n", 1, "MissingSectionHeaderError"),
+        ("[NETWORK]\ncluster_password PRIVATE_INI_SECRET\n", 2, "ParsingError"),
+        (
+            (
+                "[NETWORK]\ncluster_password = PRIVATE_INI_SECRET\n"
+                "cluster_password = PRIVATE_INI_SECRET\n"
+            ),
+            3,
+            "DuplicateOptionError",
+        ),
+        (
+            "[NETWORK]\ncluster_password = PRIVATE_INI_SECRET\n[NETWORK]\n",
+            3,
+            "DuplicateSectionError",
+        ),
+    ],
+)
+def test_ini_syntax_errors_hide_contents_and_preserve_file_location(
+    tmp_path: Path, source: str, line: int, error: str
+) -> None:
+    path = tmp_path / "cluster.ini"
+    path.write_text(source)
+    with pytest.raises(ValueError, match="invalid DST INI configuration") as caught:
+        ClusterSettings.load(path)
+    diagnostic = str(caught.value)
+    assert "PRIVATE_INI_SECRET" not in diagnostic
+    assert str(path) in diagnostic
+    assert f"{error} at line {line}" in diagnostic
+
+
 @pytest.mark.parametrize("game_mode", ["endless", "wilderness"])
 def test_ini_loader_warns_and_preserves_deprecated_game_modes(
     tmp_path: Path,
@@ -909,7 +942,7 @@ def test_typed_lua_loaders_reject_dynamic_code(tmp_path: Path) -> None:
         "return ServerModSetup([[\\049]])\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="double-quoted string"):
+    with pytest.raises(ValueError, match="quoted string"):
         WorkshopDownloads.load(setup)
 
 
@@ -1369,13 +1402,14 @@ def test_mod_prepare_preserves_generated_downloads(tmp_path: Path) -> None:
     ) == ('ServerModSetup("8")\nServerModSetup("42")\nServerModCollectionSetup("99")\n')
 
 
-def test_mod_prepare_preserves_setup_lua_and_only_prepends_missing_items(
+def test_mod_prepare_preserves_native_setup_byte_for_byte(
     tmp_path: Path,
 ) -> None:
     cluster = tmp_path / "cluster"
     shard = cluster / "Master"
     mods_path = cluster / "mods"
     shard.mkdir(parents=True)
+    (shard / "server.ini").touch()
     mods_path.mkdir()
     (shard / "modoverrides.lua").write_text(
         'return { ["workshop-42"] = { enabled = true } }',
@@ -1390,12 +1424,8 @@ def test_mod_prepare_preserves_setup_lua_and_only_prepends_missing_items(
         'ServerModSetup("8"); return ServerModSetup("9")\r\n'
     )
     setup.write_text(original, encoding="utf-8")
-    assert mods.prepare_shared(cluster) == (8, 9, 42)
-    shebang, body = original.split("\n", 1)
-    expected = f'{shebang}\nServerModSetup("42")\n{body}'
-    assert setup.read_bytes() == expected.encode()
-    assert mods.prepare_shared(cluster) == (8, 9, 42)
-    assert setup.read_bytes() == expected.encode()
+    assert mods.prepare_shared(cluster) == (8, 9)
+    assert setup.read_bytes() == original.encode()
 
 
 def test_mod_override_parser_accepts_empty_files_and_rejects_truthy_numbers(
@@ -1403,14 +1433,14 @@ def test_mod_override_parser_accepts_empty_files_and_rejects_truthy_numbers(
 ) -> None:
     path = tmp_path / "modoverrides.lua"
     path.write_text("-- no overrides\n", encoding="utf-8")
-    assert mods.workshop_ids((path,)) == ()
+    assert ModOverrides.load(path).workshop_items == frozenset()
 
     path.write_text(
         'return { ["workshop-42"] = { enabled = 1 } }',
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="valid boolean"):
-        mods.workshop_ids((path,))
+        ModOverrides.load(path)
 
 
 def test_mod_file_parsers_enforce_static_workshop_boundaries(tmp_path: Path) -> None:
@@ -1420,14 +1450,14 @@ def test_mod_file_parsers_enforce_static_workshop_boundaries(tmp_path: Path) -> 
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="invalid DST Workshop mod name"):
-        mods.workshop_ids((override,))
+        ModOverrides.load(override)
 
     override.write_text(
         'return { [("workshop-" .. "42")] = { enabled = true } }',
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="string"):
-        mods.workshop_ids((override,))
+        ModOverrides.load(override)
 
     invalid_overrides = (
         ("return { client_mods_disabled = 1 }", "valid boolean"),
@@ -1444,7 +1474,7 @@ def test_mod_file_parsers_enforce_static_workshop_boundaries(tmp_path: Path) -> 
     for content, message in invalid_overrides:
         override.write_text(content, encoding="utf-8")
         with pytest.raises(ValueError, match=message):
-            mods.workshop_ids((override,))
+            ModOverrides.load(override)
 
     setup = tmp_path / "dedicated_server_mods_setup.lua"
     setup.write_text(

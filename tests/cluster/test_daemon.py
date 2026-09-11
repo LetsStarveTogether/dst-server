@@ -26,6 +26,7 @@ from dst_server.models.cluster import (
 from dst_server.rpc import ClusterClient, rpc_runtime
 from dst_server.rpc.servants import WorkerRegistryServant
 from dst_server.rpc.transport import abstract_rpc_server
+from tests.helpers import wait_for_event
 
 
 class AgentStub:
@@ -146,6 +147,10 @@ class ControllerStub:
 
 
 def write_deployment(root: Path) -> None:
+    (root / "cluster.ini").write_text(
+        "[SHARD]\nshard_enabled = true\nmaster_ip = 127.0.0.1\ncluster_key = test-key\n"
+    )
+    (root / "cluster_token.txt").write_text("test-token\n")
     for name, master, server_port, steam_port in (
         ("Caves", False, 11000, 27017),
         ("Master", True, 10999, 27016),
@@ -205,7 +210,7 @@ async def test_secondary_agent_identity_comes_from_server_ini(
         asyncio.Event(),
     )
 
-    assert observed == [Shard("Caves", False, tmp_path / "Caves" / "console")]
+    assert observed == [Shard("Caves", False)]
 
 
 async def test_agent_rejects_a_shard_path_before_creating_files(
@@ -269,12 +274,12 @@ async def test_master_discovers_roster_and_registers_local_agent(
     store = observed["controller"]
     assert isinstance(store, ConfigurationStore)
     assert store.shards == (
-        Shard("Master", True, tmp_path / "console"),
-        Shard("Caves", False, tmp_path / "Caves" / "console"),
+        Shard("Master", True),
+        Shard("Caves", False),
     )
     assert store.directory == tmp_path
     shard, values = observed["agent"]  # ty: ignore[not-iterable]
-    assert shard == Shard("Master", True, tmp_path / "console")
+    assert shard == Shard("Master", True)
     assert values["external_port"] == 30000
     assert observed["serve"] == (
         instance,
@@ -467,17 +472,24 @@ async def test_abstract_registry_registers_and_unregisters_remote_agent() -> Non
     agent = AgentStub(calls)
     controller = ControllerStub(calls)
     address = f"dst-server-test-{ULID()}"
-    async with rpc_runtime():
-        async with abstract_rpc_server(
-            lambda: WorkerRegistryServant(controller),  # ty: ignore[invalid-argument-type]
-            address,
-        ):
-            task = asyncio.create_task(daemon._registered_cycle(agent, address))  # ty: ignore[invalid-argument-type]
-            await controller.registered.wait()
-            await agent.failure_waiting.wait()
-            assert controller.endpoint.name == "Caves"
-        await task
-        await controller.unregistered.wait()
+    task: asyncio.Task[None] | None = None
+    async with asyncio.timeout(5), rpc_runtime():
+        try:
+            async with abstract_rpc_server(
+                lambda: WorkerRegistryServant(controller),  # ty: ignore[invalid-argument-type]
+                address,
+            ):
+                task = asyncio.create_task(daemon._registered_cycle(agent, address))  # ty: ignore[invalid-argument-type]
+                await wait_for_event(controller.registered, task)
+                await wait_for_event(agent.failure_waiting, task)
+                assert controller.endpoint.name == "Caves"
+            await task
+            await wait_for_event(controller.unregistered)
+        finally:
+            async with asyncio.timeout(5):
+                if task is not None:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.parametrize("phase", ["connect", "register", "failed"])
@@ -590,13 +602,19 @@ async def test_local_agent_failure_is_reported_without_rpc() -> None:
             agent,  # ty: ignore[invalid-argument-type]
         )
     )
-    await agent.failure_waiting.wait()
-    agent.failures.put_nowait(object())
-    await controller.failure.wait()
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+    try:
+        async with asyncio.timeout(5):
+            await wait_for_event(agent.failure_waiting, task)
+            agent.failures.put_nowait(object())
+            await wait_for_event(controller.failure, task)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
-    assert controller.failed_agent is agent
+            assert controller.failed_agent is agent
+    finally:
+        async with asyncio.timeout(5):
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.parametrize(

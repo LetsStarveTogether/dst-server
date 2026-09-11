@@ -29,11 +29,13 @@ class Cluster(ClusterAPI):
 async def test_shard_facade_builds_shared_requests() -> None:
     shard = Shard()
     await shard.execute("return 1", timeout=17)
+    await shard.evaluate("1 + 2", timeout=18)
     await shard.players.give("KU_example", "log", count=3)
     await shard.players.set_vitals("KU_example", health=0.5)
     await shard.regenerate_shard(preserve_settings=False)
     assert shard.requests == [
         c.Execute(source="return 1", timeout=17),
+        c.Evaluate(source="1 + 2", timeout=18),
         c.Give(userid="KU_example", item="log", count=3),
         c.SetVitals(userid="KU_example", health=0.5),
         c.RegenerateShard(preserve_settings=False),

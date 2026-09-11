@@ -3,20 +3,10 @@ FROM ghcr.io/astral-sh/uv:latest AS uv
 FROM docker.io/cm2network/steamcmd:latest
 LABEL maintainer="wh2099@pm.me"
 
-ARG BETA=""
 ARG DST_64_PKGS="ca-certificates libcurl3-gnutls procps"
-ARG GAME_VERSION
-
-ENV PATH="/app/.venv/bin:${PATH}" \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_NO_DEV=1 \
-    UV_PYTHON_INSTALL_DIR=/opt/python
 
 WORKDIR /
 VOLUME ["/cluster"]
-
-COPY --from=uv /uv /uvx /bin/
 
 # Install DST server dependencies.
 USER root
@@ -28,6 +18,8 @@ RUN apt-get update && \
 
 # Install the DST server.
 USER steam
+ARG BETA=""
+ARG GAME_VERSION
 RUN set -e; \
     delay=10; \
     for attempt in 1 2 3 4 5 6 7 8 9 10; do \
@@ -57,10 +49,8 @@ RUN set -e; \
         echo "Retrying SteamCMD in ${delay}s..." >&2; \
         sleep "$delay"; \
         delay=30; \
-    done
-
-# Refuse to publish an image under the wrong DST version.
-RUN installed_version="$(sed -n 's/\r$//; /^[0-9][0-9]*$/p' /install/version.txt)" && \
+    done; \
+    installed_version="$(sed -n 's/\r$//; /^[0-9][0-9]*$/p' /install/version.txt)" && \
     if [ "${installed_version}" != "${GAME_VERSION}" ]; then \
         echo "Expected DST ${GAME_VERSION}, installed ${installed_version:-invalid}" >&2; \
         exit 1; \
@@ -68,6 +58,12 @@ RUN installed_version="$(sed -n 's/\r$//; /^[0-9][0-9]*$/p' /install/version.txt
 
 # Install Python dependencies before the SDK to preserve the dependency layer.
 USER root
+ENV PATH="/app/.venv/bin:${PATH}" \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_DEV=1 \
+    UV_PYTHON_INSTALL_DIR=/opt/python
+COPY --from=uv /uv /uvx /bin/
 WORKDIR /app
 COPY .python-version pyproject.toml uv.lock README.md LICENSE ./
 RUN uv sync --locked --extra otel --no-install-project --no-editable

@@ -85,12 +85,7 @@ jobs:
         env:
           OTEL_EXPORTER_OTLP_ENDPOINT: http://collector.invalid
           OTEL_SDK_DISABLED: 'true'
-        run: >-
-          uv run --isolated --no-project --with dist/dst_server-*.whl python -I -c
-          "import dst_server.cluster.cli;
-          from dst_server.cluster.service import configure_otel;
-          from dst_server.runtime import ServerConfig;
-          assert configure_otel(ServerConfig(shard='smoke')) is None"
+        run: uv run --isolated --no-project --with dist/dst_server-*.whl python -I tests/distribution.py
 
       - name: Upload distributions
         uses: actions/upload-artifact@v7
@@ -186,7 +181,7 @@ jobs:
           tag: ${{ needs.verify-tag.outputs.tag }}
           allowUpdates: true
           draft: false
-          makeLatest: true
+          makeLatest: legacy
           omitBodyDuringUpdate: true
           omitNameDuringUpdate: true
           skipIfReleaseExists: true

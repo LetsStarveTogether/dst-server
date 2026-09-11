@@ -2,21 +2,19 @@
 from abc import ABC, abstractmethod
 
 from pydantic import JsonValue
-from ulid import ULID
 
 from dst_server import commands as c
-from dst_server.configuration.models import ClusterConfig
 from dst_server.events.server import SavedEvent
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
 from dst_server.models.cluster import (
     ClusterSaveResult,
     ClusterStatus,
     ConfigurationRead,
-    ConfigurationSnapshot,
     LocatedPlayer,
     ShardResult,
     ShardRuntimeStatus,
 )
+from dst_server.models.console import ConsoleResult
 from dst_server.models.driver import DriverHealth
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog
 from dst_server.timeouts import (
@@ -69,6 +67,11 @@ class ShardAPI(_LifecycleAPI):
     ) -> JsonValue:
         return await self.invoke(c.ExecuteJson(source=source, timeout=timeout))
 
+    async def evaluate(
+        self, source: str, *, timeout: float = DEFAULT_COMMAND_TIMEOUT
+    ) -> ConsoleResult:
+        return await self.invoke(c.Evaluate(source=source, timeout=timeout))
+
     async def save(self, *, timeout: float = DEFAULT_SAVE_TIMEOUT) -> SavedEvent:
         return await self.invoke(c.Save(timeout=timeout))
 
@@ -110,15 +113,6 @@ class ClusterAPI(_LifecycleAPI):
 
     async def read_configuration(self) -> ConfigurationRead:
         return await self.invoke(c.ReadConfiguration())
-
-    async def save_configuration(
-        self, expected_revision: ULID, configuration: ClusterConfig
-    ) -> ConfigurationSnapshot:
-        return await self.invoke(
-            c.SaveConfiguration(
-                expected_revision=expected_revision, configuration=configuration
-            )
-        )
 
     async def execute_all(
         self, source: str, *, timeout: float = DEFAULT_COMMAND_TIMEOUT

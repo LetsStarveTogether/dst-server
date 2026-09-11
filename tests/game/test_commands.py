@@ -1,24 +1,8 @@
-from unittest.mock import AsyncMock
-
 import pytest
 
 from dst_server import commands as c
 from dst_server.errors import IndeterminateCommandError
-from tests.game.test_client import make_game
-
-
-async def test_game_boundary_accepts_shared_requests(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    game, _ = make_game()
-    request = AsyncMock(return_value=3)
-    monkeypatch.setattr(game, "request", request)
-    assert await game.invoke(c.Give(userid="KU_TEST", item="Twigs", count=3)) == 3
-    assert request.await_args is not None
-    assert request.await_args.args[:2] == (
-        "give_item",
-        {"userid": "KU_TEST", "prefab": "twigs", "count": 3},
-    )
+from tests.game.helpers import make_game
 
 
 async def test_game_boundary_rejects_lifecycle_and_copied_invalid_commands() -> None:

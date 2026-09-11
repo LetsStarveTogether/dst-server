@@ -46,41 +46,6 @@ sys.exit(int(os.environ["FAKE_RETURN_CODE"]))
 """
 
 
-@pytest.mark.parametrize("existing", ["directory", "file", "symlink"])
-def test_prepare_validates_overrides_before_replacing_install_mods(
-    tmp_path: Path,
-    existing: str,
-) -> None:
-    install = tmp_path / "install"
-    install.mkdir()
-    install_mods = install / "mods"
-    sentinel = b"keep"
-    if existing == "directory":
-        install_mods.mkdir()
-        (install_mods / "sentinel").write_bytes(sentinel)
-    elif existing == "file":
-        install_mods.write_bytes(sentinel)
-    else:
-        old_mods = tmp_path / "old-mods"
-        old_mods.mkdir()
-        (old_mods / "sentinel").write_bytes(sentinel)
-        install_mods.symlink_to(old_mods, target_is_directory=True)
-
-    cluster = tmp_path / "cluster"
-    shard = cluster / "forest"
-    shard.mkdir(parents=True)
-    (shard / "modoverrides.lua").write_bytes(b"\xff")
-
-    with pytest.raises(ValueError, match=r"invalid.*utf-8"):
-        mods.prepare_shared(cluster)
-
-    if existing == "file":
-        assert install_mods.read_bytes() == sentinel
-    else:
-        assert (install_mods / "sentinel").read_bytes() == sentinel
-    assert not (cluster / "mods").exists()
-
-
 def test_prepare_rejects_managed_setup_symlink_before_replacing_install_mods(
     tmp_path: Path,
 ) -> None:
@@ -137,28 +102,6 @@ def test_prepare_rejects_invalid_setup_before_mutation(tmp_path: Path) -> None:
     assert sentinel.is_file()
     assert not (cluster_mods / "ugc").exists()
     assert not (cluster_mods / "modsettings.lua").exists()
-
-
-def test_prepare_rejects_shard_override_symlink_before_mutation(
-    tmp_path: Path,
-) -> None:
-    install = tmp_path / "install"
-    install.mkdir()
-    cluster = tmp_path / "cluster"
-    shard = cluster / "Master"
-    shard.mkdir(parents=True)
-    outside = tmp_path / "outside.lua"
-    outside.write_text(
-        'return { ["workshop-42"] = { enabled = true } }',
-        encoding="utf-8",
-    )
-    (shard / "modoverrides.lua").symlink_to(outside)
-
-    with pytest.raises(ValueError, match="configuration cannot be a symlink"):
-        mods.prepare_shared(cluster)
-
-    assert not (cluster / "mods").exists()
-    assert outside.read_text(encoding="utf-8").endswith("true } }")
 
 
 def test_native_scan_accepts_static_calls_inside_native_setup(tmp_path: Path) -> None:
@@ -342,6 +285,7 @@ async def test_leader_exit_terminates_descendant_holding_stdout(
     [
         "return",
         'ServerModSetup("42")',
+        "ServerModSetup('42')",
         'ServerModSetup(""); return ServerModCollectionSetup("99")',
     ],
 )
@@ -349,14 +293,13 @@ def test_static_setup_uses_configuration_model(tmp_path: Path, source: str) -> N
     setup = tmp_path / "setup.lua"
     setup.write_text(source, encoding="utf-8")
     parsed = WorkshopDownloads.load(setup)
-    assert parsed.items == ({42} if '"42"' in source else set())
+    assert parsed.items == ({42} if "42" in source else set())
     assert parsed.collections == ({99} if '"99"' in source else set())
 
 
 @pytest.mark.parametrize(
     "source",
     [
-        "ServerModSetup('42')",
         "ServerModSetup([[42]])",
         'return ServerModSetup("1"), ServerModSetup("2")',
     ],
@@ -369,3 +312,35 @@ def test_native_scan_is_broader_than_static_configuration(
     assert mods.scan_setup(setup)[0]
     with pytest.raises(ValueError, match=r"string|return"):
         WorkshopDownloads.load(setup)
+
+
+def test_mod_preparation_uses_setup_and_preserves_native_overrides(
+    tmp_path: Path,
+) -> None:
+    active = tmp_path / "forest"
+    active.mkdir()
+    (active / "server.ini").touch()
+    override = active / "modoverrides.lua"
+    original_override = (
+        'local id = "999"; return {["workshop-" .. id] = {enabled = true}}'
+    )
+    override.write_text(original_override)
+    setup = tmp_path / "mods/dedicated_server_mods_setup.lua"
+    setup.parent.mkdir()
+    setup.write_text('ServerModSetup("777")\n')
+    inactive = tmp_path / "cave"
+    inactive.mkdir()
+    (inactive / "modoverrides.lua").write_text("inactive Lua")
+    world = inactive / "save/world"
+    world.parent.mkdir()
+    world.write_bytes(b"retained world")
+
+    assert mods.prepare_shared(tmp_path) == (777,)
+
+    downloads = WorkshopDownloads.load(
+        tmp_path / "mods/dedicated_server_mods_setup.lua"
+    )
+    assert downloads.items == {777}
+    assert world.read_bytes() == b"retained world"
+    assert override.read_text() == original_override
+    assert (inactive / "modoverrides.lua").read_text() == "inactive Lua"

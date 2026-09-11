@@ -68,7 +68,6 @@ class ShardRuntimeStatus(FrozenModel):
 class ClusterStatus(FrozenModel):
     epoch: ULIDValue
     phase: ClusterPhase
-    revision: ULIDValue | None = None
     prepared_revision: ULIDValue | None = None
     master: Annotated[str, Field(min_length=1)]
     missing_shards: tuple[str, ...] = ()

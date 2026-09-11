@@ -3,5 +3,4 @@ Description=Regenerate idle online DST rooms
 
 [Service]
 Type=oneshot
-WorkingDirectory=/srv/dst/dst-server
-ExecStart=/srv/dst/dst-server/.venv/bin/python -m scripts.recycle_rooms
+ExecStart=/srv/dst/dst-server/.venv/bin/dst-server maintenance recycle

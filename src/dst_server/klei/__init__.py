@@ -9,7 +9,7 @@ from .lobby import (
     Room,
     Secondary,
 )
-from .version import Builds, Version, VersionPage
+from .version import Builds, Version
 
 __all__ = [
     "Builds",
@@ -25,6 +25,5 @@ __all__ = [
     "Room",
     "Secondary",
     "Version",
-    "VersionPage",
     "VersionType",
 ]

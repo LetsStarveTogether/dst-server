@@ -7,29 +7,32 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.14.7"
 dependencies = [
+    "cyclopts>=4.25.2,<5",
     "httpx2[http2]>=2.12,<3",
     "logbook>=1.10.1",
     "luaparser>=4.2.0,<5",
     "opentelemetry-api~=1.44.0",
     "pycapnp>=2.2.4,<3",
     "pydantic>=2.13.5",
+    "prompt-toolkit>=3.0.53,<4",
     "python-ulid>=4.0.1",
 ]
 
 [project.optional-dependencies]
 export = ["obstore>=0.11.1,<1", "py7zr>=1.1.3,<2"]
-host = ["pystemd>=0.15.3,<0.16"]
+host = ["dbus-fast>=5.0.22,<6"]
 klei = ["selectolax>=0.4.11,<0.5"]
 otel = ["opentelemetry-exporter-otlp-proto-grpc~=1.44.0"]
 
 [project.scripts]
-dst-annotations = "dst_server.annotations.cli:main"
-dst-server = "dst_server.cluster.cli:main"
+dst-server = "dst_server.cli:main"
 
 [dependency-groups]
 dev = [
     "hypothesis>=6.168.0",
     "prek>=0.5.2",
+    # ponytail: production timers still use the legacy scripts; remove after cutover.
+    "pystemd>=0.15.3,<0.16",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.16.7",

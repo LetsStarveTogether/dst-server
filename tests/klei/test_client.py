@@ -15,7 +15,7 @@ from dst_server.klei import (
     Region,
     Role,
     Room,
-    VersionPage,
+    Version,
     VersionType,
 )
 
@@ -71,19 +71,40 @@ def lobby_row() -> dict[str, object]:
     }
 
 
-def test_version_page_uses_strict_lexbor_models() -> None:
-    page = VersionPage.model_validate(VERSION_HTML)
+async def test_get_versions_preserves_fields_and_sorts() -> None:
+    content = (
+        VERSION_HTML.replace("736959", "736960").replace("06/11/26", "06/10/26")
+        + VERSION_HTML.replace("736959", "736958")
+        + VERSION_HTML
+    )
 
-    assert page.title == "Don't Starve Together"
-    assert page.page_count == 35
-    assert page.followers == 262
-    assert page.versions[0].number == 736959
-    assert page.versions[0].type is VersionType.RELEASE
-    assert page.versions[0].date == date(2026, 6, 11)
-    assert page.versions[0].is_hotfix is True
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert str(request.url) == VERSION_URL
+        return httpx2.Response(200, text=content)
 
-    with pytest.raises(ValidationError, match="missing required nodes"):
-        VersionPage.model_validate('<li class="cCmsRecord_row">broken</li>')
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
+        versions = await KleiClient(client=http).get_versions()
+
+    assert [version.number for version in versions] == [736959, 736958, 736960]
+    assert versions[0] == Version(
+        number=736959,
+        type=VersionType.RELEASE,
+        date=date(2026, 6, 11),
+        url="https://example.test/736959",
+        row_id=2754,
+        release_id=2754,
+        is_current_release=True,
+        is_hotfix=True,
+    )
+
+
+async def test_get_versions_rejects_malformed_release_rows() -> None:
+    transport = httpx2.MockTransport(
+        lambda _: httpx2.Response(200, text='<li class="cCmsRecord_row">broken</li>')
+    )
+    async with httpx2.AsyncClient(transport=transport) as http:
+        with pytest.raises(ValidationError, match="missing required nodes"):
+            await KleiClient(client=http).get_versions()
 
 
 @pytest.mark.parametrize(
@@ -268,6 +289,8 @@ async def test_klei_client_has_explicit_error_boundaries(failure: str) -> None:
         error = httpx2.ConnectError if failure == "connect" else httpx2.HTTPStatusError
         with pytest.raises(error):
             await client.get_latest_build()
+        with pytest.raises(error):
+            await client.get_versions()
 
 
 async def test_klei_client_only_closes_its_own_http_client() -> None:

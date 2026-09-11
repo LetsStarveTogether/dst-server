@@ -11,7 +11,6 @@ from ulid import ULID
 from dst_server import commands as c
 from dst_server.api import ClusterAPI, ShardAPI
 from dst_server.concurrency import cancel_tasks, complete
-from dst_server.configuration.models import ClusterConfig
 from dst_server.configuration.store import ConfigurationStore
 from dst_server.errors import (
     ConfigurationStoreError,
@@ -20,7 +19,6 @@ from dst_server.errors import (
     IncompleteRosterError,
     IndeterminateCommandError,
     IndeterminateError,
-    InvalidConfigurationError,
     PlayerLocationConflictError,
     SubscriptionOverflowError,
     error_info,
@@ -31,9 +29,7 @@ from dst_server.models.cluster import (
     ClusterSaveResult,
     ClusterStatus,
     ConfigurationRead,
-    ConfigurationSnapshot,
     GameEventRecord,
-    InvalidConfiguration,
     LifecycleRecord,
     LocatedPlayer,
     LogRecord,
@@ -72,7 +68,6 @@ AGENT_STOP_TIMEOUT = (
 AGENT_KILL_TIMEOUT = OUTPUT_DRAIN_TIMEOUT + RPC_TIMEOUT_MARGIN
 AGENT_RESTART_TIMEOUT = AGENT_START_TIMEOUT + AGENT_STOP_TIMEOUT
 CONTROLLER_CANCEL_TIMEOUT = 1.0
-PREPARE_ATTEMPTS = 3
 
 
 class AgentEndpoint(Protocol):
@@ -178,7 +173,6 @@ class ClusterController(ClusterAPI):
             c.Kill: self._kill,
             c.UpdateMods: self._update_mods,
             c.ReadConfiguration: self._read_configuration,
-            c.SaveConfiguration: self._save_configuration,
             c.ExecuteAll: self._execute_all,
             c.Announce: self._announce,
             c.ClusterSave: self._save,
@@ -310,8 +304,6 @@ class ClusterController(ClusterAPI):
 
     async def _status(self) -> ClusterStatus:
         self._require_open()
-        read = await self._configuration.read()
-        revision = read.revision
         missing = self._missing
         agents = tuple(
             self._agents[name] for name in self._names if name in self._agents
@@ -320,13 +312,9 @@ class ClusterController(ClusterAPI):
             await asyncio.gather(*(self._endpoint_status(agent) for agent in agents))
         )
         error_id, error = self._error_id, self._error
-        if isinstance(read, InvalidConfiguration):
-            error_id = error_id or ULID()
-            error = error or "cluster configuration is invalid"
         return ClusterStatus(
             epoch=self.epoch,
             phase=self._cluster_phase(statuses, missing, error_id),
-            revision=revision,
             prepared_revision=self._prepared_revision,
             master=self.master,
             missing_shards=missing,
@@ -369,20 +357,6 @@ class ClusterController(ClusterAPI):
     async def _read_configuration(self) -> ConfigurationRead:
         self._require_open()
         return await self._configuration.read()
-
-    async def _save_configuration(
-        self,
-        expected_revision: ULID,
-        configuration: ClusterConfig,
-    ) -> ConfigurationSnapshot:
-        async with self._public_operation():
-            saved = await self._configuration.save(
-                expected_revision,
-                configuration,
-                all_stopped=self._complete and await self._all_stopped(),
-            )
-            self._prepared_revision = None
-            return saved
 
     async def _execute_all(
         self,
@@ -904,42 +878,25 @@ class ClusterController(ClusterAPI):
         self._require_complete()
         self._phase = "preparing"
         try:
-            for _ in range(PREPARE_ATTEMPTS):
-                read = await self._configuration.read()
-                if isinstance(read, InvalidConfiguration):
-                    raise InvalidConfigurationError(read.revision, read.fields)
-                self._configuration.validate_deployment(read.configuration)
-                if not force and read.revision == self._prepared_revision:
-                    break
-                if not await self._all_stopped():
-                    if not force and self._prepared_revision is None:
-                        # Adopt live games without rewriting their shared Mod files.
-                        break
+            self._configuration.validate_deployment()
+            if force or self._prepared_revision is None:
+                if await self._all_stopped():
+                    self._prepared_revision = None
+                    actual = await service.prepare_shared(
+                        self.install_path,
+                        self.cluster_path,
+                        update_mods=True,
+                    )
+                    self._require_open()
+                    if {(item.name, item.master) for item in actual} != {
+                        (item.name, item.master) for item in self._layout.values()
+                    }:
+                        msg = "prepared shard topology does not match controller"
+                        raise RuntimeError(msg)
+                    self._prepared_revision = ULID()
+                elif force:
                     msg = "all game processes must be stopped"
                     raise RuntimeError(msg)
-                self._prepared_revision = None
-                actual = await service.prepare_shared(
-                    self.install_path,
-                    self.cluster_path,
-                    update_mods=True,
-                )
-                self._require_open()
-                if {(item.name, item.master) for item in actual} != {
-                    (item.name, item.master) for item in self._layout.values()
-                }:
-                    msg = "prepared shard topology does not match controller"
-                    raise RuntimeError(msg)
-                current = await self._configuration.read()
-                if isinstance(current, InvalidConfiguration):
-                    raise InvalidConfigurationError(current.revision, current.fields)
-                self._configuration.validate_deployment(current.configuration)
-                if current.revision == read.revision:
-                    self._prepared_revision = current.revision
-                    break
-                force = True
-            else:
-                msg = "cluster configuration changed repeatedly during preparation"
-                raise RuntimeError(msg)
             self._require_open()
             await self._gather(
                 self._ordered_agents,

@@ -1,9 +1,9 @@
 [Unit]
 Description=Apply DST room opening hours
 OnSuccess=dst-room-recycle.service
+OnFailure=dst-room-recycle.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/srv/dst/dst-server
-ExecStart=/srv/dst/dst-server/.venv/bin/python -m scripts.manage_rooms
-TimeoutStartSec=30
+ExecStart=/srv/dst/dst-server/.venv/bin/dst-server schedule run
+TimeoutStartSec=120

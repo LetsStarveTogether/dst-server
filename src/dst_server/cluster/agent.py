@@ -36,7 +36,7 @@ from dst_server.timeouts import (
     timeout_scope,
 )
 
-from . import console, service
+from . import service
 from .subscriptions import Broadcast
 
 if TYPE_CHECKING:
@@ -81,7 +81,6 @@ class ShardAgent:
         self._saved_floor = 0
         self._event_changed = asyncio.Condition()
         self._attempt_tasks: tuple[asyncio.Task[None], ...] = ()
-        self._fifo_task: asyncio.Task[None] | None = None
         self._pipeline: Pipeline | None = None
         self._activated = False
         self._close_task: asyncio.Task[None] | None = None
@@ -153,11 +152,7 @@ class ShardAgent:
         )
 
     async def activate(self) -> None:
-        service.activate_shard(
-            self.install_path,
-            self.cluster_path,
-            self.shard,
-        )
+        service.activate_shard(self.install_path, self.cluster_path)
         if not self._activated:
             self._pipeline = service.configure_otel(
                 self.config,
@@ -365,9 +360,6 @@ class ShardAgent:
             await self.supervisor.aclose()
         except BaseException as error:
             errors.append(error)
-        fifo, self._fifo_task = self._fifo_task, None
-        if fifo is not None:
-            await cancel_tasks(fifo)
         tasks, self._attempt_tasks = self._attempt_tasks, ()
         await cancel_tasks(*tasks)
         self.logs.close()
@@ -454,22 +446,12 @@ class ShardAgent:
             )
         )
 
-    async def _started(self, server: Server) -> None:
+    async def _started(self, _server: Server) -> None:
         self._failure_id = None
         self._started_at_ns = time_ns()
-        self._fifo_task = asyncio.create_task(
-            console.forward(self.shard.console, server),
-            name=f"dst-fifo-{self.shard.name}",
-        )
-        self._fifo_task.add_done_callback(
-            lambda completed: self._background_done(server, completed, critical=False)
-        )
 
     async def _stopped(self, _server: Server) -> None:
         self._started_at_ns = None
-        fifo, self._fifo_task = self._fifo_task, None
-        if fifo is not None:
-            await cancel_tasks(fifo)
         tasks, self._attempt_tasks = self._attempt_tasks, ()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)

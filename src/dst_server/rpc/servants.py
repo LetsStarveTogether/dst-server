@@ -292,6 +292,14 @@ class _EndpointMethods(_Responder):
 
         await self._respond(_context, "subscribe", subscribe, _identity)
 
+    async def describe(self, _context: Any) -> None:
+        await self._respond(
+            _context,
+            "describe",
+            lambda: c.describe_operations(self.scope),
+            lambda value: encode(c.METHOD_DESCRIPTIONS, value),
+        )
+
 
 def _sources(target: Endpoint) -> dict[str, Callable[[], LocalSubscription[Any]]]:
     return {

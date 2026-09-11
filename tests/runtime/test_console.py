@@ -19,7 +19,7 @@ from dst_server.runtime.lifecycle import Lifecycle
 from dst_server.runtime.request import track_request
 from dst_server.telemetry.recorder import Recorder
 from dst_server.telemetry.stream import EventStream
-from tests.helpers import StubWriter, feed_frame, next_frame
+from tests.helpers import StubWriter, feed_frame, next_frame, wait_for_event
 
 COMMAND_DONE = b"DST_RemoteCommandDone"
 
@@ -41,7 +41,14 @@ async def start_command(
     command: str,
 ) -> tuple[asyncio.Task[str], bytes, bytes, bytes]:
     task = asyncio.create_task(console.execute(command))
-    start, end, wrapped = await next_frame(writer)
+    try:
+        start, end, wrapped = await next_frame(writer)
+    except BaseException:
+        async with asyncio.timeout(5):
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await console.close()
+        raise
     return task, start, end, wrapped
 
 
@@ -203,18 +210,19 @@ async def test_close_finishes_writer_before_propagating_repeated_cancellation(
     monkeypatch.setattr(writer, "wait_closed", wait_closed)
     closing = asyncio.create_task(console.close())
     try:
-        await entered.wait()
+        await wait_for_event(entered, closing)
         for _ in range(cancellations):
             closing.cancel()
             await asyncio.sleep(0)
             assert not closing.done()
         release.set()
         with pytest.raises(asyncio.CancelledError):
-            await closing
+            await asyncio.wait_for(asyncio.shield(closing), timeout=5)
         assert closed.is_set()
     finally:
-        release.set()
-        await asyncio.gather(closing, return_exceptions=True)
+        async with asyncio.timeout(5):
+            release.set()
+            await asyncio.gather(closing, return_exceptions=True)
 
 
 async def test_outer_deadline_after_write_breaks_console() -> None:
@@ -295,15 +303,25 @@ async def test_generation_change_after_lua_busy_does_not_replay(
 
     monkeypatch.setattr("dst_server.runtime.console.asyncio.sleep", retry_delay)
     task = asyncio.create_task(console.execute("mutation()", lambda: current))
-    await next_frame(writer)
-    reader.feed_data(b"DST_LuaBusy\n")
-    await retry_started.wait()
-    current = False
-    release_retry.set()
+    try:
+        async with asyncio.timeout(5):
+            await next_frame(writer)
+            reader.feed_data(b"DST_LuaBusy\n")
+            await wait_for_event(retry_started, task)
+            current = False
+            release_retry.set()
 
-    with pytest.raises(StaleGenerationError, match="before the command was written"):
-        await asyncio.wait_for(task, 1)
-    assert len(writer.commands) == 1
+            with pytest.raises(
+                StaleGenerationError, match="before the command was written"
+            ):
+                await asyncio.wait_for(task, 1)
+            assert len(writer.commands) == 1
+    finally:
+        async with asyncio.timeout(5):
+            release_retry.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await console.close()
 
 
 async def test_generation_change_while_draining_does_not_write(
@@ -313,7 +331,7 @@ async def test_generation_change_while_draining_does_not_write(
     first, start, end, _ = await start_command(console, writer, "first")
     first.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await first
+        await asyncio.wait_for(asyncio.shield(first), timeout=5)
 
     draining = asyncio.Event()
     drain_result = console.drain_result
@@ -325,13 +343,22 @@ async def test_generation_change_while_draining_does_not_write(
     monkeypatch.setattr(console, "drain_result", observe_drain)
     current = True
     second = asyncio.create_task(console.execute("mutation()", lambda: current))
-    await draining.wait()
-    current = False
-    feed_frame(reader, start, end, b"old")
+    try:
+        async with asyncio.timeout(5):
+            await wait_for_event(draining, second)
+            current = False
+            feed_frame(reader, start, end, b"old")
 
-    with pytest.raises(StaleGenerationError, match="before the command was written"):
-        await second
-    assert len(writer.commands) == 1
+            with pytest.raises(
+                StaleGenerationError, match="before the command was written"
+            ):
+                await second
+            assert len(writer.commands) == 1
+    finally:
+        async with asyncio.timeout(5):
+            second.cancel()
+            await asyncio.gather(second, return_exceptions=True)
+            await console.close()
 
 
 async def test_cancelled_command_retrieves_later_lua_busy() -> None:
@@ -412,31 +439,43 @@ async def test_cancelled_save_late_busy_releases_confirmation_barrier() -> None:
             return await lifecycle.wait_for_save(request, 1, state)
 
     first = asyncio.create_task(save())
-    await next_frame(writer)
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
+    second: asyncio.Task[server_events.SavedEvent] | None = None
+    try:
+        watchdog = asyncio.timeout(5)
+        async with watchdog:
+            await next_frame(writer)
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
 
-    second_started = asyncio.Event()
-    request_completed = asyncio.Event()
+            second_started = asyncio.Event()
+            request_completed = asyncio.Event()
 
-    async def save_again() -> server_events.SavedEvent:
-        second_started.set()
-        return await save(request_completed)
+            async def save_again() -> server_events.SavedEvent:
+                second_started.set()
+                return await save(request_completed)
 
-    second = asyncio.create_task(save_again())
-    await second_started.wait()
-    assert len(writer.commands) == 1
+            second = asyncio.create_task(save_again())
+            await wait_for_event(second_started, second)
+            assert len(writer.commands) == 1
 
-    reader.feed_data(b"DST_LuaBusy\n")
-    start, end, _ = await next_frame(writer)
-    feed_frame(reader, start, end, b"ok")
-    await request_completed.wait()
+            reader.feed_data(b"DST_LuaBusy\n")
+            start, end, _ = await next_frame(writer)
+            feed_frame(reader, start, end, b"ok")
+            await wait_for_event(request_completed, second)
 
-    assert not second.done()
-    expected = server_events.SavedEvent(path="session/REQUEST/2", snapshot=2)
-    lifecycle.handle(expected, lambda _: None)
-    assert await second == expected
+            assert not second.done()
+            expected = server_events.SavedEvent(path="session/REQUEST/2", snapshot=2)
+            lifecycle.handle(expected, lambda _: None)
+            assert await second == expected
+        assert not watchdog.expired()
+    finally:
+        async with asyncio.timeout(5):
+            pending = (first,) if second is None else (first, second)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            await console.close()
 
 
 async def test_oversized_response_is_drained_before_next_command() -> None:

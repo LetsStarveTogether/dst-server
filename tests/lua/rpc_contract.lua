@@ -12,14 +12,6 @@ local blacklist = {
 }
 local whitelist = { KU_TEST = true }
 
-local function component(values)
-    return setmetatable(values, {
-        __index = function(_, name)
-            return function() return 0 end
-        end,
-    })
-end
-
 local function item(prefab, guid)
     return {
         prefab = prefab,
@@ -27,12 +19,12 @@ local function item(prefab, guid)
         GetSkinName = function() return "classic" end,
         components = {
             stackable = { StackSize = function() return 3 end },
-            inventoryitem = component({ GetMoisturePercent = function() return 0.1 end }),
-            finiteuses = component({ GetPercent = function() return 0.8 end }),
-            perishable = component({ GetPercent = function() return 0.7 end }),
-            fueled = component({ GetPercent = function() return 0.6 end }),
-            armor = component({ GetPercent = function() return 0.5 end }),
-            rechargeable = component({ GetPercent = function() return 0.4 end }),
+            inventoryitem = { GetMoisturePercent = function() return 0.1 end },
+            finiteuses = { GetPercent = function() return 0.8 end },
+            perishable = { GetPercent = function() return 0.7 end },
+            fueled = { GetPercent = function() return 0.6 end },
+            armor = { GetPercent = function() return 0.5 end },
+            rechargeable = { GetPercent = function() return 0.4 end },
         },
     }
 end
@@ -73,20 +65,20 @@ local player = {
         Teleport = function(_, x, y, z) observed.teleported = { x, y, z } end,
     },
     components = {
-        age = component({
+        age = {
             GetAge = function() return 100 end,
             GetAgeInDays = function() return 2 end,
             GetDisplayAgeInDays = function() return 3 end,
-        }),
+        },
         combat = { target = nil, GetWeapon = function() return nil end },
         rider = { GetMount = function() return nil end },
         leader = { followers = {} },
-        skilltreeupdater = component({
+        skilltreeupdater = {
             GetSkillXP = function() return 10 end,
             GetAvailableSkillPoints = function() return 2 end,
             GetActivatedSkills = function() return { wilson_torch_1 = true } end,
-        }),
-        health = component({
+        },
+        health = {
             currenthealth = 80,
             maxhealth = 100,
             GetPercent = function() return 0.8 end,
@@ -94,40 +86,50 @@ local player = {
             IsInvincible = function() return false end,
             ForceKill = function() observed.killed = true end,
             SetPercent = function(_, value) observed.health = value end,
-        }),
-        hunger = component({
+        },
+        hunger = {
             current = 50,
             max = 100,
             GetPercent = function() return 0.5 end,
             SetPercent = function(_, value) observed.hunger = value end,
-        }),
-        sanity = component({
+        },
+        sanity = {
             current = 60,
             max = 100,
             GetPercent = function() return 0.6 end,
             SetPercent = function(_, value) observed.sanity = value end,
-        }),
-        temperature = component({
+        },
+        temperature = {
             GetCurrent = function() return 25 end,
             GetMax = function() return 70 end,
             SetTemperature = function(_, value) observed.temperature = value end,
-        }),
-        moisture = component({
+        },
+        moisture = {
             GetMoisture = function() return 10 end,
             GetMaxMoisture = function() return 100 end,
             GetMoisturePercent = function() return 0.1 end,
             SetPercent = function(_, value) observed.moisture = value end,
-        }),
+        },
         inventory = inventory,
     },
-    HasTag = function(_, tag) return tag == "player" end,
+    HasTag = function(_, tag)
+        return tag == "player" or (tag == "playerghost" and observed.killed == true)
+    end,
     GetDisplayName = function() return "Wilson" end,
     IsValid = function() return true end,
     PushEvent = function(_, name) observed.player_event = name end,
     DoTaskInTime = function(value, _, callback) callback(value) end,
+    ListenForEvent = function(_, name, callback)
+        assert(name == "ms_skilltreeinitialized" and type(callback) == "function")
+        observed.player_listener = name
+    end,
 }
 
 TheWorld = {
+    ListenForEvent = function(_, name, callback)
+        assert(name == "ms_playerjoined" and type(callback) == "function")
+        observed.world_listener = name
+    end,
     ismastersim = true,
     ismastershard = true,
     meta = {
@@ -187,6 +189,20 @@ TheWorld = {
 }
 TheNet = {
     GetCurrentSnapshot = function() return 26 end,
+    ListSnapshots = function(_, session_id, online, count)
+        assert(session_id == "SESSION" and online == true and count >= 2)
+        return {
+            { snapshot_id = 25, world_file = "save/session/SESSION/0000000025" },
+            { snapshot_id = 23, world_file = "save/session/SESSION/0000000023" },
+        }, false
+    end,
+    TruncateSnapshots = function(_, session_id, offset)
+        observed.truncated_snapshots = { session_id, offset }
+    end,
+    GetWorldSessionFile = function(_, session_id)
+        assert(session_id == "SESSION")
+        return "save/session/SESSION/0000000023"
+    end,
     GetServerName = function() return "Test Room" end,
     GetServerDescription = function() return "Description" end,
     GetServerGameMode = function() return "survival" end,
@@ -216,6 +232,7 @@ TheNet = {
     RemoveFromWhiteList = function(_, userid) whitelist[userid] = nil end,
 }
 TheShard = { GetShardId = function() return 1 end }
+AllPlayers = { player }
 BRANCH = "release"
 APP_VERSION = "1.0"
 ModManager = { GetEnabledModNames = function() return { "workshop-1" } end }
@@ -262,6 +279,7 @@ c_reset = function() observed.reset = true end
 c_regenerateworld = function() observed.regenerated = true end
 c_regenerateshard = function(erase) observed.regenerated_shard = erase end
 c_rollback = function(count) observed.rollback = count end
+WorldRollbackFromSim = function(count) observed.snapshot_rollback = count end
 
 local driver = require("dst_server")
 driver.install({ nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV", generation = 1, profile = "off", actions = {} })
@@ -271,6 +289,7 @@ local calls = {
     { "get_room", {} },
     { "get_world", {} },
     { "get_runtime", {} },
+    { "get_snapshots", { limit = 1 } },
     { "get_mods", {} },
     { "get_shards", { current_name = "Master" } },
     { "get_players", {} },
@@ -283,6 +302,7 @@ local calls = {
     { "regenerate_world", {} },
     { "regenerate_shard", { preserve_settings = true } },
     { "rollback", { count = 1 } },
+    { "rollback_to_snapshot", { session_id = "SESSION", snapshot_id = 23 } },
     { "kick_player", { userid = "KU_TEST" } },
     { "ban_player", { userid = "KU_TEST", seconds = 60 } },
     { "get_blocklist", {} },
@@ -300,6 +320,7 @@ local calls = {
     { "give_item", { userid = "KU_TEST", prefab = "twigs", count = 1 } },
     { "remove_item", { userid = "KU_TEST", prefab = "twigs", count = 1 } },
     { "execute_script", { source = "return {answer=42}" } },
+    { "evaluate", { source = "1 + 2, '中文', nil" } },
 }
 
 for _, call in ipairs(calls) do
@@ -309,7 +330,12 @@ for _, call in ipairs(calls) do
     }))
 end
 
+assert(observed.world_listener == "ms_playerjoined")
+assert(observed.player_listener == "ms_skilltreeinitialized")
 assert(observed.announcement == "hello")
+assert(observed.saved == true and observed.reset == true and observed.regenerated == true)
+assert(observed.truncated_snapshots[1] == "SESSION" and observed.truncated_snapshots[2] == -3)
+assert(observed.snapshot_rollback == 0)
 assert(observed.paused == true)
 assert(observed.regenerated_shard == false)
 assert(observed.rollback == 1)
@@ -328,6 +354,9 @@ assert(#remaining == 2 and remaining[1] == "KU_KEEP"
 assert(driver.call("is_whitelisted", { userid = "KU_TEST" }) == false)
 assert(observed.health == 0.5)
 assert(observed.killed == true)
+assert(observed.player_event == "respawnfromghost")
+-- Reset the simulated ghost before testing later vitals changes.
+observed.killed = false
 assert(observed.world_events.ms_playerdespawnanddelete == player)
 local migration = observed.world_events.ms_playerdespawnandmigrate
 assert(migration.player == player and migration.worldid == "2" and migration.portalid == 1)

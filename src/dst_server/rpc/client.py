@@ -1,18 +1,26 @@
 # ruff: file-ignore[async-function-with-timeout, private-member-access]
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from importlib import import_module
 from os import PathLike, fspath
 from typing import Any, Literal, Self, cast
 from weakref import WeakValueDictionary
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 from ulid import ULID
 
 from dst_server.api import ClusterAPI, ShardAPI
 from dst_server.cluster.subscriptions import BATCH_SIZE, MAX_BATCH_SIZE
-from dst_server.commands import Request, Scope, encode_request, operation
+from dst_server.commands import (
+    METHOD_DESCRIPTIONS,
+    MethodDescription,
+    Request,
+    Scope,
+    encode_call,
+    encode_request,
+    operation,
+)
 from dst_server.errors import (
     DisconnectedError,
     ErrorCode,
@@ -28,7 +36,7 @@ from dst_server.timeouts import (
     positive_timeout,
 )
 
-from .codec import ERROR, decode, decode_model, unwrap_outcome
+from .codec import ERROR, decode, decode_json_value, decode_model, unwrap_outcome
 from .schema import load_schema
 
 type StreamKind = Literal["logs", "lifecycle", "events"]
@@ -110,33 +118,78 @@ class RemoteEndpoint:
 
     async def invoke[T](self, command: Request[T]) -> T:
         spec = operation(self.scope, command)
-        payload = encode_request(command)
+        return await self._send(
+            encode_request(command),
+            timeout=command.timeout,
+            mutation=spec.mutation,
+            decode_result=lambda payload: cast("T", decode(spec.response, payload)),
+        )
+
+    async def describe(self) -> tuple[MethodDescription, ...]:
+        """Read the server's public method registry, including argument schemas."""
+        capability = await self._get_capability()
+        return decode(METHOD_DESCRIPTIONS, await _read_call(capability.describe()))
+
+    async def call(
+        self,
+        method: str,
+        arguments: Mapping[str, JsonValue] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> JsonValue:
+        """Call a server-advertised method without requiring a local request class."""
+        methods = await self.describe()
+        spec = next((item for item in methods if item.name == method), None)
+        if spec is None:
+            msg = f"command {method!r} is not available to {self.scope!r}"
+            raise ValueError(msg)
+        duration = (
+            spec.default_timeout if timeout is None else positive_timeout(timeout)
+        )
+        return await self._send(
+            encode_call(method, arguments, timeout=duration),
+            timeout=duration,
+            mutation=spec.mutation,
+            decode_result=decode_json_value,
+        )
+
+    async def _send[T](
+        self,
+        payload: bytes,
+        *,
+        timeout: float,
+        mutation: bool,
+        decode_result: Callable[[bytes], T],
+    ) -> T:
         capability = await self._get_capability()
         try:
-            async with asyncio.timeout(command.timeout + 2 * RPC_TIMEOUT_MARGIN):
+            async with asyncio.timeout(timeout + 2 * RPC_TIMEOUT_MARGIN):
                 pending = capability.call(request=payload)
                 del payload
                 response = await pending
         except TimeoutError as error:
-            if spec.mutation:
+            if mutation:
                 raise IndeterminateError from error
             raise RemoteError(
                 ErrorInfo(ErrorCode.TIMEOUT, ULID(), "operation timed out")
             ) from error
         except asyncio.CancelledError as error:
-            if spec.mutation:
-                raise IndeterminateError from error
+            if mutation:
+                error.add_note(
+                    "RPC mutation result could not be confirmed; "
+                    "the operation may still be running."
+                )
             raise
         except capnp.KjException as error:
-            if spec.mutation:
+            if mutation:
                 raise IndeterminateError from error
             raise DisconnectedError(str(error)) from error
         try:
-            return cast("T", decode(spec.response, unwrap_outcome(response.result)))
+            return decode_result(unwrap_outcome(response.result))
         except RemoteError:
             raise
         except Exception as error:
-            if spec.mutation:
+            if mutation:
                 raise IndeterminateError from error
             raise
 

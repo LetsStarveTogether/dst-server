@@ -2,14 +2,13 @@ import re
 from datetime import date
 
 from pydantic import ConfigDict, RootModel, model_validator
-from selectolax.lexbor import LexborHTMLParser, LexborNode
+from selectolax.lexbor import LexborNode
 
 from .enums import VersionType
 from .schema import KleiModel
 
 VERSION_DATE_PATTERN = re.compile(r"\d{1,2}/\d{1,2}/\d{2}")
 VERSION_NUMBER_PATTERN = re.compile(r"\b\d+\b")
-PAGE_COUNT_PATTERN = re.compile(r"Page\s+(\d+)\s+of\s+(\d+)")
 SHORT_YEAR_BASE = 2000
 
 
@@ -70,65 +69,6 @@ class Version(KleiModel):
             return int(value.replace(",", ""))
         except ValueError:
             return None
-
-
-class VersionPage(KleiModel):
-    title: str
-    page: int | None = None
-    page_count: int | None = None
-    followers: int | None = None
-    versions: tuple[Version, ...]
-
-    @model_validator(mode="before")
-    @classmethod
-    def parse_html(cls, value: object) -> object:
-        if isinstance(value, str):
-            tree = LexborHTMLParser(value)
-        elif isinstance(value, LexborHTMLParser):
-            tree = value
-        else:
-            return value
-
-        versions = tuple(
-            sorted(
-                (Version.model_validate(row) for row in tree.css("li.cCmsRecord_row")),
-                key=lambda version: (version.date, version.number),
-                reverse=True,
-            )
-        )
-        page, page_count = cls.parse_page_numbers(tree)
-        return {
-            "title": cls.parse_title(tree),
-            "page": page,
-            "page_count": page_count,
-            "followers": cls.parse_followers(tree),
-            "versions": versions,
-        }
-
-    @staticmethod
-    def parse_title(tree: LexborHTMLParser) -> str:
-        if title := tree.css_first("h1"):
-            return title.text(strip=True)
-        if title := tree.css_first("title"):
-            return title.text(strip=True)
-        return ""
-
-    @staticmethod
-    def parse_page_numbers(
-        tree: LexborHTMLParser,
-    ) -> tuple[int | None, int | None]:
-        for pagination in tree.css(".ipsPagination"):
-            if match := PAGE_COUNT_PATTERN.search(
-                pagination.text(separator=" ", strip=True)
-            ):
-                return int(match.group(1)), int(match.group(2))
-        return None, None
-
-    @staticmethod
-    def parse_followers(tree: LexborHTMLParser) -> int | None:
-        if count := tree.css_first("[data-role='followButton'] .ipsCommentCount"):
-            return Version.parse_optional_int(count.text(strip=True))
-        return None
 
 
 class Builds(RootModel[dict[str, tuple[int | str, ...]]]):

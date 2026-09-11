@@ -65,6 +65,7 @@ _METHODS: dict[type[c.Request[Any]], str] = {
     c.Give: "give_item",
     c.Remove: "remove_item",
     c.ExecuteJson: "execute_script",
+    c.Evaluate: "evaluate",
 }
 _RELOADS = {c.Reset, c.Regenerate, c.RegenerateShard, c.Rollback, c.RollbackToSnapshot}
 _MUTATIONS = {
@@ -220,7 +221,7 @@ class GameClient(EndpointAPI):
             safe_failure = (
                 isinstance(error, LuaRequestError)
                 and error.code == "lua_error"
-                and method != "execute_script"
+                and method not in {"execute_script", "evaluate"}
             )
             if (
                 method not in _MUTATIONS

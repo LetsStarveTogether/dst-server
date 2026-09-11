@@ -1,10 +1,14 @@
 import os
 import re
 import struct
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from io import BytesIO
 from pathlib import Path
 from threading import Thread
 from typing import Any, BinaryIO
+from unittest.mock import Mock
 from weakref import ref
 
 import pytest
@@ -381,34 +385,26 @@ def test_consumer_failure_closes_export(saved_cluster: Path) -> None:
     assert exported.stream.closed
 
 
-@pytest.mark.parametrize(
-    ("object_prefix", "url_prefix"),
-    [
-        ("", None),
-        ("rooms/exports/", "https://downloads.example.test/"),
-        ("private/room-", "https://public.example.test/download?name="),
-    ],
-)
-@pytest.mark.parametrize("configuration_source", ["environment", "explicit", "mixed"])
-def test_upload_configuration_and_stream_cleanup(
-    saved_cluster: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    object_prefix: str,
-    url_prefix: str | None,
-    configuration_source: str,
-) -> None:
-    requests: list[tuple[str, bytes, dict[str, str]]] = []
-    fail_upload = False
+@dataclass
+class UploadEndpoint:
+    url: str = ""
+    requests: list[tuple[str, bytes, dict[str, str]]] = field(default_factory=list)
+    reject: bool = False
+
+
+@pytest.fixture
+def upload_endpoint(monkeypatch: pytest.MonkeyPatch) -> Iterator[UploadEndpoint]:
+    uploads = UploadEndpoint()
 
     class Handler(BaseHTTPRequestHandler):
         def do_PUT(self) -> None:
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            requests.append((
+            uploads.requests.append((
                 self.path,
                 body,
                 {key.lower(): value for key, value in self.headers.items()},
             ))
-            self.send_response(403 if fail_upload else 200)
+            self.send_response(403 if uploads.reject else 200)
             self.send_header("Content-Length", "0")
             self.send_header("ETag", '"test-etag"')
             self.end_headers()
@@ -416,104 +412,156 @@ def test_upload_configuration_and_stream_cleanup(
         def log_message(self, format: str, *args: object) -> None:
             pass
 
-    for name in os.environ:
+    for name in list(os.environ):
         if name.startswith("AWS_"):
             monkeypatch.delenv(name)
     with HTTPServer(("127.0.0.1", 0), Handler) as server:
-        endpoint = f"http://127.0.0.1:{server.server_port}"
-        environment = {
-            "AWS_ENDPOINT": endpoint,
+        uploads.url = f"http://127.0.0.1:{server.server_port}"
+        for name, value in {
+            "AWS_ENDPOINT": uploads.url,
             "AWS_BUCKET": "archive-test",
             "AWS_ACCESS_KEY_ID": "test-access",
             "AWS_SECRET_ACCESS_KEY": "test-secret",
             "AWS_SESSION_TOKEN": "test-session",
-            "AWS_REGION": "unused-region",
-        }
-        settings: dict[str, Any] = {}
-        region = "auto"
-        if configuration_source != "environment":
-            region = "test-region"
-            settings = {
-                "endpoint": endpoint,
-                "bucket": "archive-test",
-                "region": region,
-                "access_key_id": SecretStr("test-access"),
-                "secret_access_key": SecretStr("test-secret"),
-                "session_token": SecretStr("test-session"),
-            }
-            environment = (
-                {
-                    **dict.fromkeys(environment, "unused-value"),
-                    "AWS_ENDPOINT": "http://127.0.0.1:1",
-                    "AWS_ENDPOINT_URL_S3": "http://127.0.0.1:1",
-                }
-                if configuration_source == "mixed"
-                else {}
-            )
-        monkeypatch.setenv("AWS_ALLOW_HTTP", "true")
-        for name, value in environment.items():
+            "AWS_ALLOW_HTTP": "true",
+        }.items():
             monkeypatch.setenv(name, value)
-        thread = Thread(target=server.serve_forever, daemon=True)
+        thread = Thread(target=lambda: server.serve_forever(poll_interval=0.01))
         thread.start()
         try:
-            with archive.export_cluster(saved_cluster) as exported:
-                expected = exported.stream.read()
-                exported.stream.seek(6)
-                first = exported.upload(
-                    object_prefix=object_prefix, url_prefix=url_prefix, **settings
-                )
-                monkeypatch.setenv("AWS_SESSION_TOKEN", "test-session")
-                settings["session_token"] = None
-                second = exported.upload(
-                    object_prefix=object_prefix, url_prefix=url_prefix, **settings
-                )
-                assert first == second
-                for result in (first, second):
-                    assert result.key == object_prefix + exported.filename
-                    assert result.url == (
-                        None
-                        if url_prefix is None
-                        else url_prefix + result.key.rsplit("/", 1)[-1]
-                    )
-                assert [path for path, _, _ in requests] == [
-                    f"/archive-test/{result.key}" for result in (first, second)
-                ]
-                for invalid in (
-                    {"object_prefix": 123},
-                    {"url_prefix": False},
-                    {"object_prefix": "/private/"},
-                    {"access_key_id": "private-raw-key"},
-                    {"secret_access_key": "private-raw-secret"},
-                    {"session_token": "private-raw-token"},
-                ):
-                    with pytest.raises(ValidationError) as error:
-                        exported.upload(**invalid)  # ty: ignore[invalid-argument-type]
-                    assert "private-raw-" not in str(error.value)
-                assert len(requests) == 2
-                assert not exported.stream.closed
-            assert exported.stream.closed
-            fail_upload = True
-            with (
-                pytest.raises(PermissionDeniedError, match="403"),
-                archive.export_cluster(saved_cluster) as failed,
-            ):
-                failed.upload(
-                    object_prefix=object_prefix, url_prefix=url_prefix, **settings
-                )
-            assert failed.stream.closed
-            assert len(requests) == 3
-            assert [body for _, body, _ in requests[:2]] == [expected, expected]
-            for _, body, headers in requests:
-                assert body.startswith(b"7z\xbc\xaf\x27\x1c")
-                assert headers["content-type"] == "application/x-7z-compressed"
-                assert re.search(
-                    rf"Credential=test-access/\d{{8}}/{region}/s3/aws4_request",
-                    headers["authorization"],
-                )
-                assert headers["x-amz-security-token"] == "test-session"
+            yield uploads
         finally:
             server.shutdown()
-            thread.join()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("source", ["environment", "explicit", "mixed"])
+def test_upload_configuration_precedence_reaches_s3_request(
+    upload_endpoint: UploadEndpoint, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    settings: dict[str, Any] = {}
+    region = "auto"
+    if source != "environment":
+        region = "test-region"
+        settings = {
+            "endpoint": upload_endpoint.url,
+            "bucket": "archive-test",
+            "region": region,
+            "access_key_id": SecretStr("test-access"),
+            "secret_access_key": SecretStr("test-secret"),
+            "session_token": SecretStr("test-session"),
+        }
+        for name in list(os.environ):
+            if name.startswith("AWS_") and name != "AWS_ALLOW_HTTP":
+                if source == "explicit":
+                    monkeypatch.delenv(name)
+                else:
+                    monkeypatch.setenv(name, "unused-value")
+        if source == "mixed":
+            monkeypatch.setenv("AWS_ENDPOINT", "http://127.0.0.1:1")
+            monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:1")
+    with BytesIO(b"upload configuration contract") as stream:
+        result = archive.ClusterArchive("room.7z", stream).upload(**settings)
+        assert not stream.closed
+    assert result == archive.ArchiveUploadResult("room.7z", None)
+    [(path, body, headers)] = upload_endpoint.requests
+    assert path == "/archive-test/room.7z"
+    assert body == b"upload configuration contract"
+    assert headers["content-type"] == "application/x-7z-compressed"
+    assert headers["x-amz-security-token"] == "test-session"
+    assert re.search(
+        rf"Credential=test-access/\d{{8}}/{region}/s3/aws4_request",
+        headers["authorization"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("object_prefix", "url_prefix", "key", "url"),
+    [
+        ("", None, "room.7z", None),
+        (
+            "rooms/exports/",
+            "https://downloads.example.test/",
+            "rooms/exports/room.7z",
+            "https://downloads.example.test/room.7z",
+        ),
+        (
+            "private/room-",
+            "https://public.example.test/download?name=",
+            "private/room-room.7z",
+            "https://public.example.test/download?name=room-room.7z",
+        ),
+    ],
+)
+def test_upload_object_key_and_public_url(
+    monkeypatch: pytest.MonkeyPatch,
+    object_prefix: str,
+    url_prefix: str | None,
+    key: str,
+    url: str | None,
+) -> None:
+    store = Mock()
+    monkeypatch.setattr("obstore.store.S3Store", Mock(return_value=store))
+    with BytesIO(b"payload") as stream:
+        result = archive.ClusterArchive("room.7z", stream).upload(
+            object_prefix=object_prefix, url_prefix=url_prefix
+        )
+        assert result == archive.ArchiveUploadResult(key, url)
+        store.put.assert_called_once_with(
+            key, stream, attributes={"Content-Type": "application/x-7z-compressed"}
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"object_prefix": 123},
+        {"url_prefix": False},
+        {"object_prefix": "/private/"},
+        {"access_key_id": "private-raw-key"},
+        {"secret_access_key": "private-raw-secret"},
+        {"session_token": "private-raw-token"},
+    ],
+)
+def test_invalid_upload_settings_fail_before_opening_storage(
+    monkeypatch: pytest.MonkeyPatch, invalid: dict[str, Any]
+) -> None:
+    factory = Mock(side_effect=AssertionError("invalid settings reached storage"))
+    monkeypatch.setattr("obstore.store.S3Store", factory)
+    with BytesIO(b"payload") as stream, pytest.raises(ValidationError) as error:
+        archive.ClusterArchive("room.7z", stream).upload(**invalid)
+    assert "private-raw-" not in str(error.value)
+    factory.assert_not_called()
+
+
+def test_upload_rewinds_archive_and_closes_exports_on_success_and_failure(
+    saved_cluster: Path,
+    upload_endpoint: UploadEndpoint,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with archive.export_cluster(saved_cluster) as exported:
+        expected = exported.stream.read()
+        exported.stream.seek(6)
+        first = exported.upload()
+        monkeypatch.setenv("AWS_SESSION_TOKEN", "replacement-session")
+        second = exported.upload(session_token=None)
+        assert first == second
+        assert not exported.stream.closed
+    assert exported.stream.closed
+    assert [body for _, body, _ in upload_endpoint.requests] == [expected, expected]
+    assert expected.startswith(b"7z\xbc\xaf\x27\x1c")
+    assert (
+        upload_endpoint.requests[1][2]["x-amz-security-token"] == "replacement-session"
+    )
+    upload_endpoint.reject = True
+    with (
+        pytest.raises(PermissionDeniedError, match="403"),
+        archive.export_cluster(saved_cluster) as failed,
+    ):
+        failed.upload()
+    assert failed.stream.closed
+    assert len(upload_endpoint.requests) == 3
 
 
 @pytest.mark.parametrize(

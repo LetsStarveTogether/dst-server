@@ -28,6 +28,13 @@ from .overrides import (
 from .world import WorldOverrides
 
 PERMISSION_FILES = ("adminlist.txt", "whitelist.txt", "blocklist.txt")
+CLUSTER_STRUCTURE_FIELDS = (
+    "master_port",
+    "bind_ip",
+    "master_ip",
+    "shard_enabled",
+    "cluster_key",
+)
 
 type Port = Annotated[int, Field(ge=1024, le=65535)]
 type IniText = Annotated[str, Field(pattern=r"^[^\x00\r\n]*$")]
@@ -113,7 +120,7 @@ def _validate_shard_name(name: str) -> str:
     if (
         not name.strip()
         or len(encoded) > MAX_PATH_COMPONENT_BYTES
-        or name in {".", ".."}
+        or name.startswith(".")
         or name.casefold()
         in {
             "console",
@@ -280,6 +287,23 @@ def _shared_cluster_key(
         msg = "all shards must use the same non-empty cluster_key or omit it"
         raise ValueError(msg)
     return keys.pop()
+
+
+def cluster_structure(
+    settings: ClusterSettings, shards: Mapping[str, ShardSettings]
+) -> dict[tuple[str, ...], object]:
+    structure: dict[tuple[str, ...], object] = {
+        ("settings", field): getattr(settings, field)
+        for field in CLUSTER_STRUCTURE_FIELDS
+    }
+    if len(shards) > 1 and "shard_enabled" not in settings.model_fields_set:
+        structure["settings", "shard_enabled"] = True
+    structure.update(
+        (("shards", name, "settings", field), getattr(shard, field))
+        for name, shard in shards.items()
+        for field in ShardSettings.model_fields
+    )
+    return structure
 
 
 class ShardConfig(RevalidatedFrozenModel):

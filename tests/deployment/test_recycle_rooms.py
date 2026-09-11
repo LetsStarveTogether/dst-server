@@ -35,7 +35,6 @@ def ready_status(suffix: str = "OLD") -> ClusterStatus:
     return ClusterStatus(
         epoch=ULID(),
         phase="running",
-        revision=None,
         prepared_revision=None,
         master="forest",
         shards=tuple(

@@ -12,14 +12,25 @@ SUCCESS = "Success! App '343050' fully installed."
 
 
 @pytest.mark.parametrize(
-    ("outcomes", "returncode", "delays"),
+    ("outcomes", "returncode", "delays", "version"),
     [
-        pytest.param(((0, SUCCESS),), 0, (), id="first-success"),
-        pytest.param(((8, MISSING), (0, SUCCESS)), 0, (10,), id="retry-success"),
-        pytest.param(((8, MISSING),) * 10, 8, (10, *([30] * 8)), id="retry-limit"),
-        pytest.param(((8, OTHER),), 8, (), id="other-error"),
-        pytest.param(((143, MISSING),), 143, (), id="signal-status"),
-        pytest.param(((8, MISSING), (23, OTHER)), 23, (10,), id="fresh-attempt-log"),
+        pytest.param(((0, SUCCESS),), 0, (), "747465\n", id="first-success"),
+        pytest.param(
+            ((8, MISSING), (0, SUCCESS)), 0, (10,), "747465\n", id="retry-success"
+        ),
+        pytest.param(
+            ((8, MISSING),) * 10, 8, (10, *([30] * 8)), "747465\n", id="retry-limit"
+        ),
+        pytest.param(((8, OTHER),), 8, (), "747465\n", id="other-error"),
+        pytest.param(((143, MISSING),), 143, (), "747465\n", id="signal-status"),
+        pytest.param(
+            ((8, MISSING), (23, OTHER)), 23, (10,), "747465\n", id="fresh-attempt-log"
+        ),
+        pytest.param(((0, SUCCESS),), 0, (), "747465\r\n", id="version-crlf"),
+        pytest.param(((0, SUCCESS),), 1, (), "747464\n", id="version-mismatch"),
+        pytest.param(((0, SUCCESS),), 2, (), None, id="version-missing"),
+        pytest.param(((0, SUCCESS),), 1, (), "invalid\n", id="version-invalid"),
+        pytest.param(((0, SUCCESS),), 1, (), "", id="version-empty"),
     ],
 )
 def test_steamcmd_install_retry(
@@ -27,6 +38,7 @@ def test_steamcmd_install_retry(
     outcomes: tuple[tuple[int, str], ...],
     returncode: int,
     delays: tuple[int, ...],
+    version: str | None,
 ) -> None:
     containerfile = Path(__file__).parents[2] / "Containerfile"
     block = containerfile.read_text().split("# Install the DST server.\n", 1)[1]
@@ -36,6 +48,10 @@ def test_steamcmd_install_retry(
         "/tmp/steamcmd-install.log",  # ruff:ignore[hardcoded-temp-file]
         str(tmp_path / "install.log"),
     )
+    version_path = tmp_path / "version.txt"
+    script = script.replace("/install/version.txt", str(version_path))
+    if version is not None:
+        version_path.write_text(version)
     executable = (
         f"#!{sys.executable}\n"
         r"""
@@ -78,6 +94,7 @@ sys.exit(status)
             "STEAMCMDDIR": str(tmp_path),
             "HOMEDIR": str(tmp_path),
             "BETA": "1",
+            "GAME_VERSION": "747465",
             "CALLS": str(calls_path),
             "OUTCOMES": json.dumps(outcomes),
         },
@@ -116,3 +133,6 @@ sys.exit(status)
         )
     if returncode == 0:
         assert not (tmp_path / "install.log").exists()
+    if returncode == 1:
+        installed_version = version.strip() if version == "747464\n" else "invalid"
+        assert f"Expected DST 747465, installed {installed_version}" in output

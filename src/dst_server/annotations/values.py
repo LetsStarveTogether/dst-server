@@ -15,17 +15,6 @@ class LuaType(StrEnum):
     ANY = "any"
 
 
-DEFAULT_VALUES = {
-    LuaType.TABLE: "{}",
-    LuaType.NUMBER: "0",
-    LuaType.FUNCTION: "function()end",
-    LuaType.USERDATA: "newproxy()",
-    LuaType.STRING: '""',
-    LuaType.NIL: "nil",
-    LuaType.ANY: "variable",
-}
-
-
 def infer_type(node: Any) -> LuaType:
     match node:
         case ast.String() | ast.Concat():
@@ -51,30 +40,3 @@ def infer_type(node: Any) -> LuaType:
             return LuaType.USERDATA
         case _:
             return LuaType.ANY
-
-
-def construct_value(
-    lua_type: LuaType | list[LuaType] | None,
-    source: str | None = None,
-) -> str:
-    if lua_type is None:
-        return "variable"
-
-    if isinstance(lua_type, list):
-        values = source.split(",") if source else []
-        return ",".join(
-            construct_value(
-                item_type,
-                values[index].strip() if index < len(values) else None,
-            )
-            for index, item_type in enumerate(lua_type)
-        )
-
-    if lua_type == LuaType.BOOLEAN:
-        value = source.strip() if source else None
-        return value if value in {"true", "false"} else "false"
-
-    if source and source.strip() == "inst":
-        return "inst"
-
-    return DEFAULT_VALUES.get(lua_type, "variable")

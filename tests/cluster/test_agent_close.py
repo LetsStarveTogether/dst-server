@@ -19,9 +19,7 @@ def agent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ShardAgent:
         "create_server_config",
         Mock(return_value=ServerConfig(shard="forest")),
     )
-    return ShardAgent(
-        Shard("forest", True, tmp_path / "console"), cluster_path=tmp_path
-    )
+    return ShardAgent(Shard("forest", True), cluster_path=tmp_path)
 
 
 @pytest.mark.parametrize("cancellations", [1, 3])

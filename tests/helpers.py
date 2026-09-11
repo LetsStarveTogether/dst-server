@@ -6,7 +6,7 @@ import select
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from collections.abc import Callable
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 from dst_server.lua_codec import lua_string
 from dst_server.models.driver import DriverHealth
@@ -15,6 +15,30 @@ from dst_server.runtime.console import StaleGenerationError
 
 FRAME = re.compile(rb"DST_SERVER_FRAME\|([0-9A-HJKMNP-TV-Z]{26})\|START")
 COMMAND_DONE = b"DST_RemoteCommandDone"
+
+
+async def wait_for_event(
+    event: asyncio.Event,
+    *tasks: asyncio.Task[Any],
+    timeout: float = 5,  # ruff: ignore[async-function-with-timeout]
+) -> None:
+    """Reach a test milestone, surfacing a worker's early failure immediately."""
+    waiter = asyncio.create_task(event.wait())
+    try:
+        async with asyncio.timeout(timeout):
+            done, _ = await asyncio.wait(
+                (waiter, *tasks), return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in tasks:
+                if task in done:
+                    task.result()
+            if event.is_set():
+                return
+            message = "worker finished before the expected event"
+            raise AssertionError(message)
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
 
 
 def run_lua(source: str, luajit: str, *, driver_path: bool = True) -> bytes:

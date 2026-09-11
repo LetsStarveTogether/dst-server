@@ -31,14 +31,7 @@ local function write(event_name, data)
         cycle = cycle == nil and json.null or cycle,
         data = data,
     }, state.max_line_bytes - #state.prefix)
-    if type(encoded) ~= "string" then
-        error("encoding_failed", 0)
-    end
-    if #state.prefix + #encoded > state.max_line_bytes then
-        return false, "event_too_large"
-    end
     publish(encoded)
-    return true
 end
 
 function telemetry.report(stage, message)
@@ -49,8 +42,7 @@ function telemetry.report(stage, message)
     state.errors = state.errors + 1
     local diagnostic = { stage = stage, message = message, count = state.errors }
     state.last_error = diagnostic
-    local ok, emitted = pcall(write, "dst.telemetry.error", diagnostic)
-    if ok and emitted then return end
+    if pcall(write, "dst.telemetry.error", diagnostic) then return end
 
     -- A diagnostic must survive failure of the codec or game clocks, without recursion.
     local fallback = string.format(
@@ -63,11 +55,9 @@ function telemetry.report(stage, message)
 end
 
 function telemetry.emit(event_name, data)
-    local ok, emitted, failure = pcall(write, event_name, data)
+    local ok, failure = pcall(write, event_name, data)
     if not ok then
-        telemetry.report(event_name, emitted == "response_too_large" and "event_too_large" or "encoding_failed")
-    elseif not emitted then
-        telemetry.report(event_name, failure)
+        telemetry.report(event_name, failure == "response_too_large" and "event_too_large" or "encoding_failed")
     end
 end
 

@@ -21,7 +21,8 @@
 | 模块 | 常用入口 |
 | --- | --- |
 | [配置与部署](#配置与部署) | [目录布局](#目录布局) · [端口](#分片与端口) · [世界设置](#世界设置) · [配置 SDK](#配置-sdk) · [权限](#容器用户与目录权限) · [DNS](#容器-dns) |
-| [日常维护](#日常维护) | systemd 命令、镜像更新、恢复控制台 |
+| [统一 CLI](#统一-cli) | 创建与修改房间、模板、目标选择和 JSON 输出 |
+| [日常维护](#日常维护) | 镜像更新、控制台与日志、定时和维护任务 |
 | [运行机制](#运行机制) | [组件与通信](#组件与通信) · [生命周期](#生命周期与故障恢复) · [保存确认](#保存与世界重载) · [超时](#默认超时) |
 | [RPC 与游戏 SDK](#rpc-与游戏-sdk) | [连接示例](#连接集群) · [共享请求](#共享请求与验证) · [接口索引](#接口索引) · [表情与动作](#表情与动作枚举) |
 | [存档与导出](#存档与导出) | [文件说明](#存档文件) · [查询与回档](#快照查询与按天回档) · [导出与 R2](#导出与-r2-上传) |
@@ -33,55 +34,98 @@
 ## 快速开始
 
 需要 Linux、Podman（支持 Quadlet）、systemd 和 [uv](https://docs.astral.sh/uv/getting-started/installation/)。
-项目要求 Python `>=3.14.7`，`uv run` 会按项目配置准备 Python 与依赖。
+项目要求 Python `>=3.14.7`。
 Mod 更新器的清理流程依赖 [Python 3.14.7 的进程等待修复](https://github.com/python/cpython/pull/154171)。
-以下命令由拥有集群目录的普通用户执行。
+宿主 CLI 管理系统服务，部署命令在服务器上以 root 执行，也可通过 SSH 使用。
 
-1. 获取项目，并在 [Klei 专服管理页面](https://accounts.klei.com/account/game/servers?game=DontStarveTogether) 创建 token。
+1. 安装含宿主管理功能的包，并在 [Klei 专服管理页面](https://accounts.klei.com/account/game/servers?game=DontStarveTogether) 创建 token。
 
    ```shell
-   git clone https://github.com/LetsStarveTogether/dst-server.git
-   cd dst-server
+   uv tool install --python 3.14 'dst-server[host]'
    export DST_SERVER_CLUSTER_TOKEN='replace-with-cluster-token'
+   dst-server --help
    ```
 
-2. 生成一个森林与洞穴房间及其 Quadlet。
+2. 创建单个房间，模板与编号独立选择。
 
    ```shell
-   uv run python -m scripts.generate_rooms 0 \
-     --userns 'keep-id:uid=1000,gid=1000' \
-     --cluster-root "${HOME}/.local/share/dst" \
-     --quadlet-dir "${HOME}/.config/containers/systemd"
+   dst-server template list
+   dst-server room create 299 --template forge --max-players 9 \
+     --volume-idmap 'uids=0-1000-1;gids=0-1000-1'
    ```
 
-   token 来自文件时，改用 `--token-file /run/secrets/dst_cluster_token`，文件优先于环境变量。
-   `0` 只生成房间 `000`；可传入多个编号，例如 `0 20 139`。
-   不传编号会生成全部 `000–139` 内置房间，房间类型、名称、Mod 和遥测选项由 [生成脚本](scripts/generate_rooms.py) 决定。
-   自定义房间使用 [配置 SDK](#配置-sdk)。
+   这会生成 `/srv/dst/299` 和对应 Quadlet，不启动房间，也不覆盖已有文件。
+   使用 `--token-file /run/secrets/dst_cluster_token` 可优先从文件读取 token。
+   卷映射默认不设置；上述 rootful 映射让容器 UID `1000` 可以使用 root 持有的文件。
+   森林与洞穴房间可选 `pure_survival`，其他名称由 `template list` 查看。
 
-3. 选择日志接收方式。
-
-   生成器默认向同机 Netdata 的 `10.255.255.254:4317` 导出 Logs。
-   请先完成 [Netdata 部署](#netdata-部署与查询)；只需要本地日志时，在生成的每份 `.container` 的 `[Container]` 中添加：
-
-   ```ini
-   Environment=OTEL_LOGS_EXPORTER=none
-   ```
-
-   生成器已经关闭 Metrics 和 Traces 导出，这一行即可让游戏事件保留在本地日志。
-   宿主 shell 的 `export` 不会修改生成的容器环境。
-
-4. 加载并启动房间。
+3. 启动房间并查看日志。
 
    ```shell
-   systemctl --user daemon-reload
-   systemctl --user start dst-000-pod.service
-   journalctl --user -u dst-000-forest.service -f
+   dst-server room start 299
+   dst-server room status 299
+   dst-server logs --room 299 --lines 100 --follow
    ```
 
-首次启动会拉取镜像、准备 Mod 并生成世界。
-管理容器启动成功不代表游戏已就绪；使用 [RPC 状态](#连接集群) 查看各分片的 `ready`。
-rootful 部署、目录映射和网络设置见下文。
+   启动会检查镜像、准备 Mod、生成缺失的世界，并等待游戏真正就绪。
+   `--no-wait` 只提交启动，`room wait 299` 可单独等待就绪。
+   这样创建的房间使用本地 journald 日志；LST 整套部署预设还会配置 Netdata 导出。
+
+在仓库中使用 `uv run --extra host dst-server ...` 或 `uv run --extra host python -m dst_server ...`。
+安装后的两个入口提供同一套 CLI，不传子命令时显示帮助。
+通过 SDK 生成 rootless 部署的方式见 [权限说明](#容器用户与目录权限)。
+
+### 统一 CLI
+
+| 命令 | 用途 |
+| --- | --- |
+| `room` | 创建、查看、修改、启停、重启、等待就绪和诊断房间。 |
+| `template`、`deployment` | 查看或应用玩法模板，生成 LST 整套房间，安装自动维护单元。 |
+| `schedule`、`maintenance` | 开放时段、空闲回收、倒计时重启与后台任务。 |
+| `announce`、`player`、`world`、`mod` | 公告、玩家和权限、存档与世界、Mod 配置。 |
+| `console`、`logs`、`rpc` | Lua 求值、历史日志、方法发现、直接调用与实时订阅。 |
+| `agent`、`annotations`、`completion` | 容器进程入口、Lua 注解、输出 shell 补全。 |
+
+默认目录沿用维护环境的 `/srv/dst` 和 `/etc/containers/systemd`。
+通过 `--cluster-root` / `--quadlet-dir` 或 `DST_SERVER_CLUSTER_ROOT` / `DST_SERVER_QUADLET_DIR` 覆写。
+全局选项放在命令之前：
+
+```shell
+dst-server --cluster-root /srv/dst --quadlet-dir /etc/containers/systemd --json room list
+dst-server room edit 000-019,050-069 --max-players 9
+dst-server room edit 299 --set '/cluster/settings/cluster_description="周五联机"'
+dst-server room show 299 --field /cluster/settings/max_players
+dst-server room schema
+dst-server announce '服务器将在八分钟后维护。' --room 299
+dst-server world snapshots --room 299 --limit 10
+dst-server world save --room 299
+```
+
+`room` 命令使用位置参数编号，其他命令组使用 `--room`。
+支持逗号分隔编号、闭区间范围，以及相应命令提供的 `--template` 或显式 `--all`。
+`room list` 发现包含 `cluster.ini` 的三位编号房间目录，操作命令要求明确选择目标。
+批量操作逐房间返回结果，任何房间失败都会使整体退出码非零。
+`--json` 输出 JSON，持续输出按记录逐行发送，诊断写入 stderr。
+`room edit --set` 使用 JSON Pointer 路径和 JSON 值，`--unset` 删除显式设置。
+游戏和部署配置要求停服修改，或使用 `--restart` 先停止服务再写入。
+时段和管理策略可以在线修改，不需要解析世界 Lua。
+修改世界生成设置不替换现有地图，需要显式执行 `world regenerate`。
+
+现有 `000–139` 组合保留为独立的 LST 部署预设：
+
+```shell
+dst-server deployment lst --room 000,020,139 \
+  --volume-idmap 'uids=0-1000-1;gids=0-1000-1'
+dst-server template apply forge --room 299 --restart
+```
+
+`deployment lst --all` 生成完整预设，创建会拒绝覆盖已有房间。
+已有房间直接读取原生文件。
+应用模板会显式替换玩法、世界和 Mod 配置，保留房间编号、名称、介绍、密码、token、共享密钥及部署参数。
+已有房间不会自动继承模板变化。
+核心生成与维护代码随包发布，可直接调用异步 SDK。
+仓库暂时保留旧脚本入口，因为已部署的定时器仍引用工作区路径。
+这些部署单独切换后再移除旧入口。
 
 ## 配置与部署
 
@@ -94,6 +138,7 @@ rootful 部署、目录映射和网络设置见下文。
 
 ```text
 cluster/
+├── .dst-control.json  （可选）
 ├── cluster.ini
 ├── cluster_token.txt
 ├── adminlist.txt / blocklist.txt / whitelist.txt
@@ -121,13 +166,18 @@ cluster/
 | `<shard>/modoverrides.lua` | 当前分片启用的 Mod 及选项。 |
 | `<shard>/save/` | 世界、人物快照与辅助数据，见 [存档文件](#存档文件)。 |
 | `mods/` | 共享下载清单、Mod 内容和缓存，见 [Mod 管理](#mod-管理)。 |
-| `.dst-server.sock`、`console` | 运行时创建的集群 RPC socket 与主分片恢复 FIFO。 |
-| `<secondary>/console` | 次分片恢复 FIFO。 |
+| `.dst-control.json` | 可选的 `template`、`schedule`、`recycle` 策略及 `paused`、`override`、`until`、操作 `revision`；不存游戏和部署配置。 |
+| `.dst-server.sock` | 运行时创建的集群 RPC socket。 |
 | `<shard>/save/session/<session_id>/.last_login` | 最后一次玩家成功加载世界的 UTC ISO 8601 时间，仅一行，导出时排除。 |
 
-`cluster.ini`、`cluster_token.txt` 和每个分片的 `server.ini` 必须存在，且只能有一个主分片。
-根目录中除 `mods` 外的子目录都视为分片，因此备份应放在集群目录外。
-受管配置和分片目录不能使用符号链接；准备阶段会补齐缺失的权限名单与 Mod 支持文件。
+配置来源是原生 INI/Lua 文件和 Quadlet，包括由 systemd 处理的 drop-in。
+不再额外持久化一份完整房间定义。
+缺少 `.dst-control.json` 时，房间默认没有开放时段，也不自动回收。
+启动读取现有文件并准备 Mod，不重新生成游戏配置。
+`cluster.ini`、`cluster_token.txt` 和每个启用分片的 `server.ini` 必须存在，且只能有一个主分片。
+只有包含 `server.ini` 的子目录才是启用分片。
+停用分片保留目录、其他配置和存档，再添加同名分片时可以复用存档。
+配置和分片目录不能使用符号链接；准备阶段会补齐缺失的权限名单与 Mod 支持文件。
 
 客户端完成世界加载握手后，Agent 覆写 `.last_login`；跨分片迁移完成加载也会更新。
 关闭遥测仍会记录，重启保留时间，新世界使用自己的 session 目录。
@@ -148,7 +198,7 @@ cluster/
 | 端口分配 | 规则 |
 | --- | --- |
 | 宿主范围 | `30000–32999`，每个房间占一个十端口槽位。 |
-| 房间槽位 | 分配器支持 `000–299`；CLI 内置房间只覆盖 `000–139`。 |
+| 房间槽位 | 任意模板支持 `000–299`，LST 整套部署预设覆盖 `000–139`。 |
 | 分片数量 | 每个房间最多四个分片，只发布实际使用的 UDP 端口。 |
 | 玩家连接 | `-external_port` 公告宿主映射端口，容器仍监听 `server.ini` 中的内部端口。 |
 
@@ -189,6 +239,8 @@ return {
 `ClusterConfig`、`ClusterSettings`、`ShardConfig`、`ShardSettings` 从 `dst_server.configuration` 导入。
 `ClusterConfig` 读取、验证和保存完整配置树，`RoomPreset` 组合配置片段。
 `dst_server.deployment.QuadletApplication` 根据配置推导 Pod 和容器单元。
+通过 `for_cluster(..., allocation=RoomPortAllocation(...))` 一起生成端口映射和启动参数。
+`.replace()` 只更新显式传入的字段。
 以下示例在新目录生成无尽森林与洞穴：
 
 ```python
@@ -206,7 +258,7 @@ config.save(Path("cluster"))
 ```
 
 - 读取与修改：`ClusterConfig.load(path)`、`.replace(...)`。
-- 生成自定义房间和 Quadlet：`scripts.generate_rooms.generate_configured_room()`，传入绝对目录。
+- 生成自定义房间和 Quadlet：`dst_server.presets.lst.generate_configured_room()`，传入绝对目录。
 - 批量自定义房间：`generate_configured_rooms()`，可使用 `000–299` 中任意槽位。
 - 自定义生成函数默认不配置遥测导出，通过 `environment` / `environments` 显式传入。
 
@@ -215,19 +267,19 @@ config.save(Path("cluster"))
 不同新目录各自生成不同密钥，重复保存同一目录保留已有密钥；显式密钥仍会使用。
 单分片房间同样适用。
 
-SDK 只解析受支持的声明式 Lua，不执行脚本。
-保存会规范化排版并移除原注释；文件逐个替换，不是整个配置树的跨文件事务。
+`dst_server.rooms.Room` 是原生游戏配置、部署设置和运营策略的内存视图。
+`RoomStore.load(number)` 每次直接读取文件，也能读到游戏自身写入的修改。
+使用 `room edit` 或 `dst_server.host.Host.edit()` 检查服务状态并只写受影响的文件。
+游戏和部署配置要求已停服或使用 `--restart`，仅修改策略的操作可以在线进行。
+SDK 只解析受支持的声明式 Lua，不执行脚本；修改配置时遇到不支持的动态 Lua 会拒绝操作。
+启动和调度命令不需要解析世界 Lua。
+写回的原生文件会规范化排版并移除该文件的原注释，其他文件保持不动。
+文件逐个替换，不是整个配置树的跨文件事务。
+权限名单和存档仍是独立的实时文件，房间编辑会保留它们。
 
-已部署的集群通过 [ClusterClient](#连接集群) 修改配置：
-
-1. 等待 `save()` 成功，再 `stop()`。
-2. 用 `read_configuration()` 读取有效配置与 revision。
-3. 将修改后的配置和原 revision 传给 `save_configuration()`。
-4. 调用 `start()`，由控制器准备 Mod 并启动分片。
-
-revision 冲突时重新读取并合并。
-RPC 写入要求全部 Agent 已连接、游戏进程停止，并拒绝修改分片拓扑、`server_port` 和 `master_server_port`。
-内部 `master_port` 可修改，但必须在各分片保持一致。
+[ClusterClient](#连接集群) 的 `read_configuration()` 只读原生配置，返回配置快照或验证错误。
+其中的 revision 标识该控制器观察到的配置，不代表待生效配置或部署版本。
+持久配置通过宿主操作修改，启动不会重新应用另一份保存的配置副本。
 
 ### 容器用户与目录权限
 
@@ -239,20 +291,36 @@ RPC 写入要求全部 Agent 已连接、游戏进程停止，并拒绝修改分
 | rootless | `--userns 'keep-id:uid=1000,gid=1000'` | `.pod` 的 `[Pod]` 写入 `UserNS`，把部署用户映射为容器 `1000:1000`。 |
 | rootful | `--volume-idmap 'uids=0-1000-1;gids=0-1000-1'` | 各 `.container` 的卷使用 idmap，宿主文件保持 `root:root`，容器看到 `1000:1000`。 |
 
-rootless 使用 [快速开始](#快速开始) 的命令。
-rootful 以 root 运行：
+宿主 CLI 的服务操作使用系统级管理器。
+rootless 部署由普通部署用户通过包内 SDK 生成文件，再使用 `systemctl --user`：
 
-```shell
-uv run python -m scripts.generate_rooms 0 \
-  --volume-idmap 'uids=0-1000-1;gids=0-1000-1' \
-  --cluster-root /srv/dst \
-  --quadlet-dir /etc/containers/systemd
+```python
+import os
+from pathlib import Path
+
+from pydantic import SecretStr
+
+from dst_server.presets.lst import generate_room
+
+generate_room(
+    0,
+    token=SecretStr(os.environ["DST_SERVER_CLUSTER_TOKEN"]),
+    cluster_dir=Path.home() / ".local/share/dst/000",
+    quadlet_dir=Path.home() / ".config/containers/systemd",
+    userns="keep-id:uid=1000,gid=1000",
+)
 ```
 
-rootful 的 `systemctl` 和 `journalctl` 命令省略 `--user`，日志接收方式同样需要配置。
-其内核与数据文件系统必须支持 [idmapped mount](https://docs.podman.io/en/latest/markdown/podman-run.1.html#volume-v-source-volume-host-dir-container-dir-options)。
+```shell
+systemctl --user daemon-reload
+systemctl --user start dst-000-pod.service
+journalctl --user -u dst-000-forest.service -f
+```
+
+rootful 部署使用 [快速开始](#快速开始) 的命令。
+使用 `volume_idmap` 时，内核与数据文件系统必须支持 [idmapped mount](https://docs.podman.io/en/latest/markdown/podman-run.1.html#volume-v-source-volume-host-dir-container-dir-options)。
 集群目录应属于部署用户，且不可被组或其他用户写入，以满足 RPC socket 的检查。
-修改映射后需重新生成 Quadlet 并重建 Pod。
+修改映射后需要重建 Pod。
 
 ### 容器 DNS
 
@@ -280,37 +348,101 @@ podman network inspect podman |
 ## 日常维护
 
 ```shell
-systemctl --user status dst-000-pod.service
-journalctl --user -u dst-000-forest.service -f
-systemctl --user restart dst-000-pod.service
-systemctl --user stop dst-000-pod.service
+dst-server room status 299
+dst-server room diagnose 299
+dst-server world save --room 299
+dst-server room restart 299
+dst-server room stop 299
 ```
 
-**停止、重启和正常退出均不会隐式确认保存。
-**
-需要最新快照时，先等待 [集群 `save()`](#保存与世界重载) 成功。
+停止、重启和正常退出均不会隐式确认保存。
+需要最新快照时，先等待 `world save` 或 SDK 的 [集群 `save()`](#保存与世界重载) 成功。
 
 ### 镜像更新
 
-- `:latest` 跟随正式渠道，`--image quay.io/wh2099/dst-server:beta` 选择测试渠道。
-- 生成器不解析或固定镜像摘要与游戏版本；`Pull=always` 在容器启动时检查远端镜像。
-- `TimeoutStartSec=1800` 为容器启动预留 30 分钟。
-- 修改 Quadlet 后执行 `systemctl --user daemon-reload`，下次重启容器才应用镜像与环境变更。
-- RPC `restart()` 只重启游戏进程；升级镜像应重启 Pod 服务。
+- `:latest` 跟随正式渠道，创建房间时用 `--image quay.io/wh2099/dst-server:beta` 选择测试渠道。
+- `Pull=always` 在容器启动时检查远端镜像，`TimeoutStartSec=1800` 为启动预留 30 分钟。
+- 已有房间通过 `room edit --set` 修改 `/deployment/image`，加 `--restart` 立即应用。
+- 宿主 `room restart` 重建容器，RPC `restart()` 只重启游戏进程。
 
-### 恢复控制台
+镜像将体积较大的游戏安装保留为独立缓存层，以游戏版本和渠道区分；仅修改 SDK 时可以复用。
+镜像工作流的 `force_build` 让已发布的游戏版本也重新构建，`no_cache` 则禁止这次构建复用缓存层。
+要对已发布版本执行无缓存构建，同时勾选两个参数。
+只有当前 `main` 提交可以构建和发布。
+使用 GitHub 原生并发控制，同一工作流和 ref 上的新运行会取消此前的运行。
+因此，重新运行旧提交也会打断较新提交的运行。
+其他 ref 的运行会跳过，构建前和发布前的 HEAD 检查会拒绝过期提交。
+正式镜像的版本标签为 `:<version>`，测试镜像为 `:beta-<version>`。
 
-每个 Agent 创建一个 `console` FIFO。
-主分片位于集群根目录，次分片位于各自目录：
+### 控制台与日志
+
+公开的 console FIFO 已移除。
+`console` 通过房间 Agent 的 RPC 执行 Lua，默认选择主分片：
 
 ```shell
-echo 'c_announce("服务器即将维护。")' > "${HOME}/.local/share/dst/000/console"
-echo 'c_save()' > "${HOME}/.local/share/dst/000/cave/console"
+dst-server console 'TheWorld.state.cycles + 1' --room 299
+dst-server console 'print("hello"); return 1, nil, true' --room 299
+dst-server console --file commands.lua --room 299
+printf '%s\n' 'return TheWorld.state.cycles + 1' | dst-server console --room 299
+dst-server console --room 299 --interactive
+dst-server console --room 299 --interactive --follow
 ```
 
-FIFO 写入本身不提供保存确认。
-它和 RPC 都能执行任意服务端 Lua，仅应向同一信任边界内的进程开放。
-EOF、driver 故障和保存结果不确定时的处理见 [运行机制](#运行机制)。
+单次调用返回捕获的 print 输出、带类型的文本返回值，以及编译或运行错误，然后退出。
+Lua 只执行一次，表达式与语句在编译阶段区分，不会因执行失败而重复执行。
+交互模式只接受一个房间，通过 `--shard NAME` 指定次分片，`--follow` 同时显示后台日志。
+Ctrl+D 关闭输入，Ctrl+C 清除当前输入行。
+Lua 执行仍是可信管理操作，不代表保存已经确认。
+
+```shell
+dst-server logs --room 299 --lines 100
+dst-server logs --room 299 --since yesterday --until now
+dst-server --json logs --room 299 --after-cursor 's=...'
+dst-server logs --room 299 --follow
+```
+
+Quadlet 显式使用 `LogDriver=journald`。
+日志可以在房间关闭时查询，也能覆盖此前容器运行和宿主重启之前的记录，保留时长遵循 journald 策略。
+`--follow` 用同一个读取进程先查询历史再持续跟随，默认历史为 100 条。
+异步 SDK 提供 `dst_server.host.logs.logs()` 和 `JournalRecord`，提前结束迭代时使用 `contextlib.aclosing`。
+RPC 订阅仍只推送实时记录，Netdata 独立查询已导出的结构化事件。
+
+### 定时与维护任务
+
+```shell
+dst-server schedule set 09:00-12:00 22:00-05:00 --room 299
+dst-server schedule show --room 299
+dst-server schedule pause --room 299
+dst-server schedule resume --room 299
+dst-server deployment install
+systemctl enable --now dst-room-schedule.timer
+```
+
+每日开放时段使用宿主本地时间，可以跨午夜。
+手动启动或停止覆盖自动管理，直到下一个开放或关闭边界。
+`pause` 暂停自动管理，`resume` 恢复并清除手动覆盖。
+`--always` 移除定时窗口，`schedule run` 执行一次检查。
+计划关闭前八分钟，每分钟发送一次公告。
+安装的 timer 每分钟检查一次，检查成功后继续执行空闲回收。
+`deployment install` 写入包内的 systemd 单元，启用 timer 是单独的部署动作。
+当前生产定时器仍使用旧仓库脚本，本次重构没有切换这些部署。
+切换前应将现有 140 个房间的模板标签、开放时段和回收策略写入 `.dst-control.json`，保留原生游戏配置。
+在维护窗口停止旧定时器并等待正在运行的任务结束，再安装和启用新自动维护入口。
+
+```shell
+dst-server maintenance recycle --dry-run
+dst-server maintenance restart --room 299 --delay 8m
+dst-server maintenance restart --room 299 --delay 8m --detach
+dst-server maintenance status TASK_ID
+dst-server maintenance logs TASK_ID --follow
+dst-server maintenance cancel TASK_ID
+```
+
+维护默认前台执行。
+`--detach` 返回 systemd 临时服务的任务 ID，SSH 断开后继续运行，宿主重启后不续跑。
+取消阻止剩余倒计时继续发起重启，已经提交的服务操作不能撤销。
+后来的手动停止会使该房间尚未执行的维护重启失效。
+部分房间失败时，通过逐房间结果查看原因。
 
 ## 运行机制
 
@@ -338,12 +470,12 @@ flowchart LR
 | 组件 | 职责与代码入口 |
 | --- | --- |
 | [daemon](src/dst_server/cluster/daemon.py) | 运行管理服务、注册连接与 systemd 通知。 |
-| [Controller](src/dst_server/cluster/controller.py) | 维护预期分片名单，协调共享准备、配置 revision 与集群操作。 |
+| [Controller](src/dst_server/cluster/controller.py) | 维护预期分片名单，协调共享准备与集群操作。 |
 | [Agent](src/dst_server/cluster/agent.py) | 独占一个分片的进程资源，消费日志、生命周期、事件并处理遥测。 |
 | [Supervisor](src/dst_server/runtime/supervisor.py) | 停止和重试游戏进程，每次尝试创建新的 `Server`。 |
 | [Server](src/dst_server/runtime/server.py) | 管理一次 DST 子进程及其通信通道；单次使用。 |
 
-主容器运行 `dst-server master`，次容器运行 `dst-server serve <shard>`。
+主容器运行 `dst-server agent master`，次容器运行 `dst-server agent serve <shard>`。
 主 Agent 在进程内注册，次 Agent 通过 Pod 内的抽象 Unix socket `dst-server-registry` 注册。
 
 | 通道 | 用途 |
@@ -373,7 +505,7 @@ sequenceDiagram
     participant M as 共享 Mod
     participant G as 游戏进程
     A->>C: 完成注册
-    C->>C: 校验配置与拓扑
+    C->>C: 校验原生 INI 拓扑
     C->>M: 所有游戏停止后更新
     M-->>C: 更新成功，记录 prepared_revision
     C->>A: 激活资源并发起并发启动
@@ -390,10 +522,11 @@ sequenceDiagram
 | 整服 `restart()` | 先停止全部游戏，再更新 Mod 并启动。 |
 | `stop()` → `update_mods()` → `start()` | 手动刷新；最后一步复用刚刚成功的更新。 |
 | 单分片重启或崩溃恢复 | 复用已安装 Mod，不做共享更新。 |
-| 接管运行中的 Agent | 校验配置、保留游戏并跳过更新；`prepared_revision` 可以为空。 |
+| 接管运行中的 Agent | 校验原生拓扑、保留游戏并跳过更新；`prepared_revision` 可以为空。 |
 
 共享更新要求全部 Agent 已连接、全部游戏进程已停止；失败状态但仍有 PID 不算停止。
-更新失败会阻止启动，运行中的配置漂移也不会触发在线覆盖 Mod。
+更新失败会阻止启动。
+`prepared_revision` 标记成功准备，不是配置版本；准备只执行一次，不会重写世界设置。
 
 下图只展示单分片游戏进程的主要状态，使用公开 RPC 的状态名称：
 
@@ -429,7 +562,7 @@ FD 4 出现 EOF 或不完整响应会使 Console 不可用；游戏仍运行但�
 `await cluster.save()` 只向主分片发起一次保存，并等待全部分片在各自观测游标之后报告匹配的 Saved 确认。
 `ObservationCursor(attempt, sequence)` 将标记绑定到一次进程尝试，之前的进程不能确认新的操作。
 成功返回后，再执行停止、重启或 [导出](#导出与-r2-上传)。
-命令提交成功、FIFO 写入完成和退出日志都不能替代保存确认。
+命令提交成功和退出日志都不能替代保存确认。
 
 FD 5 的 Session 推进宿主记录的 generation，并使上一代 driver 健康状态失效。
 
@@ -489,7 +622,7 @@ RPC 为已部署的集群提供类型化接口，游戏 SDK 也可嵌入自行�
 
 ### 连接集群
 
-在项目目录用 `uv run python your_script.py` 运行 SDK 脚本。
+安装包后可在仓库之外使用 SDK，在仓库中也可用 `uv run python your_script.py`。
 以下示例从宿主机连接快速开始生成的房间：
 
 ```python
@@ -500,7 +633,7 @@ from dst_server.rpc import ClusterClient, rpc_runtime
 
 
 async def main() -> None:
-    socket = Path.home() / ".local/share/dst/000/.dst-server.sock"
+    socket = Path("/srv/dst/299/.dst-server.sock")
     async with rpc_runtime():
         async with await ClusterClient.connect(socket) as cluster:
             status = await cluster.status()
@@ -511,7 +644,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-rootful 宿主路径为 `/srv/dst/000/.dst-server.sock`，容器内为 `/cluster/.dst-server.sock`。
+宿主路径为 `/srv/dst/<room>/.dst-server.sock`，容器内为 `/cluster/.dst-server.sock`。
 `connect()` 必须传入路径，并在 `rpc_runtime()` 上下文内调用。
 
 ### 共享请求与验证
@@ -525,7 +658,7 @@ rootful 宿主路径为 `/srv/dst/000/.dst-server.sock`，容器内为 `/cluster
 各入口只接受声明的命令范围；游戏客户端处理游戏操作，Controller 负责进程生命周期与集群协调。
 
 Cap'n Proto 通过 `call` 传输命令，通过订阅能力传输观测记录。
-配置传输保留省略字段、显式 `False`、世界覆盖类型，以及保存配置所需的秘密值。
+只读配置快照保留省略字段、显式 `False` 和世界覆盖类型。
 
 集群结果、状态与观测游标从 [models.cluster](src/dst_server/models/cluster.py) 导入，`DriverHealth` 从 [models.driver](src/dst_server/models/driver.py) 导入。
 共享异常和错误码位于 [errors.py](src/dst_server/errors.py)。
@@ -534,22 +667,59 @@ RPC 使用 `RemoteError` 报告业务错误，丢失未确认的变更结果时�
 调用方取消或断开连接后，已接受的变更仍由服务端任务持有；取消查询会释放查询工作。
 未确认的变更不会自动重放。
 
+### 直接 RPC 与 Console 结果
+
+先查看运行中服务端提供的方法，再直接调用：
+
+```shell
+dst-server rpc list --room 299
+dst-server rpc describe evaluate --room 299 --shard xforge
+dst-server --json rpc call status --room 299
+dst-server rpc call execute_json --room 299 --shard xforge \
+  -f 'source=return TheWorld.state.cycles + 1'
+dst-server rpc subscribe events --room 299
+```
+
+`rpc describe` 从服务端注册表返回参数和结果 schema、作用域、超时及副作用语义。
+`rpc call --input request.json` 读取 JSON 对象，`--input -` 从标准输入读取。
+可重复使用 `-f name=value`，值支持 JSON 或普通字符串。
+加 `--shard` 选择分片入口，省略时选择集群入口。
+订阅支持 `logs`、`lifecycle` 和 `events`，不重放历史。
+
+类型化 SDK 提供同样的 console 结果：
+
+```python
+from dst_server.models.console import ConsoleResult
+from dst_server.rpc import ShardClient
+
+
+async def inspect_console(shard: ShardClient) -> None:
+    result: ConsoleResult = await shard.evaluate('print("hello"); return 1, nil, true')
+    print(result.output)
+    print([(value.type, value.text) for value in result.values])
+    print(result.error, result.truncated)
+```
+
+`error.kind` 区分编译与运行错误，`truncated` 表示输出达到限制。
+任意 Lua 对象返回有界文本，程序需要 JSON 值时使用 `execute_json()`。
+
 ### 接口索引
 
 | 对象 | 常用接口 |
 | --- | --- |
 | `cluster` 生命周期 | `status()`、`start()`、`stop()`、`restart()`、`kill()`、`update_mods()`。 |
-| `cluster` 配置与世界 | `read_configuration()`、`save_configuration()`、`save()`、`pause()`、`reset()`、`rollback()`、`rollback_to_day()`、`regenerate()`、`list_snapshots()`。 |
+| `cluster` 配置与世界 | `read_configuration()`、`save()`、`pause()`、`reset()`、`rollback()`、`rollback_to_day()`、`regenerate()`、`list_snapshots()`。 |
 | `cluster` 玩家与管理 | `list_players()`、`get_player()`、`announce()`、`whitelist()`、`unwhitelist()`、`is_whitelisted()`、`execute_all()`。 |
 | `cluster.shard(name)` | 分片生命周期、`status()`、`room()`、`world()`、`runtime()`、`health()`、`mods()`、`connected_shards()`、`save()`、`list_snapshots()`、`regenerate_shard()`。 |
 | `shard.players` | 查询人物与库存、踢出、封禁、解封、管理员状态、生命状态、传送、跨分片迁移、物品增减。 |
 | `cluster` / `shard` 订阅 | `subscribe_logs()`、`subscribe_lifecycle()`、`subscribe_events()`；通过 `async with` 管理订阅，再 `await subscription.next()`。 |
-| `shard.execute(lua)` | 执行单行 Lua，返回显式 `print` 的文本。 |
+| `shard.evaluate(lua)` | 对表达式或语句执行一次，以 `ConsoleResult` 返回 print 输出、带类型的文本值和错误。 |
+| `shard.execute(lua)` | 执行 Lua，返回显式 `print` 的文本。 |
 | `shard.execute_json(lua)` | 通过类型化 driver 返回 JSON，例如 `"return TheWorld.state.cycles + 1"`。 |
 
 便捷方法签名见 [api.py](src/dst_server/api.py)，请求契约见 [commands.py](src/dst_server/commands.py)，能力协议见 [rpc.capnp](src/dst_server/rpc/schema/rpc.capnp)。
 玩家、实体、世界与快照的返回模型见 [models](src/dst_server/models)。
-实时订阅不提供历史重放，持久历史查询见 [Netdata](#netdata-部署与查询)。
+实时订阅不提供历史重放，进程历史输出使用 [日志查询](#控制台与日志)，已导出的事件使用 [Netdata](#netdata-部署与查询)。
 
 需要自行管理单个游戏进程的应用可使用 `dst_server.runtime.Server` 与 `server.game`。
 调用方负责持续消费 lifecycle、game 和 operational 观察流，以及进程清理。
@@ -860,18 +1030,21 @@ ServerModSetup("1803285852")
 -- ServerModCollectionSetup("1234567890") -- 替换为实际合集 ID 后取消注释。
 ```
 
-配置 SDK 保存时合并 `modsettings.lua` 中 `ForceEnableMod` 的 Workshop 项目，准备阶段也补入分片显式启用的项目。
+SDK 创建或编辑房间时，将启用的 Workshop Mod 及 `modsettings.lua` 中 `ForceEnableMod` 的项目纳入下载清单。
+启动只读取 `dedicated_server_mods_setup.lua`，不自动改写。
+手工管理配置时，需要在该文件声明下载项；只在 `modoverrides.lua` 启用 Mod 不会自动补入下载清单。
 下载不会自动启用 Mod，各分片的启用状态与选项由 `modoverrides.lua` 决定。
 
-- 集群两个后端都先经过配置 SDK，只接受受支持的声明式 Lua、双引号 ID 和至多一个末尾 return。
-- 独立 SteamCMD 准备路径也只提取静态字符串调用，不支持变量、循环、条件和计算表达式。
+- 配置编辑只接受受支持的声明式 Lua、双引号 ID 和至多一个末尾 return。
+- SteamCMD 准备路径只提取静态字符串调用，不支持变量、循环、条件和计算表达式。
 - 底层 `dst_server.mods.prepare_shared()` / `activate()` 保留已有动态 setup 脚本，`update_native()` 交给游戏执行。
-  `cluster.service.prepare_shared()` 的 native backend 也支持这条底层路径。
-  修改 Controller 的 backend 不会放宽配置 SDK 限制。
+  `cluster.service.prepare_shared()` 的 native backend 也支持这条底层路径，并将动态 `modoverrides.lua` 交给游戏处理。
 - `modinfo.lua`、`modmain.lua` 等 Mod 代码由游戏执行；Python 安装器不靠 Lua 版本字段判断更新。
 
 共享更新时机统一见 [生命周期表](#生命周期与故障恢复)。
 手动更新使用 `save()` → `stop()` → `update_mods()` → `start()`，全部 Agent 需连接且游戏已停稳。
+宿主 `mod update --restart` 下载期间手动关房，会让下载完成，但阻止自动重开。
+要中止下载并清理更新容器，取消更新任务本身。
 
 ### 独立 Workshop SDK
 
@@ -969,9 +1142,10 @@ Environment=OTEL_TRACES_EXPORTER=none
 ```
 
 修改生成的 `.container` 后重新加载并重启对应服务；宿主 shell 的 `export` 不覆盖容器环境。
-`scripts.generate_rooms` CLI 为所有模板配置该 endpoint。
+`deployment lst` CLI 为整套部署预设配置该 endpoint。
 其中 `000–099`、`110–119` 使用 `history`，其余模板使用默认 `critical`。
-没有 Netdata 时，按 [快速开始](#快速开始) 保留本地日志即可。
+没有 Netdata 时，通过 `room edit --set` 将 `/deployment/environment/OTEL_LOGS_EXPORTER` 设为 `"none"`。
+单独创建的房间默认不配置导出 endpoint。
 直接调用 `QuadletApplication.for_cluster()` 时，通过 `telemetry_environment` 显式传入环境变量。
 
 ### 内存交付
@@ -1136,10 +1310,10 @@ asyncio.run(main())
 | --- | --- |
 | [Klei 服务](src/dst_server/klei) | 安装 `dst-server[klei]`，用 `KleiClient` 查询构建、更新页面、地区、Lobby 与房间详情 |
 | [账号目录编码](src/dst_server/klei_id.py) | `encode_klei_id()` / `decode_klei_id()` 在 Klei ID 与 12 位存档目录编码之间转换 |
-| [Lua 注解](src/dst_server/annotations) | `dst-annotations`，或 Python 的 `generate_components()` / `generate_modutil()` |
+| [Lua 注解](src/dst_server/annotations) | `dst-server annotations`，或 Python 的 `generate_components()` / `generate_modutil()` |
 
 `KleiClient` 使用 `async with` 管理连接；`get_latest_build()` 读取构建列表。
-`get_versions()` / `get_version_page()` 读取当前更新页面，不遍历历史分页。
+`get_versions()` 读取当前更新页面中的版本信息，不遍历历史分页。
 `get_regions()`、`get_lobbies()` 查询公开列表，`get_rooms()` 需要 `access_token`；Lobby 和房间默认并发分别为 8 和 24。
 Lobby 请求失败返回空元组，房间请求失败返回 `None` 并在批量结果中省略；无效响应结构仍报错。
 注入的 HTTP 客户端由调用方关闭；默认自有客户端不读取代理环境变量。
@@ -1150,13 +1324,14 @@ Lobby 请求失败返回空元组，房间请求失败返回 `None` 并在批量
 Lua 注解需要先按 [开发与验证](#开发与验证) 初始化游戏源码子模块。
 
 ```console
-uv run dst-annotations dst-scripts/scripts/components --output components_def.lua
-uv run dst-annotations dst-scripts/scripts/modutil.lua --output modutil_def.lua
+uv run dst-server annotations dst-scripts/scripts/components --output components_def.lua
+uv run dst-server annotations dst-scripts/scripts/modutil.lua --output modutil_def.lua
 ```
 
 注解工具自动识别 components 目录和 `modutil` 文件，也可指定 `--mode components|modutil`。
 目录递归扫描 Lua，`--max-workers 1` 顺序处理；任一文件解析失败则终止，已有输出保留。
-生成结果是基于语法推断的 LSP 定义；游戏源码阅读入口见 [DST Lua 索引](dst-scripts/index/README.md)。
+生成的 LSP 定义包含基于语法推断的类型注解和空函数声明。
+游戏源码阅读入口见 [DST Lua 索引](dst-scripts/index/README.md)。
 
 ## 开发与验证
 
@@ -1168,7 +1343,10 @@ SDK 将数据与格式、游戏进程、集群协调和传输分开。
 | --- | --- |
 | [models](src/dst_server/models) / [events](src/dst_server/events) | 业务值、状态、driver 健康、观测游标与事件 schema。 |
 | [commands.py](src/dst_server/commands.py) / [api.py](src/dst_server/api.py) / [errors.py](src/dst_server/errors.py) | 共享请求与结果验证、允许的调用范围、Python 接口和业务错误。 |
-| [configuration](src/dst_server/configuration) | 配置模型、INI/Lua 格式、显式字段语义、目录读写和带 revision 的配置存储。 |
+| [configuration](src/dst_server/configuration) | 配置模型、INI/Lua 格式、显式字段语义、目录读写和只读配置快照。 |
+| [cli](src/dst_server/cli) | SDK 操作的参数、人类可读结果与 JSON 输出。 |
+| [host](src/dst_server/host)、[rooms](src/dst_server/rooms.py) | 异步 systemd 操作、原生房间视图、日志、定时与维护。 |
+| [presets](src/dst_server/presets) | 包内玩法模板和 LST 整套部署预设。 |
 | [deployment](src/dst_server/deployment) | Quadlet 模型与序列化、房间端口及 Pod/systemd 部署推导。 |
 | [mods](src/dst_server/mods) | Mod 声明与文件、原生更新、SteamCMD、Workshop HTTP 与下载进程管理。 |
 | [lua_codec.py](src/dst_server/lua_codec.py) | 不含文件 I/O 的 Lua 字面量解析、渲染与 JSON 值编码。 |

@@ -1,13 +1,11 @@
 import shutil
-from collections.abc import Iterable
 from pathlib import Path
 
 from dst_server.configuration.files import (
     atomic_write,
     configuration_file_exists,
-    read_text,
 )
-from dst_server.configuration.overrides import ModOverrides, scan_setup
+from dst_server.configuration.overrides import scan_setup
 
 
 def prepare_shared(cluster_path: Path) -> tuple[int, ...]:
@@ -24,45 +22,13 @@ def prepare_shared(cluster_path: Path) -> tuple[int, ...]:
     validate_directory(ugc)
     configuration_file_exists(setup)
     configuration_file_exists(settings)
-    existing_items, _ = scan_setup(setup)
-    override_paths = []
-    for shard in cluster_path.iterdir():
-        if shard.name == "mods":
-            continue
-        if shard.is_symlink() and shard.is_dir():
-            msg = f"DST shard directory cannot be a symlink: {shard}"
-            raise ValueError(msg)
-        if shard.is_dir():
-            override = shard / "modoverrides.lua"
-            configuration_file_exists(override)
-            override_paths.append(override)
-    items = tuple(sorted(set(existing_items).union(workshop_ids(override_paths))))
-    original = read_text(setup) if setup.is_file() else ""
-    missing = sorted(set(items).difference(existing_items))
-    if missing:
-        generated = "".join(f'ServerModSetup("{item}")\n' for item in missing)
-        if original.startswith("#!"):
-            shebang, _, original = original.partition("\n")
-            generated = f"{shebang}\n{generated}"
-        original = generated + original
+    items, _ = scan_setup(setup)
     ugc.mkdir(parents=True, exist_ok=True)
     if not settings.exists():
         atomic_write(settings, "", 0o644)
-    if not setup.exists() or missing:
-        atomic_write(setup, original, 0o644)
+    if not setup.exists():
+        atomic_write(setup, "", 0o644)
     return items
-
-
-def workshop_ids(paths: Iterable[Path]) -> tuple[int, ...]:
-    items: set[int] = set()
-    for path in paths:
-        if configuration_file_exists(path):
-            try:
-                items.update(ModOverrides.load(path).workshop_items)
-            except ValueError as error:
-                msg = f"invalid DST mod override configuration: {path}: {error}"
-                raise ValueError(msg) from error
-    return tuple(sorted(items))
 
 
 def activate(install_path: Path, cluster_path: Path) -> None:

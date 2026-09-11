@@ -1,3 +1,4 @@
+from .console import ConsoleError, ConsoleResult, ConsoleValue
 from .entity import Entity, Position
 from .player import (
     Age,
@@ -17,6 +18,9 @@ from .server import Mod, Room, Runtime, ShardStatus, World
 
 __all__ = [
     "Age",
+    "ConsoleError",
+    "ConsoleResult",
+    "ConsoleValue",
     "Container",
     "Entity",
     "EquipmentSlot",

@@ -18,7 +18,7 @@ from dst_server.runtime.console import Console, StaleGenerationError
 from dst_server.runtime.lifecycle import Lifecycle
 from dst_server.runtime.request import RequestState
 from dst_server.telemetry import TelemetryProfile, TelemetrySettings
-from tests.helpers import FAKE_SERVER, StubServer, structured_result
+from tests.helpers import FAKE_SERVER, StubServer, structured_result, wait_for_event
 
 
 class ReloadingServer(Server):
@@ -429,17 +429,27 @@ async def test_cancelled_stop_reaps_its_wait_tasks(
 
     monkeypatch.setattr(server.lifecycle.stopping, "wait", observe_stopping)
     stopping = asyncio.create_task(server.stop())
-    await process.wait_started.wait()
-    await stopping_started.wait()
-    stopping.cancel()
+    try:
+        watchdog = asyncio.timeout(5)
+        async with watchdog:
+            await wait_for_event(process.wait_started, stopping)
+            await wait_for_event(stopping_started, stopping)
+            stopping.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
-        await stopping
-    assert process.terminated is True
-    assert process.killed is True
-    assert process.wait_finished.is_set()
-    assert stopping_finished.is_set()
-    assert server.closed is True
+            with pytest.raises(asyncio.CancelledError):
+                await stopping
+            assert process.terminated is True
+            assert process.killed is True
+            assert process.wait_finished.is_set()
+            assert stopping_finished.is_set()
+            assert server.closed is True
+        assert not watchdog.expired()
+    finally:
+        async with asyncio.timeout(5):
+            process.kill()
+            stopping.cancel()
+            await asyncio.gather(stopping, return_exceptions=True)
+            await server.finish()
 
 
 @pytest.mark.parametrize("cancellations", [1, 3])
@@ -591,20 +601,27 @@ async def test_finish_does_not_cancel_driver_cleanup_twice() -> None:
         Mock(pending_result=None, close=AsyncMock(side_effect=cleaning.wait)),
     )
     installing = asyncio.create_task(server.driver.install(0))
-    await started.wait()
-    finishing = asyncio.create_task(server.finish())
+    finishing: asyncio.Task[None] | None = None
     try:
-        await cleaning.wait()
+        await wait_for_event(started, installing)
+        finishing = asyncio.create_task(server.finish())
+        await wait_for_event(cleaning, finishing)
         await asyncio.sleep(0)
         release.set()
-        await finishing
+        await asyncio.wait_for(asyncio.shield(finishing), timeout=5)
         with pytest.raises(RuntimeError, match="closed"):
-            await installing
+            await asyncio.wait_for(asyncio.shield(installing), timeout=5)
         assert cleaned.is_set()
         assert server.closed
     finally:
-        release.set()
-        await asyncio.gather(finishing, installing, return_exceptions=True)
+        async with asyncio.timeout(5):
+            release.set()
+            pending = (installing,) if finishing is None else (installing, finishing)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if not server.closed:
+                await server.finish()
 
 
 async def test_save_waits_for_fd5_completion() -> None:
@@ -623,14 +640,23 @@ async def test_save_waits_for_fd5_completion() -> None:
         request_complete.set()
 
     saving = asyncio.create_task(server._save(observe_request, 30, request_state))
-    await request_complete.wait()
+    try:
+        async with asyncio.timeout(5):
+            await wait_for_event(request_complete, saving, pump)
 
-    reader.feed_data(b"DST_Saved|session/TEST/27\n")
+            reader.feed_data(b"DST_Saved|session/TEST/27\n")
 
-    saved = await saving
-    reader.feed_eof()
-    await pump
-    assert saved.snapshot == 27
+            saved = await saving
+            reader.feed_eof()
+            await pump
+            assert saved.snapshot == 27
+    finally:
+        async with asyncio.timeout(5):
+            reader.feed_eof()
+            saving.cancel()
+            pump.cancel()
+            await asyncio.gather(saving, pump, return_exceptions=True)
+            await server.finish()
 
 
 async def test_save_timeout_includes_request(
@@ -710,26 +736,36 @@ async def test_concurrent_saves_wait_for_separate_confirmations() -> None:
         return await lifecycle.wait_for_save(request, 1)
 
     first = asyncio.create_task(wait_for_save())
-    await first_request_started.wait()
-    second = asyncio.create_task(wait_for_save(second_call_started))
-    await second_call_started.wait()
+    second: asyncio.Task[server_events.SavedEvent] | None = None
+    try:
+        async with asyncio.timeout(5):
+            await wait_for_event(first_request_started, first)
+            second = asyncio.create_task(wait_for_save(second_call_started))
+            await wait_for_event(second_call_started, second)
 
-    assert not second_request_started.is_set()
+            assert not second_request_started.is_set()
 
-    release_first_request.set()
-    lifecycle.handle(
-        server_events.SavedEvent(path="session/TEST/1", snapshot=1),
-        lambda _: None,
-    )
-    assert (await first).snapshot == 1
+            release_first_request.set()
+            lifecycle.handle(
+                server_events.SavedEvent(path="session/TEST/1", snapshot=1),
+                lambda _: None,
+            )
+            assert (await first).snapshot == 1
 
-    await second_request_started.wait()
-    assert not second.done()
-    lifecycle.handle(
-        server_events.SavedEvent(path="session/TEST/2", snapshot=2),
-        lambda _: None,
-    )
-    assert (await second).snapshot == 2
+            await wait_for_event(second_request_started, second)
+            assert not second.done()
+            lifecycle.handle(
+                server_events.SavedEvent(path="session/TEST/2", snapshot=2),
+                lambda _: None,
+            )
+            assert (await second).snapshot == 2
+    finally:
+        async with asyncio.timeout(5):
+            release_first_request.set()
+            pending = (first,) if second is None else (first, second)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def test_save_accepts_confirmation_before_request_returns() -> None:
@@ -754,18 +790,25 @@ async def test_save_ignores_confirmation_before_command_write() -> None:
         state.mark_sent()
 
     saving = asyncio.create_task(lifecycle.wait_for_save(request, 1, state))
-    await request_started.wait()
-    lifecycle.handle(
-        server_events.SavedEvent(path="session/AUTOSAVE/1", snapshot=1),
-        lambda _: None,
-    )
-    write_command.set()
-    await asyncio.sleep(0)
-    assert not saving.done()
+    try:
+        async with asyncio.timeout(5):
+            await wait_for_event(request_started, saving)
+            lifecycle.handle(
+                server_events.SavedEvent(path="session/AUTOSAVE/1", snapshot=1),
+                lambda _: None,
+            )
+            write_command.set()
+            await asyncio.sleep(0)
+            assert not saving.done()
 
-    expected = server_events.SavedEvent(path="session/REQUEST/2", snapshot=2)
-    lifecycle.handle(expected, lambda _: None)
-    assert await saving == expected
+            expected = server_events.SavedEvent(path="session/REQUEST/2", snapshot=2)
+            lifecycle.handle(expected, lambda _: None)
+            assert await saving == expected
+    finally:
+        async with asyncio.timeout(5):
+            write_command.set()
+            saving.cancel()
+            await asyncio.gather(saving, return_exceptions=True)
 
 
 async def test_save_ignores_confirmation_from_rejected_attempt() -> None:
@@ -860,17 +903,23 @@ async def test_failed_retry_blocks_next_save_until_late_confirmation() -> None:
         second_request_started.set()
 
     saving = asyncio.create_task(lifecycle.wait_for_save(second_request, 1))
-    await asyncio.sleep(0)
-    assert not second_request_started.is_set()
+    try:
+        async with asyncio.timeout(5):
+            await asyncio.sleep(0)
+            assert not second_request_started.is_set()
 
-    lifecycle.handle(
-        server_events.SavedEvent(path="session/LATE/2", snapshot=2),
-        lambda _: None,
-    )
-    await second_request_started.wait()
-    expected = server_events.SavedEvent(path="session/REQUEST/3", snapshot=3)
-    lifecycle.handle(expected, lambda _: None)
-    assert await saving == expected
+            lifecycle.handle(
+                server_events.SavedEvent(path="session/LATE/2", snapshot=2),
+                lambda _: None,
+            )
+            await wait_for_event(second_request_started, saving)
+            expected = server_events.SavedEvent(path="session/REQUEST/3", snapshot=3)
+            lifecycle.handle(expected, lambda _: None)
+            assert await saving == expected
+    finally:
+        async with asyncio.timeout(5):
+            saving.cancel()
+            await asyncio.gather(saving, return_exceptions=True)
 
 
 @pytest.mark.parametrize("failure", ["cancel", "timeout", "error"])
@@ -893,38 +942,50 @@ async def test_incomplete_save_waits_for_late_event_before_next_request(
     saving = asyncio.create_task(
         lifecycle.wait_for_save(request, 0 if failure == "timeout" else 60)
     )
-    await request_started[0].wait()
-    if failure == "cancel":
-        saving.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await saving
-    elif failure == "timeout":
-        with pytest.raises(TimeoutError):
-            await saving
-    else:
-        with pytest.raises(RuntimeError, match="failed after write"):
-            await saving
+    second: asyncio.Task[server_events.SavedEvent] | None = None
+    try:
+        watchdog = asyncio.timeout(5)
+        async with watchdog:
+            if failure == "cancel":
+                await wait_for_event(request_started[0], saving)
+                saving.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await saving
+            elif failure == "timeout":
+                with pytest.raises(TimeoutError):
+                    await saving
+            else:
+                with pytest.raises(RuntimeError, match="failed after write"):
+                    await saving
+            assert request_started[0].is_set()
 
-    async def save_again() -> server_events.SavedEvent:
-        second_call_started.set()
-        return await lifecycle.wait_for_save(request, 1)
+            async def save_again() -> server_events.SavedEvent:
+                second_call_started.set()
+                return await lifecycle.wait_for_save(request, 1)
 
-    second = asyncio.create_task(save_again())
-    await second_call_started.wait()
-    assert requests == 1
+            second = asyncio.create_task(save_again())
+            await wait_for_event(second_call_started, second)
+            assert requests == 1
 
-    lifecycle.handle(
-        server_events.SavedEvent(path="session/LATE/1", snapshot=1),
-        lambda _: None,
-    )
-    await request_started[1].wait()
-    assert not second.done()
-    lifecycle.handle(
-        server_events.SavedEvent(path="session/REQUEST/2", snapshot=2),
-        lambda _: None,
-    )
-    assert (await second).path == "session/REQUEST/2"
-    assert requests == 2
+            lifecycle.handle(
+                server_events.SavedEvent(path="session/LATE/1", snapshot=1),
+                lambda _: None,
+            )
+            await wait_for_event(request_started[1], second)
+            assert not second.done()
+            lifecycle.handle(
+                server_events.SavedEvent(path="session/REQUEST/2", snapshot=2),
+                lambda _: None,
+            )
+            assert (await second).path == "session/REQUEST/2"
+            assert requests == 2
+        assert not watchdog.expired()
+    finally:
+        async with asyncio.timeout(5):
+            pending = (saving,) if second is None else (saving, second)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def test_readiness_followed_by_fd5_eof_is_not_startup_success() -> None:
@@ -1008,12 +1069,20 @@ async def test_fd5_eof_interrupts_save_confirmation(
 
     monkeypatch.setattr(lifecycle.saved, "wait", track_confirmation_wait)
     saving = asyncio.create_task(lifecycle.wait_for_save(request, 60))
-    await confirmation_started.wait()
-    reader.feed_eof()
+    try:
+        async with asyncio.timeout(5):
+            await wait_for_event(confirmation_started, saving, pump)
+            reader.feed_eof()
 
-    with pytest.raises(EOFError, match="closed before save completed"):
-        await asyncio.wait_for(saving, 1)
-    await pump
+            with pytest.raises(EOFError, match="closed before save completed"):
+                await asyncio.wait_for(saving, 1)
+            await pump
+    finally:
+        async with asyncio.timeout(5):
+            reader.feed_eof()
+            saving.cancel()
+            pump.cancel()
+            await asyncio.gather(saving, pump, return_exceptions=True)
 
 
 async def test_driver_is_reinstalled_after_lua_session_reload() -> None:
@@ -1060,17 +1129,24 @@ async def test_reload_retries_only_before_write_and_waits_for_next_generation(
 
     monkeypatch.setattr(server, "_execute", execute)
     resetting = asyncio.create_task(server.game.invoke(c.Reset(timeout=1)))
-    await written.wait()
-    await asyncio.sleep(0)
+    try:
+        async with asyncio.timeout(5):
+            await wait_for_event(written, resetting)
+            await asyncio.sleep(0)
 
-    assert attempts == 2
-    assert server.driver.generation == 1
-    assert not resetting.done()
+            assert attempts == 2
+            assert server.driver.generation == 1
+            assert not resetting.done()
 
-    server._session_started(2)
-    async with asyncio.timeout(1):
-        await resetting
-    assert server.installs == 3
+            server._session_started(2)
+            async with asyncio.timeout(1):
+                await resetting
+            assert server.installs == 3
+    finally:
+        async with asyncio.timeout(5):
+            resetting.cancel()
+            await asyncio.gather(resetting, return_exceptions=True)
+            await server.finish()
 
 
 async def test_reload_timeout_does_not_replay_written_command(

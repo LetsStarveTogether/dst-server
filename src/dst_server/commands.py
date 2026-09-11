@@ -1,10 +1,10 @@
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any, ClassVar, Literal, Self
 
 from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
-from dst_server.configuration.models import ClusterConfig
 from dst_server.events.server import SavedEvent
 from dst_server.models import Inventory as PlayerInventory
 from dst_server.models import Mod, Player, ShardStatus
@@ -17,18 +17,17 @@ from dst_server.models.base import (
     Identifier,
     Percent,
     RevalidatedFrozenModel,
-    ULIDValue,
 )
 from dst_server.models.cluster import (
     ClusterSaveResult,
     ClusterStatus,
     ConfigurationRead,
-    ConfigurationSnapshot,
     LocatedPlayer,
     ObservationCursor,
     ShardResult,
     ShardRuntimeStatus,
 )
+from dst_server.models.console import ConsoleResult
 from dst_server.models.driver import DriverHealth
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog
 from dst_server.timeouts import (
@@ -60,100 +59,139 @@ class Request[T](RevalidatedFrozenModel):
 
 
 class Status(Request[ShardRuntimeStatus]):
+    """Read the runtime status of this shard."""
+
     method = "status"
 
 
 class ClusterStatusQuery(Request[ClusterStatus]):
+    """Read room status, including all configured shards."""
+
     method = "status"
 
 
 class Start(Request[None]):
+    """Start the room or shard and wait for lifecycle completion."""
+
     method = "start"
     timeout: Timeout = DEFAULT_LIFECYCLE_TIMEOUT
 
 
 class Stop(Request[None]):
+    """Stop the room or shard gracefully."""
+
     method = "stop"
     timeout: Timeout = DEFAULT_STOP_TIMEOUT
 
 
 class Restart(Request[None]):
+    """Stop and start the room or shard."""
+
     method = "restart"
     timeout: Timeout = DEFAULT_LIFECYCLE_TIMEOUT
 
 
 class Kill(Request[None]):
+    """Terminate the room or shard immediately."""
+
     method = "kill"
     timeout: Timeout = DEFAULT_STOP_TIMEOUT
 
 
 class UpdateMods(Request[None]):
+    """Update the MOD files for the room."""
+
     method = "update_mods"
     timeout: Timeout = DEFAULT_LIFECYCLE_TIMEOUT
 
 
 class ReadConfiguration(Request[ConfigurationRead]):
+    """Read the room configuration and its revision."""
+
     method = "read_configuration"
 
 
-class SaveConfiguration(Request[ConfigurationSnapshot]):
-    method = "save_configuration"
-    expected_revision: ULIDValue
-    configuration: ClusterConfig
-
-
 class Execute(Request[str]):
+    """Execute Lua source and return its text response."""
+
     method = "execute"
     source: NonEmptyText
 
 
 class ExecuteJson(Request[JsonValue]):
+    """Execute Lua source and decode its JSON response."""
+
     method = "execute_json"
     source: NonEmptyText
 
 
+class Evaluate(Request[ConsoleResult]):
+    """Evaluate Lua once, returning output, values and compile/runtime errors."""
+
+    method = "evaluate"
+    source: NonEmptyText
+
+
 class ExecuteAll(Request[tuple[ShardResult[str], ...]]):
+    """Execute Lua source on every shard and return individual results."""
+
     method = "execute_all"
     source: NonEmptyText
 
 
 class Announce(Request[None]):
+    """Broadcast an announcement to players in the room."""
+
     method = "announce"
     message: NonEmptyText
 
 
 class Save(Request[SavedEvent]):
+    """Save this shard and wait for its save event."""
+
     method = "save"
     timeout: Timeout = DEFAULT_SAVE_TIMEOUT
 
 
 class ClusterSave(Request[ClusterSaveResult]):
+    """Save every shard and return their save results."""
+
     method = "save"
     timeout: Timeout = DEFAULT_SAVE_TIMEOUT
 
 
 class Pause(Request[bool]):
+    """Set whether the game is paused on this shard."""
+
     method = "pause"
     paused: bool
 
 
 class ClusterPause(Request[tuple[ShardResult[bool], ...]]):
+    """Set whether the game is paused on every shard."""
+
     method = "pause"
     paused: bool
 
 
 class Reset(Request[None]):
+    """Reload the world from its current save."""
+
     method = "reset"
     timeout: Timeout = DEFAULT_RELOAD_TIMEOUT
 
 
 class Rollback(Request[None]):
+    """Roll back the world by a number of snapshots."""
+
     method = "rollback"
     count: Natural = 1
     timeout: Timeout = DEFAULT_RELOAD_TIMEOUT
 
 
 class Regenerate(Request[None]):
+    """Generate a new world, optionally requiring an empty current session."""
+
     method = "regenerate"
     timeout: Timeout = DEFAULT_RELOAD_TIMEOUT
     expected_session_id: Identifier | None = None
@@ -161,18 +199,24 @@ class Regenerate(Request[None]):
 
 
 class RegenerateShard(Request[None]):
+    """Generate a new world for this shard."""
+
     method = "regenerate_shard"
     preserve_settings: bool = True
     timeout: Timeout = DEFAULT_RELOAD_TIMEOUT
 
 
 class Snapshots(Request[SnapshotCatalog]):
+    """List available snapshots, optionally before a snapshot number."""
+
     method = "list_snapshots"
     limit: Annotated[int, Field(ge=1, le=100)] = 100
     before: Natural | None = None
 
 
 class RollbackToDay(Request[Snapshot]):
+    """Roll back the room to a snapshot for the requested day."""
+
     method = "rollback_to_day"
     day: Positive
     timeout: Timeout = DEFAULT_RELOAD_TIMEOUT
@@ -186,34 +230,50 @@ class RollbackToSnapshot(Request[None]):
 
 
 class Health(Request[DriverHealth]):
+    """Read game command transport health."""
+
     method = "health"
 
 
 class Room(Request[RoomInfo]):
+    """Read game room details."""
+
     method = "room"
 
 
 class World(Request[WorldInfo]):
+    """Read current world details."""
+
     method = "world"
 
 
 class Runtime(Request[RuntimeInfo]):
+    """Read game runtime details."""
+
     method = "runtime"
 
 
 class Mods(Request[tuple[Mod, ...]]):
+    """List the MODs loaded by the game."""
+
     method = "mods"
 
 
 class ConnectedShards(Request[tuple[ShardStatus, ...]]):
+    """List the shards connected to this game instance."""
+
     method = "connected_shards"
 
 
 class ListPlayers(Request[tuple[Player, ...]]):
+    """List players on this shard."""
+
     method = "list_players"
 
 
 class LocatePlayers(Request[tuple[LocatedPlayer, ...]]):
+    """List players across the room with their shard locations."""
+
     method = "list_players"
 
 
@@ -222,43 +282,63 @@ class _PlayerRequest[T](Request[T]):
 
 
 class GetPlayer(_PlayerRequest[Player | None]):
+    """Read one player on this shard, or null when absent."""
+
     method = "get_player"
 
 
 class LocatePlayer(_PlayerRequest[LocatedPlayer | None]):
+    """Locate one player across the room, or null when absent."""
+
     method = "get_player"
 
 
 class Inventory(_PlayerRequest[PlayerInventory | None]):
+    """Read the inventory of a player on this shard."""
+
     method = "inventory"
 
 
 class Kick(_PlayerRequest[None]):
+    """Disconnect a player from this shard."""
+
     method = "kick"
 
 
 class Ban(_PlayerRequest[None]):
+    """Ban a player, optionally for a limited number of seconds."""
+
     method = "ban"
     seconds: Positive | None = None
 
 
 class Blocklist(Request[tuple[str, ...]]):
+    """List blocked player identifiers."""
+
     method = "blocklist"
 
 
 class IsBlocked(_PlayerRequest[bool]):
+    """Check whether a player is blocked."""
+
     method = "is_blocked"
 
 
 class Unban(_PlayerRequest[bool]):
+    """Remove a player from the blocklist."""
+
     method = "unban"
 
 
 class IsAdmin(_PlayerRequest[bool | None]):
+    """Check whether a connected player is an administrator."""
+
     method = "is_admin"
 
 
 class SetVitals(_PlayerRequest[bool]):
+    """Change one or more player vitals."""
+
     method = "set_vitals"
     health: Percent | None = None
     hunger: Percent | None = None
@@ -278,24 +358,34 @@ class SetVitals(_PlayerRequest[bool]):
 
 
 class KillPlayer(_PlayerRequest[bool]):
+    """Kill a player character."""
+
     method = "kill_player"
 
 
 class Revive(_PlayerRequest[bool]):
+    """Revive a player character."""
+
     method = "revive"
 
 
 class Despawn(_PlayerRequest[bool]):
+    """Despawn a player character."""
+
     method = "despawn"
 
 
 class Migrate(_PlayerRequest[bool]):
+    """Move a player to another connected shard through a portal."""
+
     method = "migrate"
     shard_id: Identifier
     portal_id: Positive = 1
 
 
 class Teleport(_PlayerRequest[bool]):
+    """Move a player to the given world coordinates."""
+
     method = "teleport"
     x: FiniteFloat
     y: FiniteFloat
@@ -303,26 +393,36 @@ class Teleport(_PlayerRequest[bool]):
 
 
 class Give(_PlayerRequest[int]):
+    """Give a player a number of items."""
+
     method = "give"
     item: NonEmptyText
     count: Annotated[int, Field(ge=1, le=64)] = 1
 
 
 class Remove(_PlayerRequest[int]):
+    """Remove a number of matching items from a player."""
+
     method = "remove"
     item: NonEmptyText
     count: Positive = 1
 
 
 class IsWhitelisted(_PlayerRequest[bool]):
+    """Check whether a player is on the room whitelist."""
+
     method = "is_whitelisted"
 
 
 class Whitelist(_PlayerRequest[bool]):
+    """Add a player to the room whitelist."""
+
     method = "whitelist"
 
 
 class Unwhitelist(_PlayerRequest[bool]):
+    """Remove a player from the room whitelist."""
+
     method = "unwhitelist"
 
 
@@ -359,6 +459,19 @@ class Operation:
     result_type: Any
 
 
+class MethodDescription(FrozenModel):
+    name: NonEmptyText
+    scope: Literal["cluster", "shard"]
+    description: str
+    arguments_schema: dict[str, Any]
+    result_schema: dict[str, Any]
+    default_timeout: Timeout
+    mutation: bool
+
+
+METHOD_DESCRIPTIONS = TypeAdapter(tuple[MethodDescription, ...])
+
+
 _ALL: tuple[Scope, ...] = ("cluster", "shard", "agent")
 _SHARD: tuple[Scope, ...] = ("shard", "agent")
 _MASTER: tuple[Scope, ...] = ("cluster", "agent")
@@ -375,9 +488,9 @@ _DECLARATIONS: tuple[
     (Kill, None, True, _ALL),
     (UpdateMods, None, True, _CLUSTER),
     (ReadConfiguration, ConfigurationRead, False, _CLUSTER),
-    (SaveConfiguration, ConfigurationSnapshot, True, _CLUSTER),
     (Execute, str, True, _SHARD),
     (ExecuteJson, JsonValue, True, _SHARD),
+    (Evaluate, ConsoleResult, True, _SHARD),
     (ExecuteAll, tuple[ShardResult[str], ...], True, _CLUSTER),
     (Announce, None, True, _MASTER),
     (Save, SavedEvent, True, _SHARD),
@@ -445,6 +558,31 @@ def operation(scope: str, request: Request[Any] | str) -> Operation:
     return spec
 
 
+def describe_operations(scope: str) -> tuple[MethodDescription, ...]:
+    """Describe the registered methods exposed by a public endpoint."""
+    if scope not in {"cluster", "shard"}:
+        msg = "method discovery is only available for cluster and shard endpoints"
+        raise ValueError(msg)
+    descriptions = []
+    for (registered_scope, name), spec in sorted(_OPERATIONS.items()):
+        if registered_scope != scope:
+            continue
+        arguments_schema = spec.request.model_json_schema()
+        arguments_schema["properties"].pop("timeout", None)
+        descriptions.append(
+            MethodDescription(
+                name=name,
+                scope=scope,
+                description=spec.request.__doc__ or "",
+                arguments_schema=arguments_schema,
+                result_schema=spec.response.json_schema(mode="serialization"),
+                default_timeout=spec.request.model_fields["timeout"].default,
+                mutation=spec.mutation,
+            )
+        )
+    return tuple(descriptions)
+
+
 class _Envelope(FrozenModel):
     method: NonEmptyText
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
@@ -476,11 +614,22 @@ def encode_request(request: Request[Any]) -> bytes:
     arguments = request.model_dump(
         mode="json", exclude={"timeout"}, exclude_unset=True, context={"secrets": True}
     )
-    return (
-        _Envelope(method=request.method, arguments=arguments, timeout=request.timeout)
-        .model_dump_json()
-        .encode()
+    return encode_call(request.method, arguments, timeout=request.timeout)
+
+
+def encode_call(
+    method: str,
+    arguments: Mapping[str, JsonValue] | None = None,
+    *,
+    timeout: float | None = None,
+) -> bytes:
+    envelope = _Envelope(
+        method=method, arguments=dict(arguments or {}), timeout=timeout
     )
+    if {"method", "timeout"}.intersection(envelope.arguments):
+        msg = "command arguments contain reserved fields"
+        raise ValueError(msg)
+    return envelope.model_dump_json().encode()
 
 
 def parse_request(payload: bytes, *, scope: Scope) -> Request[Any]:

@@ -227,6 +227,49 @@ def references_pod(path: Path, pod_source: str) -> bool:
     return False
 
 
+def drop_ins(path: Path) -> tuple[Path, ...]:
+    """Return local drop-ins in systemd order, with specific names taking priority."""
+    directories = (
+        f"{path.suffix[1:]}.d",
+        *(
+            f"{path.stem[: index + 1]}{path.suffix}.d"
+            for index, character in enumerate(path.stem)
+            if character == "-"
+        ),
+        f"{path.name}.d",
+    )
+    files = {
+        source.name: source
+        for directory in directories
+        for source in (path.parent / directory).glob("*.conf")
+    }
+    return tuple(files[name] for name in sorted(files))
+
+
+def validate_update(path: Path, updated: QuadletUnit) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    previous = type(updated).load(path)
+    changed = {
+        (field.section, field.key)
+        for name, field in _fields(type(updated))
+        if getattr(previous, name) != getattr(updated, name)
+    }
+    if not changed:
+        return
+    for source in drop_ins(path):
+        section = ""
+        for raw in read_text(source).splitlines():
+            line = raw.strip()
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1]
+            elif not line.startswith(("#", ";")) and "=" in line:
+                key = line.partition("=")[0].strip()
+                if (section, key) in changed:
+                    msg = f"Quadlet {section}.{key} is overridden by {source}"
+                    raise ValueError(msg)
+
+
 def _fields(model: type[QuadletUnit]) -> tuple[tuple[str, UnitField], ...]:
     return tuple(
         (name, metadata)
