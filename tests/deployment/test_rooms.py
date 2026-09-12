@@ -40,7 +40,7 @@ CLUSTER_KEY = SecretStr("template-test-cluster-key")
 
 TEMPLATES = (
     (
-        0,
+        RoomType.PURE_SURVIVAL,
         "forest",
         {
             "forest": ("SURVIVAL_TOGETHER", "SURVIVAL_TOGETHER"),
@@ -49,13 +49,13 @@ TEMPLATES = (
         frozenset(),
     ),
     (
-        20,
+        RoomType.PURE_ENDLESS,
         "forest",
         {"forest": ("ENDLESS", "ENDLESS"), "cave": ("DST_CAVE", "DST_CAVE")},
         frozenset(),
     ),
     (
-        50,
+        RoomType.SEMI_SURVIVAL,
         "forest",
         {
             "forest": ("SURVIVAL_TOGETHER", "SURVIVAL_TOGETHER"),
@@ -64,26 +64,26 @@ TEMPLATES = (
         frozenset({1803285852, 2189004162, 2950657933, 3223103565, 3046339764}),
     ),
     (
-        70,
+        RoomType.SEMI_ENDLESS,
         "forest",
         {"forest": ("ENDLESS", "ENDLESS"), "cave": ("DST_CAVE", "DST_CAVE")},
         frozenset({1803285852, 2189004162, 2950657933, 3223103565, 3046339764}),
     ),
-    (100, "afk", {"afk": ("ENDLESS", "ENDLESS")}, frozenset({1981709850})),
+    (RoomType.AFK, "afk", {"afk": ("ENDLESS", "ENDLESS")}, frozenset({1981709850})),
     (
-        110,
+        RoomType.LIGHTS_OUT_SURVIVAL,
         "forest",
         {"forest": ("LIGHTS_OUT", "LIGHTS_OUT"), "cave": ("DST_CAVE", "DST_CAVE")},
         frozenset(),
     ),
     (
-        115,
+        RoomType.LIGHTS_OUT_ENDLESS,
         "forest",
         {"forest": ("LIGHTS_OUT", "ENDLESS"), "cave": ("DST_CAVE", "DST_CAVE")},
         frozenset(),
     ),
     (
-        120,
+        RoomType.ISLAND_ADVENTURE,
         "shipwrecked",
         {
             "shipwrecked": ("SHIPWRECKED_ENDLESS", "SHIPWRECKED_ENDLESS"),
@@ -92,20 +92,25 @@ TEMPLATES = (
         frozenset({1467214795, 3435352667}),
     ),
     (
-        125,
+        RoomType.HAMLET,
         "hamlet",
         {"hamlet": ("PORKLAND_DEFAULT", "PORKLAND_DEFAULT")},
         frozenset({3322803908}),
     ),
     (
-        130,
+        RoomType.ADVENTURE,
         "adventure",
         {"adventure": ("SURVIVAL_TOGETHER", "SURVIVAL_TOGETHER")},
         frozenset({756229217, 1847959350}),
     ),
-    (133, "gorge", {"gorge": ("QUAGMIRE", "QUAGMIRE")}, frozenset({1918927570})),
     (
-        135,
+        RoomType.GORGE,
+        "gorge",
+        {"gorge": ("QUAGMIRE", "QUAGMIRE")},
+        frozenset({1918927570}),
+    ),
+    (
+        RoomType.FORGE,
         "xforge",
         {"xforge": ("LAVAARENA", "LAVAARENA")},
         frozenset({1938752683, 2038128735, 2633870801, 2961923603}),
@@ -116,41 +121,53 @@ TEMPLATES = (
 def test_room_plan_exactly_covers_the_requested_fleet() -> None:
     expanded = [number for numbers, _, _, _ in ROOMS for number in numbers]
 
-    assert tuple(expanded) == ROOM_NUMBERS == tuple(range(140))
+    assert tuple(expanded) == ROOM_NUMBERS == (*range(100), *range(200, 216))
     assert len(set(expanded)) == len(expanded)
-    assert len(ROOMS) == len(RoomType) == 12
+    assert tuple((numbers, kind) for numbers, kind, _, _ in ROOMS) == (
+        (range(30), RoomType.PURE_SURVIVAL),
+        (range(30, 60), RoomType.PURE_ENDLESS),
+        (range(60, 70), RoomType.SEMI_SURVIVAL),
+        (range(70, 100), RoomType.SEMI_ENDLESS),
+        (range(200, 205), RoomType.AFK),
+        (range(205, 206), RoomType.ADVENTURE),
+        (range(206, 207), RoomType.GORGE),
+        (range(207, 210), RoomType.FORGE),
+        (range(210, 213), RoomType.ISLAND_ADVENTURE),
+        (range(213, 216), RoomType.HAMLET),
+    )
+    assert len(RoomType) == 12
 
 
-def test_room_schedules_have_five_equal_groups_and_complete_names() -> None:
+def test_room_schedules_cover_the_requested_groups_and_complete_names() -> None:
     groups = {
-        None: (range(4), range(20, 26), range(50, 54), range(70, 76)),
-        ("晨餐", 9, 12): (range(4, 8), range(26, 32), range(54, 58), range(76, 82)),
-        ("午膳", 13, 18): (range(8, 12), range(32, 38), range(58, 62), range(82, 88)),
-        ("晚宴", 19, 0): (range(12, 16), range(38, 44), range(62, 66), range(88, 94)),
-        ("夜饮", 22, 5): (range(16, 20), range(44, 50), range(66, 70), range(94, 100)),
+        None: (range(16), range(30, 46), range(60, 66), range(70, 86)),
+        ("白饭", 10, 18): (range(16, 20), range(46, 50), range(66, 67), range(86, 90)),
+        ("晚宴", 18, 0): (range(20, 28), range(50, 58), range(67, 69), range(90, 98)),
+        ("夜饮", 0, 8): (range(28, 30), range(58, 60), range(69, 70), range(98, 100)),
     }
     seen = []
     promotion = " | 朗诵团 5 周年啦！入团找到你未来的 5 年好饥友吧~"  # ruff: ignore[ambiguous-unicode-character-string]
     for schedule, ranges in groups.items():
         numbers = [number for group in ranges for number in group]
-        assert len(numbers) == 20
         seen.extend(numbers)
         for number in numbers:
             assert room_schedule(number) == schedule
             suffix = f"-{schedule[0]}" if schedule else ""
             message = (
-                f" | 每日 {schedule[1]}-{schedule[2]} 开放" if schedule else promotion
+                f" | 每日 {schedule[1]}-{schedule[2] or 24} 开放"
+                if schedule
+                else promotion
             )
             assert room_name(number) == (
                 f"LST-{number:03d}-{room(number)[1]}{suffix}{message}"
             )
     assert sorted(seen) == list(range(100))
-    for number in range(100, 140):
+    for number in range(200, 216):
         assert room_schedule(number) is None
         assert room_name(number) == f"LST-{number:03d}-{room(number)[1]}{promotion}"
 
 
-@pytest.mark.parametrize("number", [-1, 140, True, "7"])
+@pytest.mark.parametrize("number", [-1, 100, 199, 216, 299, True, "7"])
 def test_schedule_and_name_reject_invalid_room_numbers(number: object) -> None:
     error = TypeError if isinstance(number, (bool, str)) else ValueError
     for function in (room_schedule, room_name):
@@ -158,40 +175,46 @@ def test_schedule_and_name_reject_invalid_room_numbers(number: object) -> None:
             function(cast("int", number))
 
 
-def test_netdata_environment_is_logs_only() -> None:
+def test_netdata_environment_exports_logs_and_metrics() -> None:
     assert dict(NETDATA_ENVIRONMENT) == {
         "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
-        "OTEL_METRICS_EXPORTER": "none",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
         "OTEL_TRACES_EXPORTER": "none",
     }
 
 
-@pytest.mark.parametrize(("number", "master", "shards", "downloads"), TEMPLATES)
+@pytest.mark.parametrize(("kind", "master", "shards", "downloads"), TEMPLATES)
 def test_template_settings_worlds_and_shard_roles(
-    number: int,
+    kind: RoomType,
     master: str,
     shards: dict[str, tuple[str, str]],
     downloads: frozenset[int],
 ) -> None:
-    _, _, max_players = room(number)
-    cluster = build(number, token=TOKEN, cluster_key=CLUSTER_KEY)
+    cluster = build_template(kind, number=299, token=TOKEN, cluster_key=CLUSTER_KEY)
     expected = {
-        "cluster_name": room_name(number),
         "cluster_description": CLUSTER_DESCRIPTION,
-        "max_snapshots": 9 if number == 100 else 999_999_999,
+        "max_snapshots": 9 if kind is RoomType.AFK else 999_999_999,
         "steam_group_id": 45_524_458,
-        "max_players": max_players,
+        "max_players": {
+            RoomType.AFK: 64,
+            RoomType.LIGHTS_OUT_ENDLESS: 6,
+            RoomType.ISLAND_ADVENTURE: 4,
+            RoomType.HAMLET: 4,
+            RoomType.FORGE: 6,
+        }.get(kind, 9),
         "master_port": 10888,
-        "game_mode": {133: "quagmire", 135: "lavaarena"}.get(number, "survival"),
-        "autosaver_enabled": number != 135,
+        "game_mode": {RoomType.GORGE: "quagmire", RoomType.FORGE: "lavaarena"}.get(
+            kind, "survival"
+        ),
+        "autosaver_enabled": kind is not RoomType.FORGE,
         "cluster_language": "zh",
         "lan_only_cluster": False,
         "offline_cluster": False,
-        "pause_when_empty": number not in {133, 135},
+        "pause_when_empty": kind not in {RoomType.GORGE, RoomType.FORGE},
         "pvp": False,
-        "shard_enabled": number not in {100, 125, 135},
-        "tick_rate": 1 if number in {100, 135} else 15,
-        "vote_enabled": number != 100,
+        "shard_enabled": kind not in {RoomType.AFK, RoomType.HAMLET, RoomType.FORGE},
+        "tick_rate": 1 if kind in {RoomType.AFK, RoomType.FORGE} else 15,
+        "vote_enabled": kind is not RoomType.AFK,
     }
     assert cluster.settings.model_dump(include=set(expected)) == expected
     assert set(cluster.shards) == set(shards)
@@ -213,16 +236,16 @@ def test_template_settings_worlds_and_shard_roles(
         ]
 
 
-@pytest.mark.parametrize(("number", "_master", "shards", "downloads"), TEMPLATES)
+@pytest.mark.parametrize(("kind", "_master", "shards", "downloads"), TEMPLATES)
 def test_template_mod_options_and_worlds_execute_in_native_lua(
     tmp_path: Path,
     luajit: str,
-    number: int,
+    kind: RoomType,
     _master: str,
     shards: dict[str, tuple[str, str]],
     downloads: frozenset[int],
 ) -> None:
-    cluster = build(number, token=TOKEN, cluster_key=CLUSTER_KEY)
+    cluster = build_template(kind, number=299, token=TOKEN, cluster_key=CLUSTER_KEY)
     cluster.save(tmp_path)
     expected_mods = {
         f"workshop-{identifier}": {
@@ -271,21 +294,20 @@ def test_template_mod_options_and_worlds_execute_in_native_lua(
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-@pytest.mark.parametrize(("number", "_master", "shards", "downloads"), TEMPLATES)
+@pytest.mark.parametrize(("kind", "_master", "shards", "downloads"), TEMPLATES)
 def test_room_configuration_round_trip(
     tmp_path: Path,
-    number: int,
+    kind: RoomType,
     _master: str,
     shards: dict[str, tuple[str, str]],
     downloads: frozenset[int],
 ) -> None:
-    cluster = build(number, token=TOKEN, cluster_key=CLUSTER_KEY)
-    kind, _, max_players = room(number)
+    cluster = build_template(kind, number=299, token=TOKEN, cluster_key=CLUSTER_KEY)
 
     assert set(cluster.shards) == set(shards)
     assert cluster.resolved_downloads().items == downloads
-    assert cluster.settings.cluster_name == room_name(number)
-    assert cluster.settings.max_players == max_players
+    assert cluster.settings.cluster_name is not None
+    assert cluster.settings.cluster_name.startswith("LST-299-")
     assert {"max_snapshots", "steam_group_id"}.issubset(
         cluster.settings.model_fields_set
     )
@@ -300,7 +322,11 @@ def test_room_configuration_round_trip(
         path.parent.name for path in tmp_path.rglob("leveldataoverride.lua")
     }
     assert level_shards == (
-        {"gorge"} if number == 133 else {"xforge"} if number == 135 else set()
+        {"gorge"}
+        if kind is RoomType.GORGE
+        else {"xforge"}
+        if kind is RoomType.FORGE
+        else set()
     )
     assert len(tuple(tmp_path.rglob("worldgenoverride.lua"))) == len(shards)
     assert all(
@@ -333,7 +359,7 @@ def test_every_template_mod_has_explicit_configuration() -> None:
     assert MOD_CONFIGURATIONS[3223103565]["SSB"] is False
 
 
-@pytest.mark.parametrize("number", [50, 70])
+@pytest.mark.parametrize("number", [60, 70])
 def test_semi_rooms_enable_stacked_trade_with_workshop_defaults(number: int) -> None:
     cluster = build(number, token=TOKEN, cluster_key=CLUSTER_KEY)
 
@@ -365,7 +391,7 @@ def test_world_templates_keep_only_real_overrides() -> None:
         if shard.world is not None
     )
 
-    endless = build(20, token=TOKEN, cluster_key=CLUSTER_KEY)
+    endless = build(30, token=TOKEN, cluster_key=CLUSTER_KEY)
     endless_forest = endless.shards["forest"].world
     endless_cave = endless.shards["cave"].world
     assert endless.settings.game_mode == "survival"
@@ -381,8 +407,8 @@ def test_world_templates_keep_only_real_overrides() -> None:
         "resettime": "none",
     }
 
-    semi_forest = build(50, token=TOKEN, cluster_key=CLUSTER_KEY).shards["forest"].world
-    semi_cave = build(50, token=TOKEN, cluster_key=CLUSTER_KEY).shards["cave"].world
+    semi_forest = build(60, token=TOKEN, cluster_key=CLUSTER_KEY).shards["forest"].world
+    semi_cave = build(60, token=TOKEN, cluster_key=CLUSTER_KEY).shards["cave"].world
     assert semi_forest is not None
     assert semi_cave is not None
     assert semi_forest.overrides.model_dump(exclude_unset=True) == {
@@ -425,7 +451,9 @@ def test_world_templates_keep_only_real_overrides() -> None:
         "portalresurection": "always",
     }
 
-    lights_out = build(115, token=TOKEN, cluster_key=CLUSTER_KEY)
+    lights_out = build_template(
+        "lights_out_endless", token=TOKEN, cluster_key=CLUSTER_KEY
+    )
     forest = lights_out.shards["forest"].world
     cave = lights_out.shards["cave"].world
     assert forest is not None
@@ -442,7 +470,7 @@ def test_world_templates_keep_only_real_overrides() -> None:
     }
     assert lights_out.settings.game_mode == "survival"
 
-    afk = build(100, token=TOKEN)
+    afk = build(200, token=TOKEN)
     world = afk.shards["afk"].world
     assert world is not None
     assert world.overrides.model_fields_set == {
@@ -454,9 +482,9 @@ def test_world_templates_keep_only_real_overrides() -> None:
     assert world.overrides.model_dump(exclude_unset=True)["has_ocean"] is True
 
 
-@pytest.mark.parametrize("number", [-1, 140])
+@pytest.mark.parametrize("number", [-1, 100, 199, 216, 299])
 def test_room_number_is_bounded(number: int) -> None:
-    with pytest.raises(ValueError, match="0 through 139"):
+    with pytest.raises(ValueError, match="room number must be an integer"):
         build(number, token=TOKEN, cluster_key=CLUSTER_KEY)
 
 
@@ -466,7 +494,7 @@ def test_room_number_requires_an_integer(number: object) -> None:
         build(cast(int, number), token=TOKEN, cluster_key=CLUSTER_KEY)
 
 
-@pytest.mark.parametrize("number", [0, 100, 130, 133])
+@pytest.mark.parametrize("number", [0, 200, 205, 206])
 def test_cluster_key_is_generated_only_on_save(tmp_path: Path, number: int) -> None:
     cluster = build(number, token=TOKEN)
 
@@ -479,7 +507,7 @@ def test_cluster_key_is_generated_only_on_save(tmp_path: Path, number: int) -> N
 
 
 def test_script_configuration_can_be_loaded_edited_and_saved(tmp_path: Path) -> None:
-    cluster = build(100, token=TOKEN, cluster_key=CLUSTER_KEY)
+    cluster = build(200, token=TOKEN, cluster_key=CLUSTER_KEY)
     shard = cluster.shards["afk"]
     mod_name = "workshop-1981709850"
     configured = cluster.replace(
@@ -526,7 +554,7 @@ def test_script_configuration_can_be_loaded_edited_and_saved(tmp_path: Path) -> 
 
 @pytest.mark.parametrize(
     ("number", "mode", "tick_rate"),
-    [(133, "quagmire", 15), (135, "lavaarena", 1)],
+    [(206, "quagmire", 15), (207, "lavaarena", 1)],
 )
 def test_event_rooms_preserve_their_game_mode(
     tmp_path: Path,
@@ -543,24 +571,24 @@ def test_event_rooms_preserve_their_game_mode(
     assert shard.level is not None
     assert isinstance(
         shard.level.overrides,
-        QuagmireOverrides if number == 133 else LavaArenaOverrides,
+        QuagmireOverrides if number == 206 else LavaArenaOverrides,
     )
     level_values = shard.level.overrides.model_dump()
     assert level_values["boons"] == level_values["touchstone"] == "never"
     assert level_values["task_set"] == (
-        "quagmire_taskset" if number == 133 else "lavaarena_taskset"
+        "quagmire_taskset" if number == 206 else "lavaarena_taskset"
     )
     assert level_values["start_location"] == (
-        "quagmire_startlocation" if number == 133 else "lavaarena"
+        "quagmire_startlocation" if number == 206 else "lavaarena"
     )
-    if number == 135:
+    if number == 207:
         assert cluster.settings.autosaver_enabled is False
     cluster.save(tmp_path)
     assert ClusterConfig.load(tmp_path).files() == cluster.files()
 
 
 def test_template_generation_preserves_permission_lists(tmp_path: Path) -> None:
-    for number in (132, 133, 134):
+    for number in (205, 206, 207):
         directory = tmp_path / str(number)
         directory.mkdir()
         blocklist = directory / "blocklist.txt"
@@ -609,7 +637,7 @@ def test_generate_room_saves_cluster_and_quadlet_application(
     assert all(unit.image == DEFAULT_IMAGE for unit in units)
     assert application.pod.publish_ports[0].host == 30070
     assert application.pod.userns == userns
-    assert application.pod.wanted_by == ()
+    assert application.pod.wanted_by == ("default.target",)
     for unit in units:
         assert unit.pull == "always"
         assert unit.timeout_start_sec == 1800
@@ -619,7 +647,7 @@ def test_generate_room_saves_cluster_and_quadlet_application(
         assert (unit.notify, unit.watchdog_sec, unit.restart) == (
             True,
             300,
-            "on-failure",
+            "on-failure" if unit is application.master else "no",
         )
         assert (unit.kill_mode, unit.watchdog_signal) == ("control-group", "SIGKILL")
 
@@ -670,9 +698,9 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
     assert {path.name for path in cluster_root.iterdir()} == {
         f"{number:03d}" for number in ROOM_NUMBERS
     }
-    assert len(tuple(quadlet_dir.glob("*.pod"))) == 140
-    assert len(tuple(quadlet_dir.glob("*.container"))) == 255
-    assert len(tuple(cluster_root.rglob("leveldataoverride.lua"))) == 7
+    assert len(tuple(quadlet_dir.glob("*.pod"))) == 116
+    assert len(tuple(quadlet_dir.glob("*.container"))) == 219
+    assert len(tuple(cluster_root.rglob("leveldataoverride.lua"))) == 4
     assert not tuple(quadlet_dir.glob("*.network"))
     assert not tuple(cluster_root.rglob(".dst-room.json"))
     store = RoomStore(cluster_root, quadlet_dir)
@@ -696,6 +724,8 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
         assert all(mapping.protocol == "udp" for mapping in mappings)
         managed = store.load(number)
         assert managed.template == room(number)[0]
+        assert managed.cluster.settings.cluster_name == room_name(number)
+        assert managed.cluster.settings.max_players == room(number)[2]
         assert bool(managed.schedule) is (room_schedule(number) is not None)
         assert managed.recycle is (number < 100)
         player_ports = {mapping.container: mapping.host for mapping in mappings}
@@ -728,9 +758,9 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
             assert unit.environment.get("DST_SERVER_TELEMETRY_PROFILE") == (
                 "history" if history else None
             )
-    assert len(ports) == len(set(ports)) == 510
+    assert len(ports) == len(set(ports)) == 438
     assert min(ports) == 30000
-    assert max(ports) == 31391
+    assert max(ports) == 32151
 
 
 def test_generate_rooms_uses_distinct_persistent_cluster_keys(tmp_path: Path) -> None:
@@ -738,7 +768,7 @@ def test_generate_rooms_uses_distinct_persistent_cluster_keys(tmp_path: Path) ->
     keys = []
     for _ in range(2):
         generate_rooms(
-            (0, 7, 100),
+            (0, 7, 200),
             token=TOKEN,
             cluster_root=cluster_root,
             quadlet_dir=tmp_path / "quadlet",
@@ -748,7 +778,7 @@ def test_generate_rooms_uses_distinct_persistent_cluster_keys(tmp_path: Path) ->
                 ClusterSettings.load(
                     cluster_root / f"{number:03d}/cluster.ini"
                 ).cluster_key
-                for number in (0, 7, 100)
+                for number in (0, 7, 200)
             )
         )
         assert ClusterSettings.load(cluster_root / "007/cluster.ini").cluster_name == (

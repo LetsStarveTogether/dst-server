@@ -6,39 +6,34 @@ from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
 from dst_server import commands as c
 from dst_server.errors import IndeterminateCommandError
 from dst_server.events import server as server_events
 from dst_server.events import world
-from dst_server.models.driver import DriverHealth
+from dst_server.models.driver import DriverFailed, DriverHealth, DriverReady
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.console import Console, StaleGenerationError
 from dst_server.runtime.lifecycle import Lifecycle
-from dst_server.runtime.request import RequestState
 from dst_server.telemetry import TelemetryProfile, TelemetrySettings
-from tests.helpers import FAKE_SERVER, StubServer, structured_result, wait_for_event
+from tests.helpers import FAKE_SERVER, structured_result, wait_for_event
 
 
-class ReloadingServer(Server):
-    def __init__(self) -> None:
-        super().__init__(ServerConfig(shard="test"))
-        self.installs = 0
-
-    async def install_driver(self, generation: int) -> DriverHealth:
-        self.installs += 1
-        return DriverHealth.model_validate(
-            {
-                "protocol": 2,
-                "generation": generation,
-                "telemetry_status": "active",
-                "last_error": None,
-                "events_emitted": self.installs,
-                "errors": 0,
-            },
-            strict=True,
+async def native_ready(server: Server, generation: int) -> None:
+    await server._observe_driver(
+        DriverReady(
+            nonce=server.game_events.nonce,
+            health=DriverHealth(
+                protocol=2,
+                generation=generation,
+                telemetry_status="active",
+                last_error=None,
+                events_emitted=generation + 1,
+                errors=0,
+            ),
         )
+    )
 
 
 def make_fake_server(
@@ -84,34 +79,36 @@ async def test_cloud_protocol_and_lifecycle(tmp_path: Path) -> None:
 
     await server.start()
 
-    assert server.driver_health.telemetry_status == "active"
-    assert server.session_id == "TEST"
-    observed = await server.read_game_event()
-    assert observed is not None
-    assert isinstance(observed.record, world.StateChangedEvent)
-    assert observed.record.data.name == "cycles"
-    assert observed.observed_timestamp_ns > 0
-    assert await server.execute('print("hello")') == 'result:print("hello")'
-    await asyncio.wait_for(command_logged.wait(), 1)
-    assert "command received" in logs
-    observed = await server.read_game_event()
-    assert observed is not None
-    assert observed.record.event == "dst.entity.death"
-    event = await server.read_event()
-    assert isinstance(event, server_events.SessionEvent)
-    assert event.session_id == "TEST"
-    with pytest.raises(ValueError, match="single line"):
-        await server.execute("print(1)\nprint(2)")
-    assert await server.stop() == -signal.SIGKILL
-    event = await server.read_event()
-    assert event is not None
-    assert event.event == "shutdown"
-    event = await server.read_event()
-    assert isinstance(event, server_events.SavedEvent)
-    assert event.snapshot == 1
-    event = await server.read_event()
-    assert event is not None
-    assert event.event == "stopping"
+    try:
+        assert server.driver_health.telemetry_status == "active"
+        assert server.session_id == "TEST"
+        observed = await server.read_game_event()
+        assert observed is not None
+        assert isinstance(observed.record, world.StateChangedEvent)
+        assert observed.record.data.name == "cycles"
+        assert observed.observed_timestamp_ns > 0
+        assert await server.execute('print("hello")') == 'result:print("hello")'
+        await asyncio.wait_for(command_logged.wait(), 1)
+        assert "command received" in logs
+        observed = await server.read_game_event()
+        assert observed is not None
+        assert observed.record.event == "dst.entity.death"
+        event = await server.read_event()
+        assert isinstance(event, server_events.SessionEvent)
+        assert event.session_id == "TEST"
+        assert await server.execute("print(1)\nprint(2)") == "result:print(1)\nprint(2)"
+        assert await server.stop() == -signal.SIGKILL
+        event = await server.read_event()
+        assert event is not None
+        assert event.event == "shutdown"
+        event = await server.read_event()
+        assert isinstance(event, server_events.SavedEvent)
+        assert event.snapshot == 1
+        event = await server.read_event()
+        assert event is not None
+        assert event.event == "stopping"
+    finally:
+        await server.kill()
 
 
 def test_server_config() -> None:
@@ -165,36 +162,24 @@ async def test_telemetry_install_failure_keeps_core_driver_running(
         assert server.returncode is None
 
 
-async def test_core_driver_install_failure_degrades_without_stopping_game(
+async def test_core_driver_failure_fails_startup_and_reaps_game(tmp_path: Path) -> None:
+    server = make_fake_server(tmp_path, "core-failure", telemetry_profile="history")
+    with pytest.raises(RuntimeError, match="installation_failed"):
+        await server.start()
+    assert server.driver_error == "installation_failed"
+    assert server.returncode is not None
+    assert server.closed
+    assert not server.driver.is_ready(0)
+
+
+async def test_missing_native_driver_ready_times_out_and_reaps_game(
     tmp_path: Path,
 ) -> None:
-    server = make_fake_server(
-        tmp_path,
-        "core-failure",
-        telemetry_profile="history",
-    )
-
-    async with server:
-        assert server.driver_error == "DST Lua request failed: lua_error"
-        assert server.returncode is None
-        with pytest.raises(RuntimeError, match="has not been installed"):
-            _ = server.driver_health
-        with pytest.raises(RuntimeError, match="has not been installed"):
-            await server.game.invoke(c.ListPlayers())
-        assert await server.execute('print("hello")') == 'result:print("hello")'
-
-    assert server.returncode is not None
-    assert server.closed is True
-
-
-async def test_driver_result_eof_degrades_without_stopping_game(tmp_path: Path) -> None:
     server = make_fake_server(tmp_path, "driver-eof")
-
-    async with server:
-        assert server.driver_error == (
-            "DST result stream closed before the command response completed"
-        )
-        assert server.returncode is None
+    with pytest.raises(TimeoutError):
+        await server.start(startup_timeout=0.2)
+    assert server.returncode is not None
+    assert server.closed
 
 
 async def test_failed_stdout_wakes_lifecycle_observer_before_process_exit(
@@ -260,7 +245,7 @@ async def test_cancelled_start_reaps_process_and_streams_before_propagating(
     if phase == "readiness":
         monkeypatch.setattr(server, "wait_ready", blocked)
     else:
-        monkeypatch.setattr(server.driver, "install_driver", blocked)
+        monkeypatch.setattr(server.driver, "wait_ready", blocked)
 
     starting = asyncio.create_task(server.start())
     try:
@@ -323,9 +308,10 @@ async def test_startup_failure_after_spawn_reaps_child_and_closes_streams(
 
 
 async def test_start_validates_configuration_before_allocating_pipes(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    server = Server(ServerConfig(shard="forest"))
+    server = Server(ServerConfig(shard="forest", persistent_storage_root=tmp_path))
     server.config = server.config.model_copy(
         update={"extra_args": ("invalid\0argument",)}
     )
@@ -335,6 +321,7 @@ async def test_start_validates_configuration_before_allocating_pipes(
     with pytest.raises(ValidationError):
         await server.start()
     allocate.assert_not_called()
+    assert not server.config.directory.exists()
 
 
 async def test_startup_timeout_must_be_positive() -> None:
@@ -503,7 +490,7 @@ async def test_finish_reclaims_all_resources_before_propagating_cancellation(
     entered, release = asyncio.Event(), asyncio.Event()
 
     class BlockingConsole:
-        pending_result: asyncio.Task[str] | None = None
+        reader_task: asyncio.Task[None] | None = None
 
         def __init__(self) -> None:
             self.close_calls = 0
@@ -561,9 +548,7 @@ async def test_finish_closes_streams_when_pumps_never_started() -> None:
     server = Server(ServerConfig(shard="finish-before-pump"))
     event_reader = asyncio.StreamReader()
     log_reader = asyncio.StreamReader()
-    server.lifecycle_task = asyncio.create_task(
-        server.lifecycle.pump(event_reader, server.driver.session_started)
-    )
+    server.lifecycle_task = asyncio.create_task(server.lifecycle.pump(event_reader))
     server.log_task = asyncio.create_task(server.pump_logs(log_reader))
     lifecycle_read = asyncio.create_task(server.read_event())
     game_read = asyncio.create_task(server.read_game_event())
@@ -580,412 +565,96 @@ async def test_finish_closes_streams_when_pumps_never_started() -> None:
     assert server.lifecycle.eof is True
 
 
-async def test_finish_does_not_cancel_driver_cleanup_twice() -> None:
+async def test_finish_wakes_native_driver_waiter() -> None:
     server = Server(ServerConfig(shard="driver-cleanup"))
-    started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    cleaned = asyncio.Event()
-
-    async def install(_: int) -> DriverHealth:
-        started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            cleaning.set()
-            await release.wait()
-            cleaned.set()
-        raise AssertionError
-
-    server.driver.install_driver = install
-    server.console = cast(
-        Console,
-        Mock(pending_result=None, close=AsyncMock(side_effect=cleaning.wait)),
-    )
-    installing = asyncio.create_task(server.driver.install(0))
-    finishing: asyncio.Task[None] | None = None
-    try:
-        await wait_for_event(started, installing)
-        finishing = asyncio.create_task(server.finish())
-        await wait_for_event(cleaning, finishing)
-        await asyncio.sleep(0)
-        release.set()
-        await asyncio.wait_for(asyncio.shield(finishing), timeout=5)
-        with pytest.raises(RuntimeError, match="closed"):
-            await asyncio.wait_for(asyncio.shield(installing), timeout=5)
-        assert cleaned.is_set()
-        assert server.closed
-    finally:
-        async with asyncio.timeout(5):
-            release.set()
-            pending = (installing,) if finishing is None else (installing, finishing)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            if not server.closed:
-                await server.finish()
+    waiting = asyncio.create_task(server.driver.wait_ready())
+    await asyncio.sleep(0)
+    await server.finish()
+    with pytest.raises(RuntimeError, match="closed"):
+        await asyncio.wait_for(waiting, 1)
+    assert server.closed
+    await server.finish()
 
 
-async def test_save_waits_for_fd5_completion() -> None:
-    server = await StubServer([structured_result(data=True)]).initialize()
-    reader = asyncio.StreamReader()
-    pump = asyncio.create_task(
-        server.lifecycle.pump(reader, server.driver.session_started)
-    )
-    request_complete = asyncio.Event()
-    request_save = server.game.request_save
-    request_state = RequestState()
-
-    async def observe_request() -> None:
-        request_state.mark_sent()
-        await request_save()
-        request_complete.set()
-
-    saving = asyncio.create_task(server._save(observe_request, 30, request_state))
-    try:
-        async with asyncio.timeout(5):
-            await wait_for_event(request_complete, saving, pump)
-
-            reader.feed_data(b"DST_Saved|session/TEST/27\n")
-
-            saved = await saving
-            reader.feed_eof()
-            await pump
-            assert saved.snapshot == 27
-    finally:
-        async with asyncio.timeout(5):
-            reader.feed_eof()
-            saving.cancel()
-            pump.cancel()
-            await asyncio.gather(saving, pump, return_exceptions=True)
-            await server.finish()
-
-
-async def test_save_timeout_includes_request(
+async def test_save_uses_its_rpc_callback_and_ignores_unrelated_native_saves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    server = await StubServer([]).initialize()
-    request_started = asyncio.Event()
+    server = Server(ServerConfig(shard="save"))
+    started, completed = asyncio.Event(), asyncio.Event()
+    expected = server_events.SavedEvent(path="session/REQUEST/27", snapshot=27)
 
-    async def request_save() -> None:
-        request_started.set()
-        await asyncio.Event().wait()
+    async def native_save() -> server_events.SavedEvent:
+        started.set()
+        await completed.wait()
+        return expected
 
-    monkeypatch.setattr(server.game, "request_save", request_save)
+    monkeypatch.setattr(server.game, "request_save", native_save)
+    saving = asyncio.create_task(server.save(completion_timeout=1))
+    try:
+        await wait_for_event(started, saving)
+        server.lifecycle.handle(
+            server_events.SavedEvent(path="session/AUTOSAVE/26", snapshot=26),
+        )
+        await asyncio.sleep(0)
+        assert not saving.done()
+        completed.set()
+        assert await saving == expected
+    finally:
+        saving.cancel()
+        await asyncio.gather(saving, return_exceptions=True)
+        await server.finish()
 
-    with pytest.raises(TimeoutError):
-        await server.save(completion_timeout=0.01)
-    assert request_started.is_set()
 
-
-@pytest.mark.parametrize("phase", ["lock", "barrier", "request"])
-async def test_lifecycle_save_timeout_covers_every_wait(phase: str) -> None:
-    lifecycle = Lifecycle()
+@pytest.mark.parametrize("phase", ["lock", "request"])
+async def test_save_timeout_covers_its_lock_and_callback(
+    phase: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = Server(ServerConfig(shard="save-timeout"))
     request = AsyncMock(side_effect=asyncio.Event().wait)
+    monkeypatch.setattr(server.game, "request_save", request)
     if phase == "lock":
-        await lifecycle.save_lock.acquire()
-    elif phase == "barrier":
-        lifecycle._save_confirmation_barrier = RequestState(sent=True)
-    watchdog = asyncio.timeout(1)
-
+        await server.save_lock.acquire()
     try:
         with pytest.raises(TimeoutError):
-            async with watchdog:
-                await lifecycle.wait_for_save(request, completion_timeout=0.01)
-        assert not watchdog.expired()
+            await server.save(completion_timeout=0.01)
     finally:
-        if lifecycle.save_lock.locked():
-            lifecycle.save_lock.release()
-        lifecycle.close()
-
-    if phase == "request":
-        request.assert_awaited_once()
-    else:
-        request.assert_not_awaited()
+        if server.save_lock.locked():
+            server.save_lock.release()
+        await server.finish()
+    assert request.await_count == (0 if phase == "lock" else 1)
 
 
-async def test_save_prewrite_failure_does_not_create_confirmation_barrier() -> None:
-    server = Server(ServerConfig(shard="save-prewrite-failure"))
-
-    async with asyncio.timeout(1):
-        for _ in range(2):
-            with pytest.raises(RuntimeError, match="not been installed"):
-                await server.save()
-
-
-async def test_concurrent_saves_wait_for_separate_confirmations() -> None:
-    lifecycle = Lifecycle()
-    first_request_started = asyncio.Event()
-    release_first_request = asyncio.Event()
-    second_call_started = asyncio.Event()
-    second_request_started = asyncio.Event()
-    requests = 0
-
-    async def request() -> None:
-        nonlocal requests
-        requests += 1
-        if requests == 1:
-            first_request_started.set()
-            await release_first_request.wait()
-        else:
-            second_request_started.set()
-
-    async def wait_for_save(
-        started: asyncio.Event | None = None,
-    ) -> server_events.SavedEvent:
-        if started is not None:
-            started.set()
-        return await lifecycle.wait_for_save(request, 1)
-
-    first = asyncio.create_task(wait_for_save())
-    second: asyncio.Task[server_events.SavedEvent] | None = None
-    try:
-        async with asyncio.timeout(5):
-            await wait_for_event(first_request_started, first)
-            second = asyncio.create_task(wait_for_save(second_call_started))
-            await wait_for_event(second_call_started, second)
-
-            assert not second_request_started.is_set()
-
-            release_first_request.set()
-            lifecycle.handle(
-                server_events.SavedEvent(path="session/TEST/1", snapshot=1),
-                lambda _: None,
-            )
-            assert (await first).snapshot == 1
-
-            await wait_for_event(second_request_started, second)
-            assert not second.done()
-            lifecycle.handle(
-                server_events.SavedEvent(path="session/TEST/2", snapshot=2),
-                lambda _: None,
-            )
-            assert (await second).snapshot == 2
-    finally:
-        async with asyncio.timeout(5):
-            release_first_request.set()
-            pending = (first,) if second is None else (first, second)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-
-
-async def test_save_accepts_confirmation_before_request_returns() -> None:
-    lifecycle = Lifecycle()
-    expected = server_events.SavedEvent(path="session/REQUEST/1", snapshot=1)
-
-    async def request() -> None:  # ruff:ignore[unused-async]
-        lifecycle.handle(expected, lambda _: None)
-
-    assert await lifecycle.wait_for_save(request, 1) == expected
-
-
-async def test_save_ignores_confirmation_before_command_write() -> None:
-    lifecycle = Lifecycle()
-    state = RequestState()
-    request_started = asyncio.Event()
-    write_command = asyncio.Event()
-
-    async def request() -> None:
-        request_started.set()
-        await write_command.wait()
-        state.mark_sent()
-
-    saving = asyncio.create_task(lifecycle.wait_for_save(request, 1, state))
-    try:
-        async with asyncio.timeout(5):
-            await wait_for_event(request_started, saving)
-            lifecycle.handle(
-                server_events.SavedEvent(path="session/AUTOSAVE/1", snapshot=1),
-                lambda _: None,
-            )
-            write_command.set()
-            await asyncio.sleep(0)
-            assert not saving.done()
-
-            expected = server_events.SavedEvent(path="session/REQUEST/2", snapshot=2)
-            lifecycle.handle(expected, lambda _: None)
-            assert await saving == expected
-    finally:
-        async with asyncio.timeout(5):
-            write_command.set()
-            saving.cancel()
-            await asyncio.gather(saving, return_exceptions=True)
-
-
-async def test_save_ignores_confirmation_from_rejected_attempt() -> None:
-    lifecycle = Lifecycle()
-    state = RequestState()
-
-    async def request() -> None:  # ruff:ignore[unused-async]
-        state.mark_sent()
-        lifecycle.handle(
-            server_events.SavedEvent(path="session/AUTOSAVE/1", snapshot=1),
-            lambda _: None,
-        )
-        state.mark_rejected()
-        state.mark_sent()
-
-    saving = asyncio.create_task(lifecycle.wait_for_save(request, 1, state))
-    await asyncio.sleep(0)
-    assert not saving.done()
-
-    expected = server_events.SavedEvent(path="session/REQUEST/2", snapshot=2)
-    lifecycle.handle(expected, lambda _: None)
-    assert await saving == expected
-
-
-async def test_save_rejects_confirmation_when_request_was_not_executed() -> None:
-    lifecycle = Lifecycle()
-    state = RequestState()
-
-    async def request() -> None:  # ruff:ignore[unused-async]
-        state.mark_sent()
-        lifecycle.handle(
-            server_events.SavedEvent(path="session/AUTOSAVE/1", snapshot=1),
-            lambda _: None,
-        )
-        state.mark_rejected()
-
-    with pytest.raises(TimeoutError):
-        await lifecycle.wait_for_save(request, 0.01, state)
-
-
-async def test_save_keeps_first_confirmation_for_attempt() -> None:
-    lifecycle = Lifecycle()
-    first = server_events.SavedEvent(path="session/REQUEST/1", snapshot=1)
-
-    async def request() -> None:  # ruff:ignore[unused-async]
-        lifecycle.handle(first, lambda _: None)
-        lifecycle.handle(
-            server_events.SavedEvent(path="session/OTHER/2", snapshot=2),
-            lambda _: None,
-        )
-
-    assert await lifecycle.wait_for_save(request, 1) == first
-
-
-@pytest.mark.parametrize("rejected", [False, True])
-async def test_requests_do_not_share_save_confirmation(rejected: bool) -> None:
-    first, second = RequestState(sent=True), RequestState(sent=True)
-    first.resolved.set()
-    waiting = asyncio.create_task(second.resolved.wait())
-    await asyncio.sleep(0)
-    assert not waiting.done()
-
-    if rejected:
-        second.mark_rejected()
-        assert not second.sent
-    else:
-        second.resolved.set()
-    await waiting
-
-
-async def test_failed_retry_blocks_next_save_until_late_confirmation() -> None:
-    lifecycle = Lifecycle()
-    state = RequestState()
-
-    async def failed_request() -> None:  # ruff:ignore[unused-async]
-        state.mark_sent()
-        lifecycle.handle(
-            server_events.SavedEvent(path="session/AUTOSAVE/1", snapshot=1),
-            lambda _: None,
-        )
-        state.mark_rejected()
-        state.mark_sent()
-        msg = "failed after retry write"
-        raise RuntimeError(msg)
-
-    with pytest.raises(RuntimeError, match="failed after retry write"):
-        await lifecycle.wait_for_save(failed_request, 1, state)
-
-    second_request_started = asyncio.Event()
-
-    async def second_request() -> None:  # ruff:ignore[unused-async]
-        second_request_started.set()
-
-    saving = asyncio.create_task(lifecycle.wait_for_save(second_request, 1))
-    try:
-        async with asyncio.timeout(5):
-            await asyncio.sleep(0)
-            assert not second_request_started.is_set()
-
-            lifecycle.handle(
-                server_events.SavedEvent(path="session/LATE/2", snapshot=2),
-                lambda _: None,
-            )
-            await wait_for_event(second_request_started, saving)
-            expected = server_events.SavedEvent(path="session/REQUEST/3", snapshot=3)
-            lifecycle.handle(expected, lambda _: None)
-            assert await saving == expected
-    finally:
-        async with asyncio.timeout(5):
-            saving.cancel()
-            await asyncio.gather(saving, return_exceptions=True)
-
-
-@pytest.mark.parametrize("failure", ["cancel", "timeout", "error"])
-async def test_incomplete_save_waits_for_late_event_before_next_request(
-    failure: str,
+async def test_cancelled_save_does_not_wait_for_an_uncorrelated_fd5_barrier(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lifecycle = Lifecycle()
-    request_started = (asyncio.Event(), asyncio.Event())
-    second_call_started = asyncio.Event()
-    requests = 0
+    server = Server(ServerConfig(shard="save-cancel"))
+    started = asyncio.Event()
+    expected = server_events.SavedEvent(path="session/REQUEST/28", snapshot=28)
+    calls = 0
 
-    async def request() -> None:  # ruff:ignore[unused-async]
-        nonlocal requests
-        request_started[requests].set()
-        requests += 1
-        if failure == "error" and requests == 1:
-            msg = "request failed after write"
-            raise RuntimeError(msg)
+    async def request() -> server_events.SavedEvent:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await asyncio.Event().wait()
+        return expected
 
-    saving = asyncio.create_task(
-        lifecycle.wait_for_save(request, 0 if failure == "timeout" else 60)
-    )
-    second: asyncio.Task[server_events.SavedEvent] | None = None
+    monkeypatch.setattr(server.game, "request_save", request)
+    saving = asyncio.create_task(server.save())
     try:
-        watchdog = asyncio.timeout(5)
-        async with watchdog:
-            if failure == "cancel":
-                await wait_for_event(request_started[0], saving)
-                saving.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await saving
-            elif failure == "timeout":
-                with pytest.raises(TimeoutError):
-                    await saving
-            else:
-                with pytest.raises(RuntimeError, match="failed after write"):
-                    await saving
-            assert request_started[0].is_set()
-
-            async def save_again() -> server_events.SavedEvent:
-                second_call_started.set()
-                return await lifecycle.wait_for_save(request, 1)
-
-            second = asyncio.create_task(save_again())
-            await wait_for_event(second_call_started, second)
-            assert requests == 1
-
-            lifecycle.handle(
-                server_events.SavedEvent(path="session/LATE/1", snapshot=1),
-                lambda _: None,
-            )
-            await wait_for_event(request_started[1], second)
-            assert not second.done()
-            lifecycle.handle(
-                server_events.SavedEvent(path="session/REQUEST/2", snapshot=2),
-                lambda _: None,
-            )
-            assert (await second).path == "session/REQUEST/2"
-            assert requests == 2
-        assert not watchdog.expired()
+        await wait_for_event(started, saving)
+        saving.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await saving
+        # Native code rejects a new save while the abandoned one is still running.
+        # Once it completes, the next correlated callback needs no FD5 barrier.
+        assert await server.save(completion_timeout=0.1) == expected
     finally:
-        async with asyncio.timeout(5):
-            pending = (saving,) if second is None else (saving, second)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+        saving.cancel()
+        await asyncio.gather(saving, return_exceptions=True)
+        await server.finish()
 
 
 async def test_readiness_followed_by_fd5_eof_is_not_startup_success() -> None:
@@ -994,7 +663,7 @@ async def test_readiness_followed_by_fd5_eof_is_not_startup_success() -> None:
     reader.feed_data(b"DST_SessionId|TEST\n")
     reader.feed_eof()
 
-    await lifecycle.pump(reader, lambda _: None)
+    await lifecycle.pump(reader)
 
     assert lifecycle.ready is True
     with pytest.raises(EOFError, match="closed before the server became ready"):
@@ -1015,8 +684,7 @@ async def test_lifecycle_discards_whole_oversized_line(
         return result
 
     monkeypatch.setattr(reader, "readexactly", track_overrun)
-    generations: list[int] = []
-    pump = asyncio.create_task(lifecycle.pump(reader, generations.append))
+    pump = asyncio.create_task(lifecycle.pump(reader))
 
     reader.feed_data(b"x" * 33)
     await asyncio.wait_for(overrun_drained.wait(), 1)
@@ -1025,7 +693,8 @@ async def test_lifecycle_discards_whole_oversized_line(
     await pump
 
     assert lifecycle.session_id == "REAL"
-    assert generations == [1]
+    assert await lifecycle.read() == server_events.SessionEvent(session_id="REAL")
+    assert await lifecycle.read() is None
 
 
 async def test_log_pump_survives_oversized_line_and_handler_failure() -> None:
@@ -1049,77 +718,99 @@ async def test_log_pump_survives_oversized_line_and_handler_failure() -> None:
     await server.finish()
 
 
-async def test_fd5_eof_interrupts_save_confirmation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lifecycle = Lifecycle()
+async def test_late_fd5_session_does_not_invalidate_native_driver_generation() -> None:
+    server = Server(ServerConfig(shard="test"))
+    await native_ready(server, 2)
+    for session_id in ("ONE", "TWO"):
+        server.lifecycle.handle(server_events.SessionEvent(session_id=session_id))
+    assert server.session_id == "TWO"
+    assert server.driver.is_ready(2)
+    assert server.driver_health.events_emitted == 3
+    await server.finish()
+
+
+async def test_fd5_eof_interrupts_native_driver_readiness() -> None:
+    server = Server(ServerConfig(shard="test"))
+    waiting = asyncio.create_task(server.driver.wait_ready())
     reader = asyncio.StreamReader()
-    confirmation_started = asyncio.Event()
-    request_complete = asyncio.Event()
-    request_complete.set()
-    wait = lifecycle.saved.wait
-    pump = asyncio.create_task(lifecycle.pump(reader, lambda _: None))
-
-    async def track_confirmation_wait() -> None:
-        confirmation_started.set()
-        await wait()
-
-    async def request() -> None:
-        await request_complete.wait()
-
-    monkeypatch.setattr(lifecycle.saved, "wait", track_confirmation_wait)
-    saving = asyncio.create_task(lifecycle.wait_for_save(request, 60))
-    try:
-        async with asyncio.timeout(5):
-            await wait_for_event(confirmation_started, saving, pump)
-            reader.feed_eof()
-
-            with pytest.raises(EOFError, match="closed before save completed"):
-                await asyncio.wait_for(saving, 1)
-            await pump
-    finally:
-        async with asyncio.timeout(5):
-            reader.feed_eof()
-            saving.cancel()
-            pump.cancel()
-            await asyncio.gather(saving, pump, return_exceptions=True)
-
-
-async def test_driver_is_reinstalled_after_lua_session_reload() -> None:
-    server = ReloadingServer()
-    await server.driver.install(0)
-    reader = asyncio.StreamReader()
-    pump = asyncio.create_task(
-        server.lifecycle.pump(reader, server.driver.session_started)
-    )
-
-    reader.feed_data(b"DST_SessionId|ONE\nDST_SessionId|ONE\n")
     reader.feed_eof()
-    await pump
-    if server.driver.task is not None:
-        await server.driver.task
-    assert server.installs == 2
-    assert server.driver_health.events_emitted == 2
+    await server._pump_lifecycle(reader)
+    with pytest.raises(RuntimeError, match="closed"):
+        await asyncio.wait_for(waiting, 1)
+    await server.finish()
+
+
+@pytest.mark.parametrize("generation", [None, 0])
+async def test_stale_native_failure_does_not_disable_current_driver(
+    generation: int | None,
+) -> None:
+    server = Server(ServerConfig(shard="test"))
+    await native_ready(server, 1)
+    observe = server.recorder.observe_log = Mock()
+    await server._observe_driver(
+        DriverFailed(
+            nonce=server.game_events.nonce,
+            generation=generation,
+            error="installation_failed",
+        )
+    )
+    assert server.driver.is_ready(1)
+    assert server.driver_error is None
+    observe.assert_not_called()
+    await server.finish()
+
+
+async def test_new_world_failure_interrupts_reload_wait() -> None:
+    server = Server(ServerConfig(shard="test"))
+    observe = server.recorder.observe_log = Mock()
+    await native_ready(server, 0)
+    waiting = asyncio.create_task(
+        server._wait_reload(0, asyncio.get_running_loop().time() + 10)
+    )
+    try:
+        await asyncio.sleep(0)
+        await server._observe_driver(
+            DriverFailed(
+                nonce=server.game_events.nonce,
+                generation=1,
+                error="installation_failed",
+            )
+        )
+        with pytest.raises(RuntimeError, match="installation_failed"):
+            await asyncio.wait_for(waiting, 1)
+        assert server.driver.generation == 1
+        assert server.driver_error == "installation_failed"
+        record = observe.call_args.kwargs
+        assert record["event_name"] == "dst.runtime.diagnostic"
+        assert record["body"]["generation"] == 1
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        await server.finish()
 
 
 async def test_reload_retries_only_before_write_and_waits_for_next_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    server = ReloadingServer()
-    await server.driver.install(0)
+    server = Server(ServerConfig(shard="test"))
+    await native_ready(server, 0)
     written = asyncio.Event()
     attempts = 0
 
-    async def execute(  # ruff:ignore[unused-async]
-        command: str,
+    async def execute(
+        method: str,
+        arguments: dict[str, JsonValue],
+        generation: int,
         generation_is_current: Callable[[], bool] | None = None,
-    ) -> str:
+    ) -> bytes:
         nonlocal attempts
-        del command
+        assert method == "reset"
+        assert arguments == {}
+        assert generation == attempts
         attempts += 1
         assert generation_is_current is not None
         if attempts == 1:
-            server._session_started(1)
+            await native_ready(server, 1)
             assert generation_is_current() is False
             msg = "generation changed before write"
             raise StaleGenerationError(msg)
@@ -1138,10 +829,10 @@ async def test_reload_retries_only_before_write_and_waits_for_next_generation(
             assert server.driver.generation == 1
             assert not resetting.done()
 
-            server._session_started(2)
+            await native_ready(server, 2)
             async with asyncio.timeout(1):
                 await resetting
-            assert server.installs == 3
+            assert server.driver_health.generation == 2
     finally:
         async with asyncio.timeout(5):
             resetting.cancel()
@@ -1152,8 +843,8 @@ async def test_reload_retries_only_before_write_and_waits_for_next_generation(
 async def test_reload_timeout_does_not_replay_written_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    server = ReloadingServer()
-    await server.driver.install(0)
+    server = Server(ServerConfig(shard="test"))
+    await native_ready(server, 0)
     execute = AsyncMock(return_value=structured_result(data=True))
     monkeypatch.setattr(server, "_execute", execute)
 
@@ -1168,14 +859,12 @@ async def test_reload_timeout_does_not_replay_written_command(
 async def test_failed_reload_response_is_reported_without_waiting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    server = ReloadingServer()
-    await server.driver.install(0)
-    execute = AsyncMock(
-        return_value='DST_SERVER_RESULT|{"ok":false,"error":"lua_error"}'
-    )
+    server = Server(ServerConfig(shard="test"))
+    await native_ready(server, 0)
+    execute = AsyncMock(return_value=b'{"ok":false,"error":"lua_error"}')
     monkeypatch.setattr(server, "_execute", execute)
 
-    with pytest.raises(RuntimeError, match="lua_error"):
+    with pytest.raises(IndeterminateCommandError, match="could not be confirmed"):
         await server.game.invoke(c.Reset(timeout=0.01))
 
     execute.assert_awaited_once()

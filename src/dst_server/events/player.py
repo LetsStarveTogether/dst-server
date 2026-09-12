@@ -2,18 +2,27 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from dst_server.lua_codec import NonNegativeSafeLuaInteger, PositiveSafeLuaInteger
 from dst_server.models import Position
 from dst_server.models.base import (
     FiniteFloat,
     FrozenModel,
     Identifier,
-    NonNegativeInt,
-    PositiveInt,
 )
 
 from .base import CausedData, EntityRef, EventRecord, ItemRef, PlayerData
 
 type EventText = Annotated[str, Field(max_length=256)]
+
+
+class ChatData(FrozenModel):
+    userid: Identifier | None
+    name: str | None
+    prefab: Identifier | None
+    message: str
+    whisper: bool
+    emote: bool
+    player: EntityRef | None
 
 
 class DisconnectedData(PlayerData):
@@ -22,7 +31,7 @@ class DisconnectedData(PlayerData):
 
 class MigrationStartedData(PlayerData):
     destination_shard_id: Identifier
-    portal_id: NonNegativeInt | Identifier | None
+    portal_id: NonNegativeSafeLuaInteger | Identifier | None
     destination: Position | None
 
 
@@ -31,12 +40,13 @@ class GhostedData(PlayerData):
 
 
 class RevivedData(GhostedData):
+    method: Literal["ghost", "corpse", "charlie"]
     reviver: EntityRef | None
 
 
 class ActionData(FrozenModel):
     action_id: Identifier
-    action_sequence: PositiveInt
+    action_sequence: PositiveSafeLuaInteger
     success: bool
     reason: EventText | None
     error: Literal["lua_error"] | None
@@ -59,7 +69,8 @@ class CombatData(PlayerData):
     weapon: EntityRef | None
     stimuli: Identifier | None
     special_damage: tuple[SpecialDamage, ...]
-    caused_by_action_sequence: PositiveInt | None
+    caused_by_action_sequence: PositiveSafeLuaInteger | None
+    from_doattack: bool | None
 
 
 class CombatHitData(CombatData):
@@ -171,6 +182,10 @@ class HoundWarningData(PlayerData):
 
 class ShardEnteredEvent(EventRecord[PlayerData]):
     event: Literal["dst.player.shard_entered"]
+
+
+class ChatEvent(EventRecord[ChatData]):
+    event: Literal["dst.player.chat"]
 
 
 class PlayerLoadedEvent(EventRecord[PlayerData]):

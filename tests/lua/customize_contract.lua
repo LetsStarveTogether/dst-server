@@ -1,5 +1,5 @@
 local root = assert(arg[1], "repository root is required")
-local scripts = root .. "/dst-scripts/scripts/"
+local scripts = (os.getenv("DST_SERVER_TEST_SCRIPTS") or root .. "/dst-scripts/scripts") .. "/"
 package.path = scripts .. "?.lua;" .. package.path
 local json = require("json")
 

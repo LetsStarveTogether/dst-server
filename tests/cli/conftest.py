@@ -57,6 +57,7 @@ def rpc_clients(
         connection.__aenter__.return_value = connection
         connection.invoke.return_value = None
         connection.status.return_value = SimpleNamespace(master="forest")
+        connection.list_players.return_value = ()
         connection.shard.return_value = MagicMock(spec=ShardClient)
         connection.shard.return_value.name = "cave"
         connection.shard.return_value.invoke.return_value = None

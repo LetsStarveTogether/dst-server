@@ -1,7 +1,16 @@
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import Mock
 
+import orjson
 import pytest
+from logbook import TestHandler as CaptureHandler
+
+from dst_server.telemetry import recorder as recorder_module
+from dst_server.telemetry.otel import Pipeline
+from dst_server.telemetry.recorder import Recorder
 
 
 def test_recorder_preserves_trace_parent_errors_and_metric_outcomes() -> None:
@@ -36,6 +45,7 @@ def test_recorder_preserves_trace_parent_errors_and_metric_outcomes() -> None:
                 recorder.record_action("CHOP", True)
                 recorder.set_process_up(True)
                 recorder.set_player_count(1)
+                recorder.set_client_count(2)
             message = "failed"
             with (
                 pytest.raises(RuntimeError, match="failed"),
@@ -67,6 +77,7 @@ def test_recorder_preserves_trace_parent_errors_and_metric_outcomes() -> None:
             "dst.player.action.count",
             "dst.server.operation.duration",
             "dst.server.player.count",
+            "dst.server.client.count",
             "dst.telemetry.event.count",
         } <= names
     finally:
@@ -114,3 +125,76 @@ finally:
     subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
         [sys.executable, "-c", source], check=True, timeout=10
     )
+
+
+def test_local_envelope_precedes_failed_submit_without_recursive_diagnostics() -> None:
+    sink = SimpleNamespace(
+        logs_enabled=True,
+        resource=SimpleNamespace(
+            attributes={"service.name": "test", "service.instance.id": "instance"}
+        ),
+        emit_operational=Mock(side_effect=OSError("private-exporter-detail")),
+    )
+    recorder = Recorder("cluster", "forest", pipeline=cast("Pipeline", sink))
+    metrics = recorder.record_event = Mock()
+    with CaptureHandler() as logs:
+        for index in range(3):
+            recorder.observe_log(
+                event_name="dst.test",
+                body={"message": "a\nb"},
+                observed_timestamp_ns=123 + index,
+                attributes={
+                    "log.record.uid": f"uid-{index}",
+                    "dst.game.attempt.id": "attempt",
+                },
+            )
+    assert sink.emit_operational.call_count == 3
+    records = [
+        orjson.loads(record.message.split("DST_RECORD|", 1)[1])
+        for record in logs.records
+        if "DST_RECORD|" in record.message
+    ]
+    assert len(records) == 3
+    assert records[0] == {
+        "event_name": "dst.test",
+        "body": {"message": "a\nb"},
+        "observed_timestamp_ns": 123,
+        "severity_text": "INFO",
+        "attributes": {
+            "log.record.uid": "uid-0",
+            "dst.game.attempt.id": "attempt",
+            "dst.cluster.name": "cluster",
+            "dst.shard.name": "forest",
+        },
+        "resource": {"service.name": "test", "service.instance.id": "instance"},
+    }
+    assert all("\n" not in record.message for record in logs.records)
+    assert all(
+        "private-exporter-detail" not in record.message for record in logs.records
+    )
+    assert metrics.call_count == 3
+
+
+@pytest.mark.parametrize("failure", ["handler", "serialization"])
+def test_local_sink_failure_does_not_prevent_export_or_escape(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    sink = SimpleNamespace(
+        logs_enabled=True,
+        resource=SimpleNamespace(attributes={}),
+        emit_operational=Mock(),
+    )
+    recorder = Recorder("cluster", "forest", pipeline=cast("Pipeline", sink))
+    metrics = recorder.record_event = Mock()
+    local = Mock()
+    local.warning.side_effect = OSError("broken-warning-handler")
+    if failure == "handler":
+        local.info.side_effect = OSError("broken-info-handler")
+    monkeypatch.setattr(recorder_module, "logger", local)
+    recorder.observe_log(
+        event_name="dst.test",
+        body={"value": 2**64 if failure == "serialization" else 1},
+        observed_timestamp_ns=1,
+    )
+    sink.emit_operational.assert_called_once()
+    metrics.assert_called_once_with("dropped", reason="local_record_failed")

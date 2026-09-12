@@ -32,10 +32,6 @@ def decode_model[T: BaseModel](model: type[T], payload: bytes) -> T:
     return decode(TypeAdapter(model), payload)
 
 
-def encode_json_value(value: JsonValue) -> bytes:
-    return encode(JSON_VALUE, value)
-
-
 def decode_json_value(payload: bytes) -> JsonValue:
     return decode(JSON_VALUE, payload)
 

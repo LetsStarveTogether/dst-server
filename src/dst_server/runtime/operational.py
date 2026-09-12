@@ -1,5 +1,4 @@
 import re
-from dataclasses import dataclass
 
 from pydantic import JsonValue
 
@@ -14,6 +13,7 @@ _AUTHENTICATION_STATE = re.compile(
     r"^\[(Warning|Error)\] cSteamPunchthrough::onAuthentication(Approved|Denied)"
     r" - (Client already authenticated|Missing client object)$"
 )
+_CONNECTION_CLOSED = re.compile(r"^CloseConnectionWithReason: ([A-Z][A-Z0-9_]{0,127})$")
 _WORLDGEN_ERROR = re.compile(
     r"^An error occured during world (gen we will retry|and we give up)! "
     r"\[was\s+([0-9]{1,3})\s+of\s+([0-9]{1,3})\s*\]$"
@@ -27,11 +27,6 @@ _SERVICES = {
     "lobby-v2.klei.com": "lobby",
     "login.kleientertainment.com": "login",
     "items.kleientertainment.com": "items",
-}
-_PAUSE_STATES = {
-    "Server Paused": "paused",
-    "Server Autopaused": "autopaused",
-    "Server Unpaused": "running",
 }
 _SETPIECE_FAILURES = {
     (
@@ -47,15 +42,6 @@ _SETPIECE_FAILURES = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class OperationalRecord:
-    uid: str
-    event_name: str
-    body: dict[str, JsonValue]
-    observed_timestamp_ns: int
-    severity_text: str
-
-
 def lifecycle_body(event: server.Event) -> dict[str, JsonValue] | None:
     if isinstance(event, server.UnknownEvent):
         return None
@@ -68,8 +54,9 @@ def lifecycle_body(event: server.Event) -> dict[str, JsonValue] | None:
 
 def classify_log(message: str) -> tuple[str, dict[str, JsonValue], str] | None:
     message = message.rstrip()
-    if state := _PAUSE_STATES.get(message):
-        return "dst.server.pause_changed", {"state": state}, "INFO"
+    if match := _CONNECTION_CLOSED.fullmatch(message):
+        # The engine supplies no user ID; this also includes normal shard migration.
+        return "dst.connection.closed", {"reason": match[1]}, "INFO"
 
     severity = "ERROR"
     body: dict[str, JsonValue]

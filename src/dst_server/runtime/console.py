@@ -1,31 +1,40 @@
 import asyncio
+import fcntl
+import select
+import termios
+from array import array
 from collections.abc import Callable
-from time import time_ns
+from dataclasses import dataclass
 
+import orjson
+from pydantic import JsonValue
 from ulid import ULID
 
+from dst_server.commands import validate_json_structure
 from dst_server.concurrency import cancel_tasks, complete
 from dst_server.errors import IndeterminateCommandError
-from dst_server.game.rpc import MAX_RESULT_LINE_BYTES
-from dst_server.lua_codec import lua_string
-from dst_server.telemetry.stream import EventStream
+from dst_server.game.rpc import (
+    MAX_RESULT_LINE_BYTES,
+    RPC_PREFIX,
+    RPC_RESPONSE,
+    Accepted,
+    Failure,
+)
+from dst_server.telemetry.recorder import Recorder
 from dst_server.timeouts import DEFAULT_COMMAND_TIMEOUT, positive_timeout
 
 from .fds import read_line
 from .request import RequestState, current_request
 
-COMMAND_DONE = "DST_RemoteCommandDone"
-LUA_BUSY = "DST_LuaBusy"
+COMMAND_DONE = b"DST_RemoteCommandDone"
+LUA_BUSY = b"DST_LuaBusy"
 LUA_BUSY_RETRY_DELAY = 0.1
-FRAME_PREFIX = "DST_SERVER_FRAME"
-MAX_RESULT_LINES = 1024
+# Native command input consumes read chunks, not a newline-delimited stream.
+MAX_REQUEST_BYTES = select.PIPE_BUF
+MAX_PENDING = 64
 
 
 class LuaBusyError(Exception):
-    pass
-
-
-class ResponseTooLargeError(RuntimeError):
     pass
 
 
@@ -33,258 +42,249 @@ class StaleGenerationError(RuntimeError):
     pass
 
 
+@dataclass(slots=True)
+class Pending:
+    method: str
+    generation: int
+    future: asyncio.Future[bytes]
+    tracked: RequestState | None
+    accepted: bool = False
+    native_done: bool = False
+
+    def reject(self) -> None:
+        if self.tracked is not None:
+            self.tracked.mark_rejected()
+
+    def fail(self, error: Exception) -> None:
+        if not self.future.done():
+            self.future.set_exception(error)
+
+
 class Console:
     def __init__(
         self,
         writer: asyncio.StreamWriter,
         reader: asyncio.StreamReader,
-        game_events: EventStream,
+        nonce: str,
+        recorder: Recorder,
     ) -> None:
         self.writer = writer
         self.reader = reader
-        self.game_events = game_events
+        self.nonce = nonce
+        self.recorder = recorder
         self.lock = asyncio.Lock()
-        self.pending_result: asyncio.Task[str] | None = None
-        self.broken = False
+        self.pending: dict[str, Pending] = {}
+        self.synchronized = True
+        self.closed = False
+        self.reader_task = asyncio.create_task(self._read_results())
 
     async def execute(
         self,
-        command: str,
+        method: str,
+        arguments: dict[str, JsonValue],
+        generation: int,
         generation_is_current: Callable[[], bool] | None = None,
         completion_timeout: float = DEFAULT_COMMAND_TIMEOUT,
         *,
         completion_deadline: float | None = None,
-    ) -> str:
-        if "\n" in command or "\r" in command:
-            msg = "DST console commands must be a single line"
-            raise ValueError(msg)
-        timeout = positive_timeout(completion_timeout)
-        command_state = RequestState()
+    ) -> bytes:
         deadline = (
             completion_deadline
             if completion_deadline is not None
-            else asyncio.get_running_loop().time() + timeout
+            else asyncio.get_running_loop().time()
+            + positive_timeout(completion_timeout)
         )
-        try:
-            async with asyncio.timeout_at(deadline):
-                return await self._execute(
-                    command,
-                    generation_is_current,
-                    command_state,
-                )
-        except TimeoutError, asyncio.CancelledError:
-            if asyncio.get_running_loop().time() >= deadline and command_state.sent:
-                await self._discard_pending_result()
-            raise
-
-    async def _execute(
-        self,
-        command: str,
-        generation_is_current: Callable[[], bool] | None,
-        command_state: RequestState,
-    ) -> str:
-        async with self.lock:
-            if self.broken:
-                msg = "DST console is unusable after an incomplete response"
-                raise RuntimeError(msg)
-            await self.drain_result()
+        async with asyncio.timeout_at(deadline), self.lock:
             while True:
+                if self.closed:
+                    msg = "DST result stream is closed"
+                    raise EOFError(msg)
+                await self._wait_input_consumed()
                 if generation_is_current is not None and not generation_is_current():
                     msg = "DST generation changed before the command was written"
                     raise StaleGenerationError(msg)
                 try:
-                    result = await self.execute_once(command, command_state)
+                    result = await self._send(method, arguments, generation)
                 except LuaBusyError:
                     await asyncio.sleep(LUA_BUSY_RETRY_DELAY)
                     continue
                 if generation_is_current is not None and not generation_is_current():
-                    msg = (
-                        "DST generation changed while the command was executing; "
-                        "the result is indeterminate"
-                    )
+                    msg = "DST generation changed while the command was executing"
                     raise IndeterminateCommandError(msg)
                 return result
 
-    async def execute_once(
-        self,
-        command: str,
-        command_state: RequestState,
-    ) -> str:
-        token = str(ULID())
-        frame_start = f"{FRAME_PREFIX}|{token}|START"
-        frame_end = f"{FRAME_PREFIX}|{token}|END"
-        wrapped = (
-            "local p,l,c,t=print,loadstring,pcall,tostring;"
-            f"p({lua_string(frame_start)});"
-            f"local callback,failure=l({lua_string(command)},"
-            '"@dst-server-console");'
-            "local ok=false;"
-            "if callback~=nil then ok,failure=c(callback) end;"
-            "if not ok then local text_ok,text=c(t,failure);"
-            'p(text_ok and text or "DST console command failed") end;'
-            f"p({lua_string(frame_end)})"
+    async def _wait_input_consumed(self) -> None:
+        # Linux pipe occupancy is independent of RPC replies: even native's
+        # no-Lua-context path consumes input without producing Busy or Done.
+        remaining = array("i", [0])
+        pipe = self.writer.get_extra_info("pipe")
+        while True:
+            if self.closed:
+                msg = "DST result stream is closed"
+                raise EOFError(msg)
+            fcntl.ioctl(pipe, termios.FIONREAD, remaining, True)
+            if not remaining[0] and not self.writer.transport.get_write_buffer_size():
+                return
+            await asyncio.sleep(0.01)
+
+    async def _send(
+        self, method: str, arguments: dict[str, JsonValue], generation: int
+    ) -> bytes:
+        request_id = str(ULID())
+        encoded = (
+            RPC_PREFIX
+            + orjson.dumps({
+                "v": 1,
+                "nonce": self.nonce,
+                "id": request_id,
+                "generation": generation,
+                "method": method,
+                "arguments": arguments,
+            })
+            + b"\n"
         )
-        encoded = f"{wrapped}\n".encode()
-        if len(encoded) > MAX_RESULT_LINE_BYTES:
-            msg = "DST console command exceeds 64 KiB"
+        if len(encoded) > MAX_REQUEST_BYTES:
+            msg = f"DST request exceeds the {MAX_REQUEST_BYTES}-byte atomic pipe limit"
             raise ValueError(msg)
-        try:
-            self.writer.write(encoded)
-        except BaseException:
-            self.broken = True
-            raise
-        command_state.mark_sent()
-        state = current_request.get()
-        if state is not None:
-            state.mark_sent()
-        result_task = asyncio.create_task(
-            self.read_result(frame_start, frame_end, command_state)
+        pending = Pending(
+            method,
+            generation,
+            asyncio.get_running_loop().create_future(),
+            current_request.get(),
         )
-        result_task.add_done_callback(self._result_finished)
-        self.pending_result = result_task
+        # Retain late replies only within a fixed window; IDs prevent any replay.
+        if len(self.pending) == MAX_PENDING:
+            del self.pending[next(iter(self.pending))]
+            self.synchronized = False
+        if any(
+            item.future.cancelled() and not item.native_done
+            for item in self.pending.values()
+        ):
+            self.synchronized = False
+        self.pending[request_id] = pending
         try:
             try:
+                self.writer.write(encoded)
+                if pending.tracked is not None:
+                    pending.tracked.mark_sent()
                 await self.writer.drain()
             except asyncio.CancelledError:
                 raise
-            except BaseException:
-                self.broken = True
-                await cancel_tasks(result_task)
+            except Exception:
+                self.closed = True
                 raise
-            await asyncio.wait((result_task,))
-            return result_task.result()
+            return await pending.future
         finally:
-            if result_task.done():
-                self._result_finished(result_task)
+            # The permanent reader survives caller cancellation and deadlines.
+            # A missing native barrier makes subsequent uncorrelated Busy unsafe.
+            if request_id in self.pending and not pending.future.done():
+                pending.future.cancel()
+            if pending.future.done() and not pending.future.cancelled():
+                pending.future.exception()
 
-    def _result_finished(self, result_task: asyncio.Task[str]) -> None:
-        if self.pending_result is result_task:
-            self.pending_result = None
-        if result_task.cancelled():
-            self.broken = True
-        else:
-            result_task.exception()
+    def _diagnostic(self, reason: str) -> None:
+        self.recorder.record_event("invalid", reason=f"rpc_{reason}")
 
-    async def read_result(
-        self,
-        frame_start: str,
-        frame_end: str,
-        command_state: RequestState,
-    ) -> str:
+    async def _read_results(self) -> None:
         try:
-            return await self._read_result(frame_start, frame_end, command_state)
-        except LuaBusyError, ResponseTooLargeError:
-            raise
-        except BaseException:
-            self.broken = True
-            raise
-
-    async def _read_result(  # ruff: ignore[complex-structure, too-many-branches, too-many-statements]
-        self,
-        frame_start: str,
-        frame_end: str,
-        command_state: RequestState,
-    ) -> str:
-        lines: list[str] = []
-        oversized = False
-        started = False
-        ended = False
-        output_before_start = False
-        result_bytes = 0
-        result_lines = 0
-        while True:
-            line, line_oversized = await self._read_line()
-            if line_oversized:
-                if ended:
+            while True:
+                line, oversized = await read_line(self.reader)
+                if line is None or not line.endswith(b"\n"):
+                    break
+                if oversized or len(line) > MAX_RESULT_LINE_BYTES:
+                    self._diagnostic("oversized")
                     continue
-                if started:
-                    oversized = True
-                    lines.clear()
-                else:
-                    output_before_start = True
-                continue
-            observed_timestamp_ns = time_ns()
-            if await self.game_events.accept(
-                line.rstrip(b"\r\n"), observed_timestamp_ns
+                self._receive(line.rstrip(b"\r\n"))
+        finally:
+            self.closed = True
+            for pending in self.pending.values():
+                pending.fail(EOFError("DST result stream is closed"))
+            self.pending.clear()
+
+    def _native_done(self, request_id: str) -> None:
+        pending = self.pending[request_id]
+        pending.native_done = True
+        # Save completion is asynchronous and explicitly correlated by ID.
+        if pending.method != "save" or not pending.accepted:
+            pending.fail(RuntimeError("DST command did not return a structured result"))
+        if pending.future.done():
+            del self.pending[request_id]
+
+    def _receive(self, line: bytes) -> None:  # ruff: ignore[complex-structure, too-many-branches]
+        if line in {COMMAND_DONE, LUA_BUSY}:
+            native = [key for key, item in self.pending.items() if not item.native_done]
+            if line == COMMAND_DONE:
+                if self.synchronized and native:
+                    self._native_done(native[0])
+            elif (
+                self.synchronized
+                and len(native) == 1
+                and not self.pending[native[0]].accepted
             ):
-                continue
-            value = line.decode(errors="replace").rstrip("\r\n")
-            if started and not ended and value != frame_end and not oversized:
-                result_bytes += len(line.removesuffix(b"\n").removesuffix(b"\r"))
-                result_lines += 1
-                if (
-                    result_bytes > MAX_RESULT_LINE_BYTES
-                    or result_lines > MAX_RESULT_LINES
-                ):
-                    oversized = True
-                    lines.clear()
-            if ended:
-                if value == COMMAND_DONE:
-                    if oversized:
-                        msg = "DST result exceeds 64 KiB"
-                        raise ResponseTooLargeError(msg)
-                    return "\n".join(lines)
-                continue
-            if not started:
-                if value == frame_start:
-                    started = True
-                    continue
-                if value == LUA_BUSY and not output_before_start:
-                    command_state.mark_rejected()
-                    state = current_request.get()
-                    if state is not None:
-                        state.mark_rejected()
-                    raise LuaBusyError
-                if value in {COMMAND_DONE, LUA_BUSY}:
-                    msg = "DST command response started with an ambiguous control line"
-                    raise RuntimeError(msg)
-                output_before_start = True
-                continue
-            if value == frame_end:
-                ended = True
-                continue
-            if oversized:
-                continue
-            lines.append(value)
-
-    async def _discard_pending_result(self) -> None:
-        self.broken = True
-        result_task = self.pending_result
-        if result_task is None:
+                pending = self.pending.pop(native[0])
+                pending.reject()
+                pending.fail(LuaBusyError())
+            else:
+                self._diagnostic("unattributed_busy")
+            return
+        if not line.startswith(RPC_PREFIX):
             return
         try:
-            await cancel_tasks(result_task)
-        finally:
-            if self.pending_result is result_task:
-                self.pending_result = None
-
-    async def _read_line(self) -> tuple[bytes, bool]:
-        line, oversized = await read_line(self.reader)
-        if line is None or not line.endswith(b"\n"):
-            msg = "DST result stream closed before the command response completed"
-            raise EOFError(msg)
-        return line, oversized
-
-    async def drain_result(self) -> None:
-        result_task = self.pending_result
-        if result_task is None:
+            payload = line.removeprefix(RPC_PREFIX)
+            validate_json_structure(payload)
+            response = RPC_RESPONSE.validate_json(payload, strict=True)
+        except ValueError:
+            self._diagnostic("invalid_response")
             return
-        try:
-            await asyncio.wait((result_task,))
-            result_task.result()
-        except LuaBusyError, ResponseTooLargeError:
-            pass
-        finally:
-            if self.pending_result is result_task and result_task.done():
-                self.pending_result = None
+        if response.nonce != self.nonce or response.id not in self.pending:
+            self._diagnostic("unmatched_response")
+            return
+        pending = self.pending[response.id]
+        rejected = (
+            not isinstance(response, Accepted)
+            and isinstance(response.result, Failure)
+            and response.result.error
+            in {"not_ready", "stale_generation", "invalid_request"}
+            and not pending.accepted
+        )
+        if response.generation != pending.generation and not rejected:
+            self._diagnostic("generation_mismatch")
+            return
+        # Only a reply within an unfinished native frame establishes its place
+        # in the input stream. Deferred save results may arrive after later calls.
+        if not pending.native_done:
+            for earlier in list(self.pending):
+                if earlier == response.id:
+                    break
+                if not self.pending[earlier].native_done:
+                    self._native_done(earlier)
+            self.synchronized = True
+        if isinstance(response, Accepted):
+            pending.accepted = True
+            return
+        if rejected:
+            pending.reject()
+            if response.result.error in {"not_ready", "stale_generation"}:
+                pending.fail(
+                    StaleGenerationError("DST driver is not ready for this generation")
+                )
+                return
+        else:
+            pending.accepted = True
+        if pending.future.done():
+            self._diagnostic("late_response")
+        else:
+            pending.future.set_result(response.result.model_dump_json().encode())
+        if pending.native_done:
+            del self.pending[response.id]
 
     async def close(self) -> None:
         await complete(self._close())
 
     async def _close(self) -> None:
-        self.broken = True
+        self.closed = True
         self.writer.close()
         try:
-            await self._discard_pending_result()
+            await cancel_tasks(self.reader_task)
         finally:
             await asyncio.gather(self.writer.wait_closed(), return_exceptions=True)

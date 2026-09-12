@@ -1,9 +1,7 @@
-import math
 import re
 from collections.abc import Iterator
 from typing import Annotated, cast
 
-import orjson
 from luaparser import ast
 from luaparser.ast import SyntaxException
 from luaparser.astnodes import (
@@ -20,7 +18,7 @@ from luaparser.astnodes import (
     TrueExpr,
     UMinusOp,
 )
-from pydantic import AfterValidator, BeforeValidator, Field, JsonValue
+from pydantic import AfterValidator, BeforeValidator, Field
 
 MAX_SAFE_LUA_INTEGER = 2**53 - 1
 MAX_LUA_BYTE = 255
@@ -53,6 +51,7 @@ type SafeLuaInteger = Annotated[
     int, Field(ge=-MAX_SAFE_LUA_INTEGER, le=MAX_SAFE_LUA_INTEGER)
 ]
 type NonNegativeSafeLuaInteger = Annotated[int, Field(ge=0, le=MAX_SAFE_LUA_INTEGER)]
+type PositiveSafeLuaInteger = Annotated[int, Field(gt=0, le=MAX_SAFE_LUA_INTEGER)]
 type LuaFloat = Annotated[
     float, BeforeValidator(_reject_integer_float), Field(allow_inf_nan=False)
 ]
@@ -61,11 +60,7 @@ type LuaValue = LuaScalar | list[LuaValue] | dict[LuaKey, LuaValue]
 
 
 def lua_string(value: str) -> str:
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError as error:
-        msg = "Lua strings must contain valid UTF-8"
-        raise ValueError(msg) from error
+    validate_lua_string(value)
     escaped = []
     for character in value:
         if character == '"':
@@ -77,50 +72,6 @@ def lua_string(value: str) -> str:
         else:
             escaped.extend(f"\\{byte:03d}" for byte in character.encode())
     return f'"{"".join(escaped)}"'
-
-
-def lua_value(value: JsonValue) -> str:
-    return _lua_value(value, set())
-
-
-def _lua_value(value: JsonValue, seen: set[int]) -> str:
-    if value is None:
-        return 'require("json").null'
-    if isinstance(value, str):
-        return lua_string(value)
-    if isinstance(value, (bool, int, float)):
-        if (isinstance(value, int) and abs(value) > MAX_SAFE_LUA_INTEGER) or (
-            isinstance(value, float) and not math.isfinite(value)
-        ):
-            msg = "Lua numbers must be finite; integers must be exact in IEEE 754"
-            raise ValueError(msg)
-        return orjson.dumps(value).decode()
-    if not isinstance(value, (list, dict)):
-        msg = "Lua values must be JSON values"
-        raise TypeError(msg)
-    identity = id(value)
-    if identity in seen:
-        msg = "Lua value contains a cycle"
-        raise ValueError(msg)
-    seen.add(identity)
-    try:
-        if isinstance(value, list):
-            return "{" + ",".join(_lua_value(item, seen) for item in value) + "}"
-        if any(not isinstance(key, str) for key in value):
-            msg = "Lua object keys must be strings"
-            raise TypeError(msg)
-        if not value:
-            return 'require("dst_server.wire").object({})'
-        return (
-            "{"
-            + ",".join(
-                f"[{lua_string(key)}]={_lua_value(item, seen)}"
-                for key, item in value.items()
-            )
-            + "}"
-        )
-    finally:
-        seen.remove(identity)
 
 
 def render_literal(value: LuaValue, level: int = 0) -> str:

@@ -4,35 +4,33 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
 from dst_server import commands as c
 from dst_server.errors import IndeterminateCommandError
 from dst_server.game import GameClient
 from dst_server.game.client import _METHODS
 from dst_server.game.rpc import (
-    BOOL_RESPONSE,
-    DRIVER_RESPONSE,
-    INT_RESPONSE,
-    INVENTORY_RESPONSE,
-    JSON_RESPONSE,
     MAX_RESULT_LINE_BYTES,
-    MODS_RESPONSE,
-    PLAYER_IDS_RESPONSE,
-    PLAYER_RESPONSE,
-    PLAYERS_RESPONSE,
-    RESULT_PREFIX,
-    ROOM_RESPONSE,
-    RUNTIME_RESPONSE,
-    SHARDS_RESPONSE,
-    SNAPSHOTS_RESPONSE,
-    WORLD_RESPONSE,
-    ResponseAdapter,
+    LuaRequestError,
     Success,
     response_adapter,
 )
-from dst_server.models import Item, Stat
+from dst_server.models import (
+    Inventory,
+    Item,
+    Mod,
+    Player,
+    Room,
+    Runtime,
+    ShardStatus,
+    Stat,
+    World,
+)
+from dst_server.models.base import Identifier
 from dst_server.models.console import ConsoleResult
+from dst_server.models.driver import DriverHealth
+from dst_server.models.snapshot import SnapshotCatalog
 from dst_server.timeouts import DEFAULT_RELOAD_TIMEOUT
 from tests.game.helpers import make_game
 from tests.helpers import run_lua, structured_result
@@ -43,69 +41,68 @@ type Invocation = Callable[[GameClient], Awaitable[object]]
 
 
 ROUTES = [
-    (lambda game: game.get_health(), "health", {}, DRIVER_RESPONSE),
-    (lambda game: game.invoke(c.Room()), "get_room", {}, ROOM_RESPONSE),
-    (lambda game: game.invoke(c.World()), "get_world", {}, WORLD_RESPONSE),
-    (lambda game: game.invoke(c.Runtime()), "get_runtime", {}, RUNTIME_RESPONSE),
+    (lambda game: game.invoke(c.Health()), "health", {}, DriverHealth),
+    (lambda game: game.invoke(c.Room()), "get_room", {}, Room),
+    (lambda game: game.invoke(c.World()), "get_world", {}, World),
+    (lambda game: game.invoke(c.Runtime()), "get_runtime", {}, Runtime),
     (
         lambda game: game.invoke(c.Snapshots(limit=23, before=101)),
         "get_snapshots",
         {"limit": 23, "before": 101},
-        SNAPSHOTS_RESPONSE,
+        SnapshotCatalog,
     ),
-    (lambda game: game.invoke(c.Mods()), "get_mods", {}, MODS_RESPONSE),
+    (lambda game: game.invoke(c.Mods()), "get_mods", {}, tuple[Mod, ...]),
     (
         lambda game: game.invoke(c.ConnectedShards()),
         "get_shards",
         {"current_name": "Master"},
-        SHARDS_RESPONSE,
+        tuple[ShardStatus, ...],
     ),
-    (lambda game: game.players.list(), "get_players", {}, PLAYERS_RESPONSE),
+    (lambda game: game.players.list(), "get_players", {}, tuple[Player, ...]),
     (
         lambda game: game.players.get("KU_TEST"),
         "get_player",
         {"userid": "KU_TEST"},
-        PLAYER_RESPONSE,
+        Player | None,
     ),
     (
         lambda game: game.players.inventory("KU_TEST"),
         "get_player_inventory",
         {"userid": "KU_TEST"},
-        INVENTORY_RESPONSE,
+        Inventory | None,
     ),
     (
         lambda game: game.invoke(c.Announce(message="hello")),
         "announce",
-        {"message": "hello"},
-        BOOL_RESPONSE,
+        {"message": "hello", "count": 1, "interval": 30.0},
+        bool,
     ),
-    (lambda game: game.request_save(), "save", {}, BOOL_RESPONSE),
     (
         lambda game: game.invoke(c.Pause(paused=True)),
         "set_server_paused",
         {"paused": True},
-        BOOL_RESPONSE,
+        bool,
     ),
-    (lambda game: game.invoke(c.Reset()), "reset", {}, BOOL_RESPONSE),
+    (lambda game: game.invoke(c.Reset()), "reset", {}, bool),
     (
         lambda game: game.invoke(
             c.Regenerate(expected_session_id="SESSION", require_empty=True)
         ),
         "regenerate_world",
         {"expected_session_id": "SESSION", "require_empty": True},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.invoke(c.RegenerateShard(preserve_settings=False)),
         "regenerate_shard",
         {"preserve_settings": False},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.invoke(c.Rollback(count=2)),
         "rollback",
         {"count": 2},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.invoke(
@@ -113,50 +110,55 @@ ROUTES = [
         ),
         "rollback_to_snapshot",
         {"session_id": "SESSION", "snapshot_id": 3},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.players.kick("KU_TEST"),
         "kick_player",
         {"userid": "KU_TEST"},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.players.ban("KU_TEST", seconds=60),
         "ban_player",
         {"userid": "KU_TEST", "seconds": 60},
-        BOOL_RESPONSE,
+        bool,
     ),
-    (lambda game: game.players.blocklist(), "get_blocklist", {}, PLAYER_IDS_RESPONSE),
+    (
+        lambda game: game.players.blocklist(),
+        "get_blocklist",
+        {},
+        tuple[Identifier, ...],
+    ),
     (
         lambda game: game.players.is_blocked("KU_TEST"),
         "is_blocked",
         {"userid": "KU_TEST"},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.players.unban("KU_TEST"),
         "unban_player",
         {"userid": "KU_TEST"},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.invoke(c.IsWhitelisted(userid="KU_TEST")),
         "is_whitelisted",
         {"userid": "KU_TEST"},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.invoke(c.Whitelist(userid="KU_TEST")),
         "whitelist_player",
         {"userid": "KU_TEST"},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.invoke(c.Unwhitelist(userid="KU_TEST")),
         "unwhitelist_player",
         {"userid": "KU_TEST"},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.players.set_vitals(
@@ -174,67 +176,66 @@ ROUTES = [
             "moisture": 0.0,
             "temperature": 25.0,
         },
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.players.kill("KU_TEST"),
         "kill_player",
         {"userid": "KU_TEST"},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.players.revive("KU_TEST"),
         "revive_player",
         {"userid": "KU_TEST"},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.players.despawn("KU_TEST"),
         "despawn_player",
         {"userid": "KU_TEST"},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.players.migrate("KU_TEST", "2", portal_id=3),
         "migrate_player",
         {"userid": "KU_TEST", "shard_id": "2", "portal_id": 3},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.players.teleport("KU_TEST", x=1, y=0, z=-2.5),
         "teleport_player",
         {"userid": "KU_TEST", "x": 1.0, "y": 0.0, "z": -2.5},
-        BOOL_RESPONSE,
+        bool,
     ),
     (
         lambda game: game.players.give("KU_TEST", "Twigs", 3),
         "give_item",
         {"userid": "KU_TEST", "prefab": "twigs", "count": 3},
-        INT_RESPONSE,
+        int,
     ),
     (
         lambda game: game.players.remove("KU_TEST", "Twigs", 2),
         "remove_item",
         {"userid": "KU_TEST", "prefab": "twigs", "count": 2},
-        INT_RESPONSE,
+        int,
     ),
     (
         lambda game: game.invoke(c.ExecuteJson(source="return {answer=42}")),
         "execute_script",
         {"source": "return {answer=42}"},
-        JSON_RESPONSE,
+        JsonValue,
     ),
     (
         lambda game: game.invoke(c.Evaluate(source="1 + 2")),
         "evaluate",
         {"source": "1 + 2"},
-        response_adapter(ConsoleResult),
+        ConsoleResult,
     ),
 ]
 
 VOID_METHODS = {
     "announce",
-    "save",
     "reset",
     "regenerate_world",
     "regenerate_shard",
@@ -253,11 +254,11 @@ RELOAD_METHODS = {
 
 
 def test_routing_cases_cover_every_registered_game_method() -> None:
-    assert {method for _, method, _, _ in ROUTES} == {*_METHODS.values(), "save"}
+    assert {method for _, method, _, _ in ROUTES} == set(_METHODS.values())
 
 
 @pytest.mark.parametrize(
-    ("invoke", "method", "arguments", "adapter"),
+    ("invoke", "method", "arguments", "result_type"),
     ROUTES,
     ids=[method for _, method, _, _ in ROUTES],
 )
@@ -266,7 +267,7 @@ async def test_public_api_routes_typed_requests(
     invoke: Invocation,
     method: str,
     arguments: dict[str, object],
-    adapter: ResponseAdapter[object],
+    result_type: object,
 ) -> None:
     game, _ = make_game()
     response: object = object()
@@ -283,6 +284,7 @@ async def test_public_api_routes_typed_requests(
     monkeypatch.setattr(game, "reload", reload)
 
     result = await invoke(game)
+    adapter = response_adapter(result_type)
 
     if method in RELOAD_METHODS:
         reload.assert_awaited_once_with(
@@ -296,15 +298,27 @@ async def test_public_api_routes_typed_requests(
     assert game.recorder.player_count == expected_player_count
 
 
-async def test_request_escapes_untrusted_text_before_lua_execution() -> None:
+async def test_save_returns_only_the_correlated_snapshot_path() -> None:
+    game, commands = make_game(
+        structured_result({"snapshot": "session/SESSION/0000000027"})
+    )
+    saved = await game.request_save()
+    assert saved.snapshot == 27
+    assert saved.path == "session/SESSION/0000000027"
+    assert commands == [("save", {})]
+
+
+async def test_request_passes_untrusted_text_as_data() -> None:
     game, commands = make_game(structured_result(True))
 
     await game.invoke(c.Announce(message='hello");Shutdown()--\n你好'))
 
-    (command,) = commands
-    assert "\n" not in command
-    assert "json.decode" not in command
-    assert "c_announce" not in command
+    assert commands == [
+        (
+            "announce",
+            {"message": 'hello");Shutdown()--\n你好', "count": 1, "interval": 30.0},
+        )
+    ]
 
 
 def test_native_snapshot_pages_cover_long_history(lua_runtime: str) -> None:
@@ -334,7 +348,7 @@ def test_native_snapshot_pages_cover_long_history(lua_runtime: str) -> None:
         local before = nil
         repeat
             local page = query({ limit = 100, before = before })
-            wire.reply(function() return page end)
+            print(wire.response(function() return page end))
             if not page.has_more then break end
             before = page.snapshots[#page.snapshots].snapshot_id
         until false
@@ -345,8 +359,7 @@ def test_native_snapshot_pages_cover_long_history(lua_runtime: str) -> None:
     pages = []
     for line in output.decode().splitlines():
         assert len(line.encode()) <= MAX_RESULT_LINE_BYTES
-        assert line.startswith(RESULT_PREFIX)
-        result = SNAPSHOTS_RESPONSE.validate_json(line.removeprefix(RESULT_PREFIX))
+        result = response_adapter(SnapshotCatalog).validate_json(line)
         assert isinstance(result, Success)
         pages.append(result.data)
     assert [len(page.snapshots) for page in pages] == [100, 100, 37]
@@ -396,10 +409,11 @@ async def test_indeterminate_lua_mutation_does_not_wait_for_reload(
     lua_runtime: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     output = run_lua(
-        'local wire=require("dst_server.wire");wire.reply(wire.indeterminate)',
+        'local wire=require("dst_server.wire");'
+        "print(wire.response(wire.indeterminate))",
         lua_runtime,
     )
-    game, _ = make_game(output.decode())
+    game, _ = make_game(output)
     wait = AsyncMock()
     monkeypatch.setattr(game, "wait_reload", wait)
 
@@ -407,6 +421,49 @@ async def test_indeterminate_lua_mutation_does_not_wait_for_reload(
         await game.invoke(c.Rollback())
 
     wait.assert_not_awaited()
+
+
+async def test_partial_native_mutation_is_indeterminate(lua_runtime: str) -> None:
+    output = run_lua(
+        """
+        local health = 1
+        LookupPlayerInstByUserID = function(userid)
+            assert(userid == "KU_TEST")
+            return {
+                HasTag = function() return false end,
+                components = {
+                    health = { SetPercent = function(_, value) health = value end },
+                    hunger = { SetPercent = function() error("failed") end },
+                },
+            }
+        end
+        local result = require("dst_server.wire").response(function()
+            return require("dst_server.commands").set_player_vitals({
+                userid = "KU_TEST", health = 0.5, hunger = 0.5,
+            })
+        end)
+        assert(health == 0.5)
+        print(result)
+        """,
+        lua_runtime,
+    )
+    game, executed = make_game(output)
+
+    with pytest.raises(IndeterminateCommandError) as caught:
+        await game.players.set_vitals("KU_TEST", health=0.5, hunger=0.5)
+
+    assert isinstance(caught.value.__cause__, LuaRequestError)
+    assert caught.value.__cause__.code == "lua_error"
+    assert executed == [
+        ("set_player_vitals", {"userid": "KU_TEST", "health": 0.5, "hunger": 0.5})
+    ]
+
+
+async def test_readonly_lua_failure_remains_determinate() -> None:
+    game, _ = make_game(b'{"ok":false,"error":"lua_error"}')
+
+    with pytest.raises(LuaRequestError, match="lua_error"):
+        await game.invoke(c.World())
 
 
 async def test_reload_wait_failure_is_indeterminate(
@@ -451,13 +508,13 @@ async def test_regeneration_rechecks_world_and_players_at_execution(
             or scenario == "allow_players" then
             clients[1] = { userid = "KU_LOADING", prefab = nil }
         end
-        require("dst_server.wire").reply(queued)
+        print(require("dst_server.wire").response(queued))
         assert(regenerated == (scenario == "empty" or scenario == "manual"
             or scenario == "allow_players"))
         """,
         lua_runtime,
     )
-    game, _ = make_game(output.decode())
+    game, _ = make_game(output)
     wait = AsyncMock()
     monkeypatch.setattr(game, "wait_reload", wait)
     command = (
@@ -468,7 +525,7 @@ async def test_regeneration_rechecks_world_and_players_at_execution(
         )
     )
     if scenario in {"session_changed", "player_joined"}:
-        with pytest.raises(RuntimeError, match="lua_error"):
+        with pytest.raises(IndeterminateCommandError, match="could not be confirmed"):
             await game.invoke(command)
         wait.assert_not_awaited()
     else:
@@ -547,12 +604,12 @@ async def test_native_snapshot_rollback_checks_target_and_partial_mutation(
             reset = reset + 1
             if scenario == "reset" then error("reset failed after truncation") end
         end
-        require("dst_server.wire").reply(function()
+        print(require("dst_server.wire").response(function()
             return require("dst_server.commands").rollback_to_snapshot({
                 session_id = scenario == "session" and "STALE" or "SESSION",
                 snapshot_id = 3,
             })
-        end)
+        end))
         local rejected = scenario == "missing" or scenario == "session"
             or scenario == "shard" or scenario == "current" or scenario == "future"
         assert(truncated == (rejected and 0 or 1))
@@ -562,7 +619,7 @@ async def test_native_snapshot_rollback_checks_target_and_partial_mutation(
         """,
         lua_runtime,
     )
-    game, _ = make_game(output.decode())
+    game, _ = make_game(output)
     wait = AsyncMock()
     monkeypatch.setattr(game, "wait_reload", wait)
 
@@ -571,9 +628,8 @@ async def test_native_snapshot_rollback_checks_target_and_partial_mutation(
         wait.assert_awaited_once()
     else:
         partial = scenario in {"truncate", "noop", "reset"}
-        expected = IndeterminateCommandError if partial else RuntimeError
-        message = "may have been applied" if partial else "lua_error"
-        with pytest.raises(expected, match=message):
+        message = "may have been applied" if partial else "could not be confirmed"
+        with pytest.raises(IndeterminateCommandError, match=message):
             await game.invoke(c.RollbackToSnapshot(session_id="SESSION", snapshot_id=3))
         wait.assert_not_awaited()
 
@@ -597,7 +653,7 @@ async def test_admin_query_is_limited_to_connected_players(
 
     assert await game.players.is_admin("KU_TEST") is expected
     get_player.assert_awaited_once_with(
-        "get_player", {"userid": "KU_TEST"}, PLAYER_RESPONSE
+        "get_player", {"userid": "KU_TEST"}, response_adapter(Player | None)
     )
 
 
@@ -610,7 +666,7 @@ async def test_give_enforces_spawn_limit(monkeypatch: pytest.MonkeyPatch) -> Non
     request.assert_awaited_once_with(
         "give_item",
         {"userid": "KU_TEST", "prefab": "twigs", "count": MAX_GIVE_ITEMS},
-        INT_RESPONSE,
+        response_adapter(int),
     )
 
     with pytest.raises(ValueError, match="count"):
@@ -657,37 +713,37 @@ def test_item_percent_is_bounded(field: str, value: float) -> None:
     ("response", "error", "message"),
     [
         (
-            'DST_SERVER_RESULT|{"ok":false,"error":"lua_error"}',
+            b'{"ok":false,"error":"lua_error"}',
             RuntimeError,
             "lua_error",
         ),
         (
-            'DST_SERVER_RESULT|{"ok":false,"error":"boom"}',
+            b'{"ok":false,"error":"boom"}',
             ValidationError,
             "literal_error",
         ),
         (
-            'DST_SERVER_RESULT|{"ok":true,"data":1}',
+            b'{"ok":true,"data":1}',
             ValidationError,
             "bool_type",
         ),
         (
-            'DST_SERVER_RESULT|{"ok":true,"data":true,"extra":1}',
+            b'{"ok":true,"data":true,"extra":1}',
             ValidationError,
             "extra_forbidden",
         ),
-        ("unstructured output", RuntimeError, "structured result"),
+        (b"unstructured output", ValueError, "expected a JSON value"),
     ],
 )
 def test_response_contract_rejects_invalid_results(
-    response: str,
+    response: bytes,
     error: type[Exception],
     message: str,
 ) -> None:
     game, _ = make_game(response)
 
     with pytest.raises(error, match=message):
-        game.parse(response, BOOL_RESPONSE)
+        game.parse(response, response_adapter(bool))
 
 
 @pytest.mark.parametrize(

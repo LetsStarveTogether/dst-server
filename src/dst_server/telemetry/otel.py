@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import Protocol, cast
 
 from opentelemetry import metrics, trace
 from opentelemetry._logs import Logger, SeverityNumber  # ruff: ignore[import-private-name]
@@ -28,9 +28,6 @@ from pydantic import JsonValue
 from ulid import ULID
 
 from dst_server.concurrency import complete
-
-if TYPE_CHECKING:
-    from dst_server.events import ObservedGameEvent
 
 _globals_installed = False
 _global_lock = Lock()
@@ -81,36 +78,6 @@ class Pipeline:
     @property
     def logs_enabled(self) -> bool:
         return self._logger is not None
-
-    def emit_event(
-        self,
-        observed: ObservedGameEvent,
-        *,
-        attributes: Mapping[str, AttributeValue] | None = None,
-    ) -> None:
-        event = observed.record
-        values = dict(attributes or {})
-        values.update({
-            "log.record.uid": f"{event.nonce}:{event.generation}:{event.seq}",
-            "dst.game.attempt.id": event.nonce,
-            "dst.runtime.generation": event.generation,
-            "dst.event.sequence": event.seq,
-            "dst.tick": event.tick,
-            "dst.monotonic_ms": event.monotonic_ms,
-        })
-        values.pop("dst.session.id", None)
-        values.pop("dst.world.cycle", None)
-        if event.session_id is not None:
-            values["dst.session.id"] = event.session_id
-        if event.cycle is not None:
-            values["dst.world.cycle"] = event.cycle
-        self.emit_operational(
-            event_name=event.event,
-            body=event.data.model_dump(mode="json"),
-            observed_timestamp_ns=observed.observed_timestamp_ns,
-            severity_text="ERROR" if event.event == "dst.telemetry.error" else "INFO",
-            attributes=values,
-        )
 
     def emit_operational(
         self,
@@ -232,6 +199,7 @@ def configure(
     resource = Resource.create(attributes)
     if str(resource.attributes.get("service.name", "")).startswith("unknown_service"):
         resource = resource.merge(Resource({"service.name": "dst-server"}))
+    os.environ.setdefault("OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED", "true")
     pipeline = _create_pipeline(resource, enabled)
     with _global_lock:
         if not _globals_installed:

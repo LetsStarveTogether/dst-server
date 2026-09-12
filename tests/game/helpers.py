@@ -1,23 +1,27 @@
-from pathlib import Path
+from pydantic import JsonValue
 
 from dst_server.game import GameClient
-from dst_server.telemetry import TelemetrySettings
 from dst_server.telemetry.recorder import Recorder
 
 
-def make_game(response: str = "") -> tuple[GameClient, list[str]]:
-    commands: list[str] = []
+def make_game(
+    response: bytes = b"",
+) -> tuple[GameClient, list[tuple[str, dict[str, JsonValue]]]]:
+    commands: list[tuple[str, dict[str, JsonValue]]] = []
 
-    async def execute(command: str) -> str:  # ruff:ignore[unused-async]
-        commands.append(command)
+    async def execute(  # ruff:ignore[unused-async]
+        method: str, arguments: dict[str, JsonValue]
+    ) -> bytes:
+        commands.append((method, arguments))
         return response
 
     async def execute_reload(  # ruff:ignore[unused-async]
-        command: str,
+        method: str,
+        arguments: dict[str, JsonValue],
         completion_timeout: float,
-    ) -> tuple[str, int, float]:
+    ) -> tuple[bytes, int, float]:
         del completion_timeout
-        commands.append(command)
+        commands.append((method, arguments))
         return response, 0, float("inf")
 
     async def wait_reload(  # ruff:ignore[unused-async]
@@ -28,14 +32,10 @@ def make_game(response: str = "") -> tuple[GameClient, list[str]]:
 
     game = GameClient(
         shard="Master",
-        lua_directory=Path("/lua"),
-        telemetry=TelemetrySettings(),
-        execute=execute,
         execute_ready=execute,
         execute_reload=execute_reload,
         wait_reload=wait_reload,
         recorder=Recorder("cluster", "Master"),
         session_id=lambda: "SESSION",
-        nonce="01ARZ3NDEKTSV4RRFFQ69G5FAV",
     )
     return game, commands

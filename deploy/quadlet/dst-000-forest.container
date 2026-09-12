@@ -1,6 +1,9 @@
 [Unit]
 Description=Don't Starve Together master shard forest
 Wants=dst-000-cave.container
+PartOf=dst-000-pod.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
 
 [Container]
 Image=quay.io/wh2099/dst-server:latest
@@ -21,6 +24,7 @@ Notify=true
 
 [Service]
 Restart=on-failure
+RestartSec=30
 KillMode=control-group
 WatchdogSec=300
 WatchdogSignal=SIGKILL

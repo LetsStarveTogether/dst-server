@@ -22,7 +22,7 @@ async def test_idle_lifecycle_releases_the_consumed_event(
         return await read_line(reader)
 
     monkeypatch.setattr(lifecycle_module, "read_line", lambda _: read())
-    pumping = asyncio.create_task(lifecycle.pump(reader, lambda _: None))
+    pumping = asyncio.create_task(lifecycle.pump(reader))
     reader.feed_data(b"unknown|" + b"x" * 60_000 + b"\n")
     try:
         await asyncio.wait_for(idle.wait(), 1)
@@ -36,42 +36,46 @@ async def test_idle_lifecycle_releases_the_consumed_event(
         await pumping
 
 
-async def test_bounded_native_lifecycle_never_drops_a_save_for_eof() -> None:
+async def test_saturated_notification_queue_preserves_latest_save_and_eof() -> None:
     lifecycle = Lifecycle()
     lifecycle.queue = asyncio.Queue(maxsize=1)
     reader = asyncio.StreamReader()
     reader.feed_data(b"DST_Saved|session/ABC/1\nDST_Saved|session/ABC/2\n")
     reader.feed_eof()
-    pumping = asyncio.create_task(lifecycle.pump(reader, lambda _: None))
-    try:
-        await asyncio.sleep(0)
-        assert not pumping.done()
-        assert await lifecycle.read() == events.SavedEvent(
-            path="session/ABC/1", snapshot=1
-        )
-        await asyncio.wait_for(pumping, 1)
-        assert await lifecycle.read() == events.SavedEvent(
-            path="session/ABC/2", snapshot=2
-        )
-        assert await lifecycle.read() is None
-        assert lifecycle.save_count == 2
-    finally:
-        pumping.cancel()
-        await asyncio.gather(pumping, return_exceptions=True)
+    await asyncio.wait_for(lifecycle.pump(reader), 1)
+
+    assert await lifecycle.read() == events.SavedEvent(path="session/ABC/2", snapshot=2)
+    assert await lifecycle.read() is None
+    assert lifecycle.dropped == 1
 
 
-async def test_stats_do_not_evict_lifecycle_or_change_generation() -> None:
+async def test_saturated_notifications_preserve_ready_and_stopping() -> None:
     lifecycle = Lifecycle()
-    generations: list[int] = []
+    lifecycle.queue = asyncio.Queue(maxsize=1)
+    reader = asyncio.StreamReader()
+    reader.feed_data(
+        b"unknown\nDST_Master_Ready\nDST_Saved|session/ABC/3\nDST_Stopping\n"
+    )
+    reader.feed_eof()
+    await asyncio.wait_for(lifecycle.pump(reader), 1)
+
+    assert lifecycle.ready
+    assert lifecycle.stopping.is_set()
+    assert lifecycle.dropped == 3
+    assert isinstance(await lifecycle.read(), events.StoppingEvent)
+
+
+async def test_stats_do_not_evict_lifecycle_events() -> None:
+    lifecycle = Lifecycle()
     reader = asyncio.StreamReader()
     reader.feed_data(
         b"DST_SessionId|ABC\nDST_Saved|session/ABC/2\n"
         + b"DST_Stats|1|2|3|4|5\n" * 5000
     )
     reader.feed_eof()
-    await lifecycle.pump(reader, generations.append)
+    await lifecycle.pump(reader)
 
-    assert generations == [1]
+    assert lifecycle.session_id == "ABC"
     assert await lifecycle.read() == events.SessionEvent(session_id="ABC")
     assert await lifecycle.read() == events.SavedEvent(path="session/ABC/2", snapshot=2)
     assert await lifecycle.read() is None
@@ -83,7 +87,7 @@ async def test_native_stream_recovers_after_an_oversized_message(ending: bytes) 
     reader = asyncio.StreamReader(limit=64)
     reader.feed_data(b"DST_Stats|" + b"9" * 500 + b"\nDST_Saved|session/ABC/3" + ending)
     reader.feed_eof()
-    await lifecycle.pump(reader, lambda _: None)
+    await lifecycle.pump(reader)
 
     assert await lifecycle.read() == events.SavedEvent(path="session/ABC/3", snapshot=3)
     assert await lifecycle.read() is None
@@ -96,10 +100,9 @@ async def test_unknown_and_malformed_events_do_not_mutate_lifecycle_state() -> N
         b"DST_SessionId|\nDST_Stopping|fake\nDST_Saved|" + b"x" * 4097 + b"\n"
     )
     reader.feed_eof()
-    await lifecycle.pump(reader, lambda _: pytest.fail("unexpected session"))
+    await lifecycle.pump(reader)
 
-    assert lifecycle.session_generation == 0
-    assert lifecycle.save_count == 0
+    assert lifecycle.session_id is None
     assert not lifecycle.ready
     assert not lifecycle.stopping.is_set()
 
@@ -113,7 +116,7 @@ async def test_lifecycle_observation_timestamp_is_captured_before_consumer_runs(
     reader = asyncio.StreamReader()
     reader.feed_data(b"DST_Saved|session/ABC/3\n")
     reader.feed_eof()
-    await lifecycle.pump(reader, lambda _: None)
+    await lifecycle.pump(reader)
     now = 200
 
     record = await lifecycle.read_observed()

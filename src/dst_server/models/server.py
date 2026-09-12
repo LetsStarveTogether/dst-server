@@ -1,4 +1,4 @@
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import Field
 
@@ -43,15 +43,15 @@ class World(FrozenModel):
     day: PositiveInt
     time: Percent
     time_in_phase: Percent
-    phase: Literal["day", "dusk", "night"]
+    phase: Identifier
     is_day: bool
     is_dusk: bool
     is_night: bool
-    moon_phase: Literal["new", "quarter", "half", "threequarter", "full"]
+    moon_phase: Identifier
     is_waxing_moon: bool
     is_full_moon: bool
     is_new_moon: bool
-    season: Literal["autumn", "winter", "spring", "summer"]
+    season: Identifier
     is_spring: bool
     is_summer: bool
     is_autumn: bool
@@ -68,7 +68,7 @@ class World(FrozenModel):
     moisture_ceiling: NonNegativeFloat
     precipitation_probability: Percent
     precipitation_rate: NonNegativeFloat
-    precipitation: Literal["none", "rain", "snow", "lunarhail", "acidrain"]
+    precipitation: Identifier
     is_raining: bool
     is_snowing: bool
     is_lunar_hailing: bool

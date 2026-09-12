@@ -77,29 +77,6 @@ async def test_native_download_uses_only_explicit_proxy(
     assert os.environ["http_proxy"] == "http://inherited.invalid"
 
 
-@pytest.mark.parametrize("with_handler", [False, True])
-async def test_timeout_retries_preserve_cache_until_fifth_attempt(
-    tmp_path: Path,
-    with_handler: bool,
-) -> None:
-    executable, ugc = native_updater(
-        tmp_path,
-        [TIMEOUT + "\n" + COMPLETE] * 4 + [COMPLETE],
-    )
-    lines: list[str] = []
-
-    await mods.update(
-        executable,
-        ugc,
-        log_handler=lines.append if with_handler else None,
-    )
-
-    assert (ugc / "attempts").read_text() == "5"
-    assert (ugc / "partial-download").read_bytes() == b"retained download"
-    if with_handler:
-        assert sum("retrying" in line for line in lines) == 4
-
-
 @pytest.mark.parametrize(
     "failure",
     [
@@ -110,16 +87,16 @@ async def test_timeout_retries_preserve_cache_until_fifth_attempt(
         "[00:00:31]: [Workshop] FAILED: DownloadPublishedFile [16] 42",
     ],
 )
-async def test_explicit_failure_overrides_completion_and_exhausts_attempts(
+async def test_explicit_failure_overrides_completion_without_retry(
     tmp_path: Path,
     failure: str,
 ) -> None:
     executable, ugc = native_updater(tmp_path, [COMPLETE + "\n" + failure])
 
-    with pytest.raises(RuntimeError, match=r"failed after 2 attempt\(s\)"):
-        await mods.update(executable, ugc, attempts=2)
+    with pytest.raises(mods.ModUpdateError, match="failed"):
+        await mods.update(executable, ugc)
 
-    assert (ugc / "attempts").read_text() == "2"
+    assert (ugc / "attempts").read_text() == "1"
     assert (ugc / "partial-download").read_bytes() == b"retained download"
 
 
@@ -171,21 +148,19 @@ async def test_nonzero_exit_is_not_retried(tmp_path: Path) -> None:
         returncode=7,
     )
 
-    with pytest.raises(ChildProcessError, match="status 7"):
+    with pytest.raises(mods.ModUpdateError, match="status 7"):
         await mods.update(executable, ugc)
 
     assert (ugc / "attempts").read_text() == "1"
 
 
-async def test_attempts_share_the_outer_deadline(
+async def test_timeout_terminates_downloader(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     executable, ugc = write_updater(
         tmp_path,
-        UPDATER
-        + f"\nif attempt == 1:\n    print({TIMEOUT!r})\n"
-        + "else:\n    print('READY', flush=True)\n    time.sleep(60)\n",
+        UPDATER + "\nprint('READY', flush=True)\ntime.sleep(60)\n",
     )
     real_timeout = asyncio.timeout
     deadline = real_timeout(None)
@@ -203,25 +178,10 @@ async def test_attempts_share_the_outer_deadline(
             deadline.reschedule(asyncio.get_running_loop().time())
 
     async with real_timeout(5):
-        with pytest.raises(TimeoutError):
-            await mods.update(
-                executable, ugc, attempts=2, log_handler=expire_after_retry_is_ready
-            )
+        with pytest.raises(mods.ModUpdateError):
+            await mods.update(executable, ugc, log_handler=expire_after_retry_is_ready)
 
     assert deadline.expired()
-    assert (ugc / "attempts").read_text() == "2"
+    assert (ugc / "attempts").read_text() == "1"
     assert await asyncio.to_thread(process_stopped, int((ugc / "pid").read_text()))
     assert asyncio.all_tasks() == existing_tasks
-
-
-@pytest.mark.parametrize("attempts", [0, -1, True, 1.5])
-async def test_invalid_attempt_count_is_rejected(
-    tmp_path: Path,
-    attempts: int,
-) -> None:
-    executable, ugc = native_updater(tmp_path, [COMPLETE])
-
-    with pytest.raises(ValueError, match="attempts must be a positive integer"):
-        await mods.update(executable, ugc, attempts=attempts)
-
-    assert not (ugc / "attempts").exists()

@@ -7,7 +7,6 @@ from typing import Annotated, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from dbus_fast import Variant
 from dbus_fast.aio import MessageBus
 from dbus_fast.annotations import DBusObjectPath, DBusSignature, DBusStr
 from dbus_fast.service import ServiceInterface, dbus_method
@@ -27,11 +26,8 @@ async def adapter(
     for action in ("start", "stop", "restart"):
         setattr(manager, f"call_{action}_unit", AsyncMock(return_value=JOB))
     manager.call_reload = AsyncMock()
+    manager.call_reset_failed_unit = AsyncMock()
     manager.call_list_units_by_names = AsyncMock(return_value=[])
-    manager.call_get_unit = AsyncMock(
-        return_value="/org/freedesktop/systemd1/unit/test"
-    )
-    manager.call_get_all = AsyncMock(return_value={})
     bus = MagicMock(connected=True)
     bus.connect = AsyncMock(return_value=bus)
     bus.introspect = AsyncMock()
@@ -70,46 +66,12 @@ async def test_lifecycle_submission_uses_systemd_replace_mode(
     getattr(manager, f"call_{action}_unit").assert_awaited_once_with(UNIT, "replace")
 
 
-async def test_reload_and_properties(
+async def test_reload(
     adapter: tuple[Systemd, MagicMock, MagicMock],
 ) -> None:
     systemd, manager, _ = adapter
     await systemd.reload()
     manager.call_reload.assert_awaited_once()
-    manager.call_get_all.side_effect = [
-        {"ActiveState": Variant("s", "failed"), "Unneeded": Variant("as", [])},
-        {"Result": Variant("s", "exit-code"), "ExecMainStatus": Variant("i", 7)},
-    ]
-    assert await systemd.properties(UNIT) == {
-        "ActiveState": "failed",
-        "Result": "exit-code",
-        "ExecMainStatus": 7,
-    }
-
-
-@pytest.mark.parametrize(
-    ("name", "argv", "environment", "cwd"),
-    [
-        ("bad.timer", ["/bin/true"], None, None),
-        ("test.service", [], None, None),
-        ("test.service", ["relative"], None, None),
-        ("test.service", ["/bin/echo", "\0"], None, None),
-        ("test.service", ["/bin/true"], {"BAD=NAME": "x"}, None),
-        ("test.service", ["/bin/true"], {"NAME": "\0"}, None),
-        ("test.service", ["/bin/true"], None, Path("relative")),
-    ],
-)
-async def test_transient_input_validation_happens_before_bus_connection(
-    adapter: tuple[Systemd, MagicMock, MagicMock],
-    name: str,
-    argv: list[str],
-    environment: dict[str, str] | None,
-    cwd: Path | None,
-) -> None:
-    systemd, _, bus = adapter
-    with pytest.raises(ValueError, match=r"[Tt]ransient"):
-        await systemd.start_transient(name, argv, environment=environment, cwd=cwd)
-    bus.connect.assert_not_awaited()
 
 
 def unit_row(name: str, active: str, job: int = 0) -> list[Any]:
@@ -130,7 +92,6 @@ def unit_row(name: str, active: str, job: int = 0) -> list[Any]:
 class PrivateManager(ServiceInterface):
     def __init__(self) -> None:
         super().__init__("org.freedesktop.systemd1.Manager")
-        self.properties: dict[str, Variant] = {}
         self.states = [unit_row(UNIT, "active")]
         self.observed: asyncio.Queue[list[str]] = asyncio.Queue()
         self.reply = asyncio.Event()
@@ -149,20 +110,6 @@ class PrivateManager(ServiceInterface):
     def start_unit(self, name: DBusStr, mode: DBusStr) -> DBusObjectPath:
         assert name == UNIT
         assert mode == "replace"
-        return JOB
-
-    @dbus_method(name="StartTransientUnit")
-    def start_transient(
-        self,
-        name: DBusStr,
-        mode: DBusStr,
-        properties: Annotated[list[Any], DBusSignature("a(sv)")],
-        auxiliary: Annotated[list[Any], DBusSignature("a(sa(sv))")],
-    ) -> DBusObjectPath:
-        assert name == UNIT
-        assert mode == "fail"
-        assert auxiliary == []
-        self.properties = dict(properties)
         return JOB
 
 
@@ -203,38 +150,6 @@ async def private_manager(
             except TimeoutError:
                 process.kill()
                 await asyncio.wait_for(process.wait(), 2)
-
-
-async def test_transient_properties_over_private_dbus(
-    tmp_path: Path, private_manager: tuple[str, PrivateManager]
-) -> None:
-    address, manager = private_manager
-    argv = [
-        "/bin/echo",
-        "$LITERAL",
-        "${LITERAL}",
-        "$(touch /tmp/never)",
-        "%n",
-        "two words",
-    ]
-    async with asyncio.timeout(5), Systemd(bus_address=address) as systemd:
-        assert (
-            await systemd.start_transient(
-                UNIT, argv, environment={"LITERAL": "unaltered"}, cwd=tmp_path
-            )
-            == JOB
-        )
-    properties = {name: value.value for name, value in manager.properties.items()}
-    assert properties == {
-        "Type": "exec",
-        "Restart": "no",
-        "StandardOutput": "journal",
-        "StandardError": "journal",
-        "CollectMode": "inactive-or-failed",
-        "ExecStartEx": [("/bin/echo", argv, ["no-env-expand"])],
-        "Environment": ["LITERAL=unaltered"],
-        "WorkingDirectory": str(tmp_path),
-    }
 
 
 async def test_wait_idle_tracks_all_units_until_their_transitions_settle(
@@ -331,3 +246,26 @@ async def test_exec_start_rejects_missing_or_multiple_commands(
     manager.call_get = AsyncMock(return_value=SimpleNamespace(value=commands))
     with pytest.raises(ValueError, match="expected one ExecStart"):
         await systemd.exec_start(SHARD)
+
+
+async def test_reset_failed_is_explicit_per_unit(
+    adapter: tuple[Systemd, MagicMock, MagicMock],
+) -> None:
+    systemd, manager, _ = adapter
+    await systemd.reset_failed(UNIT)
+    manager.call_reset_failed_unit.assert_awaited_once_with(UNIT)
+
+
+async def test_list_patterns_finds_legacy_tasks(
+    adapter: tuple[Systemd, MagicMock, MagicMock],
+) -> None:
+    systemd, manager, _ = adapter
+    manager.call_list_units_by_patterns = AsyncMock(
+        return_value=[unit_row(UNIT, "active")]
+    )
+    assert (await systemd.list_patterns(("dst-maintenance-*.service",)))[
+        UNIT
+    ].active == "active"
+    manager.call_list_units_by_patterns.assert_awaited_once_with(
+        [], ["dst-maintenance-*.service"]
+    )

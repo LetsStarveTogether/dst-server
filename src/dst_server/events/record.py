@@ -3,9 +3,21 @@ from typing import Annotated
 
 from pydantic import Field, TypeAdapter
 
+from .connection import (
+    ClientAuthenticatedEvent,
+    ClientDisconnectedEvent,
+    PresenceEvent,
+)
+from .messages import (
+    AnnouncementEvent,
+    DiceRolledEvent,
+    SkinReceivedEvent,
+    SystemMessageEvent,
+)
 from .player import (
     ActionEvent,
     AteEvent,
+    ChatEvent,
     CombatBlockedEvent,
     CombatHitEvent,
     CombatReceivedEvent,
@@ -32,8 +44,11 @@ from .player import (
     SpawnedEvent,
     UnequippedEvent,
 )
+from .vote import VoteCastEvent, VoteClosedEvent, VoteResultEvent, VoteStartedEvent
 from .world import (
     EntityDeathEvent,
+    ModOutdatedEvent,
+    PauseChangedEvent,
     RiftChangedEvent,
     RiftUnlockedEvent,
     ShardBossDefeatedEvent,
@@ -44,6 +59,19 @@ from .world import (
 
 type GameEvent = Annotated[
     ShardEnteredEvent
+    | ClientAuthenticatedEvent
+    | ClientDisconnectedEvent
+    | PresenceEvent
+    | ChatEvent
+    | AnnouncementEvent
+    | DiceRolledEvent
+    | SkinReceivedEvent
+    | SystemMessageEvent
+    | VoteStartedEvent
+    | VoteCastEvent
+    | VoteClosedEvent
+    | VoteResultEvent
+    | PauseChangedEvent
     | PlayerLoadedEvent
     | ShardLeftEvent
     | DisconnectedEvent
@@ -76,7 +104,8 @@ type GameEvent = Annotated[
     | HoundWarningEvent
     | RiftUnlockedEvent
     | RiftChangedEvent
-    | TelemetryErrorEvent,
+    | TelemetryErrorEvent
+    | ModOutdatedEvent,
     Field(discriminator="event"),
 ]
 

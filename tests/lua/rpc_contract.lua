@@ -201,7 +201,8 @@ TheNet = {
     end,
     GetWorldSessionFile = function(_, session_id)
         assert(session_id == "SESSION")
-        return "save/session/SESSION/0000000023"
+        return observed.truncated_snapshots ~= nil and "save/session/SESSION/0000000023"
+            or "session/SESSION/0000000026"
     end,
     GetServerName = function() return "Test Room" end,
     GetServerDescription = function() return "Description" end,
@@ -274,7 +275,7 @@ SpawnPrefab = function(prefab)
 end
 SetServerPaused = function(paused) observed.paused = paused end
 c_announce = function(message) observed.announcement = message end
-c_save = function() observed.saved = true end
+ShardGameIndex = { SaveCurrent = function(_, callback) observed.saved = true; callback() end }
 c_reset = function() observed.reset = true end
 c_regenerateworld = function() observed.regenerated = true end
 c_regenerateshard = function(erase) observed.regenerated_shard = erase end
@@ -282,6 +283,7 @@ c_rollback = function(count) observed.rollback = count end
 WorldRollbackFromSim = function(count) observed.snapshot_rollback = count end
 
 local driver = require("dst_server")
+Networking_ModOutOfDateAnnouncement = function() end
 driver.install({ nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV", generation = 1, profile = "off", actions = {} })
 
 local calls = {
@@ -324,9 +326,18 @@ local calls = {
 }
 
 for _, call in ipairs(calls) do
+    local result
+    if call[1] == "save" then
+        require("dst_server.commands").save(call[2], function(data, failure)
+            assert(failure == nil)
+            result = data
+        end)
+    else
+        result = driver.call(call[1], call[2])
+    end
     print(call[1] .. "|" .. require("dst_server.wire").encode({
         ok = true,
-        data = driver.call(call[1], call[2]),
+        data = result,
     }))
 end
 

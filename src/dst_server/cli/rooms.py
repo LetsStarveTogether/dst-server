@@ -9,6 +9,7 @@ import orjson
 from cyclopts import App, Parameter
 from pydantic import SecretStr
 
+from dst_server.announcements import Template, maintenance
 from dst_server.configuration.models import ClusterSettings, _shared_cluster_key
 from dst_server.configuration.overrides import ModOverride
 from dst_server.deployment import DEFAULT_IMAGE
@@ -142,9 +143,8 @@ async def edit_rooms(
     description: str | None = None,
     set_fields: Annotated[tuple[str, ...], Parameter(name="--set")] = (),
     unset_fields: Annotated[tuple[str, ...], Parameter(name="--unset")] = (),
-    restart: bool = False,
 ) -> None:
-    """Edit native settings; running rooms require --restart.
+    """Edit settings in stopped rooms.
 
     --set accepts /json/pointer=JSON; --unset removes an explicitly set field.
     Common settings are applied first, followed by --set and then --unset.
@@ -174,9 +174,7 @@ async def edit_rooms(
         async def edit(number: int) -> dict[str, Any]:
             original = host.rooms.load(number)
             definition = original.edit_many(changes, unset=unset_fields)
-            return _summary(
-                await host.edit(definition, restart=restart, expected=original)
-            )
+            return _summary(await host.edit(definition))
 
         await batch(
             select_rooms(host, rooms, all_rooms=all_rooms, template=template), edit
@@ -209,7 +207,7 @@ async def stop_rooms(
     wait: bool = True,
     timeout: float = DEFAULT_LIFECYCLE_TIMEOUT,
 ) -> None:
-    """Stop selected rooms, overriding schedules until their next boundary."""
+    """Stop selected room services and pause their automatic management."""
     async with make_host() as host:
         await batch(
             select_rooms(host, rooms, all_rooms=all_rooms, template=template),
@@ -226,7 +224,7 @@ async def restart_rooms(
     wait: bool = True,
     timeout: float = DEFAULT_LIFECYCLE_TIMEOUT,
 ) -> None:
-    """Restart selected rooms and wait for game readiness."""
+    """Restart selected room services and resume their automatic management."""
     async with make_host() as host:
         await batch(
             select_rooms(host, rooms, all_rooms=all_rooms, template=template),
@@ -298,9 +296,8 @@ async def apply_template(
     *,
     room: RoomOptions = (),
     all_rooms: AllRooms = False,
-    restart: bool = False,
 ) -> None:
-    """Overwrite gameplay configuration, preserving identity and deployment settings."""
+    """Apply gameplay to stopped rooms, preserving identity and deployment settings."""
     async with make_host() as host:
 
         async def apply(number: int) -> dict[str, Any]:
@@ -322,8 +319,6 @@ async def apply_template(
             return _summary(
                 await host.edit(
                     definition.replace(template=name, cluster=cluster),
-                    restart=restart,
-                    expected=definition,
                 )
             )
 
@@ -340,7 +335,7 @@ async def deploy_lst(
     volume_idmap: str | None = None,
     userns: str | None = None,
 ) -> None:
-    """Create explicitly selected LST preset rooms (000-139), without overwriting."""
+    """Create selected LST rooms (000-099, 200-215), without overwriting."""
     if all_rooms and room:
         msg = "choose --room or --all, not both"
         raise ValueError(msg)
@@ -368,6 +363,15 @@ async def install_automation() -> None:
     """Install the packaged scheduling and maintenance systemd units."""
     async with make_host() as host:
         emit(await host.install_automation())
+
+
+@deployment_app.command(name="migrate")
+async def migrate_deployment(*, apply: bool = False) -> None:
+    """Preview legacy SDK cleanup; --apply requires the entire fleet stopped."""
+    from dst_server.host.migration import migrate
+
+    async with make_host() as host:
+        emit(await migrate(host, apply=apply))
 
 
 @mod_app.command(name="list")
@@ -398,7 +402,6 @@ async def _edit_mod(
     all_rooms: bool,
     template: str | None,
     shard: tuple[str, ...],
-    restart: bool,
 ) -> None:
     name = f"workshop-{mod}" if mod.isdecimal() else mod
     async with make_host() as host:
@@ -419,8 +422,6 @@ async def _edit_mod(
                     definition.replace(
                         cluster=definition.cluster.replace(shards=shards)
                     ),
-                    restart=restart,
-                    expected=definition,
                 )
             )
 
@@ -437,9 +438,8 @@ async def enable_mod(
     all_rooms: AllRooms = False,
     template: str | None = None,
     shard: tuple[str, ...] = (),
-    restart: bool = False,
 ) -> None:
-    """Enable a mod in selected shards, or all shards when --shard is omitted."""
+    """Enable a mod in stopped rooms; use --shard to select specific shards."""
     await _edit_mod(
         mod,
         changes={"enabled": True},
@@ -447,7 +447,6 @@ async def enable_mod(
         all_rooms=all_rooms,
         template=template,
         shard=shard,
-        restart=restart,
     )
 
 
@@ -459,9 +458,8 @@ async def disable_mod(
     all_rooms: AllRooms = False,
     template: str | None = None,
     shard: tuple[str, ...] = (),
-    restart: bool = False,
 ) -> None:
-    """Disable a mod, preserving its saved options."""
+    """Disable a mod in stopped rooms, preserving its saved options."""
     await _edit_mod(
         mod,
         changes={"enabled": False},
@@ -469,7 +467,6 @@ async def disable_mod(
         all_rooms=all_rooms,
         template=template,
         shard=shard,
-        restart=restart,
     )
 
 
@@ -482,9 +479,8 @@ async def set_mod(
     all_rooms: AllRooms = False,
     template: str | None = None,
     shard: tuple[str, ...] = (),
-    restart: bool = False,
 ) -> None:
-    """Replace a mod's configuration options with a JSON object."""
+    """Replace a mod's configuration options in stopped rooms with a JSON object."""
     parsed = orjson.loads(options)
     if not isinstance(parsed, dict):
         msg = "mod options must be a JSON object"
@@ -496,7 +492,6 @@ async def set_mod(
         all_rooms=all_rooms,
         template=template,
         shard=shard,
-        restart=restart,
     )
 
 
@@ -507,10 +502,26 @@ async def update_mods(
     all_rooms: AllRooms = False,
     template: str | None = None,
     restart: bool = False,
+    notice: bool = True,
+    delay: str = "1m",
+    estimated_duration: str = "5m",
 ) -> None:
-    """Update downloaded mods; use --restart for running rooms."""
+    """Update downloaded mods; --restart restarts running games in their containers."""
+    from .operations import duration
+
+    announcement = (
+        maintenance(
+            Template.MOD_UPDATE,
+            delay=duration(delay),
+            estimated_duration=duration(estimated_duration),
+        )
+        if notice
+        else None
+    )
     async with make_host() as host:
         await batch(
             select_rooms(host, room, all_rooms=all_rooms, template=template),
-            lambda number: host.update_mods(number, restart=restart),
+            lambda number: host.update_mods(
+                number, restart=restart, notice=announcement
+            ),
         )

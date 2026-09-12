@@ -4,7 +4,7 @@ import re
 import secrets
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from datetime import datetime, time
+from datetime import time
 from pathlib import Path
 from typing import Annotated, Any, Self
 
@@ -19,6 +19,7 @@ from pydantic import (
     model_validator,
 )
 
+from dst_server.activity import ActivityCheckpoint
 from dst_server.configuration.files import (
     atomic_write,
     configuration_file_exists,
@@ -35,7 +36,11 @@ from dst_server.configuration.models import (
 )
 from dst_server.configuration.overrides import FrozenMapping
 from dst_server.deployment import DEFAULT_IMAGE, QuadletApplication, RoomPortAllocation
-from dst_server.deployment.application import CLUSTER_ENVIRONMENT, MAX_ROOM_SLOT
+from dst_server.deployment.application import (
+    CLUSTER_ENVIRONMENT,
+    MAX_ROOM_SLOT,
+    container_index,
+)
 from dst_server.deployment.models import EnvironmentName, IDMap, UnitToken, UnitValue
 from dst_server.models.base import JSON_VALUE, RevalidatedFrozenModel
 
@@ -167,13 +172,9 @@ class Room(RevalidatedFrozenModel):
             "schedule": self.schedule,
             "recycle": self.recycle,
         }
-        if current.schedule != self.schedule:
-            updates.update(override=None, until=None)
         updated = current.model_copy(update=updates)
         if updated != current:
-            write_control(
-                path, updated.model_copy(update={"revision": current.revision + 1})
-            )
+            write_control(path, updated)
 
     def application(self, directory: Path) -> QuadletApplication:
         deployment = self.deployment
@@ -305,16 +306,7 @@ class Control(BaseModel):
     schedule: tuple[DailyWindow, ...] = ()
     recycle: bool = False
     paused: bool = False
-    override: bool | None = None
-    until: datetime | None = None
-    revision: int = Field(default=0, ge=0)
-
-    @model_validator(mode="after")
-    def validate_until(self) -> Self:
-        if self.until is not None and self.until.tzinfo is None:
-            msg = "control expiry must include a timezone"
-            raise ValueError(msg)
-        return self
+    activity: ActivityCheckpoint | None = None
 
 
 def read_control(path: Path) -> Control:
@@ -331,10 +323,6 @@ def write_control(path: Path, control: Control) -> None:
     validate_directory(path)
     configuration_file_exists(target)
     atomic_write(target, control.model_dump_json(indent=2) + "\n", 0o600)
-
-
-def control_revision(path: Path) -> int:
-    return read_control(path).revision
 
 
 class RoomStore:
@@ -356,13 +344,20 @@ class RoomStore:
         return read_control(directory)
 
     def load(self, number: int) -> Room:
+        return self._load(number)
+
+    def _load(
+        self, number: int, *, container_paths: Sequence[Path] | None = None
+    ) -> Room:
         directory = self.path(number)
         policy = self.policy(number)
         cluster = ClusterConfig.load(directory)
         deployment = RoomDeployment()
         if self.quadlet_dir is not None:
             application = QuadletApplication.load(
-                self.quadlet_dir, name=f"dst-{number:03d}", legacy=True
+                self.quadlet_dir,
+                name=f"dst-{number:03d}",
+                _container_paths=container_paths,
             )
             master = application.master
             environment = dict(master.environment)
@@ -407,7 +402,16 @@ class RoomStore:
         )
 
     def list(self) -> tuple[Room, ...]:
-        return tuple(self.load(number) for number in self.numbers())
+        numbers = self.numbers()
+        if not numbers or self.quadlet_dir is None:
+            return tuple(self.load(number) for number in numbers)
+        containers = container_index(self.quadlet_dir)
+        return tuple(
+            self._load(
+                number, container_paths=containers.get(f"dst-{number:03d}.pod", ())
+            )
+            for number in numbers
+        )
 
     def save_policy(self, room: Room) -> None:
         room.save_policy(self.path(room.number))

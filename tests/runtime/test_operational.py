@@ -1,6 +1,7 @@
 import asyncio
 import tracemalloc
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
@@ -12,14 +13,14 @@ from dst_server.events.server import SavedEvent
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime import server as server_module
 from dst_server.runtime.console import Console
-from tests.helpers import StubWriter, feed_frame, next_frame, wait_for_event
+from tests.helpers import StubWriter, feed_response, next_request, wait_for_event
 
 
 @pytest.mark.parametrize("kind", ["log", "stats", "log-then-stats"])
 async def test_idle_stdout_releases_large_temporary_lines(
     monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
-    server = Server(ServerConfig(shard="test"), log_handler=lambda _: None)
+    server = observed_server(ServerConfig(shard="test"), log_handler=lambda _: None)
     reader = asyncio.StreamReader(limit=server_module.SUBPROCESS_STREAM_LIMIT)
     idle = asyncio.Event()
     read_line = server_module.read_line
@@ -63,36 +64,37 @@ async def test_idle_stdout_releases_large_temporary_lines(
             await server.finish()
 
 
-async def observations(server: Server) -> list[Any]:
-    records = []
-    async with asyncio.timeout(1):
-        while (record := await server.read_operational_event()) is not None:
-            records.append(record)
-    return records
+def observed_server(*args: Any, **kwargs: Any) -> Server:
+    server = Server(*args, **kwargs)
+    server.recorder.observe_log = Mock(wraps=server.recorder.observe_log)
+    return server
+
+
+def observations(server: Server) -> list[Any]:
+    observe = server.recorder.observe_log
+    assert isinstance(observe, Mock)
+    return [
+        SimpleNamespace(uid=call.kwargs["attributes"]["log.record.uid"], **call.kwargs)
+        for call in observe.call_args_list
+        if not call.kwargs["event_name"].startswith("dst.telemetry.")
+        and call.kwargs["event_name"] != "dst.world.state_changed"
+    ]
 
 
 async def capture_stdout(*lines: str) -> tuple[list[Any], list[str]]:
     logs: list[str] = []
-    server = Server(ServerConfig(shard="test"), log_handler=logs.append)
+    server = observed_server(ServerConfig(shard="test"), log_handler=logs.append)
     reader = asyncio.StreamReader()
     reader.feed_data("\n".join((*lines, "")).encode())
     reader.feed_eof()
     await server.pump_logs(reader)
     await server.finish()
-    return await observations(server), logs
+    return observations(server), logs
 
 
 @pytest.mark.parametrize(
     ("line", "event", "body", "severity"),
     [
-        ("Server Paused", "dst.server.pause_changed", {"state": "paused"}, "INFO"),
-        (
-            "Server Autopaused",
-            "dst.server.pause_changed",
-            {"state": "autopaused"},
-            "INFO",
-        ),
-        ("Server Unpaused", "dst.server.pause_changed", {"state": "running"}, "INFO"),
         (
             (
                 "CURL ERROR: (dst.metrics.klei.com) [28]"
@@ -336,7 +338,7 @@ async def test_mixed_byte_stream_preserves_log_and_event_boundaries(
     damage: str,
 ) -> None:
     logs: list[str] = []
-    server = Server(ServerConfig(shard="test"), log_handler=logs.append)
+    server = observed_server(ServerConfig(shard="test"), log_handler=logs.append)
     # Includes the actual beefalo/abigail emoji code points from emoji_items.lua.
     name = "测试\U000f0001\U000f001c👩🏽\u200d💻❤️e\u0301\u200b\u202eRTL\u202c"
     name += "\u0085\u2028\u2029"
@@ -421,13 +423,11 @@ async def test_mixed_byte_stream_preserves_log_and_event_boundaries(
         events.append(event.record)
     assert [event.seq for event in events] == [1, 2]
     assert all(event.session_id == name for event in events)
-    records = await observations(server)
+    records = observations(server)
     assert [(record.body, record.severity_text) for record in records] == diagnostics
     assert all(record.event_name == "dst.runtime.diagnostic" for record in records)
     assert await server.read_event() is None
-    assert server.lifecycle.session_generation == 0
     assert server.lifecycle.session_id is None
-    assert server.lifecycle.save_count == 0
     assert not server.lifecycle.ready
     assert not server.lifecycle.stopping.is_set()
 
@@ -436,7 +436,7 @@ async def test_native_lifecycle_is_projected_once_without_raw_paths_or_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(server_module, "time_ns", lambda: 321)
-    server = Server(ServerConfig(shard="test"))
+    server = observed_server(ServerConfig(shard="test"))
     reader = asyncio.StreamReader()
     reader.feed_data(
         b"DST_Master_Ready|token=secret\nDST_SessionId|ABC123\n"
@@ -445,7 +445,7 @@ async def test_native_lifecycle_is_projected_once_without_raw_paths_or_details(
     reader.feed_eof()
     await server._pump_lifecycle(reader)
     await server.finish()
-    records = await observations(server)
+    records = observations(server)
 
     assert [(record.event_name, record.body) for record in records] == [
         ("dst.server.ready", {}),
@@ -465,7 +465,7 @@ async def test_native_lifecycle_is_projected_once_without_raw_paths_or_details(
 
 async def test_stats_are_discarded_in_both_native_output_paths() -> None:
     logs: list[str] = []
-    server = Server(ServerConfig(shard="test"), log_handler=logs.append)
+    server = observed_server(ServerConfig(shard="test"), log_handler=logs.append)
     stats = b"DST_Stats|1|2|3|4|5\n" * 5000
     stdout = asyncio.StreamReader()
     stdout.feed_data(stats + b"ordinary log\n")
@@ -479,36 +479,48 @@ async def test_stats_are_discarded_in_both_native_output_paths() -> None:
     assert logs == ["ordinary log"]
     assert isinstance(await server.read_event(), SavedEvent)
     assert await server.read_event() is None
-    assert [record.event_name for record in await observations(server)] == [
+    assert [record.event_name for record in observations(server)] == [
         "dst.server.saved"
     ]
 
 
-async def test_operational_backpressure_and_eof_preserve_all_records() -> None:
-    server = Server(ServerConfig(shard="test"), log_handler=lambda _: None)
-    server.operational = asyncio.Queue(maxsize=1)
+async def test_operational_ingestion_has_no_subscriber_queue_limit() -> None:
+    server = observed_server(ServerConfig(shard="test"), log_handler=lambda _: None)
     reader = asyncio.StreamReader()
-    reader.feed_data(b"Server Paused\nServer Unpaused\n")
+    reader.feed_data(b"LUA ERROR stack traceback:\n" * 1100)
     reader.feed_eof()
-    pumping = asyncio.create_task(server.pump_logs(reader))
-    try:
-        await asyncio.sleep(0)
-        assert not pumping.done()
-        first = await server.read_operational_event()
-        assert first is not None
-        await asyncio.wait_for(pumping, 1)
-        await server.finish()
-        second = await server.read_operational_event()
-        assert second is not None
-        assert [first.body, second.body] == [{"state": "paused"}, {"state": "running"}]
-        assert await server.read_operational_event() is None
-    finally:
-        pumping.cancel()
-        await asyncio.gather(pumping, return_exceptions=True)
+    await asyncio.wait_for(server.pump_logs(reader), 3)
+    await server.finish()
+
+    records = observations(server)
+    assert len(records) == 1100
+    assert all(record.body == {"kind": "lua_error"} for record in records)
+
+
+async def test_physical_line_loss_is_reported_without_retaining_oversized_input() -> (
+    None
+):
+    server = observed_server(ServerConfig(shard="test"), log_handler=lambda _: None)
+    reader = asyncio.StreamReader(limit=server_module.SUBPROCESS_STREAM_LIMIT)
+    reader.feed_data(b"private" * 200_000 + b"\nLUA ERROR stack traceback:\n")
+    reader.feed_eof()
+    await server.pump_logs(reader)
+    await server.finish()
+
+    observe = server.recorder.observe_log
+    assert isinstance(observe, Mock)
+    reports = [call.kwargs for call in observe.call_args_list]
+    assert [report["event_name"] for report in reports] == [
+        "dst.telemetry.physical_line_oversized",
+        "dst.runtime.diagnostic",
+    ]
+    assert reports[0]["body"]["count"] == 1
+    assert reports[0]["body"]["limit_bytes"] == server_module.SUBPROCESS_STREAM_LIMIT
+    assert "private" not in orjson.dumps(reports).decode()
 
 
 async def test_process_exit_drains_both_pipe_tails_before_observation_eof() -> None:
-    server = Server(ServerConfig(shard="test"), log_handler=lambda _: None)
+    server = observed_server(ServerConfig(shard="test"), log_handler=lambda _: None)
     process = Mock(pid=42, returncode=6, wait=AsyncMock(return_value=6))
     server.child = cast("asyncio.subprocess.Process", process)
     native = asyncio.StreamReader()
@@ -522,7 +534,7 @@ async def test_process_exit_drains_both_pipe_tails_before_observation_eof() -> N
 
     assert await server.wait() == 6
     assert await server.wait() == 6
-    records = await observations(server)
+    records = observations(server)
     assert sorted(record.event_name for record in records[:-1]) == [
         "dst.runtime.diagnostic",
         "dst.server.saved",
@@ -536,27 +548,22 @@ async def test_process_exit_drains_both_pipe_tails_before_observation_eof() -> N
     assert await server.read_event() is None
 
 
-async def test_exit_record_respects_the_output_drain_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(server_module, "OUTPUT_DRAIN_TIMEOUT", 0.01)
-    server = Server(ServerConfig(shard="test"))
-    server.operational = asyncio.Queue(maxsize=1)
+async def test_operational_ingestion_does_not_block_process_cleanup() -> None:
+    server = observed_server(ServerConfig(shard="test"))
     await server._observe_operational("dst.server.saved", {"snapshot": 1})
     server.child = cast("asyncio.subprocess.Process", Mock(pid=42, returncode=6))
 
-    async with asyncio.timeout(1):
-        with pytest.raises(TimeoutError):
-            await server.finish()
+    await asyncio.wait_for(server.finish(), 1)
     assert server.closed
-    assert [record.event_name for record in await observations(server)] == [
-        "dst.server.saved"
+    assert [record.event_name for record in observations(server)] == [
+        "dst.server.saved",
+        "dst.server.process_exited",
     ]
 
 
 @pytest.mark.parametrize("source", ["stdout", "lifecycle"])
 async def test_input_pump_failure_survives_cleanup(source: str) -> None:
-    server = Server(ServerConfig(shard="test"))
+    server = observed_server(ServerConfig(shard="test"))
     server.child = cast("asyncio.subprocess.Process", Mock(pid=42, returncode=6))
     reader = asyncio.StreamReader()
     failure = OSError("injected input failure")
@@ -576,12 +583,12 @@ async def test_input_pump_failure_survives_cleanup(source: str) -> None:
     transport.close.assert_called_once_with()
     assert await server.read_event() is None
     assert await server.read_game_event() is None
-    records = await observations(server)
+    records = observations(server)
     assert records[-1].event_name == "dst.server.process_exited"
 
 
 async def test_command_result_eof_during_exit_does_not_fail_input_cleanup() -> None:
-    server = Server(ServerConfig(shard="test"))
+    server = observed_server(ServerConfig(shard="test"))
     server.child = cast("asyncio.subprocess.Process", Mock(pid=42, returncode=0))
 
     async def incomplete_command() -> str:
@@ -590,21 +597,21 @@ async def test_command_result_eof_during_exit_does_not_fail_input_cleanup() -> N
         raise EOFError(message)
 
     console = Mock(
-        pending_result=asyncio.create_task(incomplete_command()), close=AsyncMock()
+        reader_task=asyncio.create_task(incomplete_command()), close=AsyncMock()
     )
     server.console = console
     await server.finish()
 
     assert server.closed
     console.close.assert_awaited_once_with()
-    assert [record.event_name for record in await observations(server)] == [
+    assert [record.event_name for record in observations(server)] == [
         "dst.server.process_exited"
     ]
 
 
 @pytest.mark.parametrize("operation", ["stop", "kill"])
 async def test_requested_termination_is_not_reported_as_crash(operation: str) -> None:
-    server = Server(ServerConfig(shard="test"))
+    server = observed_server(ServerConfig(shard="test"))
     process = Mock(pid=42, returncode=None)
 
     def signalled() -> None:
@@ -616,15 +623,18 @@ async def test_requested_termination_is_not_reported_as_crash(operation: str) ->
     server.child = cast("asyncio.subprocess.Process", process)
 
     assert await getattr(server, operation)() == -9
-    records = await observations(server)
+    records = observations(server)
     assert records[-1].body == {"returncode": -9, "requested": True}
     assert records[-1].severity_text == "INFO"
 
 
 async def test_process_creation_failure_closes_all_observation_readers(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    server = Server(ServerConfig(shard="missing"))
+    server = observed_server(
+        ServerConfig(shard="missing", persistent_storage_root=tmp_path)
+    )
     monkeypatch.setattr(
         server_module.asyncio,
         "create_subprocess_exec",
@@ -635,7 +645,7 @@ async def test_process_creation_failure_closes_all_observation_readers(
     async with asyncio.timeout(1):
         assert await server.read_event() is None
         assert await server.read_game_event() is None
-        records = await observations(server)
+        records = observations(server)
     assert server.closed
     assert (
         "private executable"
@@ -653,13 +663,16 @@ async def test_crash_before_ready_keeps_diagnostics_and_process_attempt(
         "os._exit(6)\n"
     )
     executable.chmod(0o755)
-    server = Server(
-        ServerConfig(shard="test", executable=executable), log_handler=lambda _: None
+    server = observed_server(
+        ServerConfig(
+            shard="test", executable=executable, persistent_storage_root=tmp_path
+        ),
+        log_handler=lambda _: None,
     )
 
     with pytest.raises(EOFError):
         await server.start(startup_timeout=1)
-    records = await observations(server)
+    records = observations(server)
     assert [record.event_name for record in records] == [
         "dst.server.process_started",
         "dst.runtime.diagnostic",
@@ -669,41 +682,39 @@ async def test_crash_before_ready_keeps_diagnostics_and_process_attempt(
     assert server.closed
 
 
-async def test_stdout_response_frames_cannot_complete_pending_command() -> None:
+async def test_stdout_rpc_responses_cannot_complete_pending_command() -> None:
     logs: list[str] = []
-    server = Server(ServerConfig(shard="test"), log_handler=logs.append)
+    server = observed_server(ServerConfig(shard="test"), log_handler=logs.append)
     writer = StubWriter()
     response = asyncio.StreamReader()
     console = Console(
-        cast("asyncio.StreamWriter", writer), response, server.game_events
+        cast("asyncio.StreamWriter", writer),
+        response,
+        server.game_events.nonce,
+        server.recorder,
     )
     server.console = console
-    command = asyncio.create_task(console.execute("return true"))
-    result = b'DST_SERVER_RESULT|{"ok":true,"data":true}'
+    command = asyncio.create_task(console.execute("health", {}, 0))
     try:
         async with asyncio.timeout(1):
-            start, end, _ = await next_frame(writer)
+            request = await next_request(writer)
             stdout = asyncio.StreamReader()
-            feed_frame(stdout, start, end, result)
+            feed_response(stdout, request, True)
             stdout.feed_eof()
             await server.pump_logs(stdout)
             await asyncio.sleep(0)
 
-            assert logs == [
-                start.decode(),
-                result.decode(),
-                end.decode(),
-                "DST_RemoteCommandDone",
-            ]
+            assert len(logs) == 3
+            assert all(line.startswith("DST_RPC|") for line in logs[:2])
+            assert logs[-1] == "DST_RemoteCommandDone"
             assert not command.done()
-            assert console.pending_result is not None
-            assert not console.pending_result.done()
-            assert not console.broken
+            assert not console.reader_task.done()
+            assert not console.closed
 
-            feed_frame(response, start, end, result)
-            assert await command == result.decode()
+            feed_response(response, request, True)
+            assert orjson.loads(await command) == {"ok": True, "data": True}
             assert len(writer.commands) == 1
-            assert not console.broken
+            assert not console.closed
     finally:
         command.cancel()
         await server.finish()

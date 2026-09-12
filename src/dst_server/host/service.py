@@ -12,6 +12,11 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter
 
+from dst_server.announcements import (
+    MOD_UPDATE_NOTICE,
+    Countdown,
+    Repeat,
+)
 from dst_server.concurrency import complete
 from dst_server.configuration.files import (
     atomic_write,
@@ -38,10 +43,9 @@ from dst_server.mods.process import run_process
 from dst_server.rooms import (
     DEFAULT_QUADLET_DIR,
     DEFAULT_ROOT,
-    Control,
     Room,
     RoomStore,
-    control_revision,
+    write_control,
 )
 from dst_server.rpc import ClusterClient, rpc_runtime
 from dst_server.timeouts import (
@@ -51,11 +55,8 @@ from dst_server.timeouts import (
     positive_timeout,
 )
 
-from .locking import MOD_LOCK, room_lock
-from .schedule import (
-    effective_state,
-    record_transition,
-)
+from .locking import RoomBusyError, room_lock
+from .schedule import effective_state
 
 logger = logging.getLogger(__name__)
 _SHARD_NAME = TypeAdapter(ShardName)
@@ -143,13 +144,6 @@ class Host:  # ruff: ignore[too-many-public-methods]
                 if references_pod(path, pod)
             ),
         )
-
-    def shard_unit(self, number: int, shard: str) -> str:
-        unit = f"dst-{number:03d}-{_escape_unit_name(shard)}.service"
-        if unit not in self.units(number):
-            msg = f"unknown deployed shard: {shard}"
-            raise ValueError(msg)
-        return unit
 
     def _log_clusters(self, numbers: int | Sequence[int]) -> tuple[str, ...]:
         selected = (numbers,) if isinstance(numbers, int) else numbers
@@ -244,8 +238,11 @@ class Host:  # ruff: ignore[too-many-public-methods]
             discover(self.rooms.path(number))
         except OSError, ValueError:
             configuration_error = "room configuration could not be loaded"
-        units = await self.systemd.list_units((self.unit(number),))
-        state = units.get(self.unit(number))
+        units = await self.systemd.list_units(self.units(number))
+        state = next(
+            (unit for unit in units.values() if unit.active == "failed"),
+            units.get(self.unit(number)),
+        )
         result: dict[str, Any] = {
             "number": number,
             "load": state.load if state else "not-found",
@@ -282,126 +279,38 @@ class Host:  # ruff: ignore[too-many-public-methods]
             if any(path.name != ".dst-operation.lock" for path in directory.iterdir()):
                 msg = f"room already exists: {directory}"
                 raise FileExistsError(msg)
-            async with room_lock(self.quadlet_dir):
-                if any(
-                    (self.quadlet_dir / path).exists() for path in application.files()
-                ):
-                    msg = f"deployment already exists for room {definition.number}"
-                    raise FileExistsError(msg)
-                self.rooms.save(definition)
-                prepare(directory)
+            if any((self.quadlet_dir / path).exists() for path in application.files()):
+                msg = f"deployment already exists for room {definition.number}"
+                raise FileExistsError(msg)
+            self.rooms.save(definition)
+            prepare(directory)
         return self.rooms.load(definition.number)
 
-    async def edit(  # ruff: ignore[complex-structure]
-        self,
-        definition: Room,
-        *,
-        restart: bool = False,
-        expected: Room | None = None,
-    ) -> Room:
+    async def edit(self, definition: Room) -> Room:
+        """Write configuration for a stopped room without changing its lifecycle."""
         definition = Room.model_validate(definition)
         number = definition.number
         directory = self.rooms.path(number)
-        async with (
-            room_lock(directory),
-            room_lock(directory, name=MOD_LOCK, wait=False),
-        ):
+        async with room_lock(directory):
             previous = self.rooms.load(number)
-            self._check_definition(previous, expected)
-            game_changed = definition.game_files() != previous.game_files()
-            structural = self._structure(previous) != self._structure(definition)
-            if not game_changed and not structural and not restart:
-                self.rooms.save_policy(definition)
-                return definition
-            running = await self._running_units(number)
-            if running and not restart:
-                msg = "game and deployment changes require a stopped room or --restart"
-                raise RuntimeError(msg)
-            if structural:
-                self._deployment(previous, definition).validate_updates(
-                    self.quadlet_dir
-                )
-            revision = record_transition(directory, previous, False, override=False)
-            for unit in running:
-                await self.systemd.stop(unit)
-        await self.systemd.wait_idle(running, DEFAULT_LIFECYCLE_TIMEOUT)
-        async with (
-            room_lock(directory),
-            room_lock(directory, name=MOD_LOCK, wait=False),
-        ):
-            self._check_revision(number, revision)
-            self._check_definition(
-                self.rooms.load(number), previous, updated=definition
-            )
             if await self._running_units(number):
-                msg = "room services are still running; configuration was not changed"
+                msg = "configuration changes require a stopped room"
                 raise RuntimeError(msg)
-            async with room_lock(self.quadlet_dir):
-                application = (
-                    self._deployment(previous, definition) if structural else None
-                )
-                if application is not None:
-                    application.validate_updates(self.quadlet_dir)
-                definition.save_game(directory, previous=previous)
-                self.rooms.save_policy(definition)
-                revision = control_revision(directory)
-                if application is not None:
-                    files = application.files()
-                    pod = f"{application.pod.name}.pod"
-                    for path in self.quadlet_dir.glob("*.container"):
-                        if Path(path.name) not in files and references_pod(path, pod):
-                            path.unlink()
-                    application.save(self.quadlet_dir)
-                    await self.systemd.reload()
-        if restart:
-            await self.start(number, expected_revision=revision)
-        return self.rooms.load(number)
-
-    def _deployment(self, previous: Room, updated: Room) -> QuadletApplication:
-        directory = self.rooms.path(updated.number)
-        actual = QuadletApplication.load(
-            self.quadlet_dir, name=f"dst-{updated.number:03d}", legacy=True
-        )
-        application = actual.patch(
-            previous.application(directory), updated.application(directory)
-        )
-        pod = f"{application.pod.name}.pod"
-        for path in application.files():
-            target = self.quadlet_dir / path
-            if (
-                path.suffix == ".container"
-                and configuration_file_exists(target)
-                and not references_pod(target, pod)
-            ):
-                msg = f"refusing to replace an unrelated unit: {target}"
-                raise ValueError(msg)
-        return application
-
-    @staticmethod
-    def _check_definition(
-        current: Room, expected: Room | None, *, updated: Room | None = None
-    ) -> None:
-        if expected is None:
-            return
-        before = expected.game_files()
-        actual = current.game_files()
-        after = updated.game_files() if updated is not None else actual
-        paths = before.keys() | after.keys()
-        if updated is not None:
-            paths = {path for path in paths if before.get(path) != after.get(path)}
-        if (
-            any(actual.get(path) != before.get(path) for path in paths)
-            or (
-                (updated is None or updated.deployment != expected.deployment)
-                and current.deployment != expected.deployment
-            )
-            or any(
-                getattr(current, field) != getattr(expected, field)
-                for field in ("number", "template", "schedule", "recycle")
-            )
-        ):
-            msg = "room configuration changed; read it again before editing"
-            raise RuntimeError(msg)
+            structural = self._structure(previous) != self._structure(definition)
+            application = definition.application(directory) if structural else None
+            if application is not None:
+                application.validate_updates(self.quadlet_dir)
+            definition.save_game(directory, previous=previous)
+            self.rooms.save_policy(definition)
+            if application is not None:
+                files = application.files()
+                pod = f"{application.pod.name}.pod"
+                for path in self.quadlet_dir.glob("*.container"):
+                    if Path(path.name) not in files and references_pod(path, pod):
+                        path.unlink()
+                application.save(self.quadlet_dir)
+                await self.systemd.reload()
+            return self.rooms.load(number)
 
     async def _running_units(self, number: int) -> tuple[str, ...]:
         states = await self.systemd.list_units(self.units(number))
@@ -424,145 +333,99 @@ class Host:  # ruff: ignore[too-many-public-methods]
             ),
         )
 
-    async def _transition(
+    async def _check_busy(self, number: int) -> None:
+        try:
+            async with asyncio.timeout(5), self.connect(number) as client:
+                busy = (await client.status()).busy
+        except OSError, TimeoutError, RuntimeError:
+            # An unreachable controller must not prevent an operator recovery.
+            return
+        if busy:
+            msg = f"room operation is busy: {number:03d}"
+            raise RoomBusyError(msg)
+
+    async def _transition(  # ruff: ignore[complex-structure, too-many-branches]
         self,
         number: int,
         action: Literal["start", "stop", "restart"],
         *,
-        override: bool,
+        automatic: bool,
         wait: bool,
         timeout: float,
-        expected_revision: int | None,
     ) -> dict[str, Any]:
         timeout = positive_timeout(timeout)
         directory = self.rooms.path(number)
         async with asyncio.timeout(timeout):
-            if action == "restart":
-                async with (
-                    room_lock(directory),
-                    room_lock(directory, name=MOD_LOCK, wait=False),
-                ):
-                    definition = self.rooms.policy(number)
-                    self._check_revision(number, expected_revision)
-                    self._check_schedule(number, definition, action, override=override)
-                    expected_revision = record_transition(
-                        directory, definition, True, override=override
+            async with room_lock(directory, wait=action == "stop" and not automatic):
+                policy = self.rooms.policy(number)
+                if automatic and effective_state(policy) is not (action != "stop"):
+                    return {"number": number, "action": "skipped", "waiting": False}
+                running = await self._running_units(number)
+                operation = action
+                if action != "stop":
+                    if running:
+                        state = await self.status(number, game=False)
+                        if state["active"] == "failed":
+                            operation = "restart"
+                        else:
+                            await self._check_busy(number)
+                    await self.systemd.reload()
+                    if not automatic:
+                        for unit in self.units(number):
+                            await self.systemd.reset_failed(unit)
+                if not automatic:
+                    write_control(
+                        directory,
+                        policy.model_copy(update={"paused": action == "stop"}),
                     )
-                    running = await self._running_units(number)
+                if action == "stop":
                     for unit in running:
                         await self.systemd.stop(unit)
-                await self.systemd.wait_idle(running, timeout)
-            async with room_lock(directory):
-                definition = self.rooms.policy(number)
-                self._check_revision(number, expected_revision)
-                self._check_schedule(number, definition, action, override=override)
-                if action != "stop":
-                    async with (
-                        room_lock(directory, name=MOD_LOCK, wait=False),
-                        room_lock(self.quadlet_dir),
-                    ):
-                        running = await self._running_units(number)
-                        if action == "restart" and running:
-                            msg = "room did not stop"
-                            raise RuntimeError(msg)
-                        await self.systemd.reload()
-                        self._check_schedule(
-                            number, definition, action, override=override
-                        )
-                        revision = record_transition(
-                            directory, definition, True, override=override
-                        )
-                        await self.systemd.start(self.unit(number))
                 else:
-                    revision = record_transition(
-                        directory, definition, False, override=override
-                    )
-                    for unit in await self._running_units(number):
-                        await self.systemd.stop(unit)
+                    await getattr(self.systemd, operation)(self.unit(number))
             if wait:
                 await self.systemd.wait_idle(self.units(number), timeout)
-                self._check_revision(number, revision)
                 if action != "stop":
-                    return await self.wait_ready(
-                        number, timeout=timeout, expected_revision=revision
-                    )
+                    return await self.wait_ready(number, timeout=timeout)
                 if await self._running_units(number):
                     msg = "room services did not stop"
                     raise RuntimeError(msg)
             return {"number": number, "action": action, "waiting": not wait}
 
-    def _check_schedule(
-        self, number: int, definition: Control, action: str, *, override: bool
-    ) -> None:
-        if override or not definition.schedule:
-            return
-        desired = effective_state(self.rooms.path(number), definition)
-        if (action == "restart" and desired is False) or (
-            action != "restart" and desired is not (action == "start")
-        ):
-            msg = "room operation was superseded"
-            raise RuntimeError(msg)
-
-    def _check_revision(self, number: int, expected: int | None) -> None:
-        if (
-            expected is not None
-            and control_revision(self.rooms.path(number)) != expected
-        ):
-            msg = "room operation was superseded"
-            raise RuntimeError(msg)
-
     async def start(
         self,
         number: int,
         *,
-        override: bool = True,
+        automatic: bool = False,
         wait: bool = True,
         timeout: float = DEFAULT_LIFECYCLE_TIMEOUT,
-        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         return await self._transition(
-            number,
-            "start",
-            override=override,
-            wait=wait,
-            timeout=timeout,
-            expected_revision=expected_revision,
+            number, "start", automatic=automatic, wait=wait, timeout=timeout
         )
 
     async def stop(
         self,
         number: int,
         *,
-        override: bool = True,
+        automatic: bool = False,
         wait: bool = True,
         timeout: float = DEFAULT_LIFECYCLE_TIMEOUT,
-        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         return await self._transition(
-            number,
-            "stop",
-            override=override,
-            wait=wait,
-            timeout=timeout,
-            expected_revision=expected_revision,
+            number, "stop", automatic=automatic, wait=wait, timeout=timeout
         )
 
     async def restart(
         self,
         number: int,
         *,
-        override: bool = True,
+        automatic: bool = False,
         wait: bool = True,
         timeout: float = DEFAULT_LIFECYCLE_TIMEOUT,
-        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         return await self._transition(
-            number,
-            "restart",
-            override=override,
-            wait=wait,
-            timeout=timeout,
-            expected_revision=expected_revision,
+            number, "restart", automatic=automatic, wait=wait, timeout=timeout
         )
 
     async def wait_ready(
@@ -570,13 +433,10 @@ class Host:  # ruff: ignore[too-many-public-methods]
         number: int,
         *,
         timeout: float = DEFAULT_STARTUP_TIMEOUT,
-        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         async with asyncio.timeout(positive_timeout(timeout)):
             while True:
-                self._check_revision(number, expected_revision)
                 state = await self.status(number)
-                self._check_revision(number, expected_revision)
                 game = state["game"]
                 if (
                     game is not None
@@ -595,38 +455,36 @@ class Host:  # ruff: ignore[too-many-public-methods]
                     raise RuntimeError(msg)
                 await asyncio.sleep(1)
 
-    async def announce(self, number: int, message: str) -> None:
+    async def announce(self, number: int, message: str | Repeat | Countdown) -> None:
         async with self.connect(number) as client:
             await client.announce(message)
 
-    async def update_mods(self, number: int, *, restart: bool = False) -> None:
+    async def update_mods(
+        self,
+        number: int,
+        *,
+        restart: bool = False,
+        notice: Countdown | None = MOD_UPDATE_NOTICE,
+    ) -> None:
+        notice = Countdown.model_validate(notice) if notice is not None else None
         directory = self.rooms.path(number)
-        async with (
-            room_lock(directory),
-            room_lock(directory, name=MOD_LOCK, wait=False),
-        ):
+        async with room_lock(directory):
             policy = self.rooms.policy(number)
             running = await self._running_units(number)
-            if running and not restart:
-                msg = "MOD updates require --restart while the room is running"
-                raise RuntimeError(msg)
-            revision = record_transition(directory, policy, False, override=False)
-            for unit in running:
-                await self.systemd.stop(unit)
-        await self.systemd.wait_idle(running, DEFAULT_LIFECYCLE_TIMEOUT)
-        async with room_lock(directory, name=MOD_LOCK, wait=False):
-            async with room_lock(directory):
-                self._check_revision(number, revision)
-                if await self._running_units(number):
-                    msg = "room services are still running; MODs were not updated"
+            if running:
+                if not restart:
+                    msg = "MOD updates require --restart while the room is running"
                     raise RuntimeError(msg)
-            await self._prepare_mods(number)
-        if running:
-            await self.start(number, expected_revision=revision)
+            else:
+                write_control(directory, policy.model_copy(update={"paused": True}))
+                await self._prepare_mods(number)
+                return
+        async with self.connect(number) as client:
+            await client.update_mods(restart=True, notice=notice)
 
     async def _prepare_mods(self, number: int) -> None:
         application = QuadletApplication.load(
-            self.quadlet_dir, name=f"dst-{number:03d}", legacy=True
+            self.quadlet_dir, name=f"dst-{number:03d}"
         )
         await self.systemd.reload()
         arguments = await self.systemd.exec_start(f"{application.master.name}.service")
@@ -645,8 +503,6 @@ class Host:  # ruff: ignore[too-many-public-methods]
                 for index in range(len(arguments) - 1, 1, -1)
                 if arguments[index : index + 3]
                 == ("/app/.venv/bin/dst-server", "agent", "master")
-                or arguments[index : index + 2]
-                == ("/app/.venv/bin/dst-server", "master")
             ),
             None,
         )

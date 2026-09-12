@@ -12,6 +12,7 @@ from cyclopts import App, Parameter
 from pydantic import JsonValue
 
 from dst_server import commands as c
+from dst_server.announcements import DEFAULT_INTERVAL, Countdown, Repeat
 from dst_server.cli.common import (
     BatchFailure,
     batch,
@@ -48,6 +49,7 @@ async def _run(
     template: str | None,
     *,
     render: Callable[[Sequence[dict[str, Any]]], None] | None = None,
+    concurrency: int | None = 8,
 ) -> None:
     async with make_host() as host:
         numbers = select_rooms(host, room, all_rooms=all_rooms, template=template)
@@ -56,7 +58,12 @@ async def _run(
             async with host.connect(number) as client:
                 return await operation(client)
 
-        await batch(numbers, run, render=render)
+        await batch(
+            numbers,
+            run,
+            render=render,
+            concurrency=len(numbers) if concurrency is None else concurrency,
+        )
 
 
 async def _master(client: ClusterClient, shard: str | None) -> ShardClient:
@@ -100,9 +107,42 @@ async def announce(
     room: tuple[str, ...] = (),
     all_rooms: AllRooms = False,
     template: str | None = None,
+    count: int = 1,
+    interval: float = DEFAULT_INTERVAL,
+    countdown: float | None = None,
+    parameter: tuple[str, ...] = (),
 ) -> None:
-    """Broadcast a message to every selected room."""
-    await _command(c.Announce(message=message), room, all_rooms, template)
+    """Broadcast repeated messages, or a template with a changing countdown."""
+    if countdown is None:
+        if parameter:
+            msg = "--parameter requires --countdown"
+            raise ValueError(msg)
+        announcement = Repeat(message=message, count=count, interval=interval)
+    else:
+        if count != 1:
+            msg = "--count and --countdown are mutually exclusive"
+            raise ValueError(msg)
+        parameters: dict[str, str | int | float] = {}
+        for item in parameter:
+            name, separator, value = item.partition("=")
+            if not separator or not name or name in parameters:
+                msg = "--parameter requires distinct name=value assignments"
+                raise ValueError(msg)
+            parameters[name] = value
+        announcement = Countdown(
+            template=message, delay=countdown, interval=interval, parameters=parameters
+        )
+
+    async def broadcast(client: ClusterClient) -> None:
+        await client.announce(announcement)
+
+    await _run(
+        broadcast,
+        room,
+        all_rooms,
+        template,
+        concurrency=None if isinstance(announcement, Countdown) else 8,
+    )
 
 
 @player_app.command(name="list")
@@ -662,12 +702,7 @@ async def _stream_records(
     number: int,
     kind: Literal["logs", "lifecycle", "events"],
 ) -> None:
-    subscribe = {
-        "logs": target.subscribe_logs,
-        "lifecycle": target.subscribe_lifecycle,
-        "events": target.subscribe_events,
-    }[kind]
-    async with await subscribe() as subscription:
+    async with await target.subscribe(kind) as subscription:
         while not subscription.closed:
             for record in await subscription.next():
                 emit({"room": f"{number:03d}", "record": record})

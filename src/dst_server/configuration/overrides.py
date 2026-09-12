@@ -839,7 +839,7 @@ class WorkshopDownloads(RevalidatedFrozenModel):
 
 def scan_setup(path: Path) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Extract obvious native declarations without interpreting dynamic Lua."""
-    # Configuration SDK and SteamCMD use WorkshopDownloads.load instead.
+    # Configuration SDK uses WorkshopDownloads.load instead.
     from .files import read_text
 
     if not path.is_file():

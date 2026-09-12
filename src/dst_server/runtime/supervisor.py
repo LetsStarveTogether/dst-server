@@ -4,13 +4,15 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from logbook import Logger
+from ulid import ULID
 
 from dst_server.concurrency import cancel_tasks, complete
 from dst_server.models.cluster import ShardDesired, ShardPhase
+from dst_server.timeouts import operation_deadline
 
 from .server import Server
 
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = 4
 RETRY_DELAY = 1.0
 STABLE_WINDOW = 10 * 60.0
 logger = Logger(__name__)
@@ -34,6 +36,7 @@ class ShardSupervisorStatus:
     attempt_id: str | None
     attempts: int
     returncode: int | None
+    error_id: ULID | None = None
 
 
 type FailureHook = Callable[[ShardSupervisorStatus], Awaitable[None]]
@@ -66,6 +69,7 @@ class ShardSupervisor:
         self._attempt_id: str | None = None
         self._attempts = 0
         self._returncode: int | None = None
+        self._error_id: ULID | None = None
         self._action: _Action | None = None
         self._server: Server | None = None
         self._runner: asyncio.Task[None] | None = None
@@ -82,6 +86,7 @@ class ShardSupervisor:
             attempt_id=self._attempt_id,
             attempts=self._attempts,
             returncode=self._returncode,
+            error_id=self._error_id,
         )
 
     @property
@@ -257,13 +262,17 @@ class ShardSupervisor:
         return action
 
     async def _run(self) -> None:
+        # Process supervision outlives the request that first started it.
+        operation_deadline.set(None)
         while not self._closed:
             try:
                 await self._step()
-            except Exception:
+            except Exception as error:
+                self._record_error("run", error)
                 try:
                     await self._recover()
-                except Exception:
+                except Exception as error:
+                    self._record_error("recover", error)
                     await self._failed(self._returncode, terminal=True)
 
     async def _step(self) -> None:
@@ -280,11 +289,6 @@ class ShardSupervisor:
             await self._attempt()
             return
         self._wake.clear()
-        if self._closed or (
-            self._desired is ShardDesired.RUNNING
-            and self._phase is not ShardPhase.FAILED
-        ):
-            return
         await self._wake.wait()
 
     async def _recover(self) -> None:
@@ -293,7 +297,8 @@ class ShardSupervisor:
         if server is not None:
             try:
                 returncode = await self._terminate_now(server, force=True)
-            except Exception:
+            except Exception as error:
+                self._record_error("recover", error)
                 if self._is_live(server):
                     self._action = None
                     await self._failed(terminal=True)
@@ -312,11 +317,13 @@ class ShardSupervisor:
         self._failure_reported = False
         self._attempt_id = None
         self._returncode = None
+        self._error_id = None
         await self._set_phase(ShardPhase.STARTING)
 
         try:
             server = self._factory()
-        except Exception:
+        except Exception as error:
+            self._record_error("create", error)
             await self._failed()
             return
 
@@ -339,7 +346,8 @@ class ShardSupervisor:
             return
         try:
             start_task.result()
-        except Exception:
+        except Exception as error:
+            self._record_error("start", error)
             await self._terminate(server, force=True)
             await self._finish_attempt(server)
             await self._failed()
@@ -379,7 +387,7 @@ class ShardSupervisor:
     async def _reset_when_stable(self, server: Server) -> None:
         await self._clock(STABLE_WINDOW)
         if self._server is server and self._phase is ShardPhase.RUNNING:
-            self._reset_attempts()
+            self._attempts = 1
             await self._notify()
 
     async def _stop_attempt(self, server: Server, action: _Action) -> None:
@@ -402,8 +410,6 @@ class ShardSupervisor:
             if task.done():
                 return True
             self._wake.clear()
-            if self._closed or self._action is not None:
-                return False
             wake_task = asyncio.create_task(self._wake.wait())
             try:
                 await asyncio.wait(
@@ -468,6 +474,15 @@ class ShardSupervisor:
         await self._after_action(self._take_action())
 
     async def _report_failure(self) -> None:
+        self._error_id = self._error_id or ULID()
+        logger.error(
+            "shard failed: {shard}: {error_id}: attempts={attempts}, "
+            "returncode={returncode}",
+            shard=self.shard,
+            error_id=self._error_id,
+            attempts=self._attempts,
+            returncode=self._returncode,
+        )
         if self._on_failed is None:
             return
         try:
@@ -477,6 +492,19 @@ class ShardSupervisor:
                 "shard failure hook failed: {shard}",
                 shard=self.shard,
             )
+
+    def _record_error(self, stage: str, error: Exception) -> None:
+        self._error_id = self._error_id or ULID()
+        logger.error(
+            "shard attempt failed: {shard}: {error_id}: {stage}: "
+            "attempt={attempt}, game_attempt={game_attempt}",
+            shard=self.shard,
+            error_id=self._error_id,
+            stage=stage,
+            attempt=self._attempts,
+            game_attempt=self._attempt_id,
+            exc_info=error,
+        )
 
     async def _finish_attempt(self, server: Server) -> None:
         if self._is_live(server):
@@ -505,8 +533,6 @@ class ShardSupervisor:
                     await cancel_tasks(stopping)
                     return await self._terminate_now(server, force=True)
                 self._wake.clear()
-                if self._action is _Action.KILL:
-                    continue
                 wake = asyncio.create_task(self._wake.wait())
                 try:
                     await asyncio.wait(
@@ -527,18 +553,13 @@ class ShardSupervisor:
             if server.closed:
                 return server.returncode
             return await server.wait()
-        if force:
-            try:
-                return await server.kill()
-            except ProcessLookupError:
-                return await server.wait()
         try:
-            return await server.stop()
-        except TimeoutError:
-            try:
-                return await server.kill()
-            except ProcessLookupError:
-                return await server.wait()
+            if not force:
+                try:
+                    return await server.stop()
+                except TimeoutError:
+                    pass
+            return await server.kill()
         except ProcessLookupError:
             return await server.wait()
 

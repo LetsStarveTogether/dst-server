@@ -2,6 +2,8 @@ import pytest
 from pydantic import ValidationError
 
 from dst_server.events import GAME_EVENT_ADAPTER, player, server, world
+from dst_server.lua_codec import MAX_SAFE_LUA_INTEGER
+from dst_server.models.driver import DRIVER_RECORD_ADAPTER
 
 NONCE = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
@@ -28,9 +30,9 @@ def test_game_event_schema_is_strict() -> None:
         GAME_EVENT_ADAPTER.validate_python(data | {"unexpected": True}, strict=True)
     with pytest.raises(ValidationError, match="int_type"):
         GAME_EVENT_ADAPTER.validate_python(data | {"tick": "10"}, strict=True)
-    with pytest.raises(ValidationError, match="literal_error"):
+    with pytest.raises(ValidationError, match="string_type"):
         GAME_EVENT_ADAPTER.validate_python(
-            data | {"data": {"name": "season", "value": "day"}},
+            data | {"data": {"name": "season", "value": 1}},
             strict=True,
         )
     for nonce in (
@@ -98,6 +100,7 @@ def test_combat_hit_without_resolved_damage_is_valid() -> None:
                 "weapon": null,
                 "stimuli": null,
                 "special_damage": [],
+                "from_doattack": null,
                 "caused_by_action_sequence": null,
                 "target": {
                     "prefab": "hound",
@@ -142,6 +145,44 @@ def test_telemetry_diagnostic_has_a_safe_strict_contract() -> None:
     assert event.generation == 1
     assert event.session_id == "SESSION"
     assert event.data.message == "callback_failed"
+
+
+@pytest.mark.parametrize(
+    "field", ["generation", "seq", "tick", "monotonic_ms", "cycle"]
+)
+def test_native_event_integer_boundaries(field: str) -> None:
+    accepted = telemetry_error(**{field: MAX_SAFE_LUA_INTEGER})
+    assert (
+        getattr(GAME_EVENT_ADAPTER.validate_python(accepted), field)
+        == MAX_SAFE_LUA_INTEGER
+    )
+    with pytest.raises(ValidationError, match="less_than_equal"):
+        GAME_EVENT_ADAPTER.validate_python(
+            telemetry_error(**{field: MAX_SAFE_LUA_INTEGER + 1})
+        )
+
+
+def test_native_integer_limits_cover_payloads_and_driver_health() -> None:
+    for value in (MAX_SAFE_LUA_INTEGER + 1, 2**64):
+        with pytest.raises(ValidationError, match="less_than_equal"):
+            GAME_EVENT_ADAPTER.validate_python(
+                telemetry_error(
+                    event="dst.world.state_changed",
+                    data={"name": "cycles", "value": value},
+                )
+            )
+        with pytest.raises(ValidationError, match="less_than_equal"):
+            DRIVER_RECORD_ADAPTER.validate_python({
+                "nonce": NONCE,
+                "health": {
+                    "protocol": 2,
+                    "generation": 1,
+                    "telemetry_status": "active",
+                    "last_error": None,
+                    "events_emitted": value,
+                    "errors": 0,
+                },
+            })
 
 
 @pytest.mark.parametrize(
@@ -197,8 +238,15 @@ def test_fd5_server_events_are_typed_without_losing_unknown_lines() -> None:
         "DST_SessionId|" + "x" * 129,
         "DST_Saved|" + "x" * 4097,
         "DST_Saved|" + "9" * 4301,
+        f"DST_Saved|session/TEST/{MAX_SAFE_LUA_INTEGER + 1}",
     ],
-    ids=("ready-detail", "session-id", "saved-path", "saved-snapshot"),
+    ids=(
+        "ready-detail",
+        "session-id",
+        "saved-path",
+        "saved-snapshot",
+        "unsafe-integer",
+    ),
 )
 def test_invalid_fd5_event_fields_are_preserved_as_unknown(line: str) -> None:
     assert server.parse_event(line) == server.UnknownEvent(line=line)

@@ -30,7 +30,7 @@ async def test_cross_process_wait_busy_and_release(tmp_path: Path) -> None:
     entered = asyncio.Event()
 
     async def acquire() -> None:
-        async with room_lock(tmp_path):
+        async with room_lock(tmp_path, wait=True):
             entered.set()
 
     waiter: asyncio.Task[None] | None = None
@@ -72,11 +72,11 @@ async def test_cancellation_closes_descriptor_and_releases_owned_lock(
         return descriptor
 
     async def acquire() -> None:
-        async with room_lock(tmp_path):
+        async with room_lock(tmp_path, wait=True):
             entered.set()
             await asyncio.Event().wait()
 
-    async with room_lock(tmp_path, name=".dst-operation.lock" if waiting else "other"):
+    async with room_lock(tmp_path if waiting else tmp_path / "other"):
         monkeypatch.setattr(locking.os, "open", record_open)
         task = asyncio.create_task(acquire())
         if waiting:
@@ -113,17 +113,6 @@ async def test_exception_releases_lock_and_keeps_reusable_private_file(
     assert stat.S_IMODE(lockfile.stat().st_mode) == 0o600
     async with room_lock(directory, wait=False):
         assert lockfile.stat().st_ino == inode
-
-
-@pytest.mark.parametrize("name", ["", ".", "..", "../outside", "/absolute"])
-async def test_invalid_filename_is_rejected_before_creating_directory(
-    tmp_path: Path, name: str
-) -> None:
-    directory = tmp_path / "absent"
-    with pytest.raises(ValueError, match="invalid lock filename"):
-        async with room_lock(directory, name=name):
-            pytest.fail("unsafe filename was accepted")
-    assert not directory.exists()
 
 
 async def test_symlink_room_directory_is_rejected(tmp_path: Path) -> None:

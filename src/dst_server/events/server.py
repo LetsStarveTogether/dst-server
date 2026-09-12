@@ -2,7 +2,8 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from dst_server.models.base import FrozenModel, Identifier, NonNegativeInt
+from dst_server.lua_codec import NonNegativeSafeLuaInteger
+from dst_server.models.base import FrozenModel, Identifier
 
 
 class ReadyEvent(FrozenModel):
@@ -18,7 +19,7 @@ class SessionEvent(FrozenModel):
 class SavedEvent(FrozenModel):
     event: Literal["saved"] = "saved"
     path: Annotated[str, Field(max_length=4096)]
-    snapshot: NonNegativeInt | None
+    snapshot: NonNegativeSafeLuaInteger | None
 
 
 class StoppingEvent(FrozenModel):

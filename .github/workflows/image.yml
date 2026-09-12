@@ -238,6 +238,20 @@ jobs:
         if: ${{ matrix.build }}
         uses: astral-sh/setup-uv@v10.1.0
 
+      - name: Test native contracts from built image
+        if: ${{ matrix.build }}
+        env:
+          DST_SERVER_IMAGE: ${{ steps.build.outputs.image-with-tag }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes lua5.1 luajit
+          scripts_bundle=$(mktemp --suffix=.zip)
+          trap 'rm -f "$scripts_bundle"' EXIT
+          native_container=$(podman create "$DST_SERVER_IMAGE")
+          trap 'podman rm --volumes "$native_container"; rm -f "$scripts_bundle"' EXIT
+          podman cp "$native_container:/install/data/databundles/scripts.zip" "$scripts_bundle"
+          uv run --locked --all-extras pytest tests --scripts-zip "$scripts_bundle"
+
       - name: Test built image with the real game
         if: ${{ matrix.build }}
         timeout-minutes: 40
@@ -297,3 +311,17 @@ jobs:
             [[ "${channel}" == "${EXPECTED_CHANNEL}" ]]
             [[ "${digest}" == "${EXPECTED_DIGEST}" ]]
           done
+
+      - name: Show deployment restart command
+        if: ${{ matrix.build }}
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+
+          The image is published; room deployment remains a separate host operation.
+          Restart selected room services to use the new image:
+
+          ```sh
+          dst-server room restart ROOM
+          ```
+          Replace `ROOM` with the intended room selection.
+          EOF

@@ -1,6 +1,7 @@
 [Unit]
 Description=Don't Starve Together shard cave
 BindsTo=dst-000-forest.container
+PartOf=dst-000-forest.service
 After=dst-000-forest.container
 
 [Container]
@@ -21,7 +22,7 @@ StopTimeout=360
 Notify=true
 
 [Service]
-Restart=on-failure
+Restart=no
 KillMode=control-group
 WatchdogSec=300
 WatchdogSignal=SIGKILL

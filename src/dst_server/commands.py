@@ -6,6 +6,15 @@ from typing import Annotated, Any, ClassVar, Literal, Self
 import orjson
 from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
+from dst_server.announcements import (
+    DEFAULT_DELAY,
+    DEFAULT_INTERVAL,
+    MOD_UPDATE_NOTICE,
+    RESTART_NOTICE,
+    SHUTDOWN_NOTICE,
+    Countdown,
+)
+from dst_server.configuration.models import ClusterConfig
 from dst_server.events.server import SavedEvent
 from dst_server.models import Inventory as PlayerInventory
 from dst_server.models import Mod, Player, ShardStatus
@@ -22,7 +31,6 @@ from dst_server.models.base import (
 from dst_server.models.cluster import (
     ClusterSaveResult,
     ClusterStatus,
-    ConfigurationRead,
     LocatedPlayer,
     ObservationCursor,
     ShardResult,
@@ -82,7 +90,8 @@ class Stop(Request[None]):
     """Stop the room or shard gracefully."""
 
     method = "stop"
-    timeout: Timeout = DEFAULT_STOP_TIMEOUT
+    timeout: Timeout = DEFAULT_STOP_TIMEOUT + DEFAULT_DELAY
+    notice: Countdown | None = SHUTDOWN_NOTICE
 
 
 class Restart(Request[None]):
@@ -90,6 +99,7 @@ class Restart(Request[None]):
 
     method = "restart"
     timeout: Timeout = DEFAULT_LIFECYCLE_TIMEOUT
+    notice: Countdown | None = RESTART_NOTICE
 
 
 class Kill(Request[None]):
@@ -104,10 +114,12 @@ class UpdateMods(Request[None]):
 
     method = "update_mods"
     timeout: Timeout = DEFAULT_LIFECYCLE_TIMEOUT
+    restart: bool = False
+    notice: Countdown | None = MOD_UPDATE_NOTICE
 
 
-class ReadConfiguration(Request[ConfigurationRead]):
-    """Read the room configuration and its revision."""
+class ReadConfiguration(Request[ClusterConfig]):
+    """Read the native room configuration."""
 
     method = "read_configuration"
 
@@ -145,6 +157,8 @@ class Announce(Request[None]):
 
     method = "announce"
     message: NonEmptyText
+    count: Positive = 1
+    interval: Timeout = DEFAULT_INTERVAL
 
 
 class Save(Request[SavedEvent]):
@@ -488,7 +502,7 @@ _DECLARATIONS: tuple[
     (Restart, None, True, _ALL),
     (Kill, None, True, _ALL),
     (UpdateMods, None, True, _CLUSTER),
-    (ReadConfiguration, ConfigurationRead, False, _CLUSTER),
+    (ReadConfiguration, ClusterConfig, False, _CLUSTER),
     (Execute, str, True, _SHARD),
     (ExecuteJson, JsonValue, True, _SHARD),
     (Evaluate, ConsoleResult, True, _SHARD),

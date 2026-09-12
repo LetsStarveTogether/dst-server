@@ -155,14 +155,14 @@ def export_cluster(  # ruff: ignore[complex-structure, too-many-branches]
         ) as archive:
             for path, content in files.items():
                 archive.writestr(content, (Path(room_id) / path).as_posix())
-            for source, (target, expected) in saves.items():
+            for source, target in saves.items():
                 descriptor = os.open(
                     source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
                 )
                 with os.fdopen(descriptor, "rb") as saved:
-                    if _file_state(os.fstat(saved.fileno())) != expected:
-                        msg = f"save changed during export: {source}"
-                        raise RuntimeError(msg)
+                    if not stat.S_ISREG(os.fstat(saved.fileno()).st_mode):
+                        msg = f"save entry must be a regular file: {source}"
+                        raise ValueError(msg)
                     arcname = (Path(room_id) / target).as_posix()
                     if target.parts[1:] == ("save", "shardindex"):
                         archive.writestr(
@@ -173,30 +173,16 @@ def export_cluster(  # ruff: ignore[complex-structure, too-many-branches]
                         )
                     else:
                         archive.writef(saved, arcname)
-        if saves != _save_files(directory, configuration, encode_user_path):
-            msg = "saves changed during export; use a quiescent copy or stop the games"
-            raise RuntimeError(msg)
         del saves, files, exported, configuration
         stream.seek(0)
         yield ClusterArchive(filename, stream)
-
-
-def _file_state(value: os.stat_result) -> tuple[int, ...]:
-    return (
-        value.st_dev,
-        value.st_ino,
-        value.st_mode,
-        value.st_size,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
-    )
 
 
 def _save_files(  # ruff: ignore[complex-structure, too-many-branches]
     directory: Path,
     configuration: ClusterConfig,
     encode_user_path: bool,
-) -> dict[Path, tuple[Path, tuple[int, ...]]]:
+) -> dict[Path, Path]:
     files = {}
     player_directories: dict[Path, Path] = {}
     for name in configuration.shards:
@@ -241,7 +227,7 @@ def _save_files(  # ruff: ignore[complex-structure, too-many-branches]
             target = source.relative_to(directory)
             _validate_archive_path(target)
             if not convert_user_path or not source.is_relative_to(root):
-                files[source] = target, _file_state(state)
+                files[source] = target
                 continue
             parts = list(source.relative_to(root).parts)
             if parts[2:] and parts[1].startswith("KU_"):
@@ -259,7 +245,7 @@ def _save_files(  # ruff: ignore[complex-structure, too-many-branches]
                 if player_directories.setdefault(player, original) != original:
                     msg = f"player save directories collide after encoding: {player}"
                     raise ValueError(msg)
-            files[source] = target, _file_state(state)
+            files[source] = target
     return files
 
 

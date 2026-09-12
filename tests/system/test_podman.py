@@ -7,12 +7,13 @@ import socket
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, closing, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
+from zipfile import ZipFile
 
 import logbook
 import orjson
@@ -21,7 +22,6 @@ from pydantic import JsonValue, SecretStr
 from ulid import ULID
 
 from dst_server import commands as c
-from dst_server.activity import read_last_login
 from dst_server.archive import export_cluster
 from dst_server.cluster.agent import ShardAgent
 from dst_server.cluster.controller import AgentEndpoint, ClusterController
@@ -48,7 +48,6 @@ from dst_server.logs import NetdataLogQuery, NetdataLogs
 from dst_server.lua_codec import lua_string
 from dst_server.models.cluster import (
     ClusterStatus,
-    ConfigurationSnapshot,
     GameEventRecord,
     LifecycleRecord,
     ShardRuntimeStatus,
@@ -233,7 +232,7 @@ def make_server(
     root: Path,
     cluster: Path,
     container_name: str,
-    lua_directory: Path | None = None,
+    script_bundle: Path | None = None,
     *,
     log_handler: Callable[[str], None] | None = None,
     shard: str = "forest",
@@ -252,15 +251,15 @@ def make_server(
         "--workdir",
         "/install/bin64",
         "--volume",
-        f"{cluster}:/cluster:idmap={VOLUME_IDMAP}",
+        f"{cluster}:{cluster}:idmap={VOLUME_IDMAP}",
         "--volume",
         f"{cluster / 'mods'}:/install/mods:idmap={VOLUME_IDMAP}",
     ]
-    lua_directory = lua_directory or ServerConfig(shard="forest").lua_directory
-    command.extend((
-        "--volume",
-        f"{lua_directory}:/dst-server-lua:ro,idmap={VOLUME_IDMAP}",
-    ))
+    if script_bundle is not None:
+        command.extend((
+            "--volume",
+            f"{script_bundle}:/install/data/databundles/scripts.zip:ro,idmap={VOLUME_IDMAP}",
+        ))
     command.extend(("--entrypoint", GAME_EXECUTABLE, IMAGE))
     wrapper.write_text(
         "#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n',
@@ -271,12 +270,11 @@ def make_server(
         ServerConfig(
             shard=shard,
             executable=wrapper,
-            persistent_storage_root=Path("/"),
-            conf_dir="/",
-            cluster="cluster",
-            ugc_directory=Path("/cluster/mods/ugc"),
+            persistent_storage_root=cluster.parent,
+            conf_dir=".",
+            cluster=cluster.name,
+            ugc_directory=cluster / "mods" / "ugc",
             extra_args=("-skip_update_server_mods", "-offline"),
-            lua_directory=Path("/dst-server-lua"),
             telemetry=TelemetrySettings(profile="history"),
             monitor_parent_process=False,
         ),
@@ -496,7 +494,7 @@ async def running_sharded_cluster(
                 )
 
 
-async def test_player_loaded_login_survives_restart_but_not_regeneration(
+async def test_player_activity_needs_no_files_and_resets_with_process(
     tmp_path: Path,
 ) -> None:
     async with running_sharded_cluster(tmp_path) as (controller, agents):
@@ -511,7 +509,7 @@ async def test_player_loaded_login_survives_restart_but_not_regeneration(
         assert snapshots.snapshots
         assert not marker.exists()
         userid = "KU_1234567_"
-        with closing(controller.subscribe_events()) as events:
+        with closing(controller.subscribe("events")) as events:
 
             async def observe(
                 event_type: type[player.ShardEnteredEvent | player.PlayerLoadedEvent],
@@ -520,7 +518,8 @@ async def test_player_loaded_login_survives_restart_but_not_regeneration(
                     while True:
                         record = (await events.next(1))[0]
                         if (
-                            record.shard == MASTER
+                            isinstance(record, GameEventRecord)
+                            and record.shard == MASTER
                             and isinstance(record.event, event_type)
                             and record.event.data.player.userid == userid
                         ):
@@ -544,13 +543,15 @@ async def test_player_loaded_login_survives_restart_but_not_regeneration(
             loaded = await observe(player.PlayerLoadedEvent)
         assert loaded.event.session_id == sessions[MASTER]
         timestamp = datetime.fromtimestamp(loaded.observed_timestamp_ns / 1e9, UTC)
-        assert read_last_login(shard_directory, sessions[MASTER]) == timestamp
-        assert marker.read_text(encoding="utf-8") == f"{timestamp.isoformat()}\n"
+        last_active_at = (await master.runtime_status()).last_active_at
+        assert last_active_at is not None
+        assert last_active_at >= timestamp
+        assert not marker.exists()
         assert await master.invoke(c.Snapshots()) == snapshots
         await controller.restart()
         for shard, agent in agents.items():
             assert (await agent.invoke(c.Runtime())).session_id == sessions[shard]
-        assert read_last_login(shard_directory, sessions[MASTER]) == timestamp
+        assert not marker.exists()
         await controller.regenerate(
             expected_session_id=sessions[MASTER],
             require_empty=True,
@@ -559,7 +560,9 @@ async def test_player_loaded_login_survives_restart_but_not_regeneration(
         for shard, agent in agents.items():
             session = (await agent.invoke(c.Runtime())).session_id
             assert session != sessions[shard]
-            assert read_last_login(tmp_path / "cluster" / shard, session) is None
+            assert not (
+                tmp_path / "cluster" / shard / "save/session" / session / ".last_login"
+            ).exists()
 
 
 async def test_rollback_to_day_restores_both_shards_and_player_saves(
@@ -789,7 +792,7 @@ async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(
             assert (socket_metadata.st_uid, socket_metadata.st_gid) == (0, 0)
             _, processes = await run_command("podman", "top", container_name, "args")
             assert GAME_EXECUTABLE in processes
-            lifecycle = await client.subscribe_lifecycle()
+            lifecycle = await client.subscribe("lifecycle")
             stopping = asyncio.create_task(
                 wait_for_stopping(lifecycle, frozenset({MASTER}))
             )
@@ -885,9 +888,9 @@ async def test_sdk_real_game_core_contract(
             assert (await server.game.invoke(c.Room())).is_dedicated is True
             saved = await server.save(completion_timeout=OPERATION_TIMEOUT)
             assert saved.snapshot is None or saved.snapshot >= runtime.snapshot
-            generation = server.lifecycle.session_generation
+            generation = server.driver_health.generation
             await server.game.invoke(c.Reset(timeout=OPERATION_TIMEOUT))
-            assert server.lifecycle.session_generation > generation
+            assert server.driver_health.generation > generation
             assert server.returncode is None
         await server.stop(grace_period=OPERATION_TIMEOUT)
     except BaseException as error:
@@ -897,79 +900,70 @@ async def test_sdk_real_game_core_contract(
         await reap_server(server, container_name)
 
 
-async def test_real_game_driver_recovers_after_delayed_session(
+async def test_real_game_driver_restarts_with_unchanged_session_id(
     tmp_path: Path,
     container_name: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cluster = write_cluster(tmp_path)
     logs: deque[str] = deque(maxlen=200)
     server = make_server(tmp_path, cluster, container_name, log_handler=logs.append)
-    original_session = server._session_started
-    third_session = asyncio.Event()
-
-    def session_started(generation: int) -> None:
-        # Delay only the notification to Driver; keep reading the native FD5 pipe.
-        if generation == 3:
-            third_session.set()
-        else:
-            original_session(generation)
-
-    monkeypatch.setattr(server, "_session_started", session_started)
-
-    async def drain(reader: Callable[[], Awaitable[object | None]]) -> None:
-        while await reader() is not None:
-            pass
-
-    consumers = [
-        asyncio.create_task(drain(reader))
-        for reader in (
-            server.read_lifecycle_event,
-            server.read_game_event,
-            server.read_operational_event,
-        )
-    ]
-    resets: list[asyncio.Task[str]] = []
     try:  # ruff: ignore[too-many-statements-in-try-clause]
         await server.start(startup_timeout=STARTUP_TIMEOUT)
-        assert server.driver_health.generation == 1
+        session_id = server.session_id
+        generation = server.driver_health.generation
         async with asyncio.timeout(OPERATION_TIMEOUT):
-            # Queue both raw resets before the first reload installs its driver.
-            resets = [
-                asyncio.create_task(
-                    server.execute("c_reset()", completion_timeout=OPERATION_TIMEOUT)
-                )
-                for _ in range(2)
-            ]
-            await asyncio.gather(*resets)
-            await third_session.wait()
-            await server.driver.wait_ready()
-            assert server.lifecycle.session_generation == 3
-            assert server.driver.generation == 2
-            assert server.driver_health.generation == 2
-
-            original_session(3)
-            assert await server.driver.wait_ready() == 3
-            assert server.driver.installed_generation == 3
+            await server.execute("c_reset()", completion_timeout=OPERATION_TIMEOUT)
+            await server.game.wait_reload(
+                generation,
+                asyncio.get_running_loop().time() + OPERATION_TIMEOUT,
+            )
+            assert server.driver_health.generation > generation
+            assert server.session_id == session_id
+            generation = server.driver_health.generation
+            await server.game.invoke(c.Reset(timeout=OPERATION_TIMEOUT))
+            assert server.driver_health.generation > generation
+            assert server.session_id == session_id
             assert server.driver_error is None
             health = await server.game.invoke(c.Health())
-            assert health.generation == 3
+            assert health.generation == server.driver_health.generation
             assert health.telemetry_status == "active"
             assert (await server.game.invoke(c.Room())).is_dedicated is True
-            assert (
-                await server.game.invoke(c.Runtime())
-            ).session_id == server.session_id
             assert server.returncode is None
+        await server.stop(grace_period=OPERATION_TIMEOUT)
     except BaseException as error:
         error.add_note("recent game logs:\n" + "\n".join(logs))
         raise
     finally:
-        try:
-            await reap_server(server, container_name)
-        finally:
-            for task in (*consumers, *resets):
-                task.cancel()
-            await asyncio.gather(*consumers, *resets, return_exceptions=True)
+        await reap_server(server, container_name)
+
+
+async def copy_image_bundle(path: Path) -> None:
+    process = await asyncio.create_subprocess_exec(
+        "podman",
+        "run",
+        "--rm",
+        "--pull=never",
+        "--network=none",
+        "--entrypoint=/bin/cat",
+        IMAGE,
+        "/install/data/databundles/scripts.zip",
+        stdout=asyncio.subprocess.PIPE,
+    )
+    content = await communicate(process, CLEANUP_TIMEOUT)
+    assert process.returncode == 0
+    await asyncio.to_thread(path.write_bytes, content)
+
+
+def replace_bundle_script(bundle: Path, name: str, source: bytes) -> None:
+    # Deliberately corrupt this test-only bundle without changing the image.
+    temporary = bundle.with_suffix(".tmp")
+    with ZipFile(bundle) as original, ZipFile(temporary, "w") as modified:
+        assert name in original.namelist()
+        for entry in original.infolist():
+            modified.writestr(
+                entry, source if entry.filename == name else original.read(entry)
+            )
+    temporary.replace(bundle)
 
 
 @pytest.mark.parametrize("fault", ["telemetry", "core"])
@@ -979,39 +973,49 @@ async def test_real_game_driver_degrades_safely(
     fault: Literal["telemetry", "core"],
 ) -> None:
     cluster = write_cluster(tmp_path)
-    lua_directory = tmp_path / f"{fault}-failure-lua"
-    shutil.copytree(ServerConfig(shard="forest").lua_directory, lua_directory)
+    bundle = tmp_path / f"{fault}-failure-scripts.zip"
+    await copy_image_bundle(bundle)
+    script = (
+        "scripts/dst_server/world_events.lua"
+        if fault == "telemetry"
+        else "scripts/dst_server.lua"
+    )
+    with ZipFile(bundle) as archive:
+        original = archive.read(script)
     if fault == "telemetry":
-        world_events = lua_directory / "dst_server" / "world_events.lua"
-        source = world_events.read_text(encoding="utf-8")
-        needle = "    local state_names = {"
-        assert needle in source
-        world_events.write_text(
-            source.replace(
-                needle,
-                '    error("injected telemetry install failure", 0)\n\n' + needle,
-                1,
-            ),
-            encoding="utf-8",
+        needle = b"    local state_names = {"
+        assert needle in original
+        modified = original.replace(
+            needle,
+            b'    error("injected telemetry install failure", 0)\n\n' + needle,
+            1,
         )
     else:
-        (lua_directory / "dst_server.lua").write_text(
-            'error("injected core driver failure", 0)\n',
-            encoding="utf-8",
-        )
+        modified = b'error("injected core driver failure", 0)\n'
+    replace_bundle_script(bundle, script, modified)
     logs: deque[str] = deque(maxlen=200)
     server = make_server(
         tmp_path,
         cluster,
         container_name,
-        lua_directory,
+        bundle,
         log_handler=logs.append,
     )
     try:  # ruff: ignore[too-many-statements-in-try-clause]
+        if fault == "core":
+            with pytest.raises(RuntimeError, match="installation_failed"):
+                await server.start(startup_timeout=STARTUP_TIMEOUT)
+            assert server.driver_error == "installation_failed"
+            assert server.returncode is not None
+            await reap_server(server, container_name)
+            replace_bundle_script(bundle, script, original)
+            server = make_server(
+                tmp_path, cluster, container_name, bundle, log_handler=logs.append
+            )
         await server.start(startup_timeout=STARTUP_TIMEOUT)
         async with asyncio.timeout(OPERATION_TIMEOUT):
+            health = server.driver_health
             if fault == "telemetry":
-                health = server.driver_health
                 assert health.telemetry_status == "failed"
                 assert health.last_error is not None
                 assert health.last_error.stage == "install"
@@ -1019,31 +1023,11 @@ async def test_real_game_driver_degrades_safely(
                 diagnostic = await server.read_game_event()
                 assert diagnostic is not None
                 assert diagnostic.record.event == "dst.telemetry.error"
-                assert server.driver_health.telemetry_status == "failed"
-                assert (await server.game.invoke(c.Room())).is_dedicated is True
-                await server.save(completion_timeout=OPERATION_TIMEOUT)
             else:
-                assert server.driver_error is not None
-                assert server.driver_error == "DST Lua request failed: lua_error"
-                with pytest.raises(RuntimeError, match="has not been installed"):
-                    await server.game.invoke(c.Room())
-                sentinel = str(ULID())
-                assert sentinel in await server.execute(
-                    f'print(TheWorld~=nil and {lua_string(sentinel)} or "missing")'
-                )
-                shutil.copyfile(
-                    ServerConfig(shard="forest").lua_directory / "dst_server.lua",
-                    lua_directory / "dst_server.lua",
-                )
-                generation = server.lifecycle.session_generation
-                await server.execute("c_reset()")
-                await server.game.wait_reload(
-                    generation,
-                    asyncio.get_running_loop().time() + OPERATION_TIMEOUT,
-                )
+                assert health.telemetry_status == "active"
                 assert server.driver_error is None
-                assert server.driver_health.telemetry_status == "active"
-                assert (await server.game.invoke(c.Room())).is_dedicated is True
+            assert (await server.game.invoke(c.Room())).is_dedicated is True
+            await server.save(completion_timeout=OPERATION_TIMEOUT)
             assert server.returncode is None
         await server.stop(grace_period=OPERATION_TIMEOUT)
     except BaseException as error:
@@ -1478,7 +1462,10 @@ async def test_quadlet_waits_for_all_agents_and_keeps_watchdog_alive(
                 "podman", "top", system.container_name(MASTER), "args"
             )
             assert GAME_EXECUTABLE not in processes
-            await verify_watchdog_notifications(system.master_service)
+            properties = await service_properties(
+                system.master_service, "WatchdogTimestampMonotonic"
+            )
+            assert int(properties["WatchdogTimestampMonotonic"]) > 0
             assert (await observer.status()).phase == "waitingAgents"
             await run_command(
                 "systemctl", "unmask", "--runtime", *system.secondary_services
@@ -1494,6 +1481,7 @@ async def test_quadlet_waits_for_all_agents_and_keeps_watchdog_alive(
             assert not status.missing_shards
             assert all(shard.ready for shard in status.shards)
             await wait_for_game_shards(observer, len(SHARDS))
+            await verify_watchdog_notifications(system.master_service)
 
 
 async def test_quadlet_publishes_each_shard_port(
@@ -1538,8 +1526,8 @@ async def test_quadlet_native_configuration_preserves_game_writes_and_stopped_ed
     assert rooms.load(number).cluster.settings.max_players == 9
     async with system.running() as client:
         configuration = await client.read_configuration()
-        assert isinstance(configuration, ConfigurationSnapshot)
-        assert configuration.configuration.settings.max_players == 9
+        assert isinstance(configuration, ClusterConfig)
+        assert configuration.settings.max_players == 9
         master = client.shard(MASTER)
         assert (await master.room()).is_dedicated is True
         assert await master.execute_json(
@@ -1573,8 +1561,8 @@ async def test_quadlet_native_configuration_preserves_game_writes_and_stopped_ed
             shard: (await client.shard(shard).runtime()).session_id for shard in SHARDS
         } == sessions
         reread = await client.read_configuration()
-        assert isinstance(reread, ConfigurationSnapshot)
-        assert reread.configuration.settings.max_players == 8
+        assert isinstance(reread, ClusterConfig)
+        assert reread.settings.max_players == 8
 
 
 async def test_quadlet_delivers_logs_to_rpc_and_journal_and_player_events(
@@ -1583,8 +1571,8 @@ async def test_quadlet_delivers_logs_to_rpc_and_journal_and_player_events(
     system = quadlet_system
     async with (
         system.running() as client,
-        await client.subscribe_logs() as logs,
-        await client.subscribe_events() as events,
+        await client.subscribe("logs") as logs,
+        await client.subscribe("events") as events,
     ):
         marker = f"DST_RPC_{ULID()}"
         await client.shard(MASTER).execute_json(
@@ -1620,7 +1608,7 @@ async def test_quadlet_game_crash_retries_without_replacing_containers(
     quadlet_system: QuadletSystem,
 ) -> None:
     system = quadlet_system
-    async with system.running() as client, await client.subscribe_logs() as logs:
+    async with system.running() as client, await client.subscribe("logs") as logs:
         before = await client.status()
         master_before = _shard(before, MASTER)
         cave_before = _shard(before, "cave")
@@ -1654,13 +1642,17 @@ async def test_quadlet_game_crash_retries_without_replacing_containers(
         await next_matching(logs, lambda record: marker in record.line)
 
 
-async def test_quadlet_retry_exhaustion_stops_all_games_and_allows_manual_start(
+async def test_quadlet_retry_exhaustion_restarts_management_and_all_games(
     quadlet_system: QuadletSystem,
 ) -> None:
     system = quadlet_system
     async with system.running() as client:
         current = await client.status()
-        for _ in range(MAX_ATTEMPTS - _shard(current, MASTER).retry_attempt + 1):
+        epoch = current.epoch
+        container_ids = {shard: await system.container_id(shard) for shard in SHARDS}
+        pod_id = await system.pod_id()
+        remaining = MAX_ATTEMPTS - _shard(current, MASTER).retry_attempt + 1
+        for index in range(remaining):
             attempt = _shard(current, MASTER)
             assert attempt.pid is not None
             await run_command(
@@ -1671,48 +1663,38 @@ async def test_quadlet_retry_exhaustion_stops_all_games_and_allows_manual_start(
                 "-KILL",
                 str(attempt.pid),
             )
+            if index + 1 == remaining:
+                break
             current = await wait_for_status(
                 client,
                 lambda value, previous=attempt.game_attempt: (
-                    value.phase == "failed"
-                    or (
-                        value.phase == "running"
-                        and _shard(value, MASTER).game_attempt != previous
-                    )
+                    value.phase == "running"
+                    and _shard(value, MASTER).game_attempt != previous
                 ),
             )
-        await wait_for_status(
-            client,
-            lambda value: (
-                value.phase == "failed"
-                and value.error == "shard retry budget exhausted"
-                and all(shard.pid is None for shard in value.shards)
-            ),
+        replacement, recovered = await wait_for_client(
+            system.socket_path,
+            lambda value: value.epoch != epoch and value.phase == "running",
         )
-        for shard in SHARDS:
-            _, processes = await run_command(
-                "podman", "top", system.container_name(shard), "args"
-            )
-            assert GAME_EXECUTABLE not in processes
-        await client.start()
-        current = await wait_for_status(client, lambda value: value.phase == "running")
-        assert all(shard.ready for shard in current.shards)
-        await wait_for_game_shards(client, len(SHARDS))
+        with closing(replacement):
+            assert all(shard.ready for shard in recovered.shards)
+            assert await system.pod_id() == pod_id
+            for shard in SHARDS:
+                assert await system.container_id(shard) != container_ids[shard]
+            await wait_for_game_shards(replacement, len(SHARDS))
 
 
-async def test_quadlet_watchdog_reaps_frozen_agent_and_reconnects_event_stream(
+async def test_quadlet_watchdog_reaps_frozen_agent_and_recovers_the_room(
     quadlet_system: QuadletSystem,
 ) -> None:
     system = quadlet_system
     process_fds: list[int] = []
-    async with system.running() as client, await client.subscribe_events() as events:
+    async with system.running() as client:
         before = await client.status()
         container_ids = {shard: await system.container_id(shard) for shard in SHARDS}
         pod_id = await system.pod_id()
-        incarnations = {shard.name: shard.agent_incarnation for shard in before.shards}
-        attempts = {shard.name: shard.game_attempt for shard in before.shards}
         cave_service = f"{system.container_name('cave')}.service"
-        properties = await service_properties(cave_service, "NRestarts")
+        properties = await service_properties(system.master_service, "NRestarts")
         restarts = int(properties["NRestarts"])
         _, processes = await run_command(
             "podman", "top", system.container_name("cave"), "hpid"
@@ -1727,22 +1709,32 @@ async def test_quadlet_watchdog_reaps_frozen_agent_and_reconnects_event_stream(
             await run_command(
                 "podman", "kill", "--signal", "STOP", system.container_name("cave")
             )
-            current = await wait_for_status(
-                client,
-                lambda value: (
-                    value.phase == "running"
-                    and _shard(value, "cave").agent_incarnation != incarnations["cave"]
-                ),
+            replacement, current = await wait_for_client(
+                system.socket_path,
+                lambda value: value.epoch != before.epoch and value.phase == "running",
             )
-            assert all(select.select([fd], [], [], 0)[0] for fd in process_fds)
+            with closing(replacement):
+                assert all(select.select([fd], [], [], 0)[0] for fd in process_fds)
+                for shard in SHARDS:
+                    assert await system.container_id(shard) != container_ids[shard]
+                    assert (
+                        _shard(current, shard).agent_incarnation
+                        != _shard(before, shard).agent_incarnation
+                    )
+                assert await system.pod_id() == pod_id
+                properties = await service_properties(
+                    system.master_service, "NRestarts"
+                )
+                assert int(properties["NRestarts"]) == restarts + 1
+                assert await service_properties(cave_service, "NRestarts") == {
+                    "NRestarts": "0"
+                }
+                await wait_for_game_shards(replacement, len(SHARDS))
+                async with await replacement.subscribe("events") as events:
+                    await emit_player_event(replacement, events, "cave")
         finally:
             for fd in process_fds:
                 os.close(fd)
-        assert await system.container_id("cave") != container_ids["cave"]
-        assert await system.container_id(MASTER) == container_ids[MASTER]
-        assert await system.pod_id() == pod_id
-        properties = await service_properties(cave_service, "NRestarts")
-        assert int(properties["NRestarts"]) == restarts + 1
         _, journal = await run_command(
             "journalctl",
             "--unit",
@@ -1756,12 +1748,6 @@ async def test_quadlet_watchdog_reaps_frozen_agent_and_reconnects_event_stream(
         assert "left-over" not in journal
         assert "remains running" not in journal
         assert "stop-post' timed out" not in journal
-        assert _shard(current, MASTER).agent_incarnation == incarnations[MASTER]
-        assert all(
-            _shard(current, shard).game_attempt != attempts[shard] for shard in SHARDS
-        )
-        await wait_for_game_shards(client, len(SHARDS))
-        await emit_player_event(client, events, "cave")
 
 
 async def test_quadlet_master_container_crash_recreates_shards_in_existing_pod(
@@ -1793,12 +1779,34 @@ async def test_quadlet_master_container_crash_recreates_shards_in_existing_pod(
                 assert await system.container_id(shard) != container_ids[shard]
 
 
+async def test_quadlet_pod_restart_recreates_all_shards(
+    quadlet_system: QuadletSystem,
+) -> None:
+    system = quadlet_system
+    async with system.running() as client:
+        before = await client.status()
+        pod_id = await system.pod_id()
+        container_ids = {shard: await system.container_id(shard) for shard in SHARDS}
+        await run_command(
+            "systemctl", "restart", system.pod_service, seconds=STARTUP_TIMEOUT
+        )
+        replacement, _ = await wait_for_client(
+            system.socket_path,
+            lambda value: value.epoch != before.epoch and value.phase == "running",
+        )
+        with closing(replacement):
+            assert await system.pod_id() != pod_id
+            for shard in SHARDS:
+                assert await system.container_id(shard) != container_ids[shard]
+            await wait_for_game_shards(replacement, len(SHARDS))
+
+
 async def test_quadlet_pod_stop_delivers_stopping_and_reaps_all_containers(
     quadlet_system: QuadletSystem,
 ) -> None:
     system = quadlet_system
     async with system.running() as client:
-        lifecycle = await client.subscribe_lifecycle()
+        lifecycle = await client.subscribe("lifecycle")
         stopping = asyncio.create_task(wait_for_stopping(lifecycle, frozenset(SHARDS)))
         try:
             await run_command(

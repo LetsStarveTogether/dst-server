@@ -2,9 +2,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import AwareDatetime, Field
 
-from dst_server.configuration.models import ClusterConfig
 from dst_server.errors import ErrorInfo
 from dst_server.events import GameEvent
 from dst_server.events.server import Event as LifecycleEvent
@@ -49,29 +48,48 @@ class ShardRuntimeStatus(FrozenModel):
     phase: ShardPhase
     agent_incarnation: ULIDValue | None = None
     game_attempt: ULIDValue | None = None
+    outdated_mods: tuple[str, ...] = ()
     pid: NonNegativeInt | None = None
     session_id: str | None = None
     ready: bool = False
     returncode: int | None = None
-    retry_attempt: Annotated[int, Field(ge=0, le=5)] = 0
+    retry_attempt: Annotated[int, Field(ge=0, le=4)] = 0
     stable_since_ns: NonNegativeInt | None = None
     driver_health: DriverHealth | None = None
     driver_error: str | None = None
     telemetry_profile: TelemetryProfile
     telemetry_invalid: NonNegativeInt = 0
     telemetry_dropped: NonNegativeInt = 0
+    telemetry_duplicates: NonNegativeInt = 0
+    telemetry_stale: NonNegativeInt = 0
+    telemetry_gaps: NonNegativeInt = 0
+    telemetry_last_event_ns: NonNegativeInt | None = None
+    telemetry_last_presence_ns: NonNegativeInt | None = None
+    last_active_at: AwareDatetime | None = None
+    player_count: NonNegativeInt = 0
+    client_count: NonNegativeInt = 0
     external_port: Annotated[int, Field(ge=1024, le=65535)] | None = None
     error_id: ULIDValue | None = None
+    error: str | None = None
+
+
+class ModUpdateStatus(FrozenModel):
+    enabled: bool = True
+    pending: bool = False
+    updating: bool = False
+    retry_in_seconds: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 0.0
     error: str | None = None
 
 
 class ClusterStatus(FrozenModel):
     epoch: ULIDValue
     phase: ClusterPhase
-    prepared_revision: ULIDValue | None = None
+    prepared: bool = False
+    busy: bool = False
     master: Annotated[str, Field(min_length=1)]
     missing_shards: tuple[str, ...] = ()
     shards: tuple[ShardRuntimeStatus, ...]
+    mod_update: ModUpdateStatus = ModUpdateStatus()
     error_id: ULIDValue | None = None
     error: str | None = None
 
@@ -108,21 +126,6 @@ class GameEventRecord(FrozenModel):
     sequence: NonNegativeInt
     observed_timestamp_ns: NonNegativeInt
     event: GameEvent
-
-
-@dataclass(frozen=True, slots=True)
-class ConfigurationSnapshot:
-    revision: ULIDValue
-    configuration: ClusterConfig
-
-
-@dataclass(frozen=True, slots=True)
-class InvalidConfiguration:
-    revision: ULIDValue
-    fields: tuple[tuple[str, ...], ...]
-
-
-type ConfigurationRead = ConfigurationSnapshot | InvalidConfiguration
 
 
 @dataclass(frozen=True, slots=True)

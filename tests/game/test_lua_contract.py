@@ -1,4 +1,3 @@
-import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 from typing import Any
 
@@ -7,34 +6,27 @@ import pytest
 from dst_server import commands as c
 from dst_server.events import GAME_EVENT_ADAPTER
 from dst_server.game.client import _METHODS
-from dst_server.game.rpc import BOOL_RESPONSE, response_adapter
+from dst_server.game.rpc import SAVE_RESPONSE, response_adapter
+from tests.helpers import native_scripts, run_lua_process
 
 PREFIX = "DST_OTEL|"
 
 RPC_ADAPTERS = {
     method: response_adapter(c.operation("agent", command.method).result_type or bool)
     for command, method in _METHODS.items()
-} | {"save": BOOL_RESPONSE}
+} | {"save": SAVE_RESPONSE}
 
 
 def run_lua_contract(script: str, luajit: str) -> list[str]:
     root = Path(__file__).parents[2]
-    result = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]
-        [
-            luajit,
-            str(root / f"tests/lua/{script}"),
-            str(root / "src/dst_server/lua"),
-            str(root / "tests/lua"),
-            str(root / "dst-scripts/scripts"),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
+    output = run_lua_process(
+        luajit,
+        root / f"tests/lua/{script}",
+        root / "src/dst_server/lua",
+        root / "tests/lua",
+        native_scripts(),
     )
-
-    assert result.returncode == 0, result.stderr or result.stdout
-    return result.stdout.splitlines()
+    return output.decode().splitlines()
 
 
 def test_all_real_lua_event_producers_match_python_contract(luajit: str) -> None:
@@ -59,6 +51,10 @@ def test_all_real_lua_event_producers_match_python_contract(luajit: str) -> None
     assert all(event.nonce == "01ARZ3NDEKTSV4RRFFQ69G5FAV" for event in events)
     assert all(event.v == 2 and event.generation == 1 for event in events)
     assert all(event.session_id == "SESSION" for event in events)
+
+
+def test_native_announcement_repetition(luajit: str) -> None:
+    assert run_lua_contract("announcement_contract.lua", luajit) == []
 
 
 @pytest.fixture(scope="module")
@@ -123,6 +119,28 @@ def test_registered_lua_queries(rpc_data: dict[str, Any]) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("season", "wet"),
+        ("season", "monsoon"),
+        ("phase", "custom_mod_phase"),
+        ("moon_phase", "eclipse"),
+        ("precipitation", "ash"),
+    ],
+)
+def test_world_response_preserves_mod_state(
+    rpc_data: dict[str, Any], field: str, value: str
+) -> None:
+    response = RPC_ADAPTERS["get_world"].validate_python({
+        "ok": True,
+        "data": rpc_data["get_world"] | {field: value},
+    })
+
+    assert response.ok
+    assert getattr(response.data, field) == value
+
+
 def test_lua_player_values_and_loading_state(rpc_data: dict[str, Any]) -> None:
     data = rpc_data
     player, loading = data["get_players"]
@@ -184,7 +202,7 @@ def test_lua_mutation_results(rpc_data: dict[str, Any]) -> None:
     data = rpc_data
     assert data["get_blocklist"] == ["KU_BLOCKED", "KU_KEEP", "Steam_ONLY"]
     for method, adapter in RPC_ADAPTERS.items():
-        if adapter is BOOL_RESPONSE:
+        if adapter is response_adapter(bool):
             assert data[method] is True, method
     assert data["give_item"] == 1
     assert data["remove_item"] == 1

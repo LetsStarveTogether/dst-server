@@ -28,6 +28,7 @@ function driver.health()
 end
 
 function driver.install(options)
+    if state.installed then error("driver is already installed") end
     if type(options) ~= "table" then
         error("driver options must be a table")
     end
@@ -59,48 +60,45 @@ function driver.install(options)
     if TheWorld == nil or not TheWorld.ismastersim then
         error("master simulation is unavailable")
     end
-    if state.installed then
-        if nonce ~= state.nonce or generation < state.generation or profile ~= state.requested_profile
-            or TheWorld ~= state.world then
-            error("driver is already installed with different options")
-        end
-        for name in pairs(action_allowlist) do
-            if not state.action_allowlist[name] then error("driver action allowlist differs") end
-        end
-        for name in pairs(state.action_allowlist) do
-            if not action_allowlist[name] then error("driver action allowlist differs") end
-        end
-        -- Native Session notifications can reach the host after this VM is installed.
-        state.generation = generation
-        return driver.health()
-    end
-
     state.nonce = nonce
     state.generation = generation
-    state.world = TheWorld
     state.requested_profile = profile
     state.action_allowlist = action_allowlist
-    state.installed = true
-    local ok = pcall(function()
-        local world_events = require("dst_server.world_events")
-        world_events.install_players()
-        if profile == "off" then
-            return
-        end
-        if type(GetTick) ~= "function" or type(GetTimeReal) ~= "function" then
-            error("required telemetry clock is unavailable")
-        end
-        world_events.install_shard()
-        world_events.install_world()
-        if profile == "history" and next(action_allowlist) ~= nil then
-            require("dst_server.actions").install()
-        end
-    end)
-    if ok then
-        state.telemetry_active = profile ~= "off"
-    else
-        require("dst_server.telemetry").report("install", "installation_failed")
+
+    local original = Networking_ModOutOfDateAnnouncement
+    if type(original) ~= "function" then
+        error("Networking_ModOutOfDateAnnouncement is unavailable")
     end
+    local telemetry = require("dst_server.telemetry")
+    Networking_ModOutOfDateAnnouncement = function(...)
+        local mod = ...
+        -- This is required control state, including when optional telemetry is off.
+        -- Capture first so announcement failures cannot hide the native detection.
+        pcall(telemetry.emit, "dst.mod.outdated", { name = mod })
+        return original(...)
+    end
+    state.installed = true
+    local installed = false
+    local function install(stage, callback)
+        if pcall(callback) then
+            installed = true
+        else
+            telemetry.report(stage, "installation_failed")
+        end
+    end
+    install("players.install", function() require("dst_server.world_events").install_players() end)
+    if profile == "off" then return driver.health() end
+    if type(GetTick) ~= "function" or type(GetTimeReal) ~= "function" then
+        telemetry.report("clocks.install", "installation_failed")
+        return driver.health()
+    end
+    install("shards.install", function() require("dst_server.world_events").install_shard() end)
+    install("world.install", function() require("dst_server.world_events").install_world() end)
+    install("messages.install", function() require("dst_server.message_events").install() end)
+    if profile == "history" and next(action_allowlist) ~= nil then
+        install("actions.install", function() require("dst_server.actions").install() end)
+    end
+    state.telemetry_active = installed
     return driver.health()
 end
 

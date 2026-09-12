@@ -7,28 +7,26 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-MOD_LOCK = ".dst-mod-update.lock"
+
+class RoomBusyError(RuntimeError):
+    """Another host command currently owns this room."""
 
 
 @asynccontextmanager
-async def room_lock(
-    directory: Path, *, name: str = ".dst-operation.lock", wait: bool = True
-) -> AsyncIterator[None]:
-    if not name or Path(name).name != name or name in {".", ".."}:
-        msg = f"invalid lock filename: {name}"
-        raise ValueError(msg)
+async def room_lock(directory: Path, *, wait: bool = False) -> AsyncIterator[None]:
     if directory.is_symlink():
         msg = f"room directory cannot be a symlink: {directory}"
         raise ValueError(msg)
     directory.mkdir(parents=True, exist_ok=True)
+    path = directory / ".dst-operation.lock"
     descriptor = os.open(
-        directory / name,
+        path,
         os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
         0o600,
     )
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            msg = f"room lock must be a regular file: {directory / name}"
+            msg = f"room lock must be a regular file: {path}"
             raise ValueError(msg)
         while True:
             try:
@@ -36,8 +34,8 @@ async def room_lock(
                 break
             except BlockingIOError:
                 if not wait:
-                    msg = f"room operation is busy: {directory / name}"
-                    raise RuntimeError(msg) from None
+                    msg = f"room operation is busy: {path}"
+                    raise RoomBusyError(msg) from None
                 await asyncio.sleep(0.05)
         try:
             yield

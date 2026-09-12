@@ -102,21 +102,30 @@ def test_initial_world_metadata_has_no_invented_values(
     assert metadata.day is None
 
 
+@pytest.mark.parametrize("season", ["spring", "wet", "monsoon", "custom_mod_season"])
 def test_initial_world_metadata_can_have_only_season_fields(
     metadata_path: Path,
+    season: str,
 ) -> None:
     metadata_path.write_bytes(
-        b'return {clock={},seasons={season="spring",totaldaysinseason=20,'
-        b"elapseddaysinseason=0,remainingdaysinseason=20}}\0"
+        (
+            f'return {{clock={{}},seasons={{season="{season}",totaldaysinseason=20,'
+            "elapseddaysinseason=0,remainingdaysinseason=20}}\0"
+        ).encode()
     )
 
     metadata = WorldSnapshotMetadata.load(metadata_path)
 
-    assert metadata.seasons.season == "spring"
+    assert metadata.seasons.season == season
     assert metadata.seasons.remainingdaysinseason == 20
     assert metadata.seasons.mode is None
     assert metadata.seasons.lengths is None
     assert metadata.day is None
+
+
+def test_world_metadata_preserves_mod_phase(metadata_path: Path) -> None:
+    metadata_path.write_text('return {clock={phase="mod_phase"}}', encoding="utf-8")
+    assert WorldSnapshotMetadata.load(metadata_path).clock.phase == "mod_phase"
 
 
 @pytest.mark.parametrize(
@@ -188,7 +197,8 @@ def test_player_metadata_uses_character_identifier(
         b'return {clock={cycles="1",cyclestropical=0}}',
         b"return {clock={cycles=-1}}",
         b"return {clock={remainingtimeinphase=1e999}}",
-        b'return {seasons={season="monsoon"}}',
+        b'return {seasons={season=""}}',
+        b"return {seasons={season=1}}",
         b"return {seasons={israndom={autumn=1}}}",
     ],
 )

@@ -42,7 +42,7 @@ CLUSTER_DESCRIPTION = "朗诵团：924715341 频道：饥荒联机版 Let's Star
 TOKEN_ENVIRONMENT = "DST_SERVER_CLUSTER_TOKEN"  # ruff: ignore[hardcoded-password-string]
 NETDATA_ENVIRONMENT = {
     "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
-    "OTEL_METRICS_EXPORTER": "none",
+    "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
     "OTEL_TRACES_EXPORTER": "none",
 }
 _SEMI_MODS = (1803285852, 2189004162, 2950657933, 3223103565, 3046339764)
@@ -91,27 +91,24 @@ _TEMPLATE_DEFAULTS = {
 ROOMS = tuple(
     (numbers, kind, *_TEMPLATE_DEFAULTS[kind])
     for numbers, kind in (
-        (range(20), RoomType.PURE_SURVIVAL),
-        (range(20, 50), RoomType.PURE_ENDLESS),
-        (range(50, 70), RoomType.SEMI_SURVIVAL),
+        (range(30), RoomType.PURE_SURVIVAL),
+        (range(30, 60), RoomType.PURE_ENDLESS),
+        (range(60, 70), RoomType.SEMI_SURVIVAL),
         (range(70, 100), RoomType.SEMI_ENDLESS),
-        (range(100, 110), RoomType.AFK),
-        (range(110, 115), RoomType.LIGHTS_OUT_SURVIVAL),
-        (range(115, 120), RoomType.LIGHTS_OUT_ENDLESS),
-        (range(120, 125), RoomType.ISLAND_ADVENTURE),
-        (range(125, 130), RoomType.HAMLET),
-        (range(130, 133), RoomType.ADVENTURE),
-        (range(133, 135), RoomType.GORGE),
-        (range(135, 140), RoomType.FORGE),
+        (range(200, 205), RoomType.AFK),
+        (range(205, 206), RoomType.ADVENTURE),
+        (range(206, 207), RoomType.GORGE),
+        (range(207, 210), RoomType.FORGE),
+        (range(210, 213), RoomType.ISLAND_ADVENTURE),
+        (range(213, 216), RoomType.HAMLET),
     )
 )
 ROOM_NUMBERS = tuple(number for numbers, _, _, _ in ROOMS for number in numbers)
 _ROOM_SCHEDULES: tuple[tuple[str, int, int] | None, ...] = (
     None,
-    ("晨餐", 9, 12),
-    ("午膳", 13, 18),
-    ("晚宴", 19, 0),
-    ("夜饮", 22, 5),
+    ("白饭", 10, 18),
+    ("晚宴", 18, 0),
+    ("夜饮", 0, 8),
 )
 
 
@@ -122,16 +119,20 @@ def room(number: int) -> tuple[RoomType, str, int]:
     for numbers, kind, label, max_players in ROOMS:
         if number in numbers:
             return kind, label, max_players
-    msg = "room number must be an integer from 0 through 139"
+    msg = "LST room number must be an integer in 000-099 or 200-215"
     raise ValueError(msg)
 
 
 def room_schedule(number: int) -> tuple[str, int, int] | None:
     room(number)
-    for numbers, _, _, _ in ROOMS[:4]:
+    for numbers, kind, _, _ in ROOMS[:4]:
         if number in numbers:
-            group_size = len(numbers) // len(_ROOM_SCHEDULES)
-            return _ROOM_SCHEDULES[(number - numbers.start) // group_size]
+            offset = number - numbers.start
+            sizes = (6, 1, 2, 1) if kind == RoomType.SEMI_SURVIVAL else (16, 4, 8, 2)
+            for size, schedule in zip(sizes, _ROOM_SCHEDULES, strict=True):
+                if offset < size:
+                    return schedule
+                offset -= size
     return None
 
 
@@ -141,7 +142,7 @@ def room_name(number: int) -> str:
     schedule = room_schedule(number)
     if schedule:
         suffix, start, end = schedule
-        return f"{name}-{suffix} | 每日 {start}-{end} 开放"
+        return f"{name}-{suffix} | 每日 {start}-{end or 24} 开放"
     return f"{name} | 朗诵团 5 周年啦！入团找到你未来的 5 年好饥友吧~"  # ruff: ignore[ambiguous-unicode-character-string]
 
 

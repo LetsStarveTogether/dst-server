@@ -2,9 +2,10 @@ import asyncio
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
+import orjson
 import pytest
 from opentelemetry.sdk._logs.export import LogRecordExportResult
 from ulid import ULID
@@ -18,6 +19,7 @@ from dst_server.events import GAME_EVENT_ADAPTER, ObservedGameEvent
 from dst_server.models.cluster import ShardPhase
 from dst_server.runtime import Server, ServerConfig
 from dst_server.telemetry import otel
+from dst_server.telemetry.recorder import Recorder
 
 
 @pytest.fixture
@@ -60,7 +62,9 @@ def event_server(relay: ShardAgent, *events: ObservedGameEvent) -> Server:
         SimpleNamespace(
             config=relay.config,
             lifecycle=SimpleNamespace(eof=False),
-            game_events=SimpleNamespace(nonce=events[0].record.nonce),
+            game_events=SimpleNamespace(
+                nonce=events[0].record.nonce, last_active_at=None
+            ),
             recorder=SimpleNamespace(
                 attributes=Mock(return_value={"dst.shard.name": "forest"})
             ),
@@ -92,11 +96,14 @@ async def test_game_relay_keeps_broadcasting_while_export_is_unavailable(
     monkeypatch.setattr(otel, "OTLPLogExporter", Mock(return_value=Mock(export=export)))
     pipeline = relay._pipeline = otel.configure()
     subscription = relay.game_events.subscribe()
+    recorder = Recorder("cluster", "forest", pipeline=pipeline)
     try:
+        recorder.observe_game(observed)
         await relay._drain_game_events(event_server(relay, observed))
         assert await asyncio.to_thread(entered.wait, 1)
         later = observation(observed.record.nonce, generation=2)
         async with asyncio.timeout(1):
+            recorder.observe_game(later)
             await relay._drain_game_events(event_server(relay, later))
             records = await subscription.next(2)
         assert [record.event for record in records] == [observed.record, later.record]
@@ -123,37 +130,31 @@ async def test_local_mode_preserves_each_generation_and_does_not_need_otel(
     assert [record.event.generation for record in records] == [1, 2]
 
 
-async def test_operational_relay_uses_source_identity_time_and_severity(
+async def test_operational_ingestion_uses_source_identity_time_and_severity(
     relay: ShardAgent,
 ) -> None:
-    record = SimpleNamespace(
-        uid=str(ULID()),
-        event_name="dst.runtime.lua_error",
-        body={"source": "workshop-123/scripts/example.lua", "line": 42},
-        observed_timestamp_ns=1_788_657_000_123_456_789,
-        severity_text="ERROR",
+    pipeline = SimpleNamespace(
+        logs_enabled=True,
+        emit_operational=Mock(),
+        resource=SimpleNamespace(attributes={}),
     )
-    server = cast(
-        "Server",
-        SimpleNamespace(
-            config=relay.config,
-            game_events=SimpleNamespace(nonce=str(ULID())),
-            read_operational_event=AsyncMock(side_effect=(record, None)),
-            recorder=SimpleNamespace(attributes=Mock(return_value={})),
+    server = Server(
+        relay.config,
+        recorder=Recorder(
+            "cluster", "forest", pipeline=cast("otel.Pipeline", pipeline)
         ),
     )
-    pipeline = SimpleNamespace(logs_enabled=True, emit_operational=Mock())
-    relay._pipeline = cast("otel.Pipeline", pipeline)
-
-    await relay._drain_operational(server)
+    await server._observe_operational(
+        "dst.runtime.lua_error", {"line": 42}, "ERROR", 1_788_657_000_123_456_789
+    )
 
     pipeline.emit_operational.assert_called_once()
     kwargs = pipeline.emit_operational.call_args.kwargs
-    assert kwargs["event_name"] == record.event_name
-    assert kwargs["body"] == record.body
-    assert kwargs["observed_timestamp_ns"] == record.observed_timestamp_ns
+    assert kwargs["event_name"] == "dst.runtime.lua_error"
+    assert kwargs["body"] == {"line": 42}
+    assert kwargs["observed_timestamp_ns"] == 1_788_657_000_123_456_789
     assert kwargs["severity_text"] == "ERROR"
-    assert kwargs["attributes"]["log.record.uid"] == record.uid
+    assert ULID.from_str(kwargs["attributes"]["log.record.uid"])
     assert kwargs["attributes"]["dst.game.attempt.id"] == server.game_events.nonce
 
 
@@ -166,7 +167,6 @@ async def test_telemetry_relays_start_before_process_readiness_and_are_critical(
     monkeypatch.setattr(agent_module, "Server", Mock(return_value=server))
     monkeypatch.setattr(relay, "_drain_lifecycle", AsyncMock())
     monkeypatch.setattr(relay, "_drain_game_events", AsyncMock(side_effect=failures[0]))
-    monkeypatch.setattr(relay, "_drain_operational", AsyncMock(side_effect=failures[1]))
     calls: list[tuple[str, bool]] = []
 
     def done(
@@ -178,13 +178,12 @@ async def test_telemetry_relays_start_before_process_readiness_and_are_critical(
 
     monkeypatch.setattr(relay, "_background_done", done)
     assert relay._new_server() is server
-    assert len(relay._attempt_tasks) == 3
+    assert len(relay._attempt_tasks) == 2
     await asyncio.gather(*relay._attempt_tasks, return_exceptions=True)
     await asyncio.sleep(0)
 
     assert ("dst-lifecycle-relay-forest", True) in calls
     assert ("dst-game-event-relay-forest", True) in calls
-    assert ("dst-operational-relay-forest", True) in calls
 
 
 async def test_finished_process_does_not_hide_event_stream_failure(
@@ -237,6 +236,16 @@ async def test_stopped_waits_for_both_telemetry_tails(relay: ShardAgent) -> None
         await asyncio.gather(stop, *tails, return_exceptions=True)
 
 
+def split_records(stderr: str) -> tuple[list[dict[str, Any]], list[str]]:
+    records, ordinary_lines = [], []
+    for value in stderr.split("\n")[:-1]:
+        if value.startswith("forest: DST_RECORD|"):
+            records.append(orjson.loads(value.removeprefix("forest: DST_RECORD|")))
+        else:
+            ordinary_lines.append(value)
+    return records, ordinary_lines
+
+
 @pytest.mark.parametrize("pipeline_mode", ["none", "logs_disabled", "logs_enabled"])
 @pytest.mark.parametrize(
     "kind",
@@ -260,12 +269,15 @@ def test_child_log_routing_reaches_the_actual_cli_stderr(
     enabled = pipeline_mode == "logs_enabled"
     pipeline = SimpleNamespace(
         logs_enabled=enabled,
-        emit_event=Mock(),
         emit_operational=Mock(),
+        resource=SimpleNamespace(attributes={}),
     )
     if pipeline_mode != "none":
         relay._pipeline = cast("otel.Pipeline", pipeline)
-    server = Server(relay.config)
+    server = Server(
+        relay.config,
+        recorder=Recorder("cluster", "forest", pipeline=relay._pipeline),
+    )
     server.log_handler = lambda line: relay._log(server, line)
     subscription = relay.logs.subscribe()
     rpc_lines: list[str] = []
@@ -300,7 +312,6 @@ def test_child_log_routing_reaches_the_actual_cli_stderr(
         finally:
             await server.finish()
         await relay._drain_game_events(server)
-        await relay._drain_operational(server)
         for _ in range(relay._log_sequence):
             rpc_lines.extend(record.line for record in await subscription.next(1))
         subscription.close()
@@ -318,26 +329,31 @@ def test_child_log_routing_reaches_the_actual_cli_stderr(
         "invalid_utf8",
     }
     expected = [f"forest: {value}" for value in line.split("\n")] if ordinary else []
-    if kind == "event" and not enabled:
-        expected.append(f"forest: DST_EVENT|{payload}")
-    if kind == "diagnostic" and not enabled:
-        expected.append("forest: dst.runtime.diagnostic: {'kind': 'lua_error'}")
-    if kind == "invalid_payload":
-        expected.append("discard invalid DST game event")
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "".join(
-        value.replace("\0", r"\0") + "\n" for value in expected
+    records, ordinary_lines = split_records(captured.err)
+    assert ordinary_lines == [value.replace("\0", r"\0") for value in expected]
+    event_name = {
+        "event": "dst.world.state_changed",
+        "diagnostic": "dst.runtime.diagnostic",
+        "invalid_payload": "dst.telemetry.rejected",
+    }.get(kind)
+    assert [record["event_name"] for record in records] == (
+        [event_name] if event_name else []
     )
-    assert captured.err.count("\n") == len(expected)
+    if kind == "event":
+        assert records[0]["body"] == event.data.model_dump(mode="json")
+        assert records[0]["attributes"]["log.record.uid"] == f"{event.nonce}:1:1"
+    if kind == "invalid_payload":
+        assert records[0]["body"]["reason"] == "schema"
+        assert "invalid-json" not in captured.err
     assert rpc_lines == (line.split("\n") if ordinary else [])
     assert relay._log_sequence == len(rpc_lines)
     assert relay._game_sequence == int(kind == "event")
     assert server.telemetry_invalid == int(kind == "invalid_payload")
-    assert pipeline.emit_event.call_count == int(enabled and kind == "event")
-    assert pipeline.emit_operational.call_count == int(enabled and kind == "diagnostic")
-    if enabled and kind == "event":
-        assert pipeline.emit_event.call_args.args[0].record == event
+    assert pipeline.emit_operational.call_count == int(
+        enabled and event_name is not None
+    )
     if enabled and kind == "diagnostic":
         assert pipeline.emit_operational.call_args.kwargs["body"] == {
             "kind": "lua_error"

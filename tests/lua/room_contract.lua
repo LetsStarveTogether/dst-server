@@ -1,5 +1,6 @@
 local repository, cluster, expected_path = assert(arg[1]), assert(arg[2]), assert(arg[3])
-package.path = repository .. "/dst-scripts/scripts/?.lua;" .. package.path
+local scripts = os.getenv("DST_SERVER_TEST_SCRIPTS") or repository .. "/dst-scripts/scripts"
+package.path = scripts .. "/?.lua;" .. package.path
 local json = require("json")
 local stream = assert(io.open(expected_path, "r"))
 local expected = json.decode(stream:read("*a"))

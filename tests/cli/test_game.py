@@ -17,6 +17,7 @@ from rich.text import Text
 from ulid import ULID
 
 from dst_server import commands as c
+from dst_server.announcements import Countdown, Repeat
 from dst_server.cli import game, main
 from dst_server.cli import logs as cli_logs
 from dst_server.errors import ErrorCode, ErrorInfo, IndeterminateError
@@ -36,6 +37,7 @@ from dst_server.models.console import ConsoleError, ConsoleResult, ConsoleValue
 from dst_server.presets.lst import fleet_room
 from dst_server.rooms import CONTROL_FILE
 from dst_server.rpc import Subscription
+from tests.helpers import wait_for_event
 
 
 @pytest.mark.parametrize(
@@ -142,7 +144,6 @@ def test_console_source_validates_modes_and_preserves_multiline(
 @pytest.mark.parametrize(
     ("arguments", "shard", "command"),
     [
-        (["announce", "hello everyone"], None, c.Announce(message="hello everyone")),
         (["world", "save", "--timeout", "45"], None, c.ClusterSave(timeout=45)),
         (
             ["world", "save", "--shard", "cave", "--timeout", "46"],
@@ -405,7 +406,7 @@ def test_template_selection_excludes_other_rooms_and_mutations_require_targets(
     ]
     assert set(rpc_clients) == {0, 1}
     for client in rpc_clients.values():
-        client.invoke.assert_awaited_once_with(c.Announce(message="hello"))
+        client.announce.assert_awaited_once_with(Repeat(message="hello"))
         client.__aexit__.assert_awaited_once()
 
 
@@ -438,7 +439,6 @@ def test_interactive_console_continues_after_lua_error_and_eof(
 
 @pytest.mark.parametrize("ending", ["prompt_eof", "journal_error", "journal_eof"])
 def test_interactive_follow_closes_prompt_and_journal_on_eof_or_log_failure(
-    cli_host: Host,
     rpc_clients: defaultdict[int, MagicMock],
     monkeypatch: pytest.MonkeyPatch,
     ending: str,
@@ -462,7 +462,7 @@ def test_interactive_follow_closes_prompt_and_journal_on_eof_or_log_failure(
     async def journal(
         _: JournalLogs, units: Sequence[str], request: JournalQuery
     ) -> AsyncIterator[MagicMock]:
-        assert units == (cli_host.shard_unit(1, "cave"),)
+        assert units == ("dst-001-cave.service",)
         assert request.limit == 0
         assert request.direction == "forward"
         stream = MagicMock(spec=JournalStream)
@@ -619,7 +619,7 @@ def test_rpc_subscriptions_all_start_and_one_failure_preserves_others(
     active: set[int] = set()
     ready = asyncio.Event()
     subscriptions = []
-    rpc_clients[0].subscribe_events.side_effect = ConnectionError("room offline")
+    rpc_clients[0].subscribe.side_effect = ConnectionError("room offline")
     for number in range(1, 10):
         cli_host.rooms.save(fleet_room(number, token=SecretStr("test-token")))
         subscription = MagicMock(spec=Subscription)
@@ -638,7 +638,7 @@ def test_rpc_subscriptions_all_start_and_one_failure_preserves_others(
             return ()
 
         subscription.next.side_effect = next_records
-        rpc_clients[number].subscribe_events.return_value = subscription
+        rpc_clients[number].subscribe.return_value = subscription
         subscriptions.append(subscription)
     assert main(["--json", "rpc", "subscribe", "events", "--all"]) == 1
     assert active == set(range(1, 10))
@@ -879,3 +879,92 @@ def test_telemetry_cli_rejects_invalid_query_before_opening_host(
     monkeypatch.setattr(cli_logs, "make_host", make_host)
     assert main(["logs", "telemetry", "--room", "299", *arguments]) == 1
     make_host.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "announcement"),
+    [
+        (["hello"], Repeat(message="hello")),
+        (
+            ["hello", "--count", "3", "--interval", "15"],
+            Repeat(message="hello", count=3, interval=15),
+        ),
+        (
+            [
+                "{room} opens in {remaining} seconds",
+                "--countdown",
+                "90",
+                "--interval",
+                "15",
+                "--parameter",
+                "room=Lobby",
+            ],
+            Countdown(
+                template="{room} opens in {remaining} seconds",
+                delay=90,
+                interval=15,
+                parameters={"room": "Lobby"},
+            ),
+        ),
+    ],
+)
+def test_announcement_cli_delivers_validated_repeat_or_countdown(
+    rpc_clients: defaultdict[int, MagicMock],
+    arguments: list[str],
+    announcement: Repeat | Countdown,
+) -> None:
+    assert main(["announce", *arguments, "--room", "001"]) == 0
+    rpc_clients[1].announce.assert_awaited_once_with(announcement)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--count", "0"],
+        ["--interval", "0"],
+        ["--countdown", "-1"],
+        ["--countdown", "10", "--count", "2"],
+        ["--parameter", "room=Lobby"],
+        ["--countdown", "10", "--parameter", "room=Lobby", "--parameter", "room=Cave"],
+    ],
+)
+def test_invalid_announcement_never_connects_to_a_room(
+    rpc_clients: defaultdict[int, MagicMock], arguments: list[str]
+) -> None:
+    assert main(["announce", "hello", *arguments, "--room", "001"]) != 0
+    assert not rpc_clients
+
+
+async def test_countdown_starts_in_all_rooms_before_any_countdown_finishes(
+    cli_host: Host,
+    rpc_clients: defaultdict[int, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+    started = 0
+
+    async def announce(plan: Countdown) -> None:
+        nonlocal started
+        assert isinstance(plan, Countdown)
+        started += 1
+        if started == 9:
+            entered.set()
+        await release.wait()
+
+    for number in range(9):
+        cli_host.rooms.save(fleet_room(number, token=SecretStr("test-token")))
+        rpc_clients[number].announce.side_effect = announce
+    monkeypatch.setattr(game, "make_host", lambda: cli_host)
+    pending = asyncio.create_task(
+        game.announce("{remaining} seconds", room=("000-008",), countdown=60)
+    )
+    try:
+        async with asyncio.timeout(5):
+            await wait_for_event(entered, pending)
+            assert started == 9
+            release.set()
+            await pending
+    finally:
+        release.set()
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)

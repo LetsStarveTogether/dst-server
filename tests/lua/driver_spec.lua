@@ -1,6 +1,7 @@
 local root = assert(arg[1], "repository root is required")
 local scenario = assert(arg[2], "scenario is required")
-package.path = root .. "/src/dst_server/lua/?.lua;" .. root .. "/dst-scripts/scripts/?.lua;" .. package.path
+local scripts = os.getenv("DST_SERVER_TEST_SCRIPTS") or root .. "/dst-scripts/scripts"
+package.path = root .. "/src/dst_server/lua/?.lua;" .. scripts .. "/?.lua;" .. package.path
 json = require("json")
 require("class")
 require("bufferedaction")
@@ -39,11 +40,27 @@ TheWorld.watchers = {}
 TheWorld.WatchWorldState = function(self, name, callback) self.watchers[name] = callback end
 AllPlayers = { player }
 Shard_UpdateWorldState = function(...) return ... end
+Networking_ModOutOfDateAnnouncement = function(...) return ... end
+Networking_Say = function(...) return ... end
+Networking_Announcement = function(...) return ... end
+Networking_SkinAnnouncement = function(...) return ... end
+Networking_SystemMessage = function(...) return ... end
+Networking_RollAnnouncement = function(...) return ... end
+OnSimPaused = function(...) return ... end
+OnSimUnpaused = function(...) return ... end
+MAX_CHAT_INPUT_LENGTH = 150
+string.utf8len = function(value) return #value end
+Ents = { [1] = player }
 REMOTESHARDSTATE = { READY = 1 }
 GetTick = function() return 10 end
 GetTimeReal = function() return 20 end
 local saved = false
-c_save = function() saved = true end
+TheWorld.ismastershard = true
+TheNet = {
+    GetCurrentSnapshot = function() return 1 end,
+    GetWorldSessionFile = function() return "session/SESSION/0000000001" end,
+}
+ShardGameIndex = { SaveCurrent = function(_, callback) saved = true; callback() end }
 
 local function options(profile)
     return {
@@ -87,8 +104,89 @@ function scenarios.off()
     TheWorld.WatchWorldState = nil
     BufferedAction, Shard_UpdateWorldState, GetTick, GetTimeReal = nil, nil, nil, nil
     local driver = install("off")
-    assert(driver.call("save", {}) == true and saved)
+    local result
+    require("dst_server.commands").save({}, function(data, failure)
+        assert(failure == nil)
+        result = data
+    end)
+    assert(saved and result.snapshot == "session/SESSION/0000000001")
     assert(#outputs == 0)
+end
+
+local function mod_outdated(profile)
+    local driver = install(profile)
+    local callback = Networking_ModOutOfDateAnnouncement
+    assert(not pcall(driver.install, options(profile)))
+    assert(Networking_ModOutOfDateAnnouncement == callback, "installation must not stack wrappers")
+    local packed = require("dst_server.telemetry").pack(Networking_ModOutOfDateAnnouncement("Insight", nil, "tail", nil))
+    assert(packed.n == 4 and packed[1] == "Insight" and packed[2] == nil and packed[3] == "tail")
+    local events = records("dst.mod.outdated")
+    assert(#events == 1 and events[1].data.name == "Insight")
+    assert(driver.health().telemetry_status == (profile == "off" and "disabled" or "active"))
+end
+function scenarios.mod_outdated_off() mod_outdated("off") end
+function scenarios.mod_outdated_history() mod_outdated("history") end
+function scenarios.mod_outdated_native_error()
+    local failure = {}
+    Networking_ModOutOfDateAnnouncement = function() error(failure, 0) end
+    install("off")
+    local ok, result = pcall(Networking_ModOutOfDateAnnouncement, "Insight")
+    assert(not ok and result == failure, "the native exception must be preserved")
+    assert(#records("dst.mod.outdated") == 1, "detection must survive announcement failure")
+end
+function scenarios.mod_outdated_capture_error()
+    local driver = install("off")
+    require("dst_server.telemetry").emit = function() error("capture failed") end
+    assert(Networking_ModOutOfDateAnnouncement("Insight") == "Insight")
+    assert(driver.health().telemetry_status == "disabled")
+end
+function scenarios.mod_outdated_telemetry_failed()
+    TheWorld.ListenForEvent = function() error("optional installation failed") end
+    local driver = require("dst_server")
+    assert(driver.install(options()).telemetry_status == "degraded")
+    assert(Networking_ModOutOfDateAnnouncement("Insight") == "Insight")
+    assert(#records("dst.mod.outdated") == 1)
+end
+function scenarios.mod_outdated_missing_callback()
+    Networking_ModOutOfDateAnnouncement = nil
+    local ok, failure = pcall(require("dst_server").install, options("off"))
+    assert(not ok and string.find(failure, "Networking_ModOutOfDateAnnouncement", 1, true))
+end
+
+function scenarios.chat_wrapper()
+    local driver = install("critical")
+    local callback = Networking_Say
+    assert(not pcall(driver.install, options("critical")))
+    assert(Networking_Say == callback, "installation must not stack chat wrappers")
+    local results = require("dst_server.telemetry").pack(Networking_Say(
+        1, "KU_TEST", "Player", "wilson", "hello", nil, false, true, nil))
+    assert(results.n == 9 and results[5] == "hello" and results[6] == nil and results[9] == nil)
+    local events = records("dst.player.chat")
+    assert(#events == 1 and events[1].data.emote and not events[1].data.whisper)
+end
+
+function scenarios.chat_off()
+    local callback = Networking_Say
+    install("off")
+    assert(Networking_Say == callback)
+    Networking_Say(1, "KU_TEST", "Player", "wilson", "hello")
+    assert(#records("dst.player.chat") == 0)
+end
+
+function scenarios.chat_native_error()
+    local failure = {}
+    Networking_Say = function() error(failure, 0) end
+    install("critical")
+    local ok, result = pcall(Networking_Say, 1, "KU_TEST", "Player", "wilson", "hello")
+    assert(not ok and result == failure, "the native exception must be preserved")
+    assert(#records("dst.player.chat") == 0)
+end
+
+function scenarios.chat_capture_error()
+    install("critical")
+    require("dst_server.telemetry").emit = function() error("capture failed") end
+    assert(Networking_Say(1, "KU_TEST", "Player", "wilson", "hello") == 1)
+    assert(#records("dst.telemetry.error") == 1)
 end
 
 local function player_loaded(profile)
@@ -97,7 +195,7 @@ local function player_loaded(profile)
     -- A player already loaded before installation must not become a new login.
     player._PostActivateHandshakeState_Server = POSTACTIVATEHANDSHAKE.READY
     local driver = install(profile)
-    assert(driver.install(options(profile)).events_emitted == 0)
+    assert(driver.health().events_emitted == 0)
     native.OnPostActivateHandshake_Server(player, POSTACTIVATEHANDSHAKE.READY)
     assert(#records("dst.player.loaded") == 0)
 
@@ -108,7 +206,7 @@ local function player_loaded(profile)
     TheWorld:PushEvent("ms_playerjoined", joining)
     assert(#records("dst.player.loaded") == 0, "joining precedes the loading handshake")
     assert(#records("dst.player.shard_entered") == (profile == "off" and 0 or 1))
-    driver.install(options(profile))
+    assert(not pcall(driver.install, options(profile)))
     for _, phase in ipairs({ POSTACTIVATEHANDSHAKE.CTS_LOADED, POSTACTIVATEHANDSHAKE.STC_SENDINGSTATE }) do
         native.OnPostActivateHandshake_Server(joining, phase)
         assert(#records("dst.player.loaded") == 0, "loading is not yet complete")
@@ -118,7 +216,7 @@ local function player_loaded(profile)
     assert(#loaded == 1 and loaded[1].data.player.userid == joining.userid)
     assert(loaded[1].session_id == "SESSION")
     native.OnPostActivateHandshake_Server(joining, POSTACTIVATEHANDSHAKE.READY)
-    driver.install(options(profile))
+    assert(not pcall(driver.install, options(profile)))
     assert(#records("dst.player.loaded") == 1, "duplicate handshake or install must not renew activity")
     assert(driver.health().errors == 0)
 end
@@ -139,28 +237,15 @@ function scenarios.active()
     assert(driver.health().events_emitted == 2)
     local listeners = #TheWorld.listeners.ms_playerjoined
     local action_hook, shard_hook, world_hook = BufferedAction.Do, Shard_UpdateWorldState, TheWorld.watchers.cycles
-    assert(driver.install(options()).events_emitted == 2)
-    assert(#TheWorld.listeners.ms_playerjoined == listeners)
-    local changed = options()
-    changed.generation = 8
-    local health = driver.install(changed)
-    assert(health.generation == 8 and health.events_emitted == 2 and health.errors == 0)
-    assert(driver.install(changed).generation == 8)
-    assert(#TheWorld.listeners.ms_playerjoined == listeners)
-    assert(BufferedAction.Do == action_hook and Shard_UpdateWorldState == shard_hook)
-    assert(TheWorld.watchers.cycles == world_hook)
-    assert(not pcall(driver.install, options()), "generation must not move backwards")
-    for _, name in ipairs({ "nonce", "profile", "actions", "world" }) do
-        local invalid = options()
-        invalid.generation = 9
-        local world = TheWorld
-        if name == "nonce" then invalid.nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
-        elseif name == "profile" then invalid.profile = "critical"
-        elseif name == "actions" then invalid.actions = { "CHOP" }
-        else TheWorld = { ismastersim = true } end
-        assert(not pcall(driver.install, invalid))
-        TheWorld = world
-        assert(driver.health().generation == 8, "rejected options must not advance generation")
+    for _, generation in ipairs({ 7, 8 }) do
+        local repeated = options()
+        repeated.generation = generation
+        assert(not pcall(driver.install, repeated), "a Lua VM must install only once")
+        local health = driver.health()
+        assert(health.generation == 7 and health.events_emitted == 2 and health.errors == 0)
+        assert(#TheWorld.listeners.ms_playerjoined == listeners)
+        assert(BufferedAction.Do == action_hook and Shard_UpdateWorldState == shard_hook)
+        assert(TheWorld.watchers.cycles == world_hook)
     end
 end
 
@@ -502,13 +587,22 @@ end
 function scenarios.partial_failure()
     TheWorld.ListenForEvent = function() error("SECRET_TOKEN private chat", 0) end
     local health = require("dst_server").install(options())
-    assert(health.protocol == 2 and health.telemetry_status == "failed")
+    assert(health.protocol == 2 and health.telemetry_status == "degraded")
     assert(health.last_error.message == "installation_failed")
-    assert(health.errors == 1)
-    local count = #outputs
-    assert(Shard_UpdateWorldState("2", nil, {}, nil, "Caves") == "2")
-    assert(#outputs == count, "partially installed hooks remain inert")
+    assert(health.errors == 2 and health.last_error.stage == "world.install")
+    assert(Shard_UpdateWorldState("2", nil, "", nil, "Caves") == "2")
+    Networking_Say(1, "KU_TEST", "Player", "wilson", "hello")
+    assert(#records("dst.shard.connection_changed") == 1)
+    assert(#records("dst.player.chat") == 1, "unrelated collectors survive installation failures")
     assert_safe()
+end
+
+function scenarios.missing_clocks()
+    GetTick = nil
+    local health = require("dst_server").install(options())
+    assert(health.telemetry_status == "failed")
+    assert(health.last_error.stage == "clocks.install")
+    assert(#records("dst.telemetry.error") == 1)
 end
 
 function scenarios.invalid_options()

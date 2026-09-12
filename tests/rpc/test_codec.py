@@ -22,6 +22,7 @@ from dst_server.configuration.overrides import (
 from dst_server.configuration.world import ForestOverrides, WorldOverrides
 from dst_server.events import GAME_EVENT_ADAPTER
 from dst_server.events.server import SavedEvent
+from dst_server.models.base import JSON_VALUE
 from dst_server.models.cluster import (
     GameEventRecord,
     LifecycleRecord,
@@ -39,7 +40,7 @@ from dst_server.models.snapshot import (
 from dst_server.rpc.codec import (
     decode_json_value,
     decode_model,
-    encode_json_value,
+    encode,
     encode_model,
 )
 from dst_server.rpc.schema import load_schema
@@ -278,7 +279,7 @@ def test_configuration_world_discriminator_is_stable_and_checked() -> None:
     [None, [], {}, [1, {"value": None}], {"nested": ["x"]}],
 )
 def test_json_values_round_trip(value: JsonValue) -> None:
-    assert decode_json_value(encode_json_value(value)) == value
+    assert decode_json_value(encode(JSON_VALUE, value)) == value
 
 
 @pytest.mark.parametrize(
@@ -293,4 +294,4 @@ def test_codec_rejects_duplicate_json_keys(payload: bytes) -> None:
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
 def test_codec_rejects_non_finite_numbers(value: float) -> None:
     with pytest.raises(ValidationError):
-        encode_json_value(value)
+        encode(JSON_VALUE, value)

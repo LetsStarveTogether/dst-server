@@ -7,9 +7,6 @@ from dst_server.configuration.models import ShardName
 from dst_server.models.base import RevalidatedFrozenModel
 from dst_server.telemetry import TelemetrySettings
 
-LUA_DIRECTORY = Path(__file__).parents[1] / "lua"
-
-
 type Argument = Annotated[str, Field(pattern=r"^[^\x00]*$")]
 
 
@@ -24,16 +21,22 @@ class ServerConfig(RevalidatedFrozenModel):
     telemetry_cluster: str | None = None
     ugc_directory: Path | None = Path("/cluster/mods/ugc")
     extra_args: tuple[Argument, ...] = ("-skip_update_server_mods",)
-    lua_directory: Path = LUA_DIRECTORY
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
     monitor_parent_process: bool = True
+
+    @property
+    def directory(self) -> Path:
+        # DST concatenates arguments: even conf_dir="/" stays below the storage root.
+        return Path(
+            f"{self.persistent_storage_root.absolute()}/{self.conf_dir}/{self.cluster}/{self.shard}"
+        )
 
     def command(self, *, monitor_parent_process: int | None = None) -> tuple[str, ...]:
         type(self).model_validate(self)
         command = [
             str(self.executable),
             "-persistent_storage_root",
-            str(self.persistent_storage_root),
+            str(self.persistent_storage_root.absolute()),
             "-conf_dir",
             self.conf_dir,
             "-cluster",

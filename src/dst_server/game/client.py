@@ -1,6 +1,5 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any, cast
 
 from pydantic import JsonValue
@@ -8,27 +7,19 @@ from pydantic import JsonValue
 from dst_server import commands as c
 from dst_server.api import EndpointAPI, PlayerAPI
 from dst_server.errors import IndeterminateCommandError
-from dst_server.lua_codec import lua_string, lua_value
+from dst_server.events.server import SavedEvent, parse_event
 from dst_server.models.driver import DriverHealth
-from dst_server.telemetry import TelemetrySettings
 from dst_server.telemetry.recorder import Recorder
 from dst_server.timeouts import DEFAULT_RELOAD_TIMEOUT
 
 from .rpc import (
-    BOOL_RESPONSE,
-    DRIVER_RESPONSE,
     MAX_RESULT_LINE_BYTES,
-    RESULT_PREFIX,
+    SAVE_RESPONSE,
     Failure,
     LuaRequestError,
     ResponseAdapter,
-    lua_package_path,
-    lua_request,
     response_adapter,
 )
-
-DRIVER_MODULE = "dst_server"
-
 
 _METHODS: dict[type[c.Request[Any]], str] = {
     c.Health: "health",
@@ -80,28 +71,22 @@ class GameClient(EndpointAPI):
         self,
         *,
         shard: str,
-        lua_directory: Path,
-        telemetry: TelemetrySettings,
-        execute: Callable[[str], Awaitable[str]],
-        execute_ready: Callable[[str], Awaitable[str]],
+        execute_ready: Callable[[str, dict[str, JsonValue]], Awaitable[bytes]],
         recorder: Recorder,
         session_id: Callable[[], str | None],
-        nonce: str,
-        execute_reload: Callable[[str, float], Awaitable[tuple[str, int, float]]],
+        execute_reload: Callable[
+            [str, dict[str, JsonValue], float], Awaitable[tuple[bytes, int, float]]
+        ],
         wait_reload: Callable[[int, float], Awaitable[None]],
         observe_health: Callable[[int, DriverHealth], None] | None = None,
     ) -> None:
         self.shard = shard
-        self.lua_directory = lua_directory
-        self.telemetry = telemetry
-        self.execute = execute
         self.execute_ready = execute_ready
         self.execute_reload = execute_reload
         self.wait_reload = wait_reload
         self.observe_health = observe_health
         self.recorder = recorder
         self.session_id = session_id
-        self.nonce = nonce
         self.players = PlayerAPI(self)
 
     async def invoke[T](self, command: c.Request[T]) -> T:
@@ -145,25 +130,13 @@ class GameClient(EndpointAPI):
             self.observe_health(value.generation, value)
         return cast("T", None if spec.result_type is None else value)
 
-    async def request_save(self) -> None:
-        await self.request("save", {}, BOOL_RESPONSE)
-
-    async def install(self, generation: int) -> DriverHealth:
-        options = self.telemetry.model_dump(mode="json") | {
-            "nonce": self.nonce,
-            "generation": generation,
-        }
-        package_path = lua_package_path(self.lua_directory)
-        body = (
-            f"local driver=require({lua_string(DRIVER_MODULE)});"
-            f"return driver.install({lua_value(options)})"
-        )
-        result = await self.execute(
-            f"local path={lua_string(package_path)};"
-            "if not (';'..package.path..';'):find(';'..path,1,true) then "
-            "package.path=path..package.path end;" + lua_request(body)
-        )
-        return self.parse(result, DRIVER_RESPONSE)
+    async def request_save(self) -> SavedEvent:
+        result = await self.request("save", {}, SAVE_RESPONSE)
+        event = parse_event("DST_Saved|" + result.snapshot)
+        if not isinstance(event, SavedEvent) or event.snapshot is None:
+            msg = "DST save callback did not identify a completed snapshot"
+            raise IndeterminateCommandError(msg)
+        return event
 
     async def request[DataT](
         self,
@@ -176,12 +149,7 @@ class GameClient(EndpointAPI):
             self.session_id(),
         ) as span:
             span.set_attribute("dst.lua.method", method)
-            body = (
-                f"return require({lua_string(DRIVER_MODULE)}).call("
-                f"{lua_string(method)},"
-                f"{lua_value(arguments)})"
-            )
-            result = await self.execute_ready(lua_request(body))
+            result = await self.execute_ready(method, arguments)
             return self._parse_result(method, result, adapter)
 
     async def reload[DataT](
@@ -196,13 +164,8 @@ class GameClient(EndpointAPI):
             self.session_id(),
         ) as span:
             span.set_attribute("dst.lua.method", method)
-            body = (
-                f"return require({lua_string(DRIVER_MODULE)}).call("
-                f"{lua_string(method)},"
-                f"{lua_value(arguments)})"
-            )
             result, generation, deadline = await self.execute_reload(
-                lua_request(body), completion_timeout
+                method, arguments, completion_timeout
             )
             data = self._parse_result(method, result, adapter)
             try:
@@ -213,43 +176,22 @@ class GameClient(EndpointAPI):
             return data
 
     def _parse_result[T](
-        self, method: str, result: str, adapter: ResponseAdapter[T]
+        self, method: str, result: bytes, adapter: ResponseAdapter[T]
     ) -> T:
         try:
             return self.parse(result, adapter)
         except (ValueError, RuntimeError) as error:
-            safe_failure = (
-                isinstance(error, LuaRequestError)
-                and error.code == "lua_error"
-                and method not in {"execute_script", "evaluate"}
-            )
-            if (
-                method not in _MUTATIONS
-                or safe_failure
-                or isinstance(error, IndeterminateCommandError)
-            ):
+            if method not in _MUTATIONS or isinstance(error, IndeterminateCommandError):
                 raise
             msg = "DST mutation result could not be confirmed"
             raise IndeterminateCommandError(msg) from error
 
     def parse[DataT](
         self,
-        result: str,
+        payload: bytes,
         adapter: ResponseAdapter[DataT],
     ) -> DataT:
-        response = next(
-            (
-                line.removeprefix(RESULT_PREFIX)
-                for line in reversed(result.split("\n"))
-                if line.startswith(RESULT_PREFIX)
-            ),
-            None,
-        )
-        if response is None:
-            msg = "DST command did not return a structured result"
-            raise RuntimeError(msg)
-        payload = response.encode()
-        if len(payload) + len(RESULT_PREFIX) > MAX_RESULT_LINE_BYTES:
+        if len(payload) > MAX_RESULT_LINE_BYTES:
             msg = "DST command result exceeds the line size limit"
             raise RuntimeError(msg)
         c.validate_json_structure(payload)
@@ -260,6 +202,3 @@ class GameClient(EndpointAPI):
                 raise IndeterminateCommandError(msg)
             raise LuaRequestError(envelope.error)
         return envelope.data
-
-    async def get_health(self) -> DriverHealth:
-        return await self.invoke(c.Health())

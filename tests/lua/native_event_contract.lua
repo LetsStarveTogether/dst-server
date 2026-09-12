@@ -52,11 +52,23 @@ TheWorld.ismastersim = true
 TheWorld.state = { cycles = 3 }
 TheWorld.meta = { session_identifier = "SESSION" }
 TheNet = { GetSessionIdentifier = function() return "SESSION" end }
+MAX_CHAT_INPUT_LENGTH = 150
+-- The native UTF-8 helper is supplied by C++; count code points for valid test strings.
+string.utf8len = function(value)
+    local _, count = string.gsub(value, "[^\128-\191]", "")
+    return count
+end
 AllPlayers = { player, attacker }
 GetTime = function() return 1 end
 GetTick = function() return 10 end
 GetTimeReal = function() return 20 end
 Shard_UpdateWorldState = function(...) return ... end
+Networking_Announcement = function(...) return ... end
+Networking_SkinAnnouncement = function(...) return ... end
+Networking_SystemMessage = function(...) return ... end
+Networking_RollAnnouncement = function(...) return ... end
+OnSimPaused = function(...) return ... end
+OnSimUnpaused = function(...) return ... end
 REMOTESHARDSTATE = { READY = 1 }
 EQUIPSLOTS = { HANDS = "hands", BODY = "body" }
 FALLINGREASON = { OCEAN = 1, VOID = 2 }
@@ -71,6 +83,52 @@ local health = driver.install({
 assert(health.telemetry_status == (profile == "off" and "disabled" or "active"), tostring(health.last_error))
 
 local cases = {}
+
+local function mod_outdated(rail)
+    IsRail = function() return rail end
+    STRINGS = { MODS = { VERSIONING = { OUT_OF_DATE = "Steam %s", OUT_OF_DATE_RAIL = "Rail %s" } } }
+    local announcements = 0
+    Networking_Announcement = function(message, colour, kind)
+        announcements = announcements + 1
+        assert(message == (rail and "Rail Insight" or "Steam Insight"))
+        assert(colour == nil and kind == "mod")
+    end
+    assert(Networking_ModOutOfDateAnnouncement("Insight") == nil)
+    assert(announcements == 1, "the original native announcement must run exactly once")
+end
+cases.mod_outdated = function() mod_outdated(false) end
+cases.mod_outdated_rail = function() mod_outdated(true) end
+
+local function chat(mode)
+    local message = mode == "too_long" and string.rep("界", 151)
+        or mode == "unicode_limit" and string.rep("界", 150)
+        or mode == "empty" and "" or "你好\n世界"
+    if mode == "nil" then message = nil end
+    local whisper, emote = mode == "whisper", mode == "emote"
+    local character = mode == "lobby" and "" or "wilson"
+    local calls, talker_calls = 0, 0
+    Ents = (mode == "unknown_entity" or mode == "lobby") and {} or { [101] = player }
+    player.components.talker = { Say = function(_, value)
+        talker_calls = talker_calls + 1
+        assert(value == (message or ""))
+    end }
+    TheNet.GetNetIdForUser = function(_, userid)
+        assert(userid == "KU_PLAYER")
+        return "NETID"
+    end
+    ChatHistory = { OnSay = function(_, guid, userid, netid, name, prefab, value, colour, native_whisper, native_emote, vanity)
+        calls = calls + 1
+        assert(guid == 101 and userid == "KU_PLAYER" and netid == "NETID")
+        assert(name == "玩家" and prefab == character and value == message)
+        assert(colour == nil and native_whisper == whisper and native_emote == emote and vanity == nil)
+    end }
+    assert(Networking_Say(101, "KU_PLAYER", "玩家", character, message, nil, whisper, emote) == nil)
+    assert(calls == ((mode == "too_long" or mode == "nil") and 0 or 1))
+    assert(talker_calls == ((mode == "too_long" or mode == "unknown_entity" or mode == "lobby" or emote) and 0 or 1))
+end
+for _, mode in ipairs({ "say", "whisper", "emote", "unknown_entity", "lobby", "empty", "unicode_limit", "too_long", "nil" }) do
+    cases["chat_" .. mode] = function() chat(mode) end
+end
 
 local function position_action(mode)
     local alive, offset = true, 0
@@ -166,7 +224,7 @@ local function combat(damage, blocked, health)
             end,
         }
     end
-    assert(component:GetAttacked(attacker, damage) == nil)
+    component:GetAttacked(attacker, damage)
 end
 cases.combat_without_damage = function() combat(nil, false, false) end
 cases.combat_resolved_damage = function() combat(10, false, true) end

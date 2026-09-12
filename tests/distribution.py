@@ -9,6 +9,7 @@ from importlib.metadata import distribution
 from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from zipfile import ZipFile
 
 import orjson
 
@@ -38,6 +39,8 @@ def check_package() -> None:
         "rpc/schema/rpc.capnp",
         "lua/dst_server.lua",
         "lua/dst_server/console.lua",
+        "lua/dst_server/bootstrap.lua",
+        "lua/components/dst_server_runtime.lua",
         "host/systemd/dst-room-schedule.service",
         "host/systemd/dst-room-schedule.timer",
         "host/systemd/dst-room-recycle.service",
@@ -49,6 +52,7 @@ def check_package() -> None:
             "template",
             "deployment",
             "mod",
+            "scripts",
             "schedule",
             "maintenance",
             "agent",
@@ -139,6 +143,20 @@ def check_cli(directory: Path) -> None:
         for unit in (application.master, *application.secondaries)
     )
     assert not (store.path(299) / ".dst-server.sock").exists()
+
+    native = directory / "native.zip"
+    managed = directory / "scripts.zip"
+    with ZipFile(native, "w") as archive:
+        archive.writestr("scripts/main.lua", 'require("globalvariableoverrides")\n')
+        archive.writestr(
+            "scripts/globalvariableoverrides.lua", "-- Intentionally blank\n"
+        )
+    built = orjson.loads(run("scripts", "build", str(native), "--output", str(managed)))
+    assert built["sdk_files"] >= 3
+    assert (
+        orjson.loads(run("scripts", "verify", str(managed), "--source", str(native)))
+        == built
+    )
 
 
 if __name__ == "__main__":

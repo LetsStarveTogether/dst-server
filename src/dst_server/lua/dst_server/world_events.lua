@@ -14,9 +14,34 @@ function world_events.install_players()
     for _, player in ipairs(AllPlayers) do
         player_events.attach(player)
     end
+    if state.requested_profile ~= "off" then
+        player_events.install_lifecycle()
+    end
 end
 
 function world_events.install_world()
+    TheWorld:ListenForEvent("serverpauseddirty", telemetry.guard("world.serverpauseddirty", function(_, data)
+        telemetry.emit("dst.server.pause_changed", {
+            domain = "server",
+            pause = not not data.pause,
+            autopause = not not data.autopause,
+            gameautopause = not not data.gameautopause,
+            source = data.source or json.null,
+        })
+    end))
+    for name, paused in pairs({ OnSimPaused = true, OnSimUnpaused = false }) do
+        local original = _G[name]
+        if type(original) ~= "function" then error(name .. " is unavailable") end
+        local capture = telemetry.guard(paused and "world.sim_paused" or "world.sim_unpaused", function()
+            telemetry.emit("dst.server.pause_changed", { domain = "simulation", paused = paused })
+        end)
+        -- C++ calls these after the simulation transition; tasks cannot run while paused.
+        _G[name] = function(...)
+            local results = telemetry.pack(original(...))
+            capture()
+            return telemetry.unpack(results)
+        end
+    end
     TheWorld:ListenForEvent("ms_playerleft", telemetry.guard("world.ms_playerleft", function(_, player)
         telemetry.emit("dst.player.shard_left", { player = values.entity_ref(player) })
     end))

@@ -31,7 +31,6 @@ from dst_server.rpc.transport import (
 from dst_server.telemetry import TelemetrySettings
 from dst_server.timeouts import (
     DEFAULT_CONNECT_TIMEOUT,
-    DEFAULT_LIFECYCLE_TIMEOUT,
     RPC_TIMEOUT_MARGIN,
 )
 
@@ -230,6 +229,7 @@ async def _serve_master(
     shutdown_task: asyncio.Task[bool] | None = None
     failure_task: asyncio.Task[None] | None = None
     fatal_task: asyncio.Task[None] | None = None
+    controller_task: asyncio.Task[None] | None = None
     try:
         if shutdown.is_set():
             return
@@ -259,8 +259,11 @@ async def _serve_master(
             agent.wait_fatal(),
             name="dst-agent-fatal",
         )
+        controller_task = asyncio.create_task(
+            controller.wait_fatal(), name="dst-controller-fatal"
+        )
         done, _ = await asyncio.wait(
-            {shutdown_task, failure_task, fatal_task},
+            {shutdown_task, failure_task, fatal_task, controller_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
         if shutdown_task in done:
@@ -269,10 +272,12 @@ async def _serve_master(
             failure_task.result()
         if fatal_task in done:
             fatal_task.result()
+        if controller_task in done:
+            controller_task.result()
     finally:
         tasks = tuple(
             task
-            for task in (shutdown_task, failure_task, fatal_task)
+            for task in (shutdown_task, failure_task, fatal_task, controller_task)
             if task is not None
         )
 
@@ -304,76 +309,70 @@ async def _serve_agent(
         return
     shutdown_task = asyncio.create_task(shutdown.wait(), name="dst-shutdown")
     fatal_task = asyncio.create_task(agent.wait_fatal(), name="dst-agent-fatal")
-    cycle: asyncio.Task[None] | None = None
+    cycle = asyncio.create_task(
+        _registered_cycle(agent, internal_address, reconnect_delay=reconnect_delay),
+        name=f"dst-registry-{agent.name}",
+    )
     try:
-        while True:
-            if shutdown.is_set():
-                return
-            cycle = asyncio.create_task(
-                _registered_cycle(agent, internal_address),
-                name=f"dst-registry-{agent.name}",
-            )
-            done, _ = await asyncio.wait(
-                {shutdown_task, fatal_task, cycle},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if shutdown_task in done:
-                return
-            if fatal_task in done:
-                fatal_task.result()
-            try:
-                cycle.result()
-            except Exception as error:
-                logger.warning(
-                    "Shard registry connection lost: {kind}",
-                    kind=type(error).__name__,
-                )
-            await agent.kill()
-            cycle = None
-            if await _wait_reconnect(
-                reconnect_delay,
-                shutdown_task,
-                fatal_task,
-            ):
-                return
+        done, _ = await asyncio.wait(
+            {shutdown_task, fatal_task, cycle}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if shutdown_task in done:
+            return
+        if fatal_task in done:
+            fatal_task.result()
+        cycle.result()
+        msg = "shard registry connection closed"
+        raise ConnectionError(msg)
     finally:
         await complete(_cleanup_agent(cycle, shutdown_task, fatal_task, agent))
 
 
-async def _registered_cycle(agent: ShardAgent, internal_address: str) -> None:
+async def _registered_cycle(
+    agent: ShardAgent,
+    internal_address: str,
+    *,
+    reconnect_delay: float = RECONNECT_DELAY,
+) -> None:
     stack = AsyncExitStack()
     servant = AgentServant(agent)
     disconnected: asyncio.Future[object] | None = None
     failure: asyncio.Task[object] | None = None
     try:
         async with asyncio.timeout(DEFAULT_CONNECT_TIMEOUT):
-            stream = await capnp.AsyncIoStream.create_unix_connection(
-                f"\0{internal_address}"
-            )
+            while True:
+                try:
+                    stream = await capnp.AsyncIoStream.create_unix_connection(
+                        f"\0{internal_address}"
+                    )
+                    break
+                except ConnectionError, OSError:
+                    await asyncio.sleep(reconnect_delay)
             stack.callback(stream.close)
             client = capnp.TwoPartyClient(stream)
             stack.callback(client.close)
             registry = client.bootstrap().cast_as(load_schema().WorkerRegistry)
-        async with asyncio.timeout(DEFAULT_LIFECYCLE_TIMEOUT):
+        async with asyncio.timeout(DEFAULT_CONNECT_TIMEOUT):
             response = await registry.register(agent=servant)
         unwrap_outcome(response.result)
         disconnected = asyncio.ensure_future(client.on_disconnect())
-        while True:
-            failure = asyncio.create_task(
-                agent.next_failure(),
-                name=f"dst-failure-report-{agent.name}",
-            )
-            done, _ = await asyncio.wait(
-                {disconnected, failure},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if disconnected in done:
-                return
-            failure.result()
-            async with asyncio.timeout(REGISTRY_FAILURE_TIMEOUT):
-                response = await registry.failed()
-            unwrap_outcome(response.result)
-            failure = None
+        failure = asyncio.create_task(
+            agent.next_failure(),
+            name=f"dst-failure-report-{agent.name}",
+        )
+        done, _ = await asyncio.wait(
+            {disconnected, failure},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if disconnected in done:
+            msg = "registered controller disconnected"
+            raise ConnectionError(msg)
+        failure.result()
+        async with asyncio.timeout(REGISTRY_FAILURE_TIMEOUT):
+            response = await registry.failed()
+        unwrap_outcome(response.result)
+        msg = "shard retry budget exhausted"
+        raise RuntimeError(msg)
     finally:
         stack.push_async_callback(servant.aclose)
         stack.push_async_callback(
@@ -383,36 +382,15 @@ async def _registered_cycle(agent: ShardAgent, internal_address: str) -> None:
         await complete(stack.aclose())
 
 
-async def _wait_reconnect(
-    delay: float,
-    shutdown: asyncio.Task[bool],
-    fatal: asyncio.Task[None],
-) -> bool:
-    retry = asyncio.create_task(asyncio.sleep(delay), name="dst-registry-retry")
-    try:
-        done, _ = await asyncio.wait(
-            {retry, shutdown, fatal},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if shutdown in done:
-            return True
-        if fatal in done:
-            fatal.result()
-        return False
-    finally:
-        await cancel_tasks(retry)
-
-
 async def _cleanup_agent(
-    cycle: asyncio.Task[None] | None,
+    cycle: asyncio.Task[None],
     shutdown: asyncio.Task[bool],
     fatal: asyncio.Task[None],
     agent: ShardAgent,
 ) -> None:
     # Stop while the registry capability is still live, then release the connection.
     await _best_effort(agent.stop)
-    if cycle is not None:
-        await cancel_tasks(cycle)
+    await cancel_tasks(cycle)
     await cancel_tasks(shutdown, fatal)
     await _best_effort(agent.aclose)
 

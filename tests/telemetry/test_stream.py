@@ -1,7 +1,8 @@
 import asyncio
-import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from itertools import permutations
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock, call
 
 import orjson
@@ -10,9 +11,13 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 from ulid import ULID
 
+from dst_server.models.driver import DriverHealth, DriverReady, DriverStarting
+from dst_server.runtime import Server, ServerConfig
 from dst_server.telemetry import stream
+from dst_server.telemetry.otel import Pipeline
 from dst_server.telemetry.recorder import Recorder
 from dst_server.telemetry.stream import PREFIX, EventStream
+from tests.helpers import run_lua_process
 
 PLAYER = {"prefab": "wilson", "guid": 42, "userid": "KU_TEST", "position": None}
 NATIVE_PREFIXES = ["", "[00:00:01]: ", "[125:59:59]: "]
@@ -37,6 +42,67 @@ def event_line(nonce: str, sequence: int, **changes: object) -> str:
             | changes,
         ).decode()
     )
+
+
+@pytest.mark.parametrize("season", ["autumn", "wet", "monsoon", "custom_mod_season"])
+async def test_mod_season_event_is_preserved(season: str) -> None:
+    events = EventStream(Recorder("cluster", "shard"))
+    await events.accept(
+        event_line(events.nonce, 1, data={"name": "season", "value": season}),
+        123,
+    )
+    events.close()
+
+    observed = await events.read()
+    assert events.invalid == 0
+    assert observed is not None
+    assert observed.record.data.model_dump() == {"name": "season", "value": season}
+    assert observed.observed_timestamp_ns == 123
+
+
+async def test_mod_condition_survives_full_consumer_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(stream, "QUEUE_SIZE", 1)
+    events = EventStream(Recorder("cluster", "shard"))
+    await events.accept(event_line(events.nonce, 1), 1)
+    await events.accept(
+        event_line(events.nonce, 2, event="dst.mod.outdated", data={"name": "Insight"}),
+        2,
+    )
+    await events.accept(event_line(events.nonce, 3), 3)
+    events.close()
+    assert events.outdated_mods == {"Insight"}
+    assert events.dropped == 2
+
+
+async def test_only_valid_current_attempt_mod_reports_change_condition() -> None:
+    events = EventStream(Recorder("cluster", "shard"))
+    for nonce, data in (
+        (str(ULID()), {"name": "Old process"}),
+        (events.nonce, {"name": ""}),
+        (events.nonce, {"name": "x" * 4097}),
+        (events.nonce, {"name": 1}),
+        (events.nonce, {"name": "Spoofed version", "version": "1"}),
+    ):
+        await events.accept(
+            event_line(nonce, 1, event="dst.mod.outdated", data=data), 1
+        )
+    assert events.outdated_mods == set()
+    for generation in (1, 2, 1):
+        await events.accept(
+            event_line(
+                events.nonce,
+                1,
+                generation=generation,
+                event="dst.mod.outdated",
+                data={"name": "Insight"},
+            ),
+            1,
+        )
+    assert events.outdated_mods == {"Insight"}
+    assert events.invalid == 5
+    events.close()
 
 
 @given(st.lists(st.binary(max_size=128), min_size=1, max_size=40))
@@ -224,34 +290,32 @@ async def test_invalid_utf8_mixed_with_logs_does_not_poison_events(
     assert events.dropped == 0
 
 
-async def test_full_stream_waits_for_space_without_dropping(
+async def test_full_stream_drops_oldest_without_waiting_for_consumers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(stream, "QUEUE_SIZE", 1)
     recorder = Recorder("cluster", "shard")
     recorded = Mock()
+    observer = Mock()
+    journal = Mock()
     monkeypatch.setattr(recorder, "record_event", recorded)
-    events = EventStream(recorder)
-    assert await events.accept(event_line(events.nonce, 1), 11)
-
-    publishing = asyncio.create_task(events.accept(event_line(events.nonce, 2), 22))
-    await asyncio.sleep(0)
-
-    assert not publishing.done()
-    assert events.queue.qsize() == 1
-    assert events.dropped == 0
-    recorded.assert_called_once_with("accepted", event_name="dst.world.state_changed")
-    first = await events.read()
-    assert first is not None
-    assert (first.record.seq, first.observed_timestamp_ns) == (1, 11)
+    monkeypatch.setattr(recorder, "observe_game", journal)
+    events = EventStream(recorder, observe_event=observer)
     async with asyncio.timeout(1):
-        assert await publishing
+        assert await events.accept(event_line(events.nonce, 1), 11)
+        assert await events.accept(event_line(events.nonce, 2), 22)
+    assert observer.call_count == 2
+    assert journal.call_count == 2
+    assert [call.args[0].record.seq for call in journal.call_args_list] == [1, 2]
+    assert events.queue.qsize() == 1
+    assert events.dropped == 1
     second = await events.read()
     assert second is not None
     assert (second.record.seq, second.observed_timestamp_ns) == (2, 22)
     assert recorded.call_args_list == [
         call("accepted", event_name="dst.world.state_changed"),
         call("accepted", event_name="dst.world.state_changed"),
+        call("dropped", event_name="dst.world.state_changed", reason="queue_full"),
     ]
 
 
@@ -293,7 +357,7 @@ async def test_close_unblocks_all_waiting_readers() -> None:
         assert await asyncio.gather(*readers) == [None, None, None]
 
 
-async def test_close_rejects_blocked_publishers_without_evicting_accepted_event(
+async def test_close_rejects_late_publishers_without_evicting_queued_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(stream, "QUEUE_SIZE", 1)
@@ -302,14 +366,8 @@ async def test_close_rejects_blocked_publishers_without_evicting_accepted_event(
     monkeypatch.setattr(recorder, "record_event", recorded)
     events = EventStream(recorder)
     assert await events.accept(event_line(events.nonce, 1), 1)
-    publishing = asyncio.create_task(events.accept(event_line(events.nonce, 2), 2))
-    await asyncio.sleep(0)
-    assert not publishing.done()
-
     events.close()
-
-    async with asyncio.timeout(1):
-        assert await publishing
+    assert await events.accept(event_line(events.nonce, 2), 2)
     observed = await events.read()
     assert observed is not None
     assert observed.record.seq == 1
@@ -357,42 +415,25 @@ async def test_closed_stream_accounts_for_late_events() -> None:
         ),
     ],
 )
-async def test_cancelled_backpressure_has_no_gameplay_metric_side_effects(
+async def test_full_queue_updates_gameplay_metrics_once_before_consumption(
     monkeypatch: pytest.MonkeyPatch, name: str, data: dict[str, object]
 ) -> None:
     monkeypatch.setattr(stream, "QUEUE_SIZE", 1)
     recorder = Recorder("cluster", "shard")
-    recorder.set_player_count(2)
     actions = Mock()
-    recorded = Mock()
     monkeypatch.setattr(recorder, "record_action", actions)
-    monkeypatch.setattr(recorder, "record_event", recorded)
     events = EventStream(recorder)
     assert await events.accept(event_line(events.nonce, 1), 1)
     line = event_line(events.nonce, 2, event=name, data=data)
-    publishing = asyncio.create_task(events.accept(line, 2))
-    await asyncio.sleep(0)
-
-    assert recorder.player_count == 2
-    actions.assert_not_called()
-    publishing.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await publishing
-    assert events.queue.qsize() == 1
-    assert recorder.player_count == 2
-    assert events.dropped == 1
-    actions.assert_not_called()
-    assert recorded.call_args_list == [
-        call("accepted", event_name="dst.world.state_changed"),
-        call("dropped", event_name=name, reason="ingress_cancelled"),
-    ]
-
-    assert await events.read() is not None
     assert await events.accept(line, 2)
+    assert await events.accept(line, 3)
+    assert events.queue.qsize() == 1
+    assert events.dropped == events.duplicates == 1
     if name == "dst.player.action":
         actions.assert_called_once_with("CHOP", True)
     else:
-        assert recorder.player_count == (3 if name.endswith("entered") else 1)
+        actions.assert_not_called()
+        assert recorder.player_count == int(name.endswith("entered"))
 
 
 async def test_line_limit_counts_utf8_event_bytes_only() -> None:
@@ -412,21 +453,14 @@ async def test_line_limit_counts_utf8_event_bytes_only() -> None:
 
 async def lua_driver_output(luajit: str, *arguments: str) -> list[bytes]:
     root = Path(__file__).parents[2]
-    result = await asyncio.to_thread(
-        subprocess.run,
-        [
-            luajit,
-            str(root / "tests/lua/driver_spec.lua"),
-            str(root),
-            *arguments,
-        ],
-        capture_output=True,
-        timeout=5,
-        check=False,
+    output = await asyncio.to_thread(
+        run_lua_process,
+        luajit,
+        root / "tests/lua/driver_spec.lua",
+        root,
+        *arguments,
     )
-    assert result.returncode == 0, result.stderr
-    assert isinstance(result.stdout, bytes)
-    *lines, status = result.stdout.split(b"\n")
+    *lines, status = output.split(b"\n")
     assert status == b""
     assert lines.pop() == b"ok"
     return lines
@@ -455,48 +489,48 @@ async def test_native_debugprint_preserves_telemetry_lines(
     assert observed.record.seq == 2
 
 
-@pytest.mark.parametrize("prefix", ["", "[125:59:59]: "])
 @pytest.mark.parametrize("source", ["normal", "source"])
 @pytest.mark.parametrize("output", ["print", "nolineprint"])
 @pytest.mark.parametrize(
     "order", ["_".join(order) for order in permutations(("log", "error", "event"))]
 )
 async def test_native_debugprint_mixed_output_preserves_events(
-    luajit: str, prefix: str, source: str, output: str, order: str
+    luajit: str, source: str, output: str, order: str
 ) -> None:
     lines = await lua_driver_output(luajit, "print_mixed", source, output, order)
-    events = EventStream(Recorder("cluster", "shard"))
-    events.nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-    logs = []
-    for timestamp, line in enumerate(lines, start=1):
-        if not await events.accept(prefix.encode() + line, timestamp):
-            logs.append(line)
+    for prefix in (b"", b"[125:59:59]: "):
+        events = EventStream(Recorder("cluster", "shard"))
+        events.nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        logs = []
+        for timestamp, line in enumerate(lines, start=1):
+            if not await events.accept(prefix + line, timestamp):
+                logs.append(line)
 
-    events.close()
-    observed = []
-    while event := await events.read():
-        assert event.record.event == "dst.world.state_changed"
-        observed.append((event.record.seq, event.record.data.value))
-    assert observed == [(1, 2), (2, 3), (3, 4)]
-    assert events.invalid == 0
-    assert events.dropped == 0
-    assert any(b"#DST_OTEL|" in line for line in logs)
-    assert any(b"#LUA ERROR stack traceback:" in line for line in logs)
-    assert any(b"\xff" in line for line in logs)
-    ordinary = next(line for line in logs if b"ordinary\t" in line)
-    assert ordinary.endswith(b"\t") == (output == "print")
-    assert ordinary.startswith(b"@") == (source == "source" and output == "print")
-    assert any("玩家👩🏽‍💻\u200b\u202e\ue000".encode() in line for line in logs)
+        events.close()
+        observed = []
+        while event := await events.read():
+            assert event.record.event == "dst.world.state_changed"
+            observed.append((event.record.seq, event.record.data.value))
+        assert observed == [(1, 2), (2, 3), (3, 4)]
+        assert events.invalid == 0
+        assert events.dropped == 0
+        assert any(b"#DST_OTEL|" in line for line in logs)
+        assert any(b"#LUA ERROR stack traceback:" in line for line in logs)
+        assert any(b"\xff" in line for line in logs)
+        ordinary = next(line for line in logs if b"ordinary\t" in line)
+        assert ordinary.endswith(b"\t") == (output == "print")
+        assert ordinary.startswith(b"@") == (source == "source" and output == "print")
+        assert any("玩家👩🏽‍💻\u200b\u202e\ue000".encode() in line for line in logs)
 
 
-async def test_rejected_events_warn_once_per_reason(
+async def test_rejected_events_report_bounded_schema_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorder = Recorder("cluster", "shard")
     recorded = Mock()
     event_logger = Mock()
     monkeypatch.setattr(recorder, "record_event", recorded)
-    monkeypatch.setattr(stream, "logger", event_logger)
+    monkeypatch.setattr(recorder, "observe_log", event_logger)
     events = EventStream(recorder)
     cases = [
         (PREFIX + "{", "schema"),
@@ -516,10 +550,8 @@ async def test_rejected_events_warn_once_per_reason(
     ]
     assert events.invalid == len(cases) * 2
     assert events.queue.empty()
-    assert event_logger.warning.call_count == 4
-    assert all(
-        "DST_OTEL|" not in str(args) for args in event_logger.warning.call_args_list
-    )
+    assert event_logger.call_count == 10
+    assert all("DST_OTEL|" not in str(args) for args in event_logger.call_args_list)
 
 
 @pytest.mark.parametrize(
@@ -553,7 +585,7 @@ async def test_invalid_envelopes_do_not_poison_subsequent_events(
     assert events.invalid == 1
 
 
-async def test_sequences_are_preserved_without_inventing_a_loss_cause() -> None:
+async def test_ordered_stream_rejects_duplicates_and_stale_generations() -> None:
     events = EventStream(Recorder("cluster", "shard"))
     identities = [(1, 1), (1, 4), (1, 4), (1, 2), (2, 1), (1, 5)]
 
@@ -568,6 +600,291 @@ async def test_sequences_are_preserved_without_inventing_a_loss_cause() -> None:
     while event := await events.read():
         assert event.record.session_id is None
         observed.append((event.record.generation, event.record.seq))
-    assert observed == identities
+    assert observed == [(1, 1), (1, 4), (2, 1)]
+    assert events.duplicates == 1
+    assert events.stale == 2
+    assert events.gaps == 2
     assert events.invalid == 0
     assert events.dropped == 0
+
+
+async def test_presence_corrects_player_entities_and_independent_connections() -> None:
+    recorder = Recorder("cluster", "shard")
+    observer = Mock()
+    events = EventStream(recorder, observe_event=observer)
+    for sequence, guid in enumerate((42, 43), 1):
+        await events.accept(
+            event_line(
+                events.nonce,
+                sequence,
+                event="dst.player.shard_entered",
+                data={"player": PLAYER | {"guid": guid}},
+            ),
+            sequence,
+        )
+    assert recorder.player_count == 1
+    await events.accept(
+        event_line(
+            events.nonce, 3, event="dst.player.shard_left", data={"player": PLAYER}
+        ),
+        3,
+    )
+    assert recorder.player_count == 1
+    await events.accept(
+        event_line(
+            events.nonce,
+            4,
+            event="dst.client.authenticated",
+            data={"userid": "KU_LOBBY"},
+        ),
+        4,
+    )
+    assert recorder.client_count == recorder.player_count == 1
+    await events.accept(
+        event_line(
+            events.nonce,
+            6,
+            event="dst.server.presence",
+            data={
+                "reason": "startup",
+                "clients": ["KU_LOBBY", "KU_LOBBY"],
+                "players": [],
+                "max_players": 9,
+                "health": {
+                    "protocol": 2,
+                    "generation": 1,
+                    "telemetry_status": "active",
+                    "last_error": None,
+                    "events_emitted": 5,
+                    "errors": 0,
+                },
+            },
+        ),
+        60,
+    )
+    assert recorder.player_count == 0
+    assert recorder.client_count == 1
+    assert events.last_presence_timestamp_ns == events.last_event_timestamp_ns == 60
+    assert events.gaps == 1
+    assert observer.call_args.args[0].event == "dst.server.presence"
+    await events.accept(
+        event_line(
+            events.nonce,
+            7,
+            event="dst.client.disconnected",
+            data={"userid": "KU_LOBBY"},
+        ),
+        61,
+    )
+    assert recorder.client_count == 0
+    events.start_generation(2)
+    assert events.sequence == 0
+    assert events.gaps == 1
+    assert events.last_presence_timestamp_ns is None
+    await events.accept(
+        event_line(
+            events.nonce, 8, event="dst.player.shard_entered", data={"player": PLAYER}
+        ),
+        62,
+    )
+    assert events.stale == 1
+    assert recorder.player_count == 0
+
+
+@pytest.mark.parametrize("profile", ["off", "critical"])
+async def test_activity_survives_queue_eviction_and_includes_lobby_disconnect(
+    monkeypatch: pytest.MonkeyPatch, profile: stream.TelemetryProfile
+) -> None:
+    from datetime import UTC, datetime
+
+    monkeypatch.setattr(stream, "QUEUE_SIZE", 1)
+    recorder = Recorder("cluster", "shard")
+    events = EventStream(recorder, profile=profile)
+    for seq, event in enumerate(("authenticated", "disconnected"), 1):
+        await events.accept(
+            event_line(
+                events.nonce,
+                seq,
+                event="dst.client." + event,
+                data={"userid": "KU_LOBBY"},
+            ),
+            seq * 1_000_000_000,
+        )
+    assert events.last_active_at == datetime.fromtimestamp(2, UTC)
+    assert recorder.client_count == 0
+    await events.accept(
+        event_line(events.nonce, 3, event="dst.mod.outdated", data={"name": "Insight"}),
+        3_000_000_000,
+    )
+    assert events.last_active_at == datetime.fromtimestamp(2, UTC)
+    if profile == "off":
+        assert events.queue.empty()
+    else:
+        assert events.dropped == 2
+    events.start_generation(2)
+    assert events.last_active_at is None
+
+
+async def test_server_refreshes_presence_before_consumption_and_resets_on_new_world(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(stream, "QUEUE_SIZE", 1)
+    server = Server(ServerConfig(shard="forest"))
+    events = server.game_events
+    health = DriverHealth(
+        protocol=2,
+        generation=1,
+        telemetry_status="active",
+        last_error=None,
+        events_emitted=0,
+        errors=0,
+    )
+    await server._observe_driver(DriverReady(nonce=events.nonce, health=health))
+    await events.accept(event_line(events.nonce, 1), 1)
+    presence_health = health.replace(
+        telemetry_status="failed",
+        errors=1,
+        last_error={"stage": "install", "message": "installation_failed", "count": 1},
+        events_emitted=1,
+    )
+    try:
+        await events.accept(
+            event_line(
+                events.nonce,
+                2,
+                event="dst.server.presence",
+                data={
+                    "reason": "startup",
+                    "clients": ["KU_A", "KU_LOBBY"],
+                    "players": [
+                        {"userid": "KU_A", "guid": 1},
+                        {"userid": "KU_A", "guid": 2},
+                    ],
+                    "max_players": 9,
+                    "health": presence_health.model_dump(mode="json"),
+                },
+            ),
+            60,
+        )
+        assert events.dropped == 1
+        assert server.recorder.player_count == 1
+        assert server.recorder.client_count == 2
+        assert server.driver_health == presence_health.replace(events_emitted=2)
+        assert server.driver.is_ready(1)
+        # Duplicate native ready must not erase an already observed snapshot.
+        await server._observe_driver(DriverReady(nonce=events.nonce, health=health))
+        assert events.sequence == 2
+        assert server.recorder.player_count == 1
+        await server._observe_driver(DriverStarting(nonce=events.nonce, generation=2))
+        assert events.sequence == 0
+        assert server.recorder.player_count == server.recorder.client_count == 0
+        assert events.last_presence_timestamp_ns is None
+        assert not server.driver.is_ready(2)
+        await events.accept(event_line(events.nonce, 3), 61)
+        assert events.stale == 1
+        assert events.sequence == 0
+    finally:
+        await server.finish()
+
+
+@pytest.mark.parametrize("fragment", ['"seq":1,"seq":2', '"seq":1,"s\\u0065q":2'])
+async def test_duplicate_json_keys_are_rejected(fragment: str) -> None:
+    events = EventStream(Recorder("cluster", "shard"))
+    line = event_line(events.nonce, 1).replace('"seq":1', fragment)
+    await events.accept(line, 1)
+    assert events.invalid == 1
+    assert events.queue.empty()
+
+
+async def test_export_precedes_eviction_and_diagnostics_survive_saturation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(stream, "QUEUE_SIZE", 1)
+    sink = SimpleNamespace(
+        logs_enabled=True,
+        resource=SimpleNamespace(attributes={"service.name": "test"}),
+        emit_operational=Mock(),
+    )
+    recorder = Recorder("cluster", "shard", pipeline=cast("Pipeline", sink))
+    metrics = recorder.record_event = Mock()
+    events = EventStream(recorder)
+    for sequence in (1, 3, 5, 7):
+        await events.accept(event_line(events.nonce, sequence), sequence)
+    # Replayed observations must not be logged or exported twice.
+    await events.accept(event_line(events.nonce, 7), 8)
+    for sequence in range(3):
+        await events.accept(
+            event_line(events.nonce, sequence + 8, data={"secret": "private-text"}),
+            sequence + 9,
+        )
+    events.close()
+    events.close()
+
+    records = [call.kwargs for call in sink.emit_operational.call_args_list]
+    games = [
+        record for record in records if record["event_name"].startswith("dst.world.")
+    ]
+    assert [record["attributes"]["dst.event.sequence"] for record in games] == [
+        1,
+        3,
+        5,
+        7,
+    ]
+    assert [record["observed_timestamp_ns"] for record in games] == [1, 3, 5, 7]
+    assert all(
+        record["attributes"]["dst.cluster.name"] == "cluster" for record in records
+    )
+    assert events.dropped == events.gaps == events.invalid == 3
+    assert events.queue.qsize() == 1
+    for kind in ("sequence_gap", "notification_dropped", "rejected"):
+        reports = [
+            record
+            for record in records
+            if record["event_name"] == f"dst.telemetry.{kind}"
+        ]
+        assert [record["body"]["count"] for record in reports] == [1, 2, 3]
+        assert sum(record["body"]["since_previous"] for record in reports) == 3
+    assert "private-text" not in orjson.dumps(records).decode()
+    assert metrics.call_args_list.count(call("invalid", reason="schema")) == 3
+    assert metrics.call_args_list.count(call("gap", reason="sequence", count=1)) == 3
+
+
+async def test_diagnostic_totals_are_attempt_scoped_across_world_generations() -> None:
+    recorder = Recorder("cluster", "shard")
+    sink = recorder.observe_log = Mock()
+    events = EventStream(recorder)
+    await events.accept(event_line(events.nonce, 3, generation=1), 100)
+    await events.accept(event_line(events.nonce, 2, generation=2), 200)
+    records = [
+        call.kwargs
+        for call in sink.call_args_list
+        if call.kwargs["event_name"] == "dst.telemetry.sequence_gap"
+    ]
+    assert records[-1]["body"]["count"] == 3
+    assert records[-1]["body"]["last_generation"] == 2
+    assert records[-1]["body"]["last_after"] == 0
+    assert records[-1]["body"]["last_next"] == 2
+    assert "dst.runtime.generation" not in records[-1]["attributes"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"seq": 2**53},
+        {"generation": 2**53},
+        {"data": {"name": "cycles", "value": 2**53}},
+        {"event": "dst.player.loaded", "data": {"player": PLAYER | {"guid": 2**53}}},
+    ],
+)
+async def test_integer_boundary_rejection_does_not_interrupt_valid_observations(
+    changes: dict[str, object],
+) -> None:
+    events = EventStream(Recorder("cluster", "shard"))
+    await events.accept(event_line(events.nonce, 1, **changes), 1)
+    await events.accept(event_line(events.nonce, 2), 2)
+    events.close()
+    assert events.invalid == 1
+    observed = await events.read()
+    assert observed is not None
+    assert observed.record.seq == 2
+    assert await events.read() is None

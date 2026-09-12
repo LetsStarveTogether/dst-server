@@ -267,6 +267,9 @@ def test_pod_userns_rejects_unsafe_values(userns: str) -> None:
                 requires=("database.service",),
                 wants=("cache.service",),
                 binds_to=("master.service",),
+                part_of=("room-pod.service",),
+                start_limit_interval_sec=600,
+                start_limit_burst=3,
                 after=("database.service",),
                 pod="room.pod",
                 exec=("/app/dst-server", "serve", "Cave World %n ${HOME}"),
@@ -285,6 +288,7 @@ def test_pod_userns_rejects_unsafe_values(userns: str) -> None:
                 watchdog_signal="SIGKILL",
                 stop_timeout=40,
                 restart="on-failure",
+                restart_sec=30,
                 timeout_start_sec=1800,
                 timeout_stop_sec=50,
                 wanted_by=("default.target",),
@@ -617,6 +621,14 @@ def test_application_builds_master_secondary_lifecycle(
     assert application.master.binds_to == ()
     assert secondary.requires == secondary.wants == ()
     assert secondary.after == secondary.binds_to == (master_source,)
+    assert application.master.part_of == ("dst-007-pod.service",)
+    assert secondary.part_of == (f"{application.master.name}.service",)
+    assert application.master.restart == "on-failure"
+    assert application.master.restart_sec == 30
+    assert application.master.start_limit_interval_sec == 600
+    assert application.master.start_limit_burst == 3
+    assert secondary.restart == "no"
+    assert secondary.restart_sec is None
     assert application.master.exec == (
         "/app/.venv/bin/dst-server",
         "agent",
@@ -654,7 +666,6 @@ def test_application_builds_master_secondary_lifecycle(
         assert unit.timeout_stop_sec >= unit.stop_timeout + 2 * RPC_TIMEOUT_MARGIN
     assert {
         (
-            unit.restart,
             unit.stop_timeout,
             unit.timeout_stop_sec,
             unit.notify,
@@ -663,7 +674,7 @@ def test_application_builds_master_secondary_lifecycle(
             unit.watchdog_signal,
         )
         for unit in (application.master, secondary)
-    } == {("on-failure", 360, 420, True, 300, "control-group", "SIGKILL")}
+    } == {(360, 420, True, 300, "control-group", "SIGKILL")}
 
 
 @pytest.mark.parametrize(
@@ -886,106 +897,47 @@ def test_more_specific_drop_in_replaces_same_named_shared_drop_in(
     assert shared.read_text() == "[Container]\nImage=example:shared\n"
 
 
-def test_application_patch_keeps_native_values_outside_the_requested_changes(
-    application: QuadletApplication,
-) -> None:
-    native = application.replace(
-        pod=application.pod.replace(networks=("private.network",)),
-        master=application.master.replace(timeout_start_sec=900, nice=5),
-    )
-    requested = application.replace(
-        pod=application.pod.replace(wanted_by=()),
-        master=application.master.replace(image="example:new"),
-    )
-
-    result = native.patch(application, requested)
-
-    assert result == native.replace(
-        pod=native.pod.replace(wanted_by=()),
-        master=native.master.replace(image="example:new"),
-    )
-
-
-@pytest.mark.parametrize("caves", [False, True])
-def test_application_patch_handles_changed_shards(tmp_path: Path, caves: bool) -> None:
-    previous = QuadletApplication.for_cluster(
-        make_cluster(caves=not caves), tmp_path / "room"
-    )
-    updated = QuadletApplication.for_cluster(
-        make_cluster(caves=caves), tmp_path / "room"
-    )
-    native = previous.replace(master=previous.master.replace(nice=5))
-
-    result = native.patch(previous, updated)
-
-    assert result == updated.replace(master=updated.master.replace(nice=5))
-
-
-def test_application_patch_rejects_mismatched_native_units(
-    tmp_path: Path, application: QuadletApplication, cluster: ClusterConfig
-) -> None:
-    other = QuadletApplication.for_cluster(cluster, tmp_path / "other")
-
-    with pytest.raises(ValueError, match="units do not match"):
-        other.patch(application, application)
-
-
-def test_application_save_preserves_unchanged_native_units(
+def test_application_save_regenerates_sdk_owned_base_units(
     tmp_path: Path, application: QuadletApplication
 ) -> None:
     application.save(tmp_path)
-    untouched = (
-        tmp_path / f"{application.pod.name}.pod",
-        tmp_path / f"{application.secondaries[0].name}.container",
-    )
-    for path in untouched:
-        path.write_text(
-            "# Native room configuration\n" + path.read_text().replace("=", " = ", 1)
-        )
-    before = {path: path.read_bytes() for path in untouched}
+    application.master.replace(nice=5).save(tmp_path)
+    pod = tmp_path / f"{application.pod.name}.pod"
+    pod.write_text("# Native room configuration\n" + pod.read_text())
     updated = application.replace(
         master=application.master.replace(image="example:new")
     )
 
     written = updated.save(tmp_path)
 
-    assert written == (tmp_path / f"{application.master.name}.container",)
+    assert set(written) == {tmp_path / path for path in updated.files()}
     assert QuadletApplication.load(tmp_path) == updated
-    assert before == {path: path.read_bytes() for path in untouched}
-    assert updated.save(tmp_path) == ()
+    assert QuadletApplication.load(tmp_path).master.nice is None
+    assert not pod.read_text().startswith("#")
 
 
-def test_updating_native_legacy_images_preserves_commands_and_untouched_pod(
+def test_application_rejects_legacy_commands_until_explicit_migration(
     tmp_path: Path, application: QuadletApplication
 ) -> None:
     application.save(tmp_path)
-    original = {}
-    for unit in (application.master, *application.secondaries):
-        old = unit.replace(exec=(unit.exec[0], *unit.exec[2:]))
-        old.save(tmp_path)
-        original[old.name] = old.exec
-    pod = tmp_path / f"{application.pod.name}.pod"
-    pod.write_text("# Native pod settings\n" + pod.read_text())
-    before = pod.read_bytes()
-    native = QuadletApplication.load(tmp_path, legacy=True)
-    requested = application.replace(
-        master=application.master.replace(image="example:new"),
-        secondaries=tuple(
-            unit.replace(image="example:new") for unit in application.secondaries
-        ),
-    )
+    unit = application.master
+    unit.replace(exec=(unit.exec[0], *unit.exec[2:])).save(tmp_path)
 
-    written = native.patch(application, requested).save(tmp_path)
-    loaded = QuadletApplication.load(tmp_path, legacy=True)
+    with pytest.raises(ValueError, match="expected exactly one Quadlet master"):
+        QuadletApplication.load(tmp_path)
 
-    assert set(written) == {tmp_path / f"{name}.container" for name in original}
-    assert {
-        unit.name: unit.exec for unit in (loaded.master, *loaded.secondaries)
-    } == original
-    assert all(
-        unit.image == "example:new" for unit in (loaded.master, *loaded.secondaries)
-    )
-    assert pod.read_bytes() == before
+
+def test_application_save_rejects_unrelated_container_before_writing(
+    tmp_path: Path, application: QuadletApplication
+) -> None:
+    source = tmp_path / f"{application.master.name}.container"
+    source.write_text("[Container]\nImage=other\nPod=other.pod\n")
+
+    with pytest.raises(ValueError, match="unrelated Quadlet container"):
+        application.save(tmp_path)
+
+    assert source.read_text() == "[Container]\nImage=other\nPod=other.pod\n"
+    assert tuple(tmp_path.iterdir()) == (source,)
 
 
 def test_deployment_preflight_rejects_a_dangling_unit_symlink(

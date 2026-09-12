@@ -31,12 +31,13 @@ def _commands() -> None:
         "deployment": ("rooms", "Install the LST fleet and automation."),
         "mod": ("rooms", "Configure and update room mods."),
         "schedule": ("operations", "Manage daily room opening hours."),
-        "maintenance": ("operations", "Run maintenance and inspect tasks."),
+        "maintenance": ("operations", "Run game maintenance and room recycling."),
         "agent": ("operations", "Run game agents inside containers."),
         "player": ("game", "Inspect players and manage permissions."),
         "world": ("game", "Inspect and operate game worlds."),
         "console": ("game", "Evaluate Lua through a game agent."),
         "logs": ("logs", "Query retained journal and OpenTelemetry logs."),
+        "scripts": ("scripts", "Build and verify native SDK script bundles."),
         "rpc": ("game", "Discover and call game RPC methods."),
     }
     for name, (module, help_text) in commands.items():

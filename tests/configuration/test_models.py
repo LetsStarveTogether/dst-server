@@ -570,6 +570,7 @@ def test_internal_worldgen_topology_overrides_are_typed_and_sparse(
 
 def test_world_override_models_match_bundled_customize_source(
     luajit: str,
+    request: pytest.FixtureRequest,
 ) -> None:
     contract = source_customize_contract(luajit)
     source_options = cast(
@@ -599,7 +600,11 @@ def test_world_override_models_match_bundled_customize_source(
         schema = cast(dict[str, object], model.model_json_schema())
         properties = cast(dict[str, dict[str, object]], schema["properties"])
 
-        assert set(model.model_fields) == set(options) | misc_keys
+        native_fields = set(options) | misc_keys
+        assert native_fields <= set(model.model_fields)
+        if request.config.getoption("--scripts-zip") is None:
+            # The SDK follows the pinned source; release images may lack beta options.
+            assert set(model.model_fields) == native_fields
         for name, source in options.items():
             values = cast(list[str], source["values"])
             definition = schema_definition(schema, properties[name])

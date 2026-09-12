@@ -1,10 +1,20 @@
 import asyncio
-from typing import Annotated
+from typing import Annotated, Literal
 from weakref import WeakSet
 
 from pydantic import Field, TypeAdapter
 
 from dst_server.errors import SubscriptionOverflowError
+from dst_server.models.cluster import GameEventRecord, LifecycleRecord, LogRecord
+
+type StreamKind = Literal["logs", "lifecycle", "events"]
+type StreamRecord = LogRecord | LifecycleRecord | GameEventRecord
+
+STREAM_MODELS: dict[StreamKind, type[StreamRecord]] = {
+    "logs": LogRecord,
+    "lifecycle": LifecycleRecord,
+    "events": GameEventRecord,
+}
 
 MAX_BATCH_SIZE = 256
 BATCH_SIZE = TypeAdapter(Annotated[int, Field(ge=1, le=MAX_BATCH_SIZE)])

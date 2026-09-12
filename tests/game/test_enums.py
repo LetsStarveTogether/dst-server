@@ -6,7 +6,6 @@ import pytest
 from pydantic import JsonValue, TypeAdapter
 
 from dst_server.game import Emoji, Emote, EmoteType
-from dst_server.lua_codec import lua_value
 from tests.helpers import run_lua
 
 
@@ -106,7 +105,6 @@ def test_game_enum_scalars_round_trip_without_implicit_aliases(
     member: Emoji | Emote | EmoteType,
     value: str | int,
     invalid_values: tuple[str | int, ...],
-    luajit: str,
 ) -> None:
     enum = type(member)
     adapter = TypeAdapter(enum)
@@ -118,10 +116,6 @@ def test_game_enum_scalars_round_trip_without_implicit_aliases(
     assert orjson.loads(adapter.dump_json(member)) == value
     assert adapter.validate_json(orjson.dumps(value), strict=True) is member
     assert TypeAdapter(JsonValue).validate_python(member) == value
-    assert (
-        lua_json(f"io.write(json.encode_compliant({lua_value(member)}))", luajit)
-        == value
-    )
     for invalid in invalid_values:
         with pytest.raises(ValueError, match=f"is not a valid {enum.__name__}"):
             enum(invalid)

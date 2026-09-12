@@ -12,7 +12,12 @@ from pydantic import BaseModel
 from ulid import ULID
 
 from dst_server import commands as c
-from dst_server.cluster.subscriptions import Broadcast
+from dst_server.cluster.subscriptions import (
+    STREAM_MODELS,
+    Broadcast,
+    StreamKind,
+    StreamRecord,
+)
 from dst_server.cluster.subscriptions import Subscription as LocalSubscription
 from dst_server.errors import (
     DisconnectedError,
@@ -36,7 +41,7 @@ from dst_server.timeouts import (
     positive_timeout,
 )
 
-from .client import RemoteEndpoint, StreamKind
+from .client import RemoteEndpoint
 from .client import Subscription as RemoteSubscription
 from .codec import ERROR, encode, encode_model, failure, success
 from .schema import load_schema
@@ -44,8 +49,6 @@ from .schema import load_schema
 capnp: Any = import_module("capnp")
 schema = load_schema()
 logger = Logger(__name__)
-_STREAM_COUNT = 3
-_STREAM_RETRY_DELAY = 1.0
 
 type _Operation = Callable[[], object | Awaitable[object]]
 type _Encoder = Callable[[Any], object]
@@ -53,9 +56,7 @@ type _Encoder = Callable[[Any], object]
 
 class Endpoint(Protocol):
     async def invoke[T](self, command: c.Request[T]) -> T: ...
-    def subscribe_logs(self) -> LocalSubscription[LogRecord]: ...
-    def subscribe_lifecycle(self) -> LocalSubscription[LifecycleRecord]: ...
-    def subscribe_events(self) -> LocalSubscription[GameEventRecord]: ...
+    def subscribe(self, kind: StreamKind) -> LocalSubscription[StreamRecord]: ...
 
 
 class ClusterEndpoint(Endpoint, Protocol):
@@ -252,13 +253,13 @@ class _EndpointMethods(_Responder):
         self,
         target: Endpoint | AgentEndpoint,
         scope: c.Scope,
-        sources: dict[str, Callable[[], LocalSubscription[Any]]],
+        subscribe: Callable[[StreamKind], LocalSubscription[Any]],
         owner: _TaskOwner | None = None,
     ) -> None:
         super().__init__(owner)
         self.target = target
         self.scope = scope
-        self._sources = sources
+        self._subscribe = subscribe
 
     async def call_context(self, _context: Any) -> None:
         try:
@@ -284,11 +285,10 @@ class _EndpointMethods(_Responder):
 
     async def subscribe(self, kind: str, _context: Any) -> None:
         def subscribe() -> _SubscriptionServant:
-            source = self._sources.get(kind)
-            if source is None:
+            if kind not in STREAM_MODELS:
                 msg = "unknown subscription kind"
                 raise ValueError(msg)
-            return self._subscription(source())
+            return self._subscription(self._subscribe(kind))
 
         await self._respond(_context, "subscribe", subscribe, _identity)
 
@@ -301,37 +301,26 @@ class _EndpointMethods(_Responder):
         )
 
 
-def _sources(target: Endpoint) -> dict[str, Callable[[], LocalSubscription[Any]]]:
-    return {
-        "logs": target.subscribe_logs,
-        "lifecycle": target.subscribe_lifecycle,
-        "events": target.subscribe_events,
-    }
-
-
 class ShardServant(_EndpointMethods, schema.Endpoint.Server):
     def __init__(self, target: Endpoint, owner: _TaskOwner | None = None) -> None:
-        super().__init__(target, "shard", _sources(target), owner)
+        super().__init__(target, "shard", target.subscribe, owner)
 
 
 class AgentServant(_EndpointMethods, schema.Agent.Server):
     def __init__(self, target: AgentEndpoint) -> None:
-        super().__init__(
-            target,
-            "agent",
-            {
-                "logs": target.logs.subscribe,
-                "lifecycle": target.lifecycle.subscribe,
-                "events": target.game_events.subscribe,
-            },
-        )
+        sources = {
+            "logs": target.logs,
+            "lifecycle": target.lifecycle,
+            "events": target.game_events,
+        }
+        super().__init__(target, "agent", lambda kind: sources[kind].subscribe())
 
 
 class ClusterServant(_EndpointMethods, schema.Cluster.Server):
     def __init__(
         self, controller: ClusterEndpoint, owner: _TaskOwner | None = None
     ) -> None:
-        super().__init__(controller, "cluster", _sources(controller), owner)
+        super().__init__(controller, "cluster", controller.subscribe, owner)
         self.controller = controller
         self._shards: dict[str, ShardServant] = {}
 
@@ -367,7 +356,7 @@ class RemoteAgent(RemoteEndpoint):
         self.lifecycle = Broadcast[LifecycleRecord]()
         self.game_events = Broadcast[GameEventRecord]()
         self._initial_status: ShardRuntimeStatus | None = None
-        self._subscriptions: list[RemoteSubscription[Any]] = []
+        self._subscriptions: dict[StreamKind, RemoteSubscription[Any]] = {}
         self._pumps: list[asyncio.Task[None]] = []
         self._closed = False
 
@@ -395,32 +384,25 @@ class RemoteAgent(RemoteEndpoint):
         self.incarnation = str(status.agent_incarnation)
         self.master = status.is_master
         self._initial_status = status
-        streams: tuple[tuple[StreamKind, type[BaseModel]], ...] = (
-            ("logs", LogRecord),
-            ("lifecycle", LifecycleRecord),
-            ("events", GameEventRecord),
-        )
-        for kind, model in streams:
-            self._subscriptions.append(await self._subscribe(kind, model))
+        for kind in STREAM_MODELS:
+            self._subscriptions[kind] = await self.subscribe(kind)
 
     def start_pumps(self) -> None:
-        if self._pumps or len(self._subscriptions) != _STREAM_COUNT:
+        if self._pumps or self._subscriptions.keys() != STREAM_MODELS.keys():
             msg = "remote subscriptions are not ready"
             raise RuntimeError(msg)
-
-        def start[T: BaseModel](
-            index: int, kind: StreamKind, target: Broadcast[T], model: type[T]
-        ) -> None:
-            self._pumps.append(
-                asyncio.create_task(
-                    self._pump(self._subscriptions[index], kind, target, model),
-                    name=f"dst-agent-{kind}",
-                )
+        targets = {
+            "logs": self.logs,
+            "lifecycle": self.lifecycle,
+            "events": self.game_events,
+        }
+        self._pumps = [
+            asyncio.create_task(
+                self._pump(subscription, targets[kind], kind),
+                name=f"dst-agent-{kind}",
             )
-
-        start(0, "logs", self.logs, LogRecord)
-        start(1, "lifecycle", self.lifecycle, LifecycleRecord)
-        start(2, "events", self.game_events, GameEventRecord)
+            for kind, subscription in self._subscriptions.items()
+        ]
 
     async def runtime_status(self) -> ShardRuntimeStatus:
         if self._initial_status is not None:
@@ -441,7 +423,10 @@ class RemoteAgent(RemoteEndpoint):
             async with asyncio.timeout(RPC_TIMEOUT_MARGIN):
                 await asyncio.gather(*self._pumps, return_exceptions=True)
                 await asyncio.gather(
-                    *(self._close_subscription(item) for item in self._subscriptions)
+                    *(
+                        self._close_subscription(item)
+                        for item in self._subscriptions.values()
+                    )
                 )
         except TimeoutError:
             logger.warning("remote agent cleanup timed out: {shard}", shard=self.name)
@@ -460,62 +445,29 @@ class RemoteAgent(RemoteEndpoint):
             async with asyncio.timeout(RPC_TIMEOUT_MARGIN):
                 await subscription.close()
 
-    async def _release_subscription(
-        self, subscription: RemoteSubscription[Any]
-    ) -> None:
-        with suppress(ValueError):
-            self._subscriptions.remove(subscription)
-        await self._close_subscription(subscription)
-
     async def _pump[RecordT: BaseModel](
         self,
         subscription: RemoteSubscription[RecordT],
-        subscribe: StreamKind,
         target: Broadcast[RecordT],
-        model: type[RecordT],
+        kind: StreamKind,
     ) -> None:
-        current: RemoteSubscription[RecordT] | None = subscription
-        while not self._closed:
-            if current is None:
-                await asyncio.sleep(_STREAM_RETRY_DELAY)
-                try:
-                    current = await self._subscribe(subscribe, model)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    logger.warning(
-                        "remote observation stream reconnect failed: "
-                        "{shard}: {stream}: {kind}",
-                        shard=self.name,
-                        stream=model.__name__,
-                        kind=type(error).__name__,
-                    )
-                    continue
-                self._subscriptions.append(current)
-            failure = "closed"
-            try:
-                await self._relay_stream(current, target, model)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                failure = type(error).__name__
-            finally:
-                await self._release_subscription(current)
-                current = None
-            if not self._closed:
-                logger.warning(
-                    "remote observation stream ended; reconnecting: "
-                    "{shard}: {stream}: {kind}",
-                    shard=self.name,
-                    stream=model.__name__,
-                    kind=failure,
-                )
+        try:
+            await self._relay_stream(subscription, target, kind)
+        except Exception as error:
+            logger.warning(
+                "remote observation stream ended: {shard}: {stream}: {kind}",
+                shard=self.name,
+                stream=kind,
+                kind=type(error).__name__,
+            )
+        finally:
+            await self._close_subscription(subscription)
 
     async def _relay_stream[RecordT: BaseModel](
         self,
         subscription: RemoteSubscription[RecordT],
         target: Broadcast[RecordT],
-        model: type[RecordT],
+        kind: StreamKind,
     ) -> None:
         while True:
             try:
@@ -526,7 +478,7 @@ class RemoteAgent(RemoteEndpoint):
                         "remote subscription overflowed; records were dropped: "
                         "{shard}: {stream}",
                         shard=self.name,
-                        stream=model.__name__,
+                        stream=kind,
                     )
                     continue
                 raise

@@ -18,6 +18,7 @@ local function entity(prefab, guid, userid, x, z, tags)
         prefab = prefab,
         GUID = guid,
         userid = userid,
+        IsValid = function() return true end,
         Transform = {
             GetWorldPosition = function() return x, 0, z end,
         },
@@ -43,6 +44,7 @@ end
 
 TheWorld = {
     ismastersim = true,
+    ismastershard = true,
     Map = { GetPlatformAtPoint = function() end },
     meta = { session_identifier = "SESSION" },
     state = { cycles = 2 },
@@ -59,6 +61,19 @@ BufferedAction = {
     Do = function() return true, "worked" end,
 }
 Shard_UpdateWorldState = function(...) return ... end
+Networking_ModOutOfDateAnnouncement = function() end
+Networking_Say = function() end
+Networking_Announcement = function() end
+Networking_SkinAnnouncement = function() end
+Networking_SystemMessage = function() end
+Networking_RollAnnouncement = function() end
+OnSimPaused = function() end
+OnSimUnpaused = function() end
+TheNet = { GetServerMaxPlayers = function() return 9 end }
+GetPlayerClientTable = function() return { { userid = "KU_TEST" } } end
+MAX_CHAT_INPUT_LENGTH = 150
+string.utf8len = function(value) return #value end
+Ents = { [42] = player }
 REMOTESHARDSTATE = { READY = 1 }
 GetTick = function() return 10 end
 GetTimeReal = function() return 20 end
@@ -71,6 +86,43 @@ local health = driver.install({
     actions = { "CHOP" },
 })
 assert(health.telemetry_status == "active")
+local connections = require("dst_server.connections")
+connections.install(TheWorld)
+world_listeners.ms_clientauthenticationcomplete(TheWorld, { userid = "KU_LOBBY" })
+world_listeners.ms_clientdisconnected(TheWorld, { userid = "KU_LOBBY" })
+TheWorld.DoStaticPeriodicTask = function(_, _, callback) callback() end
+connections.start(TheWorld)
+Networking_ModOutOfDateAnnouncement("Insight")
+Networking_Say(42, "KU_TEST", "Test Player", "wilson", "hello", nil, false, false)
+Networking_Announcement("maintenance", nil, "mod_maintenance")
+Networking_SkinAnnouncement("Test Player", { 1, 1, 1 }, "wilson_formal")
+Networking_SystemMessage("system message")
+Networking_RollAnnouncement("KU_TEST", "Test Player", "wilson", nil, { 2, 6 }, 6)
+world_listeners.serverpauseddirty(TheWorld, { pause = false, autopause = true, gameautopause = false })
+OnSimPaused()
+OnSimUnpaused()
+
+MAX_VOTE_OPTIONS = 4
+local command = { name = "kick", voteoptions = { "Yes", "No" } }
+package.loaded.usercommands = {
+    GetCommandFromHash = function() return command end,
+    FinishVote = function(_, params) params.voteselection = 1; params.votecount = 1; return true end,
+}
+TheWorld.net = { components = { worldvoter = { OnUpdate = function()
+    world_listeners.master_worldvoterupdate(TheWorld, { countdown = 0 })
+    require("usercommands").FinishVote("kick", { user = "KU_TARGET" }, {
+        total = 1, total_voted = 1, total_not_voted = 0, options = { 1, 0 },
+    })
+end } } }
+require("dst_server.vote_events").install()
+local vote = {
+    countdown = 30, commandid = 100, targetuserid = "KU_TARGET", starteruserid = "KU_TEST",
+    voters = { KU_TEST = MAX_VOTE_OPTIONS + 1 },
+}
+world_listeners.master_worldvoterupdate(TheWorld, vote)
+vote.voters.KU_TEST = 1
+world_listeners.master_worldvoterupdate(TheWorld, vote)
+TheWorld.net.components.worldvoter:OnUpdate()
 
 local target = entity("hound", 44, nil, 3, 4)
 local redirected = entity("wall", 45, nil, 5, 6)
@@ -208,4 +260,4 @@ player_listeners.unequip(player, { item = spear, eslot = "hands", slip = true })
 player_listeners.dropitem(player, { item = spear })
 
 health = driver.health()
-assert(health.events_emitted == 61 and health.errors == 0)
+assert(health.events_emitted == 77 and health.errors == 0)

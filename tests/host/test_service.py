@@ -1,16 +1,17 @@
 import asyncio
 import shlex
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 from datetime import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 from pydantic import SecretStr, ValidationError
 from ulid import ULID
 
+from dst_server.announcements import MOD_UPDATE_NOTICE, Countdown
 from dst_server.configuration.files import discover
 from dst_server.configuration.models import ClusterConfig
 from dst_server.host import service
@@ -24,7 +25,7 @@ from dst_server.models.cluster import (
     ShardRuntimeStatus,
 )
 from dst_server.presets.lst import fleet_room
-from dst_server.rooms import DailyWindow, control_revision, read_control, write_control
+from dst_server.rooms import DailyWindow, read_control, write_control
 from tests.helpers import wait_for_event
 
 
@@ -51,6 +52,7 @@ async def host(tmp_path: Path) -> Host:
     )
     manager.wait_idle = AsyncMock()
     manager.reload = AsyncMock()
+    manager.reset_failed = AsyncMock()
     manager.aclose = AsyncMock()
     manager.states = states
     instance = Host(tmp_path / "rooms", tmp_path / "quadlets", systemd=manager)
@@ -105,26 +107,57 @@ async def test_offline_edit_preserves_permissions_and_removes_unset_managed_over
         ("/cluster/settings/max_players", 10),
         ("/cluster/shards/forest/world", None),
     ))
-    await host.edit(updated, expected=original)
+    await host.edit(updated)
     assert host.rooms.load(0).cluster.settings.max_players == 10
     assert not (root / "forest" / "worldgenoverride.lua").exists()
     assert (root / "forest" / "user.lua").read_text() == "custom"
     assert (root / "blocklist.txt").read_text() == "KU_newban\n"
     host.systemd.stop.assert_not_awaited()
     host.systemd.start.assert_not_awaited()
-    with pytest.raises(RuntimeError, match="configuration changed"):
-        await host.edit(original, expected=original)
 
 
-async def test_structural_edit_checks_shards_even_if_pod_is_inactive(
-    host: Host,
+@pytest.mark.parametrize("state", ["running", "shard-only", "queued"])
+@pytest.mark.parametrize("change", ["game", "deployment", "shards", "policy"])
+async def test_edit_requires_all_units_stopped_without_mutating_files(
+    host: Host, state: str, change: str
 ) -> None:
     original = host.rooms.load(0)
-    host.systemd.states[host.shard_unit(0, "forest")] = "active"
-    updated = original.edit("/cluster/shards/cave", unset=True)
+    updated = {
+        "game": original.edit("/cluster/settings/max_players", 10),
+        "deployment": original.edit("/deployment/image", "localhost/custom:latest"),
+        "shards": original.edit("/cluster/shards/cave", unset=True),
+        "policy": original.replace(recycle=False),
+    }[change]
+    active_unit = "dst-000-forest.service" if state == "shard-only" else host.unit(0)
+    host.systemd.list_units.side_effect = lambda names: {
+        name: UnitStatus(
+            name,
+            "loaded",
+            "active" if name == active_unit and state != "queued" else "inactive",
+            "dead",
+            int(name == active_unit and state == "queued"),
+            "start" if name == active_unit and state == "queued" else "",
+            "/",
+        )
+        for name in names
+    }
+    root = host.rooms.path(0)
+
+    def contents() -> dict[Path, bytes]:
+        return {
+            path: path.read_bytes()
+            for directory in (root, host.quadlet_dir)
+            for path in directory.rglob("*")
+            if path.is_file() and path.suffix != ".lock"
+        }
+
+    before = contents()
     with pytest.raises(RuntimeError, match="stopped room"):
-        await host.edit(updated, expected=original)
+        await host.edit(updated)
+    assert contents() == before
     assert host.rooms.load(0) == original
+    for action in ("stop", "start", "restart", "wait_idle", "reload"):
+        getattr(host.systemd, action).assert_not_awaited()
 
 
 async def test_removed_shard_is_inactive_and_readding_it_reuses_the_untouched_save(
@@ -138,14 +171,12 @@ async def test_removed_shard_is_inactive_and_readding_it_reuses_the_untouched_sa
     save.chmod(0o750)
     world.chmod(0o640)
     before = {path: path.stat() for path in (save, world)}
-    await host.edit(
-        original.edit("/cluster/shards/cave", unset=True), expected=original
-    )
+    await host.edit(original.edit("/cluster/shards/cave", unset=True))
     assert tuple(shard.name for shard in discover(host.rooms.path(0))) == ("forest",)
     assert world.read_text() == "keep this world"
     assert not (host.quadlet_dir / "dst-000-cave.container").exists()
     assert tuple(ClusterConfig.load(host.rooms.path(0)).shards) == ("forest",)
-    await host.edit(original, expected=host.rooms.load(0))
+    await host.edit(original)
     assert {shard.name for shard in discover(host.rooms.path(0))} == {"forest", "cave"}
     assert (host.quadlet_dir / "dst-000-cave.container").exists()
     assert world.read_text() == "keep this world"
@@ -164,87 +195,18 @@ async def test_removed_shard_is_inactive_and_readding_it_reuses_the_untouched_sa
         )
 
 
-async def test_stop_supersedes_edit_while_units_settle_without_lock(
-    host: Host,
-) -> None:
-    original = host.rooms.load(0)
-    host.systemd.states.update(dict.fromkeys(host.units(0), "active"))
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    async def wait_idle(*_: object) -> None:
-        entered.set()
-        await release.wait()
-
-    host.systemd.wait_idle.side_effect = wait_idle
-    editing = asyncio.create_task(
-        host.edit(
-            original.edit("/cluster/settings/max_players", 10),
-            restart=True,
-            expected=original,
-        )
-    )
-    try:
-        async with asyncio.timeout(5):
-            await wait_for_event(entered, editing)
-            await host.stop(0, wait=False)
-            release.set()
-            with pytest.raises(RuntimeError, match="superseded"):
-                await editing
-        assert host.rooms.load(0) == original
-        host.systemd.start.assert_not_awaited()
-    finally:
-        release.set()
-        editing.cancel()
-        await asyncio.wait_for(asyncio.gather(editing, return_exceptions=True), 5)
-
-
-async def test_schedule_edit_clears_override_and_keeps_pause(host: Host) -> None:
+async def test_schedule_edit_keeps_pause(host: Host) -> None:
     original = host.rooms.load(0)
     root = host.rooms.path(0)
     write_control(
         root,
-        read_control(root).model_copy(
-            update={"paused": True, "override": False, "revision": 4}
-        ),
+        read_control(root).model_copy(update={"paused": True}),
     )
     await host.edit(
         original.replace(schedule=(DailyWindow(start=time(9), end=time(12)),)),
-        expected=original,
     )
     control = read_control(root)
     assert control.paused
-    assert control.override is None
-    assert control.revision > 4
-
-
-async def test_automatic_transitions_bump_revision_and_recheck_boundary_after_reload(
-    host: Host, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    before = control_revision(host.rooms.path(0))
-    await host.stop(0, override=False, wait=False)
-    assert control_revision(host.rooms.path(0)) == before + 1
-    definition = host.rooms.load(0).replace(
-        schedule=(DailyWindow(start=time(9), end=time(12)),)
-    )
-    host.rooms.save(definition)
-    monkeypatch.setattr(service, "effective_state", Mock(side_effect=[True, False]))
-    with pytest.raises(RuntimeError, match="superseded"):
-        await host.start(0, override=False, wait=False)
-    host.systemd.start.assert_not_awaited()
-
-
-@pytest.mark.parametrize("states", [(False,), (True, False)])
-async def test_automatic_restart_cannot_cross_a_scheduled_close_boundary(
-    host: Host, monkeypatch: pytest.MonkeyPatch, states: tuple[bool, ...]
-) -> None:
-    definition = host.rooms.load(0).replace(
-        schedule=(DailyWindow(start=time(9), end=time(12)),)
-    )
-    host.rooms.save(definition)
-    monkeypatch.setattr(service, "effective_state", Mock(side_effect=states))
-    with pytest.raises(RuntimeError, match="superseded"):
-        await host.restart(0, override=False, wait=False)
-    host.systemd.restart.assert_not_awaited()
 
 
 @pytest.fixture
@@ -269,7 +231,14 @@ def ready_game() -> ClusterStatus:
 
 @pytest.fixture
 def agent(host: Host, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    client = SimpleNamespace(status=AsyncMock(), opened=0, closed=0)
+    client = SimpleNamespace(
+        status=AsyncMock(return_value=SimpleNamespace(busy=False)),
+        update_mods=AsyncMock(),
+        list_players=AsyncMock(return_value=()),
+        announce=AsyncMock(),
+        opened=0,
+        closed=0,
+    )
     host.systemd.states[host.unit(0)] = "active"
 
     @asynccontextmanager
@@ -342,34 +311,6 @@ async def test_wait_ready_reports_failure_and_releases_agent(
     assert agent.opened == (0 if failure == "unit" else 1)
 
 
-async def test_ready_status_received_after_manual_stop_is_superseded(
-    host: Host, agent: SimpleNamespace, ready_game: ClusterStatus
-) -> None:
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    async def status() -> ClusterStatus:
-        entered.set()
-        await release.wait()
-        return ready_game
-
-    agent.status.side_effect = status
-    waiting = asyncio.create_task(
-        host.wait_ready(0, expected_revision=control_revision(host.rooms.path(0)))
-    )
-    try:
-        async with asyncio.timeout(5):
-            await wait_for_event(entered, waiting)
-            await host.stop(0, wait=False)
-            release.set()
-            with pytest.raises(RuntimeError, match="superseded"):
-                await waiting
-        assert agent.opened == agent.closed == 1
-    finally:
-        release.set()
-        waiting.cancel()
-        await asyncio.wait_for(asyncio.gather(waiting, return_exceptions=True), 5)
-
-
 async def test_cancel_wait_ready_closes_inflight_connection(
     host: Host, agent: SimpleNamespace
 ) -> None:
@@ -402,109 +343,60 @@ async def test_closed_mod_update_never_starts_game_and_running_room_requires_res
     assert runner.await_count == 2
     host.systemd.start.assert_not_awaited()
     host.systemd.restart.assert_not_awaited()
-    host.systemd.states[host.shard_unit(0, "forest")] = "active"
+    host.systemd.states["dst-000-forest.service"] = "active"
     with pytest.raises(RuntimeError, match="require --restart"):
         await host.update_mods(0)
 
 
-@pytest.mark.parametrize("operation", ["edit", "mods"])
-async def test_restart_waits_for_every_stop_before_editing_or_preparing_mods(
+@pytest.mark.parametrize("notice", [MOD_UPDATE_NOTICE, None])
+async def test_running_mod_update_uses_controller_without_restarting_containers(
     host: Host,
     agent: SimpleNamespace,
-    ready_game: ClusterStatus,
     monkeypatch: pytest.MonkeyPatch,
-    operation: str,
+    notice: Countdown | None,
 ) -> None:
-    original = host.rooms.load(0)
-    units = host.units(0)
-    host.systemd.states.update(dict.fromkeys(units, "active"))
-    agent.status.return_value = ready_game
     runner = AsyncMock(return_value=0)
     monkeypatch.setattr(service, "run_process", runner)
-    stopping, release = asyncio.Event(), asyncio.Event()
-    settled: set[str] = set()
-
-    async def wait_idle(names: tuple[str, ...], _: float) -> None:
-        if any(host.systemd.states[name] == "deactivating" for name in names):
-            assert set(names) == set(units)
-            stopping.set()
-            await release.wait()
-            host.systemd.states.update(dict.fromkeys(names, "inactive"))
-            settled.update(names)
-
-    host.systemd.stop.side_effect = lambda name: (
-        host.systemd.states.__setitem__(name, "deactivating") or f"stop-{name}"
-    )
-    host.systemd.wait_idle.side_effect = wait_idle
-    editing = asyncio.create_task(
-        host.edit(
-            original.edit("/cluster/settings/max_players", 10),
-            restart=True,
-            expected=original,
-        )
-        if operation == "edit"
-        else host.update_mods(0, restart=True)
-    )
-    try:
-        async with asyncio.timeout(5):
-            await wait_for_event(stopping, editing)
-            assert host.rooms.load(0) == original
-            for relative, content in original.game_files().items():
-                assert (host.rooms.path(0) / relative).read_text() == content
-            runner.assert_not_awaited()
-            host.systemd.start.assert_not_awaited()
-            release.set()
-            await editing
-        assert settled == set(units)
-        host.systemd.start.assert_awaited_once_with(host.unit(0))
-        assert agent.opened == agent.closed == 1
-        if operation == "edit":
-            assert host.rooms.load(0).cluster.settings.max_players == 10
-            runner.assert_not_awaited()
-        else:
-            assert host.rooms.load(0) == original
-            assert runner.await_count == 2
-    finally:
-        release.set()
-        editing.cancel()
-        await asyncio.wait_for(asyncio.gather(editing, return_exceptions=True), 5)
+    before = read_control(host.rooms.path(0))
+    await host.update_mods(0, restart=True, notice=notice)
+    agent.update_mods.assert_awaited_once_with(restart=True, notice=notice)
+    assert agent.opened == agent.closed == 1
+    assert read_control(host.rooms.path(0)) == before
+    runner.assert_not_awaited()
+    host.systemd.stop.assert_not_awaited()
+    host.systemd.start.assert_not_awaited()
+    host.systemd.restart.assert_not_awaited()
 
 
-async def test_manual_stop_allows_mod_download_to_finish_without_restarting(
-    host: Host, monkeypatch: pytest.MonkeyPatch
+async def test_manual_stop_interrupts_service_without_waiting_for_running_mod_update(
+    host: Host, agent: SimpleNamespace
 ) -> None:
-    entered, cleaned, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    commands: list[tuple[str, ...]] = []
+    entered, release = asyncio.Event(), asyncio.Event()
 
-    async def run(*command: str, **_: object) -> int:
-        commands.append(command)
-        if command[1] == "run":
-            entered.set()
-            await release.wait()
-        else:
-            cleaned.set()
-        return 0
+    async def update_mods(*, restart: bool, notice: Countdown | None) -> None:
+        assert restart
+        assert notice == MOD_UPDATE_NOTICE
+        entered.set()
+        await release.wait()
 
-    monkeypatch.setattr(service, "run_process", run)
+    agent.update_mods.side_effect = update_mods
     host.systemd.states.update(dict.fromkeys(host.units(0), "active"))
     updating = asyncio.create_task(host.update_mods(0, restart=True))
     try:
         async with asyncio.timeout(5):
             await wait_for_event(entered, updating)
-            revision = control_revision(host.rooms.path(0))
+            agent.status.return_value = SimpleNamespace(busy=True)
             with pytest.raises(RuntimeError, match="busy"):
                 await host.start(0, wait=False)
-            assert control_revision(host.rooms.path(0)) == revision
             await host.stop(0, wait=False)
-            assert control_revision(host.rooms.path(0)) > revision
+            assert read_control(host.rooms.path(0)).paused
             assert not updating.done()
-            assert not cleaned.is_set()
-            assert len(commands) == 1
             release.set()
-            with pytest.raises(RuntimeError, match="superseded"):
-                await updating
-        assert cleaned.is_set()
-        assert commands[1] == ("podman", "rm", "--force", "--ignore", commands[0][4])
+            await updating
+        agent.update_mods.assert_awaited_once_with(
+            restart=True, notice=MOD_UPDATE_NOTICE
+        )
+        assert agent.opened == agent.closed == 2
         host.systemd.start.assert_not_awaited()
         host.systemd.restart.assert_not_awaited()
         await host.start(0, wait=False)
@@ -513,6 +405,22 @@ async def test_manual_stop_allows_mod_download_to_finish_without_restarting(
         release.set()
         updating.cancel()
         await asyncio.wait_for(asyncio.gather(updating, return_exceptions=True), 5)
+
+
+async def test_failed_running_mod_update_releases_host_lock(
+    host: Host, agent: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = AsyncMock(return_value=0)
+    monkeypatch.setattr(service, "run_process", runner)
+    agent.update_mods.side_effect = RuntimeError("download failed")
+    with pytest.raises(RuntimeError, match="download failed"):
+        await host.update_mods(0, restart=True)
+    assert agent.opened == agent.closed == 1
+    runner.assert_not_awaited()
+    host.systemd.stop.assert_not_awaited()
+    host.systemd.start.assert_not_awaited()
+    await host.start(0, wait=False)
+    host.systemd.start.assert_awaited_once_with(host.unit(0))
 
 
 async def test_cancel_mod_update_waits_for_container_cleanup_and_releases_lock(
@@ -696,7 +604,7 @@ async def test_failed_native_edit_does_not_create_desired_state_or_rewrite_on_st
     ("phase", "wait"),
     [
         (phase, wait)
-        for phase in ("lock", "reload", "submit", "idle", "ready")
+        for phase in ("reload", "submit", "idle", "ready")
         for wait in (True, False)
         if wait or phase not in {"idle", "ready"}
     ],
@@ -709,27 +617,18 @@ async def test_transition_timeout_covers_the_whole_operation(
     async def block(*_: object, **__: object) -> None:
         await stalled.wait()
 
-    if phase == "lock":
-        context = service.room_lock(host.rooms.path(0))
+    if phase == "reload":
+        host.systemd.reload.side_effect = block
+    elif phase == "submit":
+        host.systemd.start.side_effect = block
+    elif phase == "idle":
+        host.systemd.wait_idle.side_effect = block
     else:
-        context = nullcontext()
-        if phase == "reload":
-            host.systemd.reload.side_effect = block
-        elif phase == "submit":
-            host.systemd.start.side_effect = block
-        elif phase == "idle":
-            host.systemd.wait_idle.side_effect = block
-        else:
-            host.wait_ready = block  # ty: ignore[invalid-assignment]
-    async with asyncio.timeout(2), context:
+        host.wait_ready = block  # ty: ignore[invalid-assignment]
+    async with asyncio.timeout(2):
         with pytest.raises(TimeoutError):
             await host.start(0, wait=wait, timeout=0.02)
-    # Cancellation must release both room and deployment locks for later operations.
-    async with (
-        asyncio.timeout(1),
-        service.room_lock(host.rooms.path(0)),
-        service.room_lock(host.quadlet_dir),
-    ):
+    async with asyncio.timeout(1), service.room_lock(host.rooms.path(0)):
         pass
 
 
@@ -764,7 +663,6 @@ async def test_diagnostics_remain_available_when_native_configuration_is_damaged
     assert set(result["units"]) == set(units)
     assert queried == [("dst-000-pod.service", "dst-000-*.service")]
     assert result["logs"].diagnostics == "journal warning"
-    assert host.shard_unit(0, "forest") in units
 
 
 async def test_status_keeps_live_rpc_diagnostics_with_a_damaged_native_configuration(
@@ -778,7 +676,7 @@ async def test_status_keeps_live_rpc_diagnostics_with_a_damaged_native_configura
     assert agent.opened == agent.closed == 1
 
 
-async def test_live_game_edits_require_restart_but_policy_edits_preserve_native_files(
+async def test_stopped_policy_edit_preserves_native_files(
     host: Host,
 ) -> None:
     original = host.rooms.load(0)
@@ -788,19 +686,14 @@ async def test_live_game_edits_require_restart_but_policy_edits_preserve_native_
     unit = host.quadlet_dir / "dst-000-forest.container"
     unit.write_text(unit.read_text() + "\n# native formatting\n")
     before = {path: path.read_bytes() for path in (game, unit)}
-    host.systemd.states[host.shard_unit(0, "forest")] = "active"
-    with pytest.raises(RuntimeError, match="stopped room or --restart"):
-        await host.edit(original.edit("/cluster/settings/max_players", 10))
-    revision = control_revision(root)
     await host.edit(original.replace(recycle=False))
     assert not host.rooms.policy(0).recycle
-    assert control_revision(root) == revision + 1
     assert {path: path.read_bytes() for path in before} == before
     host.systemd.stop.assert_not_awaited()
     host.systemd.start.assert_not_awaited()
 
 
-async def test_native_quadlet_customizations_survive_game_and_deployment_edits(
+async def test_deployment_regenerates_managed_units_and_preserves_drop_ins(
     host: Host,
 ) -> None:
     from dst_server.deployment.application import QuadletApplication
@@ -818,18 +711,14 @@ async def test_native_quadlet_customizations_survive_game_and_deployment_edits(
     )
     original = host.rooms.load(0)
     before = {path: path.read_bytes() for path in host.quadlet_dir.glob("*.container")}
-    await host.edit(
-        original.edit("/cluster/settings/max_players", 10), expected=original
-    )
+    await host.edit(original.edit("/cluster/settings/max_players", 10))
     assert {path: path.read_bytes() for path in before} == before
     original = host.rooms.load(0)
-    await host.edit(
-        original.edit("/deployment/image", "localhost/custom:latest"), expected=original
-    )
+    await host.edit(original.edit("/deployment/image", "localhost/custom:latest"))
     updated = QuadletApplication.load(host.quadlet_dir, name="dst-000")
-    assert updated.master.nice == 8
+    assert updated.master.nice == original.application(host.rooms.path(0)).master.nice
     assert updated.master.image == "localhost/custom:latest"
-    assert pod_path.read_bytes() == pod_content
+    assert pod_path.read_bytes() != pod_content
     assert (
         drop_in.read_text()
         == "[Container]\nEnvironment=DST_SERVER_MOD_PROXY=http://proxy.invalid\n"
@@ -905,50 +794,82 @@ async def test_mod_preparation_uses_native_quadlet_drop_ins(
     assert command[-3:] == ("/app/.venv/bin/dst-server", "agent", "prepare")
 
 
-async def test_restart_edit_preserves_world_and_permission_changes_on_shutdown(
-    host: Host, agent: SimpleNamespace, ready_game: ClusterStatus
-) -> None:
-    original = host.rooms.load(0)
+async def test_stopped_edit_preserves_world_and_permission_files(host: Host) -> None:
     root = host.rooms.path(0)
     world = root / "forest/worldgenoverride.lua"
     written = 'return { override_enabled = true, preset = "SURVIVAL_TOGETHER" }\n'
-    agent.status.return_value = ready_game
-
-    async def save_on_shutdown(*_: object) -> None:  # ruff: ignore[unused-async]
-        world.write_text(written)
-        (root / "blocklist.txt").write_text("KU_newban\n")
-
-    host.systemd.wait_idle.side_effect = save_on_shutdown
+    world.write_text(written)
+    (root / "blocklist.txt").write_text("KU_newban\n")
+    save = root / "forest/save/world"
+    save.parent.mkdir(exist_ok=True)
+    save.write_bytes(b"native saved world")
+    original = host.rooms.load(0)
     updated = await host.edit(
         original.edit("/cluster/settings/max_players", 10),
-        restart=True,
-        expected=original,
     )
     assert updated.cluster.settings.max_players == 10
     assert updated == host.rooms.load(0)
     assert world.read_text() == written
     assert (root / "blocklist.txt").read_text() == "KU_newban\n"
-    host.systemd.start.assert_awaited_once_with(host.unit(0))
+    assert save.read_bytes() == b"native saved world"
+    host.systemd.stop.assert_not_awaited()
+    host.systemd.wait_idle.assert_not_awaited()
+    host.systemd.start.assert_not_awaited()
 
 
-async def test_restart_edit_rejects_changes_to_the_native_file_it_would_replace(
+async def test_manual_stop_pauses_and_start_resumes_without_countdown(
     host: Host,
 ) -> None:
-    original = host.rooms.load(0)
-    root = host.rooms.path(0)
-    host.systemd.states[host.unit(0)] = "active"
+    await host.stop(0, wait=False)
+    assert read_control(host.rooms.path(0)).paused
+    await host.start(0, wait=False)
+    assert not read_control(host.rooms.path(0)).paused
+    assert host.systemd.reset_failed.await_args_list == [
+        call(unit) for unit in host.units(0)
+    ]
+    assert not (host.quadlet_dir / ".dst-operation.lock").exists()
 
-    async def change_during_shutdown(*_: object) -> None:  # ruff: ignore[unused-async]
-        original.edit("/cluster/settings/max_players", 20).save_game(
-            root, previous=original
-        )
 
-    host.systemd.wait_idle.side_effect = change_during_shutdown
-    with pytest.raises(RuntimeError, match="configuration changed"):
-        await host.edit(
-            original.edit("/cluster/settings/max_players", 10),
-            restart=True,
-            expected=original,
-        )
-    assert host.rooms.load(0).cluster.settings.max_players == 20
+async def test_restart_submits_one_native_systemd_transaction(
+    host: Host, agent: SimpleNamespace
+) -> None:
+    assert not agent.status.return_value.busy
+    await host.restart(0, wait=False)
+    host.systemd.restart.assert_awaited_once_with(host.unit(0))
+    host.systemd.stop.assert_not_awaited()
     host.systemd.start.assert_not_awaited()
+
+
+async def test_automatic_start_never_clears_start_limit(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service, "effective_state", lambda *_: True)
+    await host.start(0, automatic=True, wait=False)
+    host.systemd.start.assert_awaited_once()
+    host.systemd.reset_failed.assert_not_awaited()
+
+
+async def test_status_reports_failed_master_even_when_pod_is_active(host: Host) -> None:
+    host.systemd.states[host.unit(0)] = "active"
+    host.systemd.states["dst-000-forest.service"] = "failed"
+    result = await host.status(0, game=False)
+    assert result["active"] == "failed"
+
+
+async def test_explicit_start_recovers_failed_master_with_active_pod(
+    host: Host,
+) -> None:
+    host.systemd.states[host.unit(0)] = "active"
+    host.systemd.states["dst-000-forest.service"] = "failed"
+    await host.start(0, wait=False)
+    host.systemd.restart.assert_awaited_once_with(host.unit(0))
+    host.systemd.start.assert_not_awaited()
+    assert host.systemd.reset_failed.await_count == len(host.units(0))
+
+
+async def test_explicit_restart_recovers_unreachable_controller(
+    host: Host, agent: SimpleNamespace
+) -> None:
+    agent.status.side_effect = ConnectionError("controller unavailable")
+    await host.restart(0, wait=False)
+    host.systemd.restart.assert_awaited_once_with(host.unit(0))

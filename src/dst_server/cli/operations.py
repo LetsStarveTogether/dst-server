@@ -9,14 +9,15 @@ import sys
 from collections.abc import Mapping
 from datetime import time
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from cyclopts import App, Parameter
 from cyclopts.types import PositiveInt
 from pydantic import TypeAdapter
 
+from dst_server.announcements import Template
 from dst_server.configuration.models import Port
-from dst_server.rooms import Control, DailyWindow, write_control
+from dst_server.rooms import Control, DailyWindow
 from dst_server.timeouts import DEFAULT_LIFECYCLE_TIMEOUT, positive_timeout
 
 from .common import BatchFailure, batch, emit, make_host, select_rooms
@@ -24,7 +25,7 @@ from .common import BatchFailure, batch, emit, make_host, select_rooms
 agent_app = App(name="agent", help="Run a game agent inside a container.")
 schedule_app = App(name="schedule", help="Manage daily room opening hours.")
 maintenance_app = App(
-    name="maintenance", help="Run room maintenance and inspect background tasks."
+    name="maintenance", help="Run game maintenance through the active SDK service."
 )
 _PORT = TypeAdapter(Port)
 type AllRooms = Annotated[bool, Parameter(name="--all")]
@@ -40,10 +41,10 @@ type ExternalPort = Annotated[int | None, Parameter(validator=_port)]
 
 @agent_app.command
 async def prepare() -> None:
-    """Prepare shared room files and download required mods."""
+    """Prepare shared room files and update mods, including when auto-update is off."""
     from dst_server.cluster.service import prepare_shared
 
-    await prepare_shared()
+    await prepare_shared(update_mods=True)
 
 
 async def _serve(shard: str | None, external_port: int | None) -> int:
@@ -79,12 +80,11 @@ async def show_schedule(
     all_rooms: AllRooms = False,
     template: str | None = None,
 ) -> None:
-    """Show opening hours, manual overrides and the next schedule boundary."""
+    """Show opening hours, pause state and the next schedule boundary."""
     from dst_server.host.schedule import (
         effective_state,
         local_now,
         next_boundary,
-        read_control,
     )
 
     async with make_host() as host:
@@ -93,12 +93,11 @@ async def show_schedule(
         results = []
         for number in numbers:
             definition = host.rooms.policy(number)
-            path = host.rooms.path(number)
             results.append({
                 "room": number,
                 "windows": definition.schedule,
-                "control": read_control(path),
-                "open": effective_state(path, definition, now),
+                "control": definition,
+                "open": effective_state(definition, now),
                 "next_boundary": next_boundary(definition, now),
             })
         emit(results)
@@ -112,12 +111,10 @@ async def set_schedule(
     template: str | None = None,
     always: bool = False,
 ) -> None:
-    """Set daily HH:MM-HH:MM windows, or --always for unscheduled operation."""
+    """Set HH:MM-HH:MM windows for stopped rooms, or --always to remove windows."""
     if bool(windows) == always:
         msg = "provide daily windows or --always"
         raise ValueError(msg)
-    from dst_server.host.locking import room_lock
-
     parsed = []
     for window in windows:
         match = re.fullmatch(r"([0-9]{2}:[0-9]{2})-([0-9]{2}:[0-9]{2})", window)
@@ -133,32 +130,16 @@ async def set_schedule(
     async with make_host() as host:
 
         async def save(number: int) -> Control:
-            path = host.rooms.path(number)
-            async with room_lock(path):
-                previous = host.rooms.policy(number)
-                updated = previous.model_copy(
-                    update={
-                        "schedule": tuple(parsed),
-                        "override": None,
-                        "until": None,
-                        "revision": previous.revision + 1,
-                    }
-                )
-                write_control(path, updated)
-                return updated
+            previous = host.rooms.load(number)
+            await host.edit(previous.replace(schedule=tuple(parsed)))
+            return host.rooms.policy(number)
 
         await batch(select_rooms(host, room, all_rooms, template), save)
 
 
-def _emit_results(results: Mapping[Any, object]) -> None:
+def _emit_results(results: Mapping[int, Mapping[str, object]]) -> None:
     emit(results)
-    rooms = results.get("rooms", results)
-    if not isinstance(rooms, Mapping):
-        rooms = results
-    if any(
-        isinstance(item, dict) and item.get("status") == "failed"
-        for item in rooms.values()
-    ):
+    if any(item["status"] == "failed" for item in results.values()):
         raise BatchFailure
 
 
@@ -190,7 +171,7 @@ async def resume(
     all_rooms: AllRooms = False,
     template: str | None = None,
 ) -> None:
-    """Resume the configured schedule and clear manual overrides."""
+    """Resume the configured automatic management."""
     await _pause(False, room, all_rooms, template)
 
 
@@ -223,13 +204,17 @@ async def maintenance_restart(
     all_rooms: AllRooms = False,
     template: str | None = None,
     delay: str = "8m",
-    detach: bool = False,
+    reason: Annotated[
+        Template, Parameter(name=("--reason", "--notice"))
+    ] = Template.RESTART,
+    estimated_duration: str = "5m",
     timeout: float = DEFAULT_LIFECYCLE_TIMEOUT,  # ruff: ignore[async-function-with-timeout]
 ) -> None:
     """Announce a countdown, then restart the selected rooms."""
     from dst_server.host.maintenance import maintain_restart
 
     seconds = duration(delay)
+    estimate = duration(estimated_duration)
     timeout = positive_timeout(timeout)
     async with make_host() as host:
         _emit_results(
@@ -237,7 +222,8 @@ async def maintenance_restart(
                 host,
                 select_rooms(host, room, all_rooms, template),
                 delay=seconds,
-                detach=detach,
+                reason=reason,
+                estimated_duration=estimate,
                 timeout=timeout,
             ),
         )
@@ -250,49 +236,6 @@ async def recycle(*, dry_run: bool = False) -> None:
 
     async with make_host() as host:
         _emit_results(await run_recycle(host, dry_run=dry_run))
-
-
-@maintenance_app.command(name="status")
-async def maintenance_status(task: str) -> None:
-    """Read a background maintenance task's current or retained completion status."""
-    from dst_server.host.maintenance import task_status
-
-    async with make_host() as host:
-        emit(await task_status(host, task))
-
-
-@maintenance_app.command(name="cancel")
-async def maintenance_cancel(task: str) -> None:
-    """Cancel a background maintenance task and any unstarted room restarts."""
-    from dst_server.host.maintenance import cancel_task
-
-    async with make_host() as host:
-        emit(await cancel_task(host, task))
-
-
-@maintenance_app.command(name="logs")
-async def maintenance_logs(
-    task: str, *, follow: bool = False, lines: int = 100
-) -> None:
-    """Read retained maintenance task logs and optionally follow new records."""
-    from dst_server.host.maintenance import task_unit
-    from dst_server.logs import JournalLogs, JournalQuery
-
-    from .logs import show_diagnostics, show_record
-
-    units = (task_unit(task),)
-    request = JournalQuery(limit=lines, direction="forward" if follow else "backward")
-    reader = JournalLogs()
-    if follow:
-        async with reader.follow(units, request) as stream:
-            async for record in stream:
-                show_record(record)
-        show_diagnostics(stream.diagnostics, stream.diagnostics_truncated)
-    else:
-        result = await reader.query(units, request)
-        for record in result.records:
-            show_record(record)
-        show_diagnostics(result.diagnostics, result.diagnostics_truncated)
 
 
 async def annotations(

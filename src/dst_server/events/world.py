@@ -2,15 +2,15 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from dst_server.lua_codec import NonNegativeSafeLuaInteger, PositiveSafeLuaInteger
 from dst_server.models.base import (
     FrozenModel,
     Identifier,
     Name,
-    NonNegativeInt,
-    PositiveInt,
 )
+from dst_server.models.driver import DriverDiagnostic
 
-from .base import DriverDiagnostic, EntityRef, EventRecord
+from .base import EntityRef, EventRecord
 
 
 class EntityDeathData(FrozenModel):
@@ -19,32 +19,19 @@ class EntityDeathData(FrozenModel):
     afflicter: EntityRef | None
     attributed_player: EntityRef | None
     corpsing: bool
-    caused_by_action_sequence: PositiveInt | None
+    caused_by_action_sequence: PositiveSafeLuaInteger | None
 
 
 class CycleState(FrozenModel):
     name: Literal["cycles"]
-    value: NonNegativeInt
+    value: NonNegativeSafeLuaInteger
 
 
-class PhaseState(FrozenModel):
-    name: Literal["phase", "cavephase"]
-    value: Literal["day", "dusk", "night"]
-
-
-class SeasonState(FrozenModel):
-    name: Literal["season"]
-    value: Literal["autumn", "winter", "spring", "summer"]
-
-
-class MoonState(FrozenModel):
-    name: Literal["moonphase", "cavemoonphase"]
-    value: Literal["new", "quarter", "half", "threequarter", "full"]
-
-
-class NightmareState(FrozenModel):
-    name: Literal["nightmarephase"]
-    value: Literal["none", "calm", "warn", "wild", "dawn"]
+class IdentifierState(FrozenModel):
+    name: Literal[
+        "phase", "cavephase", "season", "moonphase", "cavemoonphase", "nightmarephase"
+    ]
+    value: Identifier
 
 
 class BooleanState(FrozenModel):
@@ -58,7 +45,7 @@ class BooleanState(FrozenModel):
 
 
 type StateData = Annotated[
-    CycleState | PhaseState | SeasonState | MoonState | NightmareState | BooleanState,
+    CycleState | IdentifierState | BooleanState,
     Field(discriminator="name"),
 ]
 
@@ -82,6 +69,36 @@ class RiftUnlockedData(FrozenModel):
 class RiftChangedData(FrozenModel):
     rift: EntityRef
     active: bool
+
+
+class ModOutdatedData(FrozenModel):
+    name: Annotated[str, Field(min_length=1, max_length=4096)]
+
+
+class ServerPauseData(FrozenModel):
+    domain: Literal["server"]
+    pause: bool
+    autopause: bool
+    gameautopause: bool
+    source: str | None
+
+
+class SimulationPauseData(FrozenModel):
+    domain: Literal["simulation"]
+    paused: bool
+
+
+type PauseData = Annotated[
+    ServerPauseData | SimulationPauseData, Field(discriminator="domain")
+]
+
+
+class PauseChangedEvent(EventRecord[PauseData]):
+    event: Literal["dst.server.pause_changed"]
+
+
+class ModOutdatedEvent(EventRecord[ModOutdatedData]):
+    event: Literal["dst.mod.outdated"]
 
 
 class EntityDeathEvent(EventRecord[EntityDeathData]):

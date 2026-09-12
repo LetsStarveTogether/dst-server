@@ -5,9 +5,8 @@ import pytest
 
 from dst_server import mods
 from dst_server.configuration.overrides import WorkshopDownloads
-from dst_server.mods import native
 from dst_server.mods import process as mod_process
-from tests.helpers import BlockingProcess, process_stopped
+from tests.helpers import process_stopped
 
 FAKE_UPDATER = r"""#!/usr/bin/env python3
 import os
@@ -173,39 +172,6 @@ async def assert_stopped(processes: tuple[int, int]) -> None:
     )
 
 
-async def test_update_chains_cleanup_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    process = BlockingProcess()
-
-    async def spawn(  # ruff:ignore[unused-async]
-        *_args: object,
-        **_kwargs: object,
-    ) -> BlockingProcess:
-        return process
-
-    async def fail_cleanup(_process: object) -> None:  # ruff:ignore[unused-async]
-        msg = "cleanup B"
-        raise LookupError(msg)
-
-    def fail_log(_line: str) -> None:
-        msg = "primary A"
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr(native, "free_udp_ports", lambda _count: (1, 2))
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setattr(mod_process, "terminate_process", fail_cleanup)
-    existing_tasks = asyncio.all_tasks()
-
-    with pytest.raises(RuntimeError, match="primary A") as caught:
-        await mods.update_native(tmp_path / "updater", tmp_path, log_handler=fail_log)
-
-    assert isinstance(caught.value.__cause__, LookupError)
-    assert str(caught.value.__cause__) == "cleanup B"
-    assert asyncio.all_tasks() == existing_tasks
-
-
 async def test_log_handler_failure_terminates_process_group(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -268,7 +234,7 @@ async def test_leader_exit_terminates_descendant_holding_stdout(
             await mods.update_native(executable, ugc, log_handler=lines.append)
 
     if returncode:
-        with pytest.raises(ChildProcessError, match=f"status {returncode}"):
+        with pytest.raises(mods.ModUpdateError, match=f"status {returncode}"):
             await run()
     else:
         await run()

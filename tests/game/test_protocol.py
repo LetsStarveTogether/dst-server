@@ -1,7 +1,6 @@
 import math
 import string
 import sys
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -9,16 +8,15 @@ import orjson
 import pytest
 from pydantic import JsonValue
 
+from dst_server import commands as c
 from dst_server.game import GameClient, rpc
-from dst_server.lua_codec import lua_string, lua_value
-from dst_server.telemetry import TelemetrySettings
+from dst_server.lua_codec import LuaValue, lua_string, render_literal
+from dst_server.models import Mod, Player
+from dst_server.models.driver import DriverHealth
 from dst_server.telemetry.recorder import Recorder
-from tests.helpers import run_lua
+from tests.helpers import native_scripts, run_lua
 
-ROOT = Path(__file__).parents[2]
-PREFIX = rpc.RESULT_PREFIX.encode()
-SUCCESS_OVERHEAD = len(PREFIX) + len(b'{"ok":true,"data":""}')
-SAFE_INTEGER = 2**53 - 1
+SUCCESS_OVERHEAD = len(b'{"ok":true,"data":""}')
 TEXT = (
     "".join(chr(code) + string.digits for code in range(32))
     + '\\"中文😀𐀀\u007f\u0080\u07ff\u0800\ud7ff\ue000\uffff\U0010ffff'
@@ -43,21 +41,19 @@ TEXT += "".join(UNICODE_INPUTS.values())
 
 
 def response(body: str, luajit: str, *, setup: str = "") -> tuple[bytes, Any]:
-    output = run_lua(setup + rpc.lua_request(body), luajit)
-    assert output.startswith(PREFIX)
+    output = run_lua(
+        setup
+        + 'local wire=require("dst_server.wire");'
+        + f'io.write(wire.response(function() {body} end), "\\n")',
+        luajit,
+    )
     assert output.endswith(b"\n")
     line = output[:-1]
     assert len(line) <= rpc.MAX_RESULT_LINE_BYTES
     assert all(byte >= 32 for byte in line), "RPC output must be a single JSON line"
-    envelope = orjson.loads(line[len(PREFIX) :])
-    rpc.JSON_RESPONSE.validate_json(line[len(PREFIX) :], strict=True)
+    envelope = orjson.loads(line)
+    rpc.response_adapter(JsonValue).validate_json(line, strict=True)
     return line, envelope
-
-
-@pytest.mark.parametrize("character", [";", "?", "\r", "\n"])
-def test_lua_package_path_rejects_control_syntax(character: str) -> None:
-    with pytest.raises(ValueError, match="Lua directory"):
-        rpc.lua_package_path(Path(f"/sdk{character}modules"))
 
 
 @pytest.mark.parametrize("value", [TEXT, "", "\0" + "123", "\x1f" + "999"])
@@ -112,18 +108,22 @@ def test_player_queries_accept_unselected_characters(
     expected: str | None,
     luajit: str,
 ) -> None:
-    client = {"userid": "KU_TEST", "name": "Test", "lobbycharacter": lobbycharacter}
+    client: dict[str, LuaValue] = {
+        "userid": "KU_TEST",
+        "name": "Test",
+        "lobbycharacter": lobbycharacter,
+    }
     if prefab is not None:
         client["prefab"] = prefab
     line, _ = response(
         'return require("dst_server.player_queries").get_players()',
         luajit,
         setup=(
-            f"GetPlayerClientTable=function() return {{{lua_value(client)}}} end;"
+            f"GetPlayerClientTable=function() return {{{render_literal(client)}}} end;"
             "LookupPlayerInstByUserID=function() return nil end;"
         ),
     )
-    result = rpc.PLAYERS_RESPONSE.validate_json(line[len(PREFIX) :])
+    result = rpc.response_adapter(tuple[Player, ...]).validate_json(line)
     assert isinstance(result, rpc.Success)
     assert result.data[0].prefab == expected
 
@@ -137,7 +137,7 @@ def test_player_queries_accept_unselected_characters(
 def test_player_names_preserve_unicode_code_points(
     name: str, source: str, luajit: str
 ) -> None:
-    client = {
+    client: dict[str, LuaValue] = {
         "userid": "KU_TEST",
         "name": name,
         "prefab": "" if source == "lobby" else "wilson",
@@ -151,23 +151,23 @@ def test_player_names_preserve_unicode_code_points(
         f'return require("dst_server.player_queries").{query}',
         luajit,
         setup=(
-            f"local client={lua_value(client)};"
+            f"local client={render_literal(client)};"
             'local player={userid=client.userid,prefab="wilson",components={},'
             "HasTag=function() return false end,"
             "GetDisplayName=function() return client.name end};"
             "GetPlayerClientTable=function() return "
-            f"{lua_value([] if source == 'display-name' else [client])} end;"
+            f"{{{'' if source == 'display-name' else 'client'}}} end;"
             "LookupPlayerInstByUserID=function() return "
             f"{'nil' if source == 'lobby' else 'player'} end;"
         ),
     )
     if source == "display-name":
-        result = rpc.PLAYER_RESPONSE.validate_json(line[len(PREFIX) :])
+        result = rpc.response_adapter(Player | None).validate_json(line)
         assert isinstance(result, rpc.Success)
         assert result.data is not None
         actual = result.data
     else:
-        players = rpc.PLAYERS_RESPONSE.validate_json(line[len(PREFIX) :])
+        players = rpc.response_adapter(tuple[Player, ...]).validate_json(line)
         assert isinstance(players, rpc.Success)
         (actual,) = players.data
     assert (actual.state is None) == (source == "lobby")
@@ -214,7 +214,7 @@ def test_player_queries_accept_native_follower_counts(luajit: str) -> None:
         LookupPlayerInstByUserID = function() return player end
         """,
     )
-    result = rpc.PLAYER_RESPONSE.validate_json(line[len(PREFIX) :])
+    result = rpc.response_adapter(Player | None).validate_json(line)
     assert isinstance(result, rpc.Success)
     assert result.data is not None
     assert result.data.state is not None
@@ -230,7 +230,7 @@ def test_player_queries_accept_native_follower_counts(luajit: str) -> None:
 def test_mod_queries_accept_native_metadata(
     name: str, version: str, luajit: str
 ) -> None:
-    source = (ROOT / "dst-scripts/scripts/modindex.lua").read_text()
+    source = (native_scripts() / "modindex.lua").read_text()
     declaration = "function ModIndex:InitializeModInfo(modname)"
     initializer = (
         declaration
@@ -261,82 +261,10 @@ def test_mod_queries_accept_native_metadata(
         ModManager = {{GetEnabledModNames=function() return {{"local-test"}} end}}
         """,
     )
-    result = rpc.MODS_RESPONSE.validate_json(line[len(PREFIX) :])
+    result = rpc.response_adapter(tuple[Mod, ...]).validate_json(line)
     assert isinstance(result, rpc.Success)
     assert result.data[0].name == name
     assert result.data[0].version == version
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        None,
-        False,
-        True,
-        0,
-        -1,
-        SAFE_INTEGER,
-        -SAFE_INTEGER,
-        1.2345678901234567,
-        sys.float_info.max,
-        sys.float_info.min,
-        math.ulp(0.0),
-        TEXT,
-        [],
-        {},
-        {"n": 0},
-        [None, False, 0, [], {}, TEXT],
-        {TEXT: [None, False, 0, {"n": 0}], "empty": {}},
-        '"); error("injected"); --\nDST_SERVER_RESULT|',
-    ],
-)
-def test_lua_value_round_trips_json_values(value: Any, luajit: str) -> None:
-    _, envelope = response(f"return {lua_value(value)}", luajit)
-    assert envelope == {"ok": True, "data": value}
-    assert orjson.dumps(envelope["data"], option=orjson.OPT_SORT_KEYS) == orjson.dumps(
-        value, option=orjson.OPT_SORT_KEYS
-    )
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        math.nan,
-        math.inf,
-        -math.inf,
-        SAFE_INTEGER + 1,
-        -SAFE_INTEGER - 1,
-        10**400,
-        b"bytes",
-        (1, 2),
-        {1, 2},
-        {1: "numeric key"},
-        {False: "boolean key"},
-        {None: "null key"},
-        {"nested": [math.nan]},
-        {"nested": {1: "bad key"}},
-        "\ud800",
-        {"\udfff": "bad key"},
-        object(),
-    ],
-)
-def test_lua_value_rejects_values_outside_its_contract(value: Any) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        lua_value(value)
-
-
-def test_lua_value_rejects_cycles_and_accepts_shared_values(luajit: str) -> None:
-    cyclic_list: list[Any] = []
-    cyclic_list.append(cyclic_list)
-    cyclic_object: dict[str, Any] = {}
-    cyclic_object["self"] = cyclic_object
-    for cyclic in (cyclic_list, cyclic_object):
-        with pytest.raises(ValueError, match=r"cyclic|circular|cycle"):
-            lua_value(cyclic)
-    shared = {"value": [None, False]}
-    value = [shared, shared]
-    _, envelope = response(f"return {lua_value(value)}", luajit)
-    assert envelope == {"ok": True, "data": value}
 
 
 @pytest.mark.parametrize(
@@ -347,16 +275,20 @@ def test_lua_value_rejects_cycles_and_accepts_shared_values(luajit: str) -> None
         ("false", False),
         ("true", True),
         ("0", 0),
+        ("-1", -1),
+        ("9007199254740991", 2**53 - 1),
+        ("-9007199254740991", -(2**53 - 1)),
         ("{}", []),
         ("wire.object({})", {}),
         ("{n=0}", {"n": 0}),
-        ("{json.null,false,0,{}}", [None, False, 0, []]),
+        ("{json.null,false,0,{},wire.object({})}", [None, False, 0, [], {}]),
         (
             '{text="中文😀",empty=wire.object({}),null=json.null}',
             {"text": "中文😀", "empty": {}, "null": None},
         ),
         ("1.2345678901234567", 1.2345678901234567),
         ("1.7976931348623157e308", sys.float_info.max),
+        ("2.2250738585072014e-308", sys.float_info.min),
         ("4.9406564584124654e-324", math.ulp(0.0)),
     ],
 )
@@ -463,8 +395,13 @@ def test_wire_rejects_invalid_utf8(
 def test_wire_accepts_shared_references_without_mistaking_them_for_cycles(
     luajit: str,
 ) -> None:
-    _, envelope = response("local shared={n=0};return {shared,shared}", luajit)
-    assert envelope == {"ok": True, "data": [{"n": 0}, {"n": 0}]}
+    _, envelope = response(
+        "local shared={value={json.null,false}};return {shared,shared}", luajit
+    )
+    assert envelope == {
+        "ok": True,
+        "data": [{"value": [None, False]}, {"value": [None, False]}],
+    }
 
 
 @pytest.mark.parametrize(
@@ -489,18 +426,18 @@ def test_callback_errors_are_private_and_have_a_stable_category(
     assert envelope == {"ok": False, "error": "lua_error"}
 
 
-def test_reply_invokes_callback_once_and_never_stringifies_its_error(
+def test_response_invokes_callback_once_and_never_stringifies_its_error(
     luajit: str,
 ) -> None:
     output = run_lua(
         'local wire=require("dst_server.wire");local calls,stringifications=0,0;'
         "local failure=setmetatable({}, {__tostring=function() "
         'stringifications=stringifications+1;error("private",0) end});'
-        "wire.reply(function() calls=calls+1;error(failure,0) end);"
+        'io.write(wire.response(function() calls=calls+1;error(failure,0) end), "\\n");'
         "assert(calls==1);assert(stringifications==0)",
         luajit,
     )
-    assert output == PREFIX + b'{"ok":false,"error":"lua_error"}\n'
+    assert output == b'{"ok":false,"error":"lua_error"}\n'
 
 
 @pytest.mark.parametrize("overflow", [False, True], ids=["limit", "overflow"])
@@ -515,7 +452,7 @@ def test_lua_result_line_limit(overflow: bool, luajit: str) -> None:
 
 
 @pytest.mark.parametrize("value", ["string.char(0)", '"😀"'])
-def test_reply_limits_encoded_bytes_not_source_character_count(
+def test_response_limits_encoded_bytes_not_source_character_count(
     value: str,
     luajit: str,
 ) -> None:
@@ -552,94 +489,63 @@ def test_wire_stops_encoding_when_the_byte_budget_is_exhausted(
     )
 
 
-def test_lua_request_delegates_to_the_shared_wire_reply() -> None:
-    command = rpc.lua_request("return false")
-    assert "dst_server.wire" in command
-    assert "reply" in command
-    assert "return false" in command
-    assert len(command) < 200
+@pytest.mark.parametrize("operation", ["request", "reload", "health"])
+async def test_game_client_sends_typed_method_and_arguments(operation: str) -> None:
+    commands: list[tuple[str, dict[str, JsonValue]]] = []
 
-
-@pytest.mark.parametrize("operation", ["install", "request", "reload", "health"])
-async def test_game_client_uses_safe_literals_and_bootstraps_the_wire_module(
-    operation: str,
-    luajit: str,
-) -> None:
-    module = """
-        json.decode=function() error("native decoder used",0) end
-        package.preload["dst_server"]=function()
-            return {
-                install=function(options)
-                    assert(options.generation==7)
-                    assert(options.nonce=="01ARZ3NDEKTSV4RRFFQ69G5FAV")
-                    assert(options.profile=="off")
-                    return {protocol=2,generation=options.generation,
-                        telemetry_status="disabled",
-                        last_error=json.null,events_emitted=0,errors=0}
-                end,
-                call=function(name,args)
-                    if name=="health" then
-                        return {protocol=2,generation=3,telemetry_status="active",
-                            last_error=json.null,events_emitted=7,errors=0}
-                    end
-                    assert(name=="echo")
-                    return args
-                end,
+    async def execute(method: str, arguments: dict[str, JsonValue]) -> bytes:  # ruff:ignore[unused-async]
+        commands.append((method, arguments))
+        data = (
+            {
+                "protocol": 2,
+                "generation": 3,
+                "telemetry_status": "active",
+                "last_error": None,
+                "events_emitted": 7,
+                "errors": 0,
             }
-        end
-    """
-    commands: list[str] = []
+            if method == "health"
+            else arguments
+        )
+        return orjson.dumps({"ok": True, "data": data})
 
-    async def execute(command: str) -> str:  # ruff:ignore[unused-async]
-        commands.append(command)
-        source = module + command
-        if operation == "install":
-            for prefix in ("", "mod/?.lua;"):
-                source += (
-                    f";package.path={lua_string(prefix)}..package.path;"
-                    f"local installed_path=package.path;{command};"
-                    "assert(package.path==installed_path)"
-                )
-        return run_lua(source, luajit, driver_path=operation != "install").decode()
-
-    async def reload(command: str, completion_timeout: float) -> tuple[str, int, float]:
+    async def reload(
+        method: str, arguments: dict[str, JsonValue], completion_timeout: float
+    ) -> tuple[bytes, int, float]:
         assert completion_timeout == 30
-        return await execute(command), 7, 100.0
+        return await execute(method, arguments), 7, 100.0
 
     wait_reload = AsyncMock()
-    observations: list[tuple[int, rpc.DriverHealth]] = []
+    observations: list[tuple[int, DriverHealth]] = []
     game = GameClient(
         shard="Master",
-        lua_directory=ROOT / "src/dst_server/lua",
-        telemetry=TelemetrySettings(profile="off"),
-        execute=execute,
         execute_ready=execute,
         execute_reload=reload,
         wait_reload=wait_reload,
         recorder=Recorder("cluster", "Master"),
         session_id=lambda: "SESSION",
-        nonce="01ARZ3NDEKTSV4RRFFQ69G5FAV",
         observe_health=lambda generation, health: observations.append((
             generation,
             health,
         )),
     )
     value: dict[str, JsonValue] = {"text": TEXT, "empty": {}, "items": [None, False, 0]}
-    if operation == "install":
-        health = await game.install(7)
-        assert health.protocol == 2
-        assert health.generation == 7
-        assert health.telemetry_status == "disabled"
-    elif operation == "request":
-        assert await game.request("echo", value, rpc.JSON_RESPONSE) == value
+    if operation == "request":
+        assert (
+            await game.request("echo", value, rpc.response_adapter(JsonValue)) == value
+        )
     elif operation == "reload":
-        assert await game.reload("echo", value, rpc.JSON_RESPONSE, 30) == value
+        assert (
+            await game.reload("echo", value, rpc.response_adapter(JsonValue), 30)
+            == value
+        )
         wait_reload.assert_awaited_once_with(7, 100.0)
     else:
-        health = await game.get_health()
+        health = await game.invoke(c.Health())
         assert health.generation == 3
         assert observations == [(3, health)]
     if operation != "health":
         assert observations == []
-    assert len(commands) == 1
-    assert "json.decode" not in commands[0]
+    assert commands == (
+        [("health", {})] if operation == "health" else [("echo", value)]
+    )

@@ -19,6 +19,7 @@ local function attach_lifecycle(player)
         telemetry.emit("dst.player.revived", {
             player = values.entity_ref(player),
             corpse = data ~= nil and data.corpse == true,
+            method = data ~= nil and data.corpse == true and "corpse" or "ghost",
             reviver = values.entity_ref(data ~= nil and data.reviver or nil),
         })
     end)
@@ -211,6 +212,29 @@ function player_events.attach(player)
         attach_conditions(player)
         attach_skills_and_fishing(player)
         attach_inventory(player)
+    end
+end
+
+function player_events.install_lifecycle()
+    local extensions = require("prefabs/player_common_extensions")
+    local original = extensions.OnRespawnFromVineSave
+    if type(original) ~= "function" then
+        error("OnRespawnFromVineSave is unavailable")
+    end
+    local capture = telemetry.guard("player.charlie_revived", function(player)
+        telemetry.emit("dst.player.revived", {
+            player = values.entity_ref(player),
+            corpse = false,
+            method = "charlie",
+            reviver = json.null,
+        })
+    end)
+    -- SGwilson resolves this exported function at each completed vine rescue.
+    -- Unlike ghost/corpse revival, it does not emit ms_respawnedfromghost.
+    extensions.OnRespawnFromVineSave = function(...)
+        local results = telemetry.pack(original(...))
+        capture(...)
+        return telemetry.unpack(results)
     end
 end
 

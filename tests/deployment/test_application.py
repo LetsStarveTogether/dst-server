@@ -8,6 +8,7 @@ from dst_server.cluster import service
 from dst_server.configuration import files as layout
 from dst_server.configuration.overrides import WorkshopDownloads
 from dst_server.deployment import DEFAULT_IMAGE, QuadletApplication
+from dst_server.mods import native
 
 
 def write_shard(path: Path, *, is_master: bool, name: str) -> None:
@@ -57,6 +58,13 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
     )
     assert master.wants == (f"{secondary.name}.container",)
     assert secondary.after == secondary.binds_to == (f"{master.name}.container",)
+    assert master.part_of == ("dst-000-pod.service",)
+    assert secondary.part_of == (f"{master.name}.service",)
+    assert master.restart == "on-failure"
+    assert master.restart_sec == 30
+    assert master.start_limit_interval_sec == 600
+    assert master.start_limit_burst == 3
+    assert secondary.restart == "no"
     assert tuple(
         (mapping.host, mapping.container) for mapping in application.pod.publish_ports
     ) == (
@@ -81,7 +89,6 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
         assert unit.timeout_start_sec == 1800
         assert unit.notify is True
         assert unit.watchdog_sec == 300
-        assert unit.restart == "on-failure"
         assert unit.kill_mode == "control-group"
         assert unit.watchdog_signal == "SIGKILL"
         text = (quadlet / f"{unit.name}.container").read_text(encoding="utf-8")
@@ -314,7 +321,7 @@ async def test_prepare_shared_updates_collection_only_setup(
         assert args[1] == cluster / "mods" / "ugc"
         calls.append((args, kwargs))
 
-    monkeypatch.setattr(mods, "update_native", update)
+    monkeypatch.setattr(native, "update", update)
 
     await service.prepare_shared(install, cluster, update_mods=True)
 

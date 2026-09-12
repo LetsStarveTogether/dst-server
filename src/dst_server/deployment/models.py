@@ -281,7 +281,14 @@ class ContainerUnit(QuadletUnit):
     binds_to: Annotated[
         tuple[UnitToken, ...], UnitField("Unit", "BindsTo", "units")
     ] = ()
+    part_of: Annotated[tuple[UnitToken, ...], UnitField("Unit", "PartOf", "units")] = ()
     after: Annotated[tuple[UnitToken, ...], UnitField("Unit", "After", "units")] = ()
+    start_limit_interval_sec: Annotated[
+        Seconds | None, UnitField("Unit", "StartLimitIntervalSec", "integer")
+    ] = None
+    start_limit_burst: Annotated[
+        int | None, Field(ge=0), UnitField("Unit", "StartLimitBurst", "integer")
+    ] = None
     pod: Annotated[UnitToken | None, UnitField("Container", "Pod", "reference")] = None
     exec: Annotated[
         tuple[NonEmptyUnitValue, ...], UnitField("Container", "Exec", "command")
@@ -319,6 +326,9 @@ class ContainerUnit(QuadletUnit):
         int | None, Field(ge=-20, le=19), UnitField("Service", "Nice", "integer")
     ] = None
     restart: Annotated[RestartPolicy | None, UnitField("Service", "Restart")] = None
+    restart_sec: Annotated[
+        Seconds | None, UnitField("Service", "RestartSec", "integer")
+    ] = None
     kill_mode: Annotated[
         Literal["control-group", "mixed", "process", "none"] | None,
         UnitField("Service", "KillMode"),

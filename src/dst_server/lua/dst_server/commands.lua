@@ -1,15 +1,56 @@
 local values = require("dst_server.values")
 local commands = {}
 local MAX_GIVE_ITEMS = 64
+local save_pending = false
 
 function commands.announce(args)
-    c_announce(values.required_string(args, "message"))
+    local message = values.required_string(args, "message")
+    local count = args.count == nil and 1 or values.required_integer(args, "count", 1)
+    if count > 9007199254740991 then error("count must be <= 9007199254740991") end
+    local interval = values.optional_number(args, "interval") or 30
+    if interval <= 0 then error("interval must be greater than zero") end
+    if count == 1 then
+        c_announce(message)
+    else
+        c_announce(message, interval)
+        TheWorld.__announcementtask.limit = count
+    end
     return true
 end
 
-function commands.save()
-    c_save()
-    return true
+function commands.save(args, callback)
+    if TheWorld == nil or not TheWorld.ismastershard then
+        error("coordinated saves require the master shard")
+    end
+    if save_pending then error("a native save is still pending") end
+    assert(type(callback) == "function", "save requires a completion callback")
+    local world = TheWorld
+    local session = values.required_string(world.meta, "session_identifier")
+    local snapshot = TheNet:GetCurrentSnapshot()
+    save_pending = true
+    local ok = pcall(function()
+        -- Preserve the native autosaver's snapshot coordination with other shards.
+        TheWorld:PushEvent("master_autosaverupdate", { snapshot = snapshot })
+        ShardGameIndex:SaveCurrent(function()
+            local confirmed, path = pcall(function()
+                local path = TheNet:GetWorldSessionFile(session)
+                local prefix = "session/" .. session .. "/"
+                assert(TheWorld == world and world.meta.session_identifier == session
+                    and type(path) == "string" and path:sub(1, #prefix) == prefix
+                    and path:sub(#prefix + 1):match("^%d+$") ~= nil)
+                return path
+            end)
+            save_pending = false
+            if not confirmed then
+                callback(nil, "indeterminate")
+                return
+            end
+            callback({ snapshot = path })
+        end)
+    end)
+    -- A failed native call can already have changed disk or other shards.
+    -- Keep the guard until its callback or the next world if completion is unknown.
+    if not ok then require("dst_server.wire").indeterminate() end
 end
 
 function commands.set_server_paused(args)

@@ -16,12 +16,15 @@ from opentelemetry.sdk._logs.export import (
     InMemoryLogRecordExporter,
     LogRecordExportResult,
 )
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
 from opentelemetry.sdk.resources import Resource
 from pydantic import JsonValue
 from ulid import ULID
 
 from dst_server.events import GAME_EVENT_ADAPTER, ObservedGameEvent
 from dst_server.telemetry import otel
+from dst_server.telemetry.recorder import Recorder
 
 ATTEMPT = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 INSTANCE = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
@@ -52,40 +55,40 @@ def observed(*, generation: int = 1, sequence: int = 1) -> ObservedGameEvent:
 
 
 def make_pipeline(
-    exporter: InMemoryLogRecordExporter, *, max_queue_size: int = 2048
+    exporter: InMemoryLogRecordExporter,
+    *,
+    max_queue_size: int = 2048,
+    meter_provider: MeterProvider | None = None,
 ) -> otel.Pipeline:
     resource = Resource({
         "service.name": "dst-server",
         "service.instance.id": INSTANCE,
     })
-    provider = LoggerProvider(resource=resource, shutdown_on_exit=False)
+    provider = LoggerProvider(
+        resource=resource, shutdown_on_exit=False, meter_provider=meter_provider
+    )
     provider.add_log_record_processor(
         BatchLogRecordProcessor(
             exporter,
             schedule_delay_millis=60_000,
             max_queue_size=max_queue_size,
             max_export_batch_size=min(512, max_queue_size),
+            meter_provider=meter_provider,
         )
     )
-    return otel.Pipeline(resource=resource, logger_provider=provider)
+    return otel.Pipeline(
+        resource=resource, logger_provider=provider, meter_provider=meter_provider
+    )
 
 
 async def test_game_logs_keep_source_identity_and_generation() -> None:
     exporter = InMemoryLogRecordExporter()
     pipeline = make_pipeline(exporter)
+    recorder = Recorder("dst-000", "forest", pipeline=pipeline)
     event = observed()
     try:
-        pipeline.emit_event(
-            event,
-            attributes={
-                "dst.cluster.name": "dst-000",
-                "dst.shard.name": "forest",
-                "dst.session.id": "wrong-session",
-                "dst.event.sequence": 999,
-                "dst.world.cycle": 999,
-            },
-        )
-        pipeline.emit_event(observed(generation=2))
+        recorder.observe_game(event)
+        recorder.observe_game(observed(generation=2))
     finally:
         await pipeline.shutdown()
     first, second = exporter.get_finished_logs()
@@ -117,6 +120,7 @@ async def test_game_logs_keep_source_identity_and_generation() -> None:
 async def test_instrumentation_failure_has_error_severity() -> None:
     exporter = InMemoryLogRecordExporter()
     pipeline = make_pipeline(exporter)
+    recorder = Recorder("dst-000", "forest", pipeline=pipeline)
     source = observed()
     failure = GAME_EVENT_ADAPTER.validate_python(
         source.record.model_dump()
@@ -130,7 +134,7 @@ async def test_instrumentation_failure_has_error_severity() -> None:
         }
     )
     try:
-        pipeline.emit_event(ObservedGameEvent(failure, source.observed_timestamp_ns))
+        recorder.observe_game(ObservedGameEvent(failure, source.observed_timestamp_ns))
     finally:
         await pipeline.shutdown()
     record = exporter.get_finished_logs()[0].log_record
@@ -200,6 +204,7 @@ async def test_failed_batch_is_discarded_and_new_logs_continue(
 ) -> None:
     exporter = InMemoryLogRecordExporter()
     pipeline = make_pipeline(exporter)
+    recorder = Recorder("dst-000", "forest", pipeline=pipeline)
     assert pipeline.logger_provider is not None
     failure = Mock(
         return_value=LogRecordExportResult.FAILURE,
@@ -208,11 +213,11 @@ async def test_failed_batch_is_discarded_and_new_logs_continue(
     try:
         with monkeypatch.context() as patch:
             patch.setattr(exporter, "export", failure)
-            pipeline.emit_event(observed())
+            recorder.observe_game(observed())
             await asyncio.to_thread(pipeline.logger_provider.force_flush)
             await asyncio.to_thread(pipeline.logger_provider.force_flush)
             failure.assert_called_once()
-        pipeline.emit_event(observed(sequence=2))
+        recorder.observe_game(observed(sequence=2))
     finally:
         await pipeline.shutdown()
     records = exporter.get_finished_logs()
@@ -233,18 +238,49 @@ class BlockingExporter(InMemoryLogRecordExporter):
         return super().export(batch)
 
 
-async def test_full_queue_drops_oldest_without_blocking_the_event_loop() -> None:
+async def test_full_queue_drops_oldest_without_blocking_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED", "true")
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=(reader,), shutdown_on_exit=False)
     exporter = BlockingExporter()
-    pipeline = make_pipeline(exporter, max_queue_size=2)
+    pipeline = make_pipeline(exporter, max_queue_size=2, meter_provider=provider)
+    recorder = Recorder("dst-000", "forest", pipeline=pipeline)
     try:
-        pipeline.emit_event(observed(sequence=1))
-        pipeline.emit_event(observed(sequence=2))
+        recorder.observe_game(observed(sequence=1))
+        recorder.observe_game(observed(sequence=2))
         assert await asyncio.to_thread(exporter.entered.wait, 1)
         started = perf_counter()
         for sequence in range(3, 6):
-            pipeline.emit_event(observed(sequence=sequence))
+            recorder.observe_game(observed(sequence=sequence))
         await asyncio.sleep(0)
         assert perf_counter() - started < 1
+        data = reader.get_metrics_data()
+        assert data is not None
+        measurements = {
+            metric.name: [
+                point
+                for point in metric.data.data_points
+                if isinstance(point, NumberDataPoint)
+            ]
+            for resource in data.resource_metrics
+            for scope in resource.scope_metrics
+            for metric in scope.metrics
+        }
+        assert [
+            point.value for point in measurements["otel.sdk.processor.log.queue.size"]
+        ] == [2]
+        assert [
+            point.value
+            for point in measurements["otel.sdk.processor.log.queue.capacity"]
+        ] == [2]
+        drops = [
+            point.value
+            for point in measurements["otel.sdk.processor.log.processed"]
+            if (point.attributes or {}).get("error.type") == "queue_full"
+        ]
+        assert drops == [1]
     finally:
         exporter.release.set()
         await pipeline.shutdown()
@@ -262,13 +298,18 @@ async def test_shutdown_flushes_once_and_rejects_new_events(
     shutdown = Mock(wraps=exporter.shutdown)
     monkeypatch.setattr(exporter, "shutdown", shutdown)
     pipeline = make_pipeline(exporter)
-    pipeline.emit_event(observed())
+    Recorder("dst-000", "forest", pipeline=pipeline).observe_game(observed())
     await asyncio.gather(pipeline.shutdown(), pipeline.shutdown())
     await pipeline.shutdown()
     shutdown.assert_called_once_with()
     assert len(exporter.get_finished_logs()) == 1
     with pytest.raises(RuntimeError, match="closed"):
-        pipeline.emit_event(observed(sequence=2))
+        pipeline.emit_operational(
+            event_name="dst.test",
+            body={},
+            observed_timestamp_ns=time_ns(),
+            severity_text="INFO",
+        )
 
 
 async def test_cancelled_shutdown_waits_for_active_export_and_closes_once(
@@ -281,12 +322,17 @@ async def test_cancelled_shutdown_waits_for_active_export_and_closes_once(
     closing = None
     outcome = None
     try:
-        pipeline.emit_event(observed())
+        Recorder("dst-000", "forest", pipeline=pipeline).observe_game(observed())
         assert await asyncio.to_thread(exporter.entered.wait, 1)
         closing = asyncio.create_task(pipeline.shutdown())
         await asyncio.sleep(0)
         with pytest.raises(RuntimeError, match="closed"):
-            pipeline.emit_event(observed(sequence=2))
+            pipeline.emit_operational(
+                event_name="dst.test",
+                body={},
+                observed_timestamp_ns=time_ns(),
+                severity_text="INFO",
+            )
         closing.cancel()
         await asyncio.sleep(0)
         assert not closing.done()
@@ -323,9 +369,10 @@ async def test_configure_disabled_signals_needs_no_storage(
     for signal in ("LOGS", "METRICS", "TRACES"):
         monkeypatch.setenv(f"OTEL_{signal}_EXPORTER", "none")
     pipeline = otel.configure()
+    assert os.environ["OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED"] == "true"
     try:
         assert not pipeline.logs_enabled
-        pipeline.emit_event(observed())
+        Recorder("dst-000", "forest", pipeline=pipeline).observe_game(observed())
     finally:
         await pipeline.shutdown()
     assert not await asyncio.to_thread(os.listdir, tmp_path)

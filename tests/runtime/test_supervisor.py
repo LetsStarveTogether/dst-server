@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable
 from types import SimpleNamespace
 from typing import cast
 
+import logbook
 import pytest
 from ulid import ULID
 
@@ -17,6 +18,7 @@ from dst_server.runtime.supervisor import (
     ShardSupervisor,
     ShardSupervisorStatus,
 )
+from dst_server.timeouts import operation_deadline, timeout_scope
 from tests.helpers import wait_for_event
 
 
@@ -264,6 +266,71 @@ async def test_failures_share_one_retry_budget(
     assert failed == [status]
 
 
+async def test_restarts_do_not_inherit_the_initial_request_deadline(
+    managed_supervisor: Callable[..., ShardSupervisor],
+) -> None:
+    deadlines: list[float] = []
+
+    class TimedProcess(ProcessStub):
+        async def start(self, startup_timeout: float = 1) -> None:
+            async with timeout_scope(startup_timeout) as deadline:
+                deadlines.append(deadline)
+                await super().start()
+
+    first, second, third = TimedProcess(), TimedProcess(), TimedProcess()
+    clock = Clock()
+    supervisor = managed_supervisor(
+        "Forest", Factory(first, second, third), clock=clock
+    )
+    async with timeout_scope(60) as request_deadline:
+        await supervisor.start()
+        assert operation_deadline.get() == request_deadline
+    await supervisor.restart()
+    second.exit(1)
+    await wait_phase(supervisor, ShardPhase.RETRY_WAIT)
+    await clock.release(RETRY_DELAY)
+    await wait_phase(supervisor, ShardPhase.RUNNING)
+
+    assert len(deadlines) == 3
+    assert all(deadline < request_deadline for deadline in deadlines)
+
+
+@pytest.mark.parametrize("stage", ["create", "start", "recover"])
+async def test_failure_id_links_root_cause_logs_to_terminal_status(
+    managed_supervisor: Callable[..., ShardSupervisor],
+    stage: str,
+) -> None:
+    error = OSError("native operation failed")
+    server = ProcessStub(
+        start_error=error if stage == "start" else None,
+        kill_error=error if stage == "recover" else None,
+    )
+    clock = Clock()
+    supervisor = managed_supervisor(
+        "Forest",
+        Factory(server, error=error if stage == "create" else None),
+        clock=clock,
+    )
+    with logbook.TestHandler() as output:
+        if stage == "recover":
+            await supervisor.start()
+            with pytest.raises(RuntimeError, match="failed to stop live"):
+                await supervisor.kill()
+            server.kill_error = None
+        else:
+            supervisor._attempts = MAX_ATTEMPTS - 1
+            await supervisor.start()
+
+    status = supervisor.status
+    assert status.phase is ShardPhase.FAILED
+    assert status.error_id is not None
+    causes = [record for record in output.records if record.exc_info]
+    assert causes
+    assert all(record.exc_info[1] is error for record in causes)
+    assert all(str(status.error_id) in record.message for record in output.records)
+    assert any(f": {stage}:" in record.message for record in causes)
+
+
 async def test_stable_window_resets_attempts(
     managed_supervisor: Callable[..., ShardSupervisor],
 ) -> None:
@@ -272,13 +339,14 @@ async def test_stable_window_resets_attempts(
     supervisor = managed_supervisor("Forest", Factory(first, second), clock=clock)
 
     await supervisor.start()
+    supervisor._attempts = MAX_ATTEMPTS - 1
     await clock.release(STABLE_WINDOW)
-    await wait_phase(supervisor, ShardPhase.RUNNING, attempts=0)
+    await wait_phase(supervisor, ShardPhase.RUNNING, attempts=1)
     first.exit(1)
 
-    assert (await wait_phase(supervisor, ShardPhase.RETRY_WAIT)).attempts == 0
+    assert (await wait_phase(supervisor, ShardPhase.RETRY_WAIT)).attempts == 1
     await clock.release(RETRY_DELAY)
-    assert (await wait_phase(supervisor, ShardPhase.RUNNING)).attempts == 1
+    assert (await wait_phase(supervisor, ShardPhase.RUNNING)).attempts == 2
 
 
 @pytest.mark.parametrize("action", ["stop", "kill", "restart", "aclose"])

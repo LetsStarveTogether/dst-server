@@ -2,22 +2,23 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from dst_server.lua_codec import NonNegativeSafeLuaInteger, PositiveSafeLuaInteger
 from dst_server.models import Position
-from dst_server.models.base import FrozenModel, Identifier, NonNegativeInt, PositiveInt
+from dst_server.models.base import FrozenModel, Identifier
 
 
 class EntityRef(FrozenModel):
     prefab: Identifier
-    guid: PositiveInt
+    guid: PositiveSafeLuaInteger
     userid: Identifier | None
     position: Position | None
 
 
 class ItemRef(FrozenModel):
     prefab: Identifier
-    guid: PositiveInt
+    guid: PositiveSafeLuaInteger
     skin: Identifier | None
-    stack_size: PositiveInt
+    stack_size: PositiveSafeLuaInteger
 
 
 class PlayerData(FrozenModel):
@@ -25,18 +26,7 @@ class PlayerData(FrozenModel):
 
 
 class CausedData(PlayerData):
-    caused_by_action_sequence: PositiveInt | None
-
-
-class DriverDiagnostic(FrozenModel):
-    stage: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_.:]{0,127}$")]
-    message: Literal[
-        "callback_failed",
-        "encoding_failed",
-        "event_too_large",
-        "installation_failed",
-    ]
-    count: PositiveInt
+    caused_by_action_sequence: PositiveSafeLuaInteger | None
 
 
 class EventRecord[DataT](FrozenModel):
@@ -45,11 +35,11 @@ class EventRecord[DataT](FrozenModel):
         str,
         Field(pattern=r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"),
     ]
-    generation: NonNegativeInt
+    generation: NonNegativeSafeLuaInteger
     session_id: Identifier | None
-    seq: PositiveInt
+    seq: PositiveSafeLuaInteger
     event: str
-    tick: NonNegativeInt
-    monotonic_ms: NonNegativeInt
-    cycle: NonNegativeInt | None
+    tick: NonNegativeSafeLuaInteger
+    monotonic_ms: NonNegativeSafeLuaInteger
+    cycle: NonNegativeSafeLuaInteger | None
     data: DataT

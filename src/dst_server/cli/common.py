@@ -126,8 +126,12 @@ async def batch(
     operation: Callable[[int], Awaitable[Any]],
     *,
     render: Callable[[Sequence[dict[str, Any]]], None] | None = None,
+    concurrency: int = 8,
 ) -> None:
-    limit = asyncio.Semaphore(8)
+    if concurrency < 1:
+        msg = "batch concurrency must be positive"
+        raise ValueError(msg)
+    limit = asyncio.Semaphore(concurrency)
 
     async def one(number: int) -> dict[str, Any]:
         async with limit:

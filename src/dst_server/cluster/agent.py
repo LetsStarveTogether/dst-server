@@ -1,7 +1,6 @@
 import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from time import time_ns
 from typing import TYPE_CHECKING, Any
@@ -10,11 +9,9 @@ from logbook import Logger
 from ulid import ULID
 
 from dst_server import commands as c
-from dst_server.activity import write_last_login
 from dst_server.concurrency import cancel_tasks, complete
 from dst_server.configuration.files import Shard
 from dst_server.errors import IndeterminateError
-from dst_server.events.player import PlayerLoadedEvent
 from dst_server.events.server import SavedEvent, SessionEvent
 from dst_server.models.cluster import (
     GameEventRecord,
@@ -135,6 +132,7 @@ class ShardAgent:
             game_attempt=(
                 ULID.from_str(server.game_events.nonce) if server is not None else None
             ),
+            outdated_mods=server.outdated_mods if server is not None else (),
             pid=process.pid if live else None,
             session_id=server.session_id if server is not None else None,
             ready=bool(server is not None and live and server.lifecycle.ready),
@@ -143,9 +141,29 @@ class ShardAgent:
             stable_since_ns=self._started_at_ns,
             driver_health=driver_health,
             driver_error=server.driver_error if server is not None else None,
+            last_active_at=server.game_events.last_active_at
+            if server is not None
+            else None,
             telemetry_profile=self.config.telemetry.profile,
             telemetry_invalid=server.telemetry_invalid if server is not None else 0,
             telemetry_dropped=server.telemetry_dropped if server is not None else 0,
+            telemetry_duplicates=(
+                server.game_events.duplicates if server is not None else 0
+            ),
+            telemetry_stale=server.game_events.stale if server is not None else 0,
+            telemetry_gaps=server.game_events.gaps if server is not None else 0,
+            telemetry_last_event_ns=(
+                server.game_events.last_event_timestamp_ns
+                if server is not None
+                else None
+            ),
+            telemetry_last_presence_ns=(
+                server.game_events.last_presence_timestamp_ns
+                if server is not None
+                else None
+            ),
+            player_count=server.recorder.player_count if server is not None else 0,
+            client_count=server.recorder.client_count if server is not None else 0,
             external_port=self.external_port,
             error_id=self._failure_id,
             error="DST shard failed" if self._failure_id is not None else None,
@@ -387,6 +405,7 @@ class ShardAgent:
             self.name,
             meter_provider=pipeline.meter_provider if pipeline is not None else None,
             tracer_provider=pipeline.tracer_provider if pipeline is not None else None,
+            pipeline=pipeline,
         )
         server = Server(self.config, recorder=recorder)
         server.log_handler = lambda line: self._log(server, line)
@@ -399,10 +418,6 @@ class ShardAgent:
             asyncio.create_task(
                 self._drain_game_events(server),
                 name=f"dst-game-event-relay-{self.shard.name}",
-            ),
-            asyncio.create_task(
-                self._drain_operational(server),
-                name=f"dst-operational-relay-{self.shard.name}",
             ),
         )
         for task in self._attempt_tasks:
@@ -459,7 +474,7 @@ class ShardAgent:
             self._event_changed.notify_all()
 
     async def _failed(self, status: ShardSupervisorStatus) -> None:
-        self._failure_id = ULID()
+        self._failure_id = status.error_id
         # Failure reports wake reconciliation, which reads the current status.
         if self.failures.full():
             self.failures.get_nowait()
@@ -536,31 +551,6 @@ class ShardAgent:
     async def _drain_game_events(self, server: Server) -> None:
         attempt = ULID.from_str(server.game_events.nonce)
         while (observed := await server.read_game_event()) is not None:
-            if isinstance(observed.record, PlayerLoadedEvent):
-                # The native session notification can arrive after this game event.
-                await complete(
-                    asyncio.to_thread(
-                        write_last_login,
-                        self.cluster_path / self.name,
-                        observed.record.session_id,
-                        datetime.fromtimestamp(
-                            observed.observed_timestamp_ns / 1_000_000_000, UTC
-                        ),
-                    )
-                )
-                if self.config.telemetry.profile == "off":
-                    del observed
-                    continue
-            if self._pipeline is not None and self._pipeline.logs_enabled:
-                self._pipeline.emit_event(
-                    observed, attributes=server.recorder.attributes()
-                )
-            else:
-                logger.info(
-                    "{shard}: DST_EVENT|{event}",
-                    shard=server.config.shard,
-                    event=observed.record.model_dump_json(),
-                )
             self._game_sequence += 1
             self.game_events.publish(
                 GameEventRecord(
@@ -572,26 +562,3 @@ class ShardAgent:
                 )
             )
             del observed
-
-    async def _drain_operational(self, server: Server) -> None:
-        while (record := await server.read_operational_event()) is not None:
-            if self._pipeline is not None and self._pipeline.logs_enabled:
-                self._pipeline.emit_operational(
-                    event_name=record.event_name,
-                    body=record.body,
-                    observed_timestamp_ns=record.observed_timestamp_ns,
-                    severity_text=record.severity_text,
-                    attributes=server.recorder.attributes()
-                    | {
-                        "log.record.uid": record.uid,
-                        "dst.game.attempt.id": server.game_events.nonce,
-                    },
-                )
-            else:
-                logger.info(
-                    "{shard}: {event}: {body}",
-                    shard=server.config.shard,
-                    event=record.event_name,
-                    body=record.body,
-                )
-            del record

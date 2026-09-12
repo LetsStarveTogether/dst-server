@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
 from pathlib import Path
 from threading import Thread
-from typing import Any, BinaryIO
+from typing import Any
 from unittest.mock import Mock
 from weakref import ref
 
@@ -30,7 +30,7 @@ from dst_server.klei_id import encode_klei_id
 def test_export_releases_file_catalog_before_yielding(
     saved_cluster: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class FileMap(dict[Path, tuple[Path, tuple[int, ...]]]):
+    class FileMap(dict[Path, Path]):
         pass
 
     catalogs: list[ref[FileMap]] = []
@@ -46,7 +46,7 @@ def test_export_releases_file_catalog_before_yielding(
     monkeypatch.setattr(archive, "_save_files", track)
     with archive.export_cluster(saved_cluster) as exported:
         assert exported.stream.read(6) == b"7z\xbc\xaf\x27\x1c"
-        assert len(catalogs) == 2
+        assert len(catalogs) == 1
         assert all(catalog() is None for catalog in catalogs)
 
 
@@ -357,21 +357,14 @@ def test_export_closes_temporary_file_on_failures(
 ) -> None:
     temporary = archive.TemporaryFile(mode="w+b")
     monkeypatch.setattr(archive, "TemporaryFile", lambda **_: temporary)
-    writef = SevenZipFile.writef
-
-    def change_save(self: SevenZipFile, bio: BinaryIO, arcname: str) -> None:
-        writef(self, bio, arcname)
-        with (saved_cluster / "forest/save/session/0123456789ABCDEF/0000000001").open(
-            "ab"
-        ) as stream:
-            stream.write(b"changed")
-
-    monkeypatch.setattr(SevenZipFile, "writef", change_save)
+    monkeypatch.setattr(
+        SevenZipFile, "writef", Mock(side_effect=OSError("write failed"))
+    )
     with (
-        pytest.raises(RuntimeError, match="changed during export"),
+        pytest.raises(OSError, match="write failed"),
         archive.export_cluster(saved_cluster),
     ):
-        pytest.fail("changing saves were exported")
+        pytest.fail("archive write failure was ignored")
     assert temporary.closed
 
 

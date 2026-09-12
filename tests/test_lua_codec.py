@@ -1,5 +1,3 @@
-import subprocess  # ruff: ignore[suspicious-subprocess-import]
-
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -8,11 +6,11 @@ from dst_server.lua_codec import (
     LuaValue,
     literal_calls,
     lua_string,
-    lua_value,
     parse_literal,
     parse_return_table,
     render_literal,
 )
+from tests.helpers import run_lua_process
 
 
 @pytest.mark.parametrize(
@@ -68,14 +66,6 @@ def test_literal_tables_and_calls_share_the_same_static_language() -> None:
     assert tuple(literal_calls("return", "setup")) == ()
 
 
-def test_rpc_values_keep_json_null_and_empty_object_semantics() -> None:
-    assert lua_value(None) == 'require("json").null'
-    assert lua_value({}) == 'require("dst_server.wire").object({})'
-    assert lua_value([]) == "{}"
-    with pytest.raises(ValueError, match="IEEE 754"):
-        lua_value(2**53)
-
-
 @given(st.text(alphabet=st.characters(codec="utf-8"), max_size=128))
 def test_lua_string_property_round_trip(value: str) -> None:
     assert parse_literal(lua_string(value)) == value
@@ -98,13 +88,7 @@ def test_native_quoted_tables_match_lua_string_bytes(lua_runtime: str) -> None:
         "do io.write(values[name]) end"
     )
 
-    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
-        [lua_runtime, "-"],
-        input=program.encode(),
-        capture_output=True,
-        check=True,
-        timeout=5,
-    )
+    output = run_lua_process(lua_runtime, "-", input=program.encode())
 
     expected = {
         "single": "\a\b\f\n\r\t\v\\'\"",
@@ -115,4 +99,4 @@ def test_native_quoted_tables_match_lua_string_bytes(lua_runtime: str) -> None:
         "lfcr": "a\nb",
     }
     assert parsed == expected
-    assert result.stdout == "".join(expected.values()).encode()
+    assert output == "".join(expected.values()).encode()

@@ -1,14 +1,18 @@
+from collections.abc import Iterator
 from datetime import UTC, datetime, time
 from pathlib import Path
+from unittest.mock import Mock
 
 import orjson
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from dst_server.activity import ActivityCheckpoint
 from dst_server.configuration import files
 from dst_server.configuration.models import ClusterConfig
 from dst_server.configuration.world import ForestOverrides
 from dst_server.deployment import QuadletApplication
+from dst_server.deployment import application as application_module
 from dst_server.presets.lst import build_template, fleet_room, template_names
 from dst_server.rooms import (
     CONTROL_FILE,
@@ -141,7 +145,7 @@ def test_stopping_a_shard_only_removes_its_server_ini(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("number", "ports"),
-    [(0, {30000, 30001, 30002, 30003}), (135, {31350, 31351})],
+    [(0, {30000, 30001, 30002, 30003}), (207, {32070, 32071})],
 )
 def test_loading_native_deployment_preserves_custom_units_and_drop_ins(
     tmp_path: Path,
@@ -181,6 +185,66 @@ def test_loading_native_deployment_preserves_custom_units_and_drop_ins(
     assert {mapping.host for mapping in application.pod.publish_ports} == ports
 
 
+def test_list_scans_quadlets_once_and_refreshes_native_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    quadlets = tmp_path / "quadlets"
+    store = RoomStore(tmp_path / "rooms", quadlets)
+    for number in (0, 207):
+        store.save(fleet_room(number, token=SecretStr("test-token")))
+    application = QuadletApplication.load(quadlets, name="dst-207")
+    original = quadlets / f"{application.master.name}.container"
+    custom = quadlets / "custom-master.container"
+    original.rename(custom)
+    custom.write_text(
+        custom.read_text().replace("Pod=dst-207.pod", 'Pod="dst-207.pod"')
+    )
+    (quadlets / "unrelated.container").write_text(
+        "[Container]\nPod=other.pod\nUnsupported=unrelated\n"
+    )
+    (quadlets / "unreadable.container").write_bytes(b"\xff")
+    override = quadlets / "container.d/custom.conf"
+    override.parent.mkdir()
+    override.write_text("[Service]\nNice=5\n")
+    expected = tuple(store.load(number) for number in store.numbers())
+    before = {path: path.read_bytes() for path in quadlets.rglob("*") if path.is_file()}
+    scan = Mock(wraps=application_module.referenced_pod)
+    monkeypatch.setattr(application_module, "referenced_pod", scan)
+    glob = Path.glob
+    scans = []
+
+    def track_glob(path: Path, pattern: str) -> Iterator[Path]:
+        if path == quadlets and pattern == "*.container":
+            scans.append(path)
+        return glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", track_glob)
+
+    assert store.list() == expected
+    assert scans == [quadlets]
+    assert scan.call_count == 5
+    assert {path: path.read_bytes() for path in before} == before
+
+    image = "quay.io/example/dst:new"
+    custom.write_text(custom.read_text().replace(expected[1].deployment.image, image))
+    renamed = quadlets / "renamed-master.container"
+    custom.rename(renamed)
+    scans.clear()
+    scan.reset_mock()
+
+    refreshed = store.list()
+    assert refreshed[1].deployment.image == image
+    assert scans == [quadlets]
+    assert scan.call_count == 5
+    assert refreshed == tuple(store.load(number) for number in store.numbers())
+
+    renamed.write_text(renamed.read_text() + "Unsupported=invalid\n")
+    with pytest.raises(ValueError, match="unknown Quadlet key"):
+        store.list()
+    with pytest.raises(ValueError, match="unknown Quadlet key"):
+        store.load(207)
+
+
 def test_policy_updates_preserve_control_state_and_native_files(tmp_path: Path) -> None:
     store = RoomStore(tmp_path)
     store.save(fleet_room(0, token=SecretStr("test-token")))
@@ -192,9 +256,10 @@ def test_policy_updates_preserve_control_state_and_native_files(tmp_path: Path) 
             template=previous.template,
             recycle=previous.recycle,
             paused=True,
-            override=True,
-            until=datetime(2030, 1, 1, tzinfo=UTC),
-            revision=4,
+            activity=ActivityCheckpoint(
+                sessions={"forest": "current"},
+                last_active_at=datetime(2030, 1, 1, tzinfo=UTC),
+            ),
         ),
     )
     before = (directory / "cluster.ini").read_bytes()
@@ -209,9 +274,9 @@ def test_policy_updates_preserve_control_state_and_native_files(tmp_path: Path) 
     assert policy.template == "custom"
     assert policy.schedule == changed.schedule
     assert policy.paused
-    assert policy.override is None
-    assert policy.until is None
-    assert policy.revision == 5
+    assert policy.activity is not None
+    assert policy.activity.sessions == {"forest": "current"}
+    assert policy.activity.last_active_at == datetime(2030, 1, 1, tzinfo=UTC)
     assert (directory / "cluster.ini").read_bytes() == before
     assert store.load(0).schedule == changed.schedule
 
@@ -253,10 +318,10 @@ def test_daily_windows_and_fleet_metadata_are_independent_of_template_number() -
     assert not window.contains(time(21, 59))
     with pytest.raises(ValueError, match="differ"):
         DailyWindow(start=time(0), end=time(0))
-    morning = fleet_room(7, token=SecretStr("test-token"))
-    assert morning.schedule == (DailyWindow(start=time(9), end=time(12)),)
-    assert morning.recycle
-    assert not morning.deployment.start_on_boot
+    daytime = fleet_room(16, token=SecretStr("test-token"))
+    assert daytime.schedule == (DailyWindow(start=time(10), end=time(18)),)
+    assert daytime.recycle
+    assert not daytime.deployment.start_on_boot
     independent = Room(
         number=299,
         cluster=build_template("forge", number=299, token=SecretStr("test-token")),

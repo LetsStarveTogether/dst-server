@@ -1,11 +1,11 @@
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Self
 
 from pydantic import model_validator
 
-from dst_server.configuration.files import write_files
+from dst_server.configuration.files import validate_directory, write_files
 from dst_server.configuration.models import ClusterConfig, ShardConfig
 from dst_server.models.base import RevalidatedFrozenModel
 
@@ -13,11 +13,10 @@ from .models import (
     ContainerUnit,
     PodUnit,
     PortMapping,
-    QuadletUnit,
     VolumeMount,
     _validate_unit_name,
 )
-from .quadlet import references_pod, validate_update
+from .quadlet import referenced_pod, references_pod, validate_update
 
 DEFAULT_IMAGE = "quay.io/wh2099/dst-server:latest"
 DEFAULT_TARGET = "default.target"
@@ -95,13 +94,14 @@ class RoomPortAllocation(RevalidatedFrozenModel):
         )
 
 
-def _import_command(unit: ContainerUnit) -> ContainerUnit:
-    """Normalize commands for recognition, leaving native Exec values intact."""
-    for command in (MASTER_COMMAND, SERVE_COMMAND):
-        previous = (command[0], command[-1])
-        if unit.exec[: len(previous)] == previous:
-            return unit.replace(exec=(*command, *unit.exec[len(previous) :]))
-    return unit
+def container_index(directory: Path) -> dict[str, list[Path]]:
+    """Read Pod references once for a batch of application loads."""
+    validate_directory(directory)
+    index: dict[str, list[Path]] = {}
+    for path in sorted(directory.glob("*.container")):
+        if (pod := referenced_pod(path)) is not None:
+            index.setdefault(pod, []).append(path)
+    return index
 
 
 class QuadletApplication(RevalidatedFrozenModel):
@@ -126,11 +126,12 @@ class QuadletApplication(RevalidatedFrozenModel):
         secondary_sources = tuple(f"{name}.container" for name in secondary_names)
         if any((
             self.master.pod != pod_source,
-            _import_command(self.master).exec[: len(MASTER_COMMAND)] != MASTER_COMMAND,
+            self.master.exec[: len(MASTER_COMMAND)] != MASTER_COMMAND,
             bool(self.master.requires),
             bool(self.master.binds_to),
             bool(self.master.after),
             self.master.wants != secondary_sources,
+            self.master.part_of != (f"{self.pod.name}-pod.service",),
         )):
             msg = "Quadlet application has an invalid master unit"
             raise ValueError(msg)
@@ -147,11 +148,12 @@ class QuadletApplication(RevalidatedFrozenModel):
                 )
                 raise ValueError(msg)
             if any((
-                _import_command(secondary).exec[: len(SERVE_COMMAND)] != SERVE_COMMAND,
+                secondary.exec[: len(SERVE_COMMAND)] != SERVE_COMMAND,
                 bool(secondary.requires),
                 bool(secondary.wants),
                 secondary.binds_to != (master_source,),
                 secondary.after != (master_source,),
+                secondary.part_of != (f"{self.master.name}.service",),
             )):
                 msg = f"Quadlet secondary has invalid master binding: {secondary.name}"
                 raise ValueError(msg)
@@ -232,10 +234,14 @@ class QuadletApplication(RevalidatedFrozenModel):
                 f"{base}-{_escape_unit_name(name)}.container"
                 for name in secondary_names
             ),
+            part_of=(f"{base}-pod.service",),
+            start_limit_interval_sec=600,
+            start_limit_burst=3,
             timezone="local",
             stop_timeout=360,
             notify=True,
             restart="on-failure",
+            restart_sec=30,
             kill_mode="control-group",
             watchdog_sec=300,
             watchdog_signal="SIGKILL",
@@ -265,7 +271,12 @@ class QuadletApplication(RevalidatedFrozenModel):
                 ),
                 after=(f"{master.name}.container",),
                 binds_to=(f"{master.name}.container",),
+                part_of=(f"{master.name}.service",),
                 wants=(),
+                restart="no",
+                restart_sec=None,
+                start_limit_interval_sec=None,
+                start_limit_burst=None,
                 container_name=_podman_name(f"{base}-{_escape_unit_name(shard_name)}"),
             )
             for shard_name in secondary_names
@@ -274,13 +285,13 @@ class QuadletApplication(RevalidatedFrozenModel):
 
     @classmethod
     def load(
-        cls, directory: Path, *, name: str | None = None, legacy: bool = False
+        cls,
+        directory: Path,
+        *,
+        name: str | None = None,
+        _container_paths: Sequence[Path] | None = None,
     ) -> Self:
-        if directory.is_symlink():
-            msg = f"Quadlet directory cannot be a symlink: {directory}"
-            raise ValueError(msg)
-        if not directory.is_dir():
-            raise NotADirectoryError(directory)
+        validate_directory(directory)
         if name is None:
             pods = tuple(sorted(directory.glob("*.pod")))
             if len(pods) != 1:
@@ -291,16 +302,15 @@ class QuadletApplication(RevalidatedFrozenModel):
             pod_path = directory / f"{_escape_unit_name(name)}.pod"
         pod = PodUnit.load(pod_path)
         pod_source = pod_path.name
-        units = tuple(
-            ContainerUnit.load(path)
-            for path in sorted(directory.glob("*.container"))
-            if references_pod(path, pod_source)
-        )
+        if _container_paths is None:
+            _container_paths = tuple(
+                path
+                for path in sorted(directory.glob("*.container"))
+                if references_pod(path, pod_source)
+            )
+        units = tuple(ContainerUnit.load(path) for path in _container_paths)
         masters = tuple(
-            unit
-            for unit in units
-            if (_import_command(unit) if legacy else unit).exec[: len(MASTER_COMMAND)]
-            == MASTER_COMMAND
+            unit for unit in units if unit.exec[: len(MASTER_COMMAND)] == MASTER_COMMAND
         )
         if len(masters) != 1:
             msg = f"expected exactly one Quadlet master, found {len(masters)}"
@@ -312,38 +322,18 @@ class QuadletApplication(RevalidatedFrozenModel):
             secondaries=tuple(unit for unit in units if unit is not master),
         )
 
-    def patch(self, previous: Self, updated: Self) -> Self:
-        """Apply the requested model changes without resetting native unit settings."""
-        actual = {unit.name: unit for unit in (self.master, *self.secondaries)}
-        expected = {
-            unit.name: unit for unit in (previous.master, *previous.secondaries)
-        }
-        if self.pod.name != previous.pod.name or actual.keys() != expected.keys():
-            msg = "native Quadlet units do not match the room configuration"
-            raise ValueError(msg)
-
-        def patch_unit[T: QuadletUnit](unit: T, before: T, after: T) -> T:
-            return unit.replace(**{
-                name: getattr(after, name)
-                for name in type(after).model_fields
-                if getattr(before, name) != getattr(after, name)
-            })
-
-        def patch_container(unit: ContainerUnit) -> ContainerUnit:
-            if unit.name not in expected:
-                return unit
-            return patch_unit(actual[unit.name], expected[unit.name], unit)
-
-        return self.replace(
-            pod=patch_unit(self.pod, previous.pod, updated.pod),
-            master=patch_container(updated.master),
-            secondaries=tuple(patch_container(unit) for unit in updated.secondaries),
-        )
-
     def validate_updates(self, directory: Path) -> None:
         """Do not change base values whose native drop-ins still override them."""
         for unit in (self.pod, self.master, *self.secondaries):
-            validate_update(directory / f"{unit.name}.{unit.section.lower()}", unit)
+            path = directory / f"{unit.name}.{unit.section.lower()}"
+            validate_update(path, unit)
+            if (
+                isinstance(unit, ContainerUnit)
+                and path.exists()
+                and not references_pod(path, f"{self.pod.name}.pod")
+            ):
+                msg = f"refusing to overwrite unrelated Quadlet container: {path}"
+                raise ValueError(msg)
 
     def files(self) -> dict[Path, str]:
         validated = type(self).model_validate(self)
@@ -371,10 +361,4 @@ class QuadletApplication(RevalidatedFrozenModel):
 
     def save(self, directory: Path) -> tuple[Path, ...]:
         self.validate_save(directory)
-        files = {}
-        for unit in (self.pod, self.master, *self.secondaries):
-            relative = Path(f"{unit.name}.{unit.section.lower()}")
-            path = directory / relative
-            if not path.exists() or type(unit).load(path) != unit:
-                files[relative] = unit.render()
-        return write_files(directory, files)
+        return write_files(directory, self.files())

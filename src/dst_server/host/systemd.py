@@ -1,9 +1,7 @@
 import asyncio
-import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
@@ -92,6 +90,12 @@ class Systemd:
         rows = await manager.call_list_units_by_names(list(names))
         return {row[0]: UnitStatus(row[0], *row[2:5], *row[7:10]) for row in rows}
 
+    async def list_patterns(self, patterns: Sequence[str]) -> dict[str, UnitStatus]:
+        """Find loaded units, including legacy detached maintenance services."""
+        manager = await self._manager()
+        rows = await manager.call_list_units_by_patterns([], list(patterns))
+        return {row[0]: UnitStatus(row[0], *row[2:5], *row[7:10]) for row in rows}
+
     async def start(self, unit: str) -> str:
         manager = await self._manager()
         return await manager.call_start_unit(unit, "replace")
@@ -121,31 +125,6 @@ class Systemd:
                     return
                 await asyncio.sleep(0.2)
 
-    async def properties(self, unit: str) -> dict[str, str | int]:
-        """Read unit state and service exit details; collected units do not exist."""
-        manager = await self._manager()
-        path = await manager.call_get_unit(unit)
-        node = await self._bus.introspect(_DESTINATION, path)
-        proxy = self._bus.get_proxy_object(_DESTINATION, path, node)
-        properties = proxy.get_interface("org.freedesktop.DBus.Properties")
-        result = await properties.call_get_all(f"{_DESTINATION}.Unit")
-        if unit.endswith(".service"):
-            result.update(await properties.call_get_all(f"{_DESTINATION}.Service"))
-        keys = {
-            "Id",
-            "Description",
-            "LoadState",
-            "ActiveState",
-            "SubState",
-            "Result",
-            "MainPID",
-            "ExecMainCode",
-            "ExecMainStatus",
-            "ExecMainStartTimestamp",
-            "ExecMainExitTimestamp",
-        }
-        return {key: value.value for key, value in result.items() if key in keys}
-
     async def exec_start(self, unit: str, *, pre: bool = False) -> tuple[str, ...]:
         """Read systemd's generated command, including native Quadlet drop-ins."""
         manager = await self._manager()
@@ -162,52 +141,7 @@ class Systemd:
             raise ValueError(msg)
         return tuple(commands[0][1])
 
-    async def start_transient(
-        self,
-        name: str,
-        argv: Sequence[str],
-        *,
-        environment: Mapping[str, str] | None = None,
-        cwd: Path | None = None,
-    ) -> str:
-        from dbus_fast import Variant
-
-        if not name.endswith(".service") or "/" in name or "\0" in name:
-            msg = "Transient tasks require a service unit name"
-            raise ValueError(msg)
-        if (
-            not argv
-            or not Path(argv[0]).is_absolute()
-            or any("\0" in arg for arg in argv)
-        ):
-            msg = "Transient tasks require absolute argv[0] and NUL-free arguments"
-            raise ValueError(msg)
-        if cwd is not None and (not cwd.is_absolute() or "\0" in str(cwd)):
-            msg = "Transient task working directory must be absolute and NUL-free"
-            raise ValueError(msg)
-        if environment and any(
-            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None or "\0" in value
-            for key, value in environment.items()
-        ):
-            msg = "Invalid transient task environment name or NUL in value"
-            raise ValueError(msg)
-        properties = [
-            ["Type", Variant("s", "exec")],
-            ["Restart", Variant("s", "no")],
-            ["StandardOutput", Variant("s", "journal")],
-            ["StandardError", Variant("s", "journal")],
-            ["CollectMode", Variant("s", "inactive-or-failed")],
-            [
-                "ExecStartEx",
-                Variant("a(sasas)", [[argv[0], list(argv), ["no-env-expand"]]]),
-            ],
-        ]
-        if environment is not None:
-            properties.append([
-                "Environment",
-                Variant("as", [f"{key}={value}" for key, value in environment.items()]),
-            ])
-        if cwd is not None:
-            properties.append(["WorkingDirectory", Variant("s", str(cwd))])
+    async def reset_failed(self, unit: str) -> None:
+        """Clear a failure and start limit for an explicit operator start."""
         manager = await self._manager()
-        return await manager.call_start_transient_unit(name, "fail", properties, [])
+        await manager.call_reset_failed_unit(unit)

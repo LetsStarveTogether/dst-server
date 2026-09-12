@@ -5,8 +5,9 @@ from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from .process import download_environment, positive_integer, redact, run_process
+from .process import download_environment, run_process
 
+EXECUTABLE = Path("bin64/dontstarve_dedicated_server_nullrenderer_x64")
 UPDATE_PROCESS_TIMEOUT = 30 * 60
 UPDATE_COMPLETE = (
     "FinishDownloadingServerMods Complete! Process trying to quit nicely.."
@@ -22,16 +23,18 @@ DOWNLOAD_FAILURES = (
 )
 
 
+class ModUpdateError(RuntimeError):
+    """The native downloader did not complete successfully."""
+
+
 async def update(
     executable: Path,
     ugc_directory: Path,
     *,
-    attempts: int = 5,
     proxy: str | None = None,
     log_handler: Callable[[str], None] | None = None,
 ) -> None:
     """Let DST execute its setup script, including native dynamic Lua."""
-    attempts = positive_integer("Mod update attempts", attempts)
     environment = download_environment(proxy)
     with TemporaryDirectory(prefix="dst-mod-update-") as temporary:
         root = Path(temporary)
@@ -57,27 +60,16 @@ async def update(
             "-shard",
             "shard",
         )
-        async with asyncio.timeout(UPDATE_PROCESS_TIMEOUT):
-            for attempt in range(1, attempts + 1):
+        try:
+            async with asyncio.timeout(UPDATE_PROCESS_TIMEOUT):
                 failure = await _attempt(
                     command, executable.parent, environment, proxy, log_handler
                 )
-                if failure is None:
-                    return
-                if (
-                    failure == UPDATE_INCOMPLETE
-                    or failure.startswith(SETUP_FAILURE)
-                    or attempt == attempts
-                ):
-                    msg = (
-                        f"DST mod updater failed after {attempt} attempt(s): {failure}"
-                    )
-                    raise RuntimeError(msg)
-                if log_handler is not None:
-                    log_handler(
-                        "DST mod update incomplete; "
-                        f"retrying ({attempt + 1}/{attempts}): {failure}"
-                    )
+        except (OSError, TimeoutError) as error:
+            raise ModUpdateError(str(error) or "DST mod updater timed out") from error
+        if failure is not None:
+            msg = f"DST mod updater failed: {failure}"
+            raise ModUpdateError(msg)
 
 
 async def _attempt(
@@ -92,7 +84,9 @@ async def _attempt(
 
     def on_line(line: str) -> None:
         nonlocal completed, failure
-        text = redact(line.rstrip("\r\n"), (proxy,) if proxy else ())
+        text = line.rstrip("\r\n")
+        if proxy:
+            text = text.replace(proxy, "***")
         if log_handler is not None:
             log_handler(text)
         message = text.split("]: ", 1)[-1].rstrip()

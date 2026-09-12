@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -11,7 +11,11 @@ from ulid import ULID
 
 from dst_server import commands as c
 from dst_server.cluster import daemon
-from dst_server.cluster.subscriptions import Broadcast, Subscription
+from dst_server.cluster.subscriptions import (
+    Broadcast,
+    StreamKind,
+    Subscription,
+)
 from dst_server.configuration.files import Shard
 from dst_server.configuration.store import ConfigurationStore
 from dst_server.models.cluster import (
@@ -97,14 +101,10 @@ class ControllerStub:
         self.lifecycle = Broadcast[LifecycleRecord]()
         self.events = Broadcast[GameEventRecord]()
 
-    def subscribe_logs(self) -> Subscription[LogRecord]:
-        return self.logs.subscribe()
-
-    def subscribe_lifecycle(self) -> Subscription[LifecycleRecord]:
-        return self.lifecycle.subscribe()
-
-    def subscribe_events(self) -> Subscription[GameEventRecord]:
-        return self.events.subscribe()
+    def subscribe(self, kind: StreamKind) -> Subscription[Any]:
+        return {"logs": self.logs, "lifecycle": self.lifecycle, "events": self.events}[
+            kind
+        ].subscribe()
 
     async def register(self, endpoint: Any) -> None:
         self.endpoint = endpoint
@@ -138,6 +138,9 @@ class ControllerStub:
             ),
         )
         return cast(T, status)
+
+    async def wait_fatal(self) -> None:
+        await asyncio.Event().wait()
 
     async def aclose(self) -> None:
         self.calls.append("controller.close")
@@ -483,7 +486,8 @@ async def test_abstract_registry_registers_and_unregisters_remote_agent() -> Non
                 await wait_for_event(controller.registered, task)
                 await wait_for_event(agent.failure_waiting, task)
                 assert controller.endpoint.name == "Caves"
-            await task
+            with pytest.raises(ConnectionError, match="controller disconnected"):
+                await task
             await wait_for_event(controller.unregistered)
         finally:
             async with asyncio.timeout(5):
@@ -525,7 +529,6 @@ async def test_registry_requests_time_out_and_release_connection(
     monkeypatch.setattr(daemon, "AgentServant", Mock(return_value=servant))
     monkeypatch.setattr(daemon, "unwrap_outcome", Mock())
     monkeypatch.setattr(daemon, "DEFAULT_CONNECT_TIMEOUT", 0.01)
-    monkeypatch.setattr(daemon, "DEFAULT_LIFECYCLE_TIMEOUT", 0.01)
     monkeypatch.setattr(daemon, "REGISTRY_FAILURE_TIMEOUT", 0.01)
     if phase == "failed":
         agent.failures.put_nowait(object())
@@ -617,42 +620,17 @@ async def test_local_agent_failure_is_reported_without_rpc() -> None:
             await asyncio.gather(task, return_exceptions=True)
 
 
-@pytest.mark.parametrize(
-    ("kill_error", "expected_connections"),
-    [(None, 2), ("child survived", 1)],
-)
-async def test_registry_exit_kills_before_reconnect(
+async def test_registered_connection_loss_exits_without_rejoining(
     monkeypatch: pytest.MonkeyPatch,
-    kill_error: str | None,
-    expected_connections: int,
 ) -> None:
     calls: list[str] = []
-    agent = AgentStub(calls, kill_error=kill_error)
-    shutdown = asyncio.Event()
-    connected = 0
-    never = asyncio.Event()
-
-    async def cycle(_: object, __: str) -> None:
-        nonlocal connected
-        connected += 1
-        if connected == 1:
-            return
-        shutdown.set()
-        await never.wait()
-
+    agent = AgentStub(calls)
+    cycle = AsyncMock(return_value=None)
     monkeypatch.setattr(daemon, "_registered_cycle", cycle)
-    outcome = (
-        pytest.raises(RuntimeError, match=kill_error) if kill_error else nullcontext()
-    )
-    with outcome:
-        await daemon._serve_agent(
-            agent,  # ty: ignore[invalid-argument-type]
-            shutdown,
-            reconnect_delay=0,
-        )
-
-    assert connected == expected_connections
-    assert calls == ["agent.kill", "agent.stop", "agent.close"]
+    with pytest.raises(ConnectionError, match="registry connection closed"):
+        await daemon._serve_agent(agent, asyncio.Event(), reconnect_delay=0)  # ty: ignore[invalid-argument-type]
+    cycle.assert_awaited_once()
+    assert calls == ["agent.stop", "agent.close"]
 
 
 def test_signal_handlers_set_shutdown_and_are_removed() -> None:
@@ -676,3 +654,26 @@ def test_signal_handlers_set_shutdown_and_are_removed() -> None:
     assert shutdown.is_set()
     remove()
     assert removed == list(callbacks)
+
+
+async def test_controller_failure_exits_master_and_closes_all_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    controller = ControllerStub(calls)
+    controller.wait_fatal = AsyncMock(side_effect=RuntimeError("registered agent lost"))
+    agent = AgentStub(calls, master=True)
+
+    @asynccontextmanager
+    async def listener(*_: object) -> AsyncIterator[None]:
+        yield
+
+    monkeypatch.setattr(daemon, "abstract_rpc_server", listener)
+    monkeypatch.setattr(daemon, "filesystem_rpc_server", listener)
+    with pytest.raises(RuntimeError, match="registered agent lost"):
+        await daemon._serve_master(
+            controller,  # ty: ignore[invalid-argument-type]
+            agent,  # ty: ignore[invalid-argument-type]
+            asyncio.Event(),
+        )
+    assert calls == ["controller.close", "agent.close"]

@@ -181,6 +181,7 @@ function values.combat_data(player, data, actor)
         stimuli = values.text(data.stimuli, 128),
         special_damage = values.special_damage(data.spdamage),
         caused_by_action_sequence = values.current_action_sequence(actor),
+        from_doattack = data.from_doattack == nil and json.null or data.from_doattack,
     }
 end
 

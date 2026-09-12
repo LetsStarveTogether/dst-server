@@ -1,30 +1,47 @@
 import asyncio
+from typing import cast
 
 import orjson
 import pytest
+from pydantic import JsonValue
 
 from dst_server import commands as c
 from dst_server.game.rpc import MAX_RESULT_LINE_BYTES
+from dst_server.lua_codec import lua_string
 from dst_server.models.console import ConsoleResult
+from dst_server.runtime.console import Console
+from dst_server.telemetry.recorder import Recorder
 from tests.game.helpers import make_game
-from tests.helpers import COMMAND_DONE, next_frame, run_lua
-from tests.runtime.test_console import make_console
+from tests.helpers import COMMAND_DONE, StubWriter, next_request, run_lua
 
 
 async def evaluate(source: str, runtime: str) -> ConsoleResult:
     game, commands = make_game()
-    console, writer, reader = make_console()
+    nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    writer = StubWriter()
+    reader = asyncio.StreamReader()
+    console = Console(
+        cast("asyncio.StreamWriter", writer),
+        reader,
+        nonce,
+        Recorder("cluster", "Master"),
+    )
 
-    async def execute(command: str) -> str:
-        commands.append(command)
-        pending = asyncio.create_task(console.execute(command))
+    async def execute(method: str, arguments: dict[str, JsonValue]) -> bytes:
+        commands.append((method, arguments))
+        pending = asyncio.create_task(console.execute(method, arguments, 0))
         try:
-            _, _, wrapped = await next_frame(writer)
+            request = await next_request(writer)
+            packet = "DST_RPC|" + orjson.dumps(request).decode()
             output = run_lua(
-                'require("dst_server.state").installed = true;'
+                'local state = require("dst_server.state"); state.installed = true;'
+                f"state.nonce = {lua_string(nonce)}; state.generation = 0;"
+                "TheSim = {LuaPrintRemote = function(_, text) io.write(text) end};"
+                'ExecuteConsoleCommand = function() error("native command") end;'
+                'require("dst_server.rpc").install({nonce=state.nonce, generation=0});'
                 "local original_print = print;"
-                + wrapped.decode()
-                + "assert(print == original_print)",
+                f"ExecuteConsoleCommand({lua_string(packet)});"
+                "assert(print == original_print)",
                 runtime,
             )
             reader.feed_data(output + COMMAND_DONE + b"\n")
@@ -40,8 +57,7 @@ async def evaluate(source: str, runtime: str) -> ConsoleResult:
     finally:
         async with asyncio.timeout(5):
             await console.close()
-    assert len(commands) == 1
-    assert "\n" not in commands[0]
+    assert commands == [("evaluate", {"source": source})]
     return result
 
 

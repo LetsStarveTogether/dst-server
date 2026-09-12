@@ -27,10 +27,6 @@ test-system image:
 test-netdata-system image:
     DST_SERVER_NETDATA_TEST=1 just test-system "{{ image }}"
 
-# Query a real SteamCMD installation separately because it requires host network access.
-test-steamcmd-system:
-    DST_SERVER_STEAMCMD_TEST=1 uv run --locked --all-extras pytest -m system tests/mods/test_steamcmd.py
-
 check:
     uv lock --check
     uv run ruff format --check

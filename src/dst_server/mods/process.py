@@ -85,13 +85,6 @@ def signal_process_group(process_id: int, value: signal.Signals) -> None:
         os.killpg(process_id, value)
 
 
-def positive_integer(name: str, value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        msg = f"{name} must be a positive integer"
-        raise ValueError(msg)
-    return value
-
-
 def validate_argument(name: str, value: str) -> str:
     if not isinstance(value, str) or not value:
         msg = f"{name} must not be empty"
@@ -130,9 +123,3 @@ def download_environment(proxy: str | None = None) -> dict[str, str]:
     if proxy is not None:
         environment.update(dict.fromkeys(("http_proxy", "https_proxy"), proxy))
     return environment
-
-
-def redact(value: str, secrets: tuple[str, ...]) -> str:
-    for secret in secrets:
-        value = value.replace(secret, "***")
-    return value

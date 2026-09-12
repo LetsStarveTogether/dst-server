@@ -204,11 +204,11 @@ def _unit_name(path: Path, suffix: str) -> str:
     return _validate_unit_name(path.name[: -len(suffix)])
 
 
-def references_pod(path: Path, pod_source: str) -> bool:
+def referenced_pod(path: Path) -> str | None:
     try:
         lines = path.read_text(encoding="utf-8").split("\n")
     except OSError, UnicodeError:
-        return False
+        return None
     section = ""
     for source in lines:
         line = source.strip()
@@ -221,10 +221,14 @@ def references_pod(path: Path, pod_source: str) -> bool:
             key, value = (item.strip() for item in line.split("=", 1))
             if key == "Pod":
                 try:
-                    return _unit_reference(value, "Pod") == pod_source
+                    return _unit_reference(value, "Pod")
                 except ValueError:
-                    return False
-    return False
+                    return None
+    return None
+
+
+def references_pod(path: Path, pod_source: str) -> bool:
+    return referenced_pod(path) == pod_source
 
 
 def drop_ins(path: Path) -> tuple[Path, ...]:

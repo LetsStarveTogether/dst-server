@@ -4,12 +4,20 @@ from abc import ABC, abstractmethod
 from pydantic import JsonValue
 
 from dst_server import commands as c
+from dst_server.announcements import (
+    DEFAULT_DELAY,
+    MOD_UPDATE_NOTICE,
+    RESTART_NOTICE,
+    SHUTDOWN_NOTICE,
+    Countdown,
+    Repeat,
+)
+from dst_server.configuration.models import ClusterConfig
 from dst_server.events.server import SavedEvent
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
 from dst_server.models.cluster import (
     ClusterSaveResult,
     ClusterStatus,
-    ConfigurationRead,
     LocatedPlayer,
     ShardResult,
     ShardRuntimeStatus,
@@ -19,8 +27,10 @@ from dst_server.models.driver import DriverHealth
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog
 from dst_server.timeouts import (
     DEFAULT_COMMAND_TIMEOUT,
+    DEFAULT_LIFECYCLE_TIMEOUT,
     DEFAULT_RELOAD_TIMEOUT,
     DEFAULT_SAVE_TIMEOUT,
+    DEFAULT_STOP_TIMEOUT,
 )
 
 
@@ -34,11 +44,21 @@ class _LifecycleAPI(EndpointAPI):
     async def start(self) -> None:
         return await self.invoke(c.Start())
 
-    async def stop(self) -> None:
-        return await self.invoke(c.Stop())
+    async def stop(
+        self,
+        *,
+        notice: Countdown | None = SHUTDOWN_NOTICE,
+        timeout: float = DEFAULT_STOP_TIMEOUT + DEFAULT_DELAY,
+    ) -> None:
+        return await self.invoke(c.Stop(notice=notice, timeout=timeout))
 
-    async def restart(self) -> None:
-        return await self.invoke(c.Restart())
+    async def restart(
+        self,
+        *,
+        notice: Countdown | None = RESTART_NOTICE,
+        timeout: float = DEFAULT_LIFECYCLE_TIMEOUT,
+    ) -> None:
+        return await self.invoke(c.Restart(notice=notice, timeout=timeout))
 
     async def kill(self) -> None:
         return await self.invoke(c.Kill())
@@ -108,10 +128,18 @@ class ClusterAPI(_LifecycleAPI):
     async def status(self) -> ClusterStatus:
         return await self.invoke(c.ClusterStatusQuery())
 
-    async def update_mods(self) -> None:
-        return await self.invoke(c.UpdateMods())
+    async def update_mods(
+        self,
+        *,
+        restart: bool = False,
+        notice: Countdown | None = MOD_UPDATE_NOTICE,
+        timeout: float = DEFAULT_LIFECYCLE_TIMEOUT,
+    ) -> None:
+        return await self.invoke(
+            c.UpdateMods(restart=restart, notice=notice, timeout=timeout)
+        )
 
-    async def read_configuration(self) -> ConfigurationRead:
+    async def read_configuration(self) -> ClusterConfig:
         return await self.invoke(c.ReadConfiguration())
 
     async def execute_all(
@@ -136,8 +164,17 @@ class ClusterAPI(_LifecycleAPI):
     async def get_player(self, userid: str) -> LocatedPlayer | None:
         return await self.invoke(c.LocatePlayer(userid=userid))
 
-    async def announce(self, message: str) -> None:
-        return await self.invoke(c.Announce(message=message))
+    async def announce(self, message: str | Repeat | Countdown) -> None:
+        if isinstance(message, Countdown):
+            plan = Countdown.model_validate(message)
+
+            async def send(text: str) -> None:
+                await self.invoke(c.Announce(message=text))
+
+            await plan.run(send)
+        else:
+            plan = Repeat(message=message) if isinstance(message, str) else message
+            await self.invoke(c.Announce(**Repeat.model_validate(plan).model_dump()))
 
     async def reset(self, *, timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
         return await self.invoke(c.Reset(timeout=timeout))

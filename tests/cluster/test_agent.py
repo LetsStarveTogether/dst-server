@@ -1,6 +1,5 @@
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -12,21 +11,23 @@ import pytest
 from ulid import ULID
 
 from dst_server import commands as c
-from dst_server.activity import read_last_login
 from dst_server.cluster import agent as agent_module
 from dst_server.cluster.agent import ShardAgent
 from dst_server.configuration.files import Shard
 from dst_server.errors import IndeterminateError
 from dst_server.events import ObservedGameEvent
-from dst_server.events.player import PlayerLoadedEvent
 from dst_server.events.server import Event, SavedEvent, SessionEvent, UnknownEvent
-from dst_server.events.world import CycleState, StateChangedEvent
+from dst_server.events.world import (
+    CycleState,
+    ModOutdatedData,
+    ModOutdatedEvent,
+    StateChangedEvent,
+)
 from dst_server.models.cluster import ObservationCursor
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog, WorldSnapshotMetadata
 from dst_server.models.telemetry import TelemetryProfile
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.lifecycle import ObservedLifecycleEvent
-from dst_server.runtime.operational import OperationalRecord
 from dst_server.runtime.supervisor import (
     ShardDesired,
     ShardPhase,
@@ -91,7 +92,9 @@ async def raise_error(error: Exception) -> None:
 
 @pytest.fixture
 def agent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ShardAgent:
-    config = ServerConfig(shard="Master", executable=tmp_path / "unused")
+    config = ServerConfig(
+        shard="Master", executable=tmp_path / "unused", persistent_storage_root=tmp_path
+    )
     monkeypatch.setattr(
         agent_module.service,
         "create_server_config",
@@ -108,10 +111,20 @@ def agent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ShardAgent:
 def running_server(agent: ShardAgent) -> SimpleNamespace:
     return SimpleNamespace(
         config=agent.config,
-        game_events=SimpleNamespace(nonce=str(ULID())),
+        game_events=SimpleNamespace(
+            nonce=str(ULID()),
+            last_active_at=None,
+            duplicates=0,
+            stale=0,
+            gaps=0,
+            last_event_timestamp_ns=None,
+            last_presence_timestamp_ns=None,
+        ),
         returncode=None,
         driver=SimpleNamespace(wait_ready=AsyncMock()),
-        recorder=SimpleNamespace(attributes=Mock(return_value={})),
+        recorder=SimpleNamespace(
+            attributes=Mock(return_value={}), player_count=0, client_count=0
+        ),
     )
 
 
@@ -311,6 +324,50 @@ async def test_runtime_status_uses_supervisor_phase(
     assert (await agent.runtime_status()).phase is phase
 
 
+@pytest.mark.parametrize("profile", ["off", "critical", "history"])
+async def test_mod_condition_is_visible_without_subscription_and_resets_per_attempt(
+    agent: ShardAgent,
+    profile: TelemetryProfile,
+) -> None:
+    agent.config = agent.config.replace(
+        telemetry=agent.config.telemetry.replace(profile=profile)
+    )
+    server = Server(agent.config)
+    next_server = Server(agent.config)
+    attach(agent, server)
+    record = ModOutdatedEvent(
+        v=2,
+        nonce=server.game_events.nonce,
+        generation=1,
+        session_id="SESSION",
+        seq=1,
+        event="dst.mod.outdated",
+        tick=1,
+        monotonic_ms=1,
+        cycle=0,
+        data=ModOutdatedData(name="Insight"),
+    )
+    try:
+        assert agent._pipeline is None
+        await server.game_events.accept("DST_OTEL|" + record.model_dump_json(), 1)
+        status = await agent.runtime_status()
+        assert status.outdated_mods == ("Insight",)
+        assert str(status.game_attempt) == server.game_events.nonce
+        # The condition is already present before the relay has consumed any event.
+        server.game_events.close()
+        await agent._drain_game_events(server)
+        assert (await agent.runtime_status()).outdated_mods == ("Insight",)
+
+        attach(agent, next_server)
+        status = await agent.runtime_status()
+        assert status.outdated_mods == ()
+        assert str(status.game_attempt) == next_server.game_events.nonce
+        assert server.game_events.nonce != next_server.game_events.nonce
+    finally:
+        await server.finish()
+        await next_server.finish()
+
+
 async def test_activate_is_idempotent_and_guards_start_and_restart(
     agent: ShardAgent,
     monkeypatch: pytest.MonkeyPatch,
@@ -476,14 +533,14 @@ async def test_generation_timeout_includes_driver_readiness(
 async def test_failure_is_queued_and_public_status_is_sanitized(
     agent: ShardAgent,
 ) -> None:
-    failed = supervisor_status(ShardPhase.FAILED)
+    failed = replace(supervisor_status(ShardPhase.FAILED), error_id=ULID())
     attach(agent, None, ShardPhase.FAILED)
 
     await agent._failed(failed)
 
     status = await agent.runtime_status()
     assert status.error == "DST shard failed"
-    assert status.error_id is not None
+    assert status.error_id == failed.error_id
     assert await agent.next_failure() == failed
 
 
@@ -496,20 +553,17 @@ async def test_unread_failures_coalesce_to_the_latest_status(agent: ShardAgent) 
     assert await agent.next_failure() == latest
 
 
-@pytest.mark.parametrize("kind", ["lifecycle", "game", "operational"])
+@pytest.mark.parametrize("kind", ["lifecycle", "game"])
 async def test_relays_release_consumed_records_while_idle(
     agent: ShardAgent,
     running_server: SimpleNamespace,
     kind: str,
 ) -> None:
-    class Body(dict[str, Any]):
-        pass
-
     idle, stop = asyncio.Event(), asyncio.Event()
     if kind == "lifecycle":
         value = UnknownEvent(line="x" * 65536)
         pending = [ObservedLifecycleEvent(value, 1)]
-    elif kind == "game":
+    else:
         value = StateChangedEvent(
             v=2,
             nonce=running_server.game_events.nonce,
@@ -523,9 +577,6 @@ async def test_relays_release_consumed_records_while_idle(
             data=CycleState(name="cycles", value=1),
         )
         pending = [ObservedGameEvent(value, 1)]
-    else:
-        value = Body(message="x" * 65536)
-        pending = [OperationalRecord("uid", "test", value, 1, "INFO")]
     released = ref(value)
     del value
 
@@ -540,7 +591,6 @@ async def test_relays_release_consumed_records_while_idle(
     relay = {
         "lifecycle": agent._drain_lifecycle,
         "game": agent._drain_game_events,
-        "operational": agent._drain_operational,
     }[kind]
     task = asyncio.create_task(relay(cast("Server", running_server)))
     try:
@@ -550,98 +600,6 @@ async def test_relays_release_consumed_records_while_idle(
     finally:
         stop.set()
         await task
-
-
-def player_load(server: SimpleNamespace) -> ObservedGameEvent:
-    return ObservedGameEvent(
-        PlayerLoadedEvent.model_validate({
-            "v": 2,
-            "nonce": server.game_events.nonce,
-            "generation": 1,
-            "session_id": "SESSION",
-            "seq": 1,
-            "event": "dst.player.loaded",
-            "tick": 1,
-            "monotonic_ms": 1,
-            "cycle": 0,
-            "data": {
-                "player": {
-                    "prefab": "wilson",
-                    "guid": 1,
-                    "userid": "KU_TEST",
-                    "position": None,
-                }
-            },
-        }),
-        1_788_998_400_000_000_000,
-    )
-
-
-@pytest.mark.parametrize("profile", ["off", "critical", "history"])
-@pytest.mark.parametrize("logs", [False, True])
-async def test_player_load_is_persisted_before_optional_log_delivery(
-    agent: ShardAgent,
-    running_server: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
-    profile: TelemetryProfile,
-    logs: bool,
-) -> None:
-    agent.config = agent.config.replace(
-        telemetry=agent.config.telemetry.replace(profile=profile)
-    )
-    running_server.session_id = "SESSION"
-    observed = player_load(running_server)
-    timestamp = datetime.fromtimestamp(observed.observed_timestamp_ns / 1e9, UTC)
-    running_server.read_game_event = AsyncMock(side_effect=[observed, None])
-    shard = agent.cluster_path / agent.name
-
-    def deliver(*_: object, **__: object) -> None:
-        assert read_last_login(shard, "SESSION") == timestamp
-
-    pipeline = SimpleNamespace(logs_enabled=logs, emit_event=Mock(side_effect=deliver))
-    monkeypatch.setattr(agent, "_pipeline", pipeline)
-    await agent._drain_game_events(cast("Server", running_server))
-    if logs and profile != "off":
-        pipeline.emit_event.assert_called_once()
-    else:
-        pipeline.emit_event.assert_not_called()
-    assert read_last_login(shard, "SESSION") == timestamp
-
-
-@pytest.mark.parametrize("native_session", [None, "PREVIOUS_SESSION", "NEXT_SESSION"])
-async def test_login_record_uses_event_session_despite_native_notification_order(
-    agent: ShardAgent, running_server: SimpleNamespace, native_session: str | None
-) -> None:
-    running_server.session_id = native_session
-    running_server.read_game_event = AsyncMock(
-        side_effect=[player_load(running_server), None]
-    )
-
-    await agent._drain_game_events(cast("Server", running_server))
-
-    assert read_last_login(agent.cluster_path / agent.name, "SESSION") is not None
-    assert read_last_login(agent.cluster_path / agent.name, native_session) is None
-
-
-async def test_failed_login_record_write_is_not_silently_ignored(
-    agent: ShardAgent,
-    running_server: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    running_server.session_id = "SESSION"
-    running_server.read_game_event = AsyncMock(
-        side_effect=[player_load(running_server), None]
-    )
-    monkeypatch.setattr(
-        agent_module, "write_last_login", Mock(side_effect=OSError("disk full"))
-    )
-    pipeline = SimpleNamespace(logs_enabled=True, emit_event=Mock())
-    monkeypatch.setattr(agent, "_pipeline", pipeline)
-
-    with pytest.raises(OSError, match="disk full"):
-        await agent._drain_game_events(cast("Server", running_server))
-
-    pipeline.emit_event.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -722,15 +680,10 @@ async def test_lifecycle_eof_before_process_exit_preserves_input_errors(
         await agent._stopped(server)
 
 
-@pytest.mark.parametrize("stream", ["game", "operational"])
 async def test_lifecycle_eof_does_not_hide_another_relay_ending_early(
-    agent: ShardAgent, monkeypatch: pytest.MonkeyPatch, stream: str
+    agent: ShardAgent, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        agent,
-        f"_drain_{'game_events' if stream == 'game' else stream}",
-        AsyncMock(),
-    )
+    monkeypatch.setattr(agent, "_drain_game_events", AsyncMock())
     server = agent._new_server()
     attach(agent, server)
     server.lifecycle.close()

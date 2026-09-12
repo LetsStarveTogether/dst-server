@@ -1,15 +1,25 @@
-import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 
 import pytest
 
 from dst_server.events import GAME_EVENT_ADAPTER
+from tests.helpers import run_lua_process
 
 
 @pytest.mark.parametrize(
     "scenario",
     [
         "off",
+        "mod_outdated_off",
+        "mod_outdated_history",
+        "mod_outdated_native_error",
+        "mod_outdated_capture_error",
+        "mod_outdated_telemetry_failed",
+        "mod_outdated_missing_callback",
+        "chat_wrapper",
+        "chat_off",
+        "chat_native_error",
+        "chat_capture_error",
         "loaded_off",
         "loaded_critical",
         "loaded_history",
@@ -33,26 +43,16 @@ from dst_server.events import GAME_EVENT_ADAPTER
         "print_partial_failure",
         "print_reentrancy",
         "partial_failure",
+        "missing_clocks",
         "invalid_options",
     ],
 )
 def test_lua_driver(scenario: str, lua_runtime: str) -> None:
     root = Path(__file__).parents[2]
-    result = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]
-        [
-            lua_runtime,
-            str(root / "tests/lua/driver_spec.lua"),
-            str(root),
-            scenario,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
+    output = run_lua_process(
+        lua_runtime, root / "tests/lua/driver_spec.lua", root, scenario
     )
-
-    assert result.returncode == 0, result.stderr or result.stdout
-    *lines, status = result.stdout.splitlines()
+    *lines, status = output.decode().splitlines()
     assert status == "ok"
     for line in lines:
         assert line.startswith("DST_OTEL|")

@@ -1,6 +1,4 @@
 import os
-import shutil
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,8 +8,7 @@ from pydantic import TypeAdapter
 from dst_server import mods
 from dst_server.configuration import files as layout
 from dst_server.configuration.models import Port
-from dst_server.configuration.overrides import WorkshopDownloads
-from dst_server.mods import SteamCMD
+from dst_server.mods import EXECUTABLE
 from dst_server.runtime import ServerConfig
 from dst_server.telemetry import TelemetrySettings
 
@@ -20,7 +17,6 @@ if TYPE_CHECKING:
 
 DEFAULT_INSTALL_PATH = Path("/install")
 DEFAULT_CLUSTER_PATH = Path("/cluster")
-EXECUTABLE = Path("bin64/dontstarve_dedicated_server_nullrenderer_x64")
 OTEL_ENDPOINTS = (
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
@@ -36,75 +32,20 @@ def _validate_external_port(value: int) -> int:
     return _EXTERNAL_PORT.validate_python(value, strict=True)
 
 
-def log_handler(prefix: str) -> Callable[[str], None]:
-    def write(line: str) -> None:
-        logger.info("{prefix}{line}", prefix=prefix, line=line)
-
-    return write
-
-
 async def prepare_shared(
     install_path: Path = DEFAULT_INSTALL_PATH,
     cluster_path: Path = DEFAULT_CLUSTER_PATH,
     *,
     update_mods: bool = True,
 ) -> tuple[layout.Shard, ...]:
-    backend = os.environ.get("DST_SERVER_MOD_UPDATER", "native")
-    if backend not in {"native", "steamcmd"}:
-        msg = "DST_SERVER_MOD_UPDATER must be 'native' or 'steamcmd'"
-        raise ValueError(msg)
     install_path, cluster_path = install_path.resolve(), cluster_path.resolve()  # ruff: ignore[blocking-path-method-in-async-function]
     executable = install_path / EXECUTABLE
     if not executable.is_file():
         raise FileNotFoundError(executable)
     shards = layout.discover(cluster_path)
     layout.prepare(cluster_path)
-    mod_ids = mods.prepare_shared(cluster_path)
-    logger.info(
-        "Found {shards} shard(s) and {mods} Workshop mod(s).",
-        shards=len(shards),
-        mods=len(mod_ids),
-    )
-    setup = cluster_path / "mods" / "dedicated_server_mods_setup.lua"
-    if update_mods and (mod_ids or mods.has_setup_code(setup)):
-        proxy = os.environ.get("DST_SERVER_MOD_PROXY") or None
-        if backend == "steamcmd":
-            from dst_server.mods.workshop import WorkshopUpdater
-
-            downloads = WorkshopDownloads.load(setup)
-            items, collections = downloads.items, downloads.collections
-            if not items and not collections:
-                return shards
-            steamcmd_executable = os.environ.get("DST_SERVER_STEAMCMD")
-            if not steamcmd_executable:
-                if directory := os.environ.get("STEAMCMDDIR"):
-                    steamcmd_executable = str(Path(directory) / "steamcmd.sh")
-                else:
-                    steamcmd_executable = "steamcmd"
-            resolved = shutil.which(steamcmd_executable)
-            if resolved is None:
-                msg = (
-                    f"SteamCMD executable not found: {steamcmd_executable}; "
-                    "set DST_SERVER_STEAMCMD "
-                    "or STEAMCMDDIR"
-                )
-                raise FileNotFoundError(msg)
-            updater = WorkshopUpdater(
-                SteamCMD(
-                    resolved, proxy=proxy, log_handler=log_handler("[MOD_UPDATE]: ")
-                ),
-                cluster_path / "mods",
-            )
-            await updater.update(items, collections=collections)
-            mods.activate(install_path, cluster_path)
-        else:
-            mods.activate(install_path, cluster_path)
-            await mods.update_native(
-                executable,
-                cluster_path / "mods" / "ugc",
-                proxy=proxy,
-                log_handler=log_handler("[MOD_UPDATE]: "),
-            )
+    logger.info("Found {shards} shard(s).", shards=len(shards))
+    await mods.prepare(install_path, cluster_path, update=update_mods)
     return shards
 
 

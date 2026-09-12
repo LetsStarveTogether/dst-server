@@ -4,14 +4,20 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from importlib import import_module
 from os import PathLike, fspath
-from typing import Any, Literal, Self, cast
+from typing import Any, Literal, Self, cast, overload
 from weakref import WeakValueDictionary
 
-from pydantic import BaseModel, JsonValue
+from pydantic import JsonValue
 from ulid import ULID
 
 from dst_server.api import ClusterAPI, ShardAPI
-from dst_server.cluster.subscriptions import BATCH_SIZE, MAX_BATCH_SIZE
+from dst_server.cluster.subscriptions import (
+    BATCH_SIZE,
+    MAX_BATCH_SIZE,
+    STREAM_MODELS,
+    StreamKind,
+    StreamRecord,
+)
 from dst_server.commands import (
     METHOD_DESCRIPTIONS,
     MethodDescription,
@@ -39,7 +45,6 @@ from dst_server.timeouts import (
 from .codec import ERROR, decode, decode_json_value, decode_model, unwrap_outcome
 from .schema import load_schema
 
-type StreamKind = Literal["logs", "lifecycle", "events"]
 capnp: Any = import_module("capnp")
 
 
@@ -193,21 +198,22 @@ class RemoteEndpoint:
                 raise IndeterminateError from error
             raise
 
-    async def _subscribe[T: BaseModel](
-        self, kind: StreamKind, model: type[T]
-    ) -> Subscription[T]:
+    @overload
+    async def subscribe(self, kind: Literal["logs"]) -> Subscription[LogRecord]: ...
+    @overload
+    async def subscribe(
+        self, kind: Literal["lifecycle"]
+    ) -> Subscription[LifecycleRecord]: ...
+    @overload
+    async def subscribe(
+        self, kind: Literal["events"]
+    ) -> Subscription[GameEventRecord]: ...
+
+    async def subscribe(self, kind: StreamKind) -> Subscription[StreamRecord]:
+        model = STREAM_MODELS[kind]
         capability = await self._get_capability()
         subscription = await _read_call(capability.subscribe(kind=kind))
         return Subscription(subscription, lambda item: decode_model(model, item))
-
-    async def subscribe_logs(self) -> Subscription[LogRecord]:
-        return await self._subscribe("logs", LogRecord)
-
-    async def subscribe_lifecycle(self) -> Subscription[LifecycleRecord]:
-        return await self._subscribe("lifecycle", LifecycleRecord)
-
-    async def subscribe_events(self) -> Subscription[GameEventRecord]:
-        return await self._subscribe("events", GameEventRecord)
 
 
 class ClusterClient(RemoteEndpoint, ClusterAPI):

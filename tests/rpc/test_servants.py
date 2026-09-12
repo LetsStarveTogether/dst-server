@@ -15,7 +15,12 @@ from ulid import ULID
 
 from dst_server import commands as c
 from dst_server.api import ClusterAPI, ShardAPI
-from dst_server.cluster.subscriptions import Broadcast, Subscription
+from dst_server.cluster.subscriptions import (
+    Broadcast,
+    StreamKind,
+    StreamRecord,
+    Subscription,
+)
 from dst_server.errors import (
     ErrorCode,
     IndeterminateCommandError,
@@ -23,9 +28,13 @@ from dst_server.errors import (
     RemoteError,
 )
 from dst_server.events.server import SavedEvent
+from dst_server.events.world import ModOutdatedData, ModOutdatedEvent
 from dst_server.models.cluster import (
     ClusterStatus,
+    GameEventRecord,
+    LifecycleRecord,
     LogRecord,
+    ModUpdateStatus,
     ShardDesired,
     ShardPhase,
     ShardRuntimeStatus,
@@ -43,11 +52,12 @@ from dst_server.rpc.schema import load_schema
 from dst_server.rpc.servants import (
     AgentServant,
     BootstrapServant,
+    ClusterEndpoint,
     RemoteAgent,
     WorkerRegistryServant,
 )
 from dst_server.rpc.transport import abstract_rpc_server, filesystem_rpc_server
-from tests.cluster.test_controller import controller as make_controller
+from tests.cluster.helpers import controller as make_controller
 from tests.helpers import wait_for_event
 
 capnp: Any = pytest.importorskip("capnp")
@@ -114,14 +124,12 @@ class FakeShard(ShardAPI):
                 value = None
         return cast("T", value)
 
-    def subscribe_logs(self) -> Subscription[LogRecord]:
-        return self.logs.subscribe()
-
-    def subscribe_lifecycle(self) -> Subscription[Any]:
-        return self.lifecycle.subscribe()
-
-    def subscribe_events(self) -> Subscription[Any]:
-        return self.game_events.subscribe()
+    def subscribe(self, kind: StreamKind) -> Subscription[Any]:
+        return {
+            "logs": self.logs,
+            "lifecycle": self.lifecycle,
+            "events": self.game_events,
+        }[kind].subscribe()
 
 
 class FakeController(ClusterAPI):
@@ -153,19 +161,13 @@ class FakeController(ClusterAPI):
             raise KeyError(name)
         return self.master
 
-    def subscribe_logs(self) -> Subscription[LogRecord]:
-        return self.master.logs.subscribe()
-
-    def subscribe_lifecycle(self) -> Subscription[Any]:
-        return self.master.lifecycle.subscribe()
-
-    def subscribe_events(self) -> Subscription[Any]:
-        return self.master.game_events.subscribe()
+    def subscribe(self, kind: StreamKind) -> Subscription[Any]:
+        return self.master.subscribe(kind)
 
 
 @asynccontextmanager
 async def connected(
-    tmp_path: Path, controller: FakeController
+    tmp_path: Path, controller: ClusterEndpoint
 ) -> AsyncIterator[ClusterClient]:
     tmp_path.chmod(0o700)
     path = tmp_path / "cluster.sock"
@@ -206,6 +208,49 @@ async def test_typed_commands_cross_real_capabilities(tmp_path: Path) -> None:
             c.Snapshots(limit=17, before=0),
             c.RollbackToDay(day=21, timeout=6),
         ]
+
+
+async def test_mod_update_sdk_preserves_restart_across_rpc(tmp_path: Path) -> None:
+    controller = FakeController()
+    async with connected(tmp_path, controller) as client:
+        await client.update_mods(restart=True)
+        await client.update_mods()
+
+    assert controller.requests == [
+        c.UpdateMods(restart=True),
+        c.UpdateMods(restart=False),
+    ]
+
+
+async def test_mod_maintenance_status_crosses_cluster_and_shard_rpc(
+    tmp_path: Path,
+) -> None:
+    controller = FakeController()
+    controller.master.value = controller.master.value.replace(
+        game_attempt=ULID(), outdated_mods=("Insight", "测试 MOD")
+    )
+    controller.value = controller.value.replace(
+        shards=(controller.master.value,),
+        mod_update=ModUpdateStatus(
+            enabled=True,
+            pending=True,
+            updating=False,
+            retry_in_seconds=123.5,
+            error="MOD update failed",
+        ),
+    )
+    async with connected(tmp_path, controller) as client:
+        status = await client.status()
+        shard = await client.shard("Master").status()
+
+    assert status == controller.value
+    assert (
+        status.mod_update.model_fields_set
+        == controller.value.mod_update.model_fields_set
+    )
+    assert shard == status.shards[0] == controller.master.value
+    assert shard.outdated_mods == ("Insight", "测试 MOD")
+    assert shard.game_attempt == controller.master.value.game_attempt
 
 
 async def test_discovery_and_raw_calls_use_public_registry(tmp_path: Path) -> None:
@@ -316,23 +361,12 @@ async def test_server_deadlines_distinguish_queries_and_mutations(
 
 
 @pytest.mark.parametrize("command_type", [c.ClusterSave, c.Reset])
-async def test_workflow_budget_starts_after_controller_lock(
+async def test_mutating_workflow_rejects_busy_controller(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     command_type: type[c.ClusterSave | c.Reset],
 ) -> None:
     controller, master, caves, _, _ = await make_controller(tmp_path, monkeypatch)
-    received = asyncio.Event()
-    elapsed = asyncio.Event()
-    invoke = controller.invoke
-
-    async def observed[T](command: c.Request[T]) -> T:
-        received.set()
-        return await invoke(command)
-
-    monkeypatch.setattr(controller, "invoke", observed)
-    await controller._lock.acquire()
-    pending: asyncio.Task[Any] | None = None
     try:
         tmp_path.chmod(0o700)
         path = tmp_path / "cluster.sock"
@@ -341,41 +375,18 @@ async def test_workflow_budget_starts_after_controller_lock(
             rpc_runtime(),
             filesystem_rpc_server(path, lambda: BootstrapServant(controller)),
             await ClusterClient.connect(path) as client,
+            controller._serialized(),
         ):
-            pending = asyncio.create_task(client.invoke(command_type(timeout=0.1)))
-            await wait_for_event(received, pending)
-            timer = asyncio.get_running_loop().call_later(0.15, elapsed.set)
-            try:
-                await wait_for_event(elapsed, pending)
-            finally:
-                timer.cancel()
-            assert not pending.done()
-            controller._lock.release()
-            result = await pending
-            if command_type is c.ClusterSave:
-                assert result.snapshot == 7
-                assert tuple(name for name, _ in result.shards) == ("Master", "Caves")
-                assert c.Save(timeout=0.1) in master.requests
-                assert (
-                    c.WaitSaved(cursor=caves.save_cursor, snapshot=7, timeout=0.1)
-                    in caves.requests
-                )
-            else:
-                assert result is None
-                assert c.Reset(timeout=0.1) in master.requests
-                assert (
-                    c.WaitGeneration(cursor=caves.generation_cursor, timeout=0.1)
-                    in caves.requests
-                )
+            with pytest.raises(RemoteError) as failure:
+                await client.invoke(command_type(timeout=0.1))
+            assert failure.value.error.code is ErrorCode.INVALID_STATE
+            assert (await client.status()).busy
+            assert not any(
+                isinstance(request, c.Save | c.Reset)
+                for request in master.requests + caves.requests
+            )
     finally:
-        if controller._lock.locked():
-            controller._lock.release()
-        if pending is not None:
-            pending.cancel()
-        async with asyncio.timeout(5):
-            if pending is not None:
-                await asyncio.gather(pending, return_exceptions=True)
-            await controller.aclose()
+        await controller.aclose()
 
 
 @pytest.mark.parametrize(
@@ -490,12 +501,58 @@ async def test_query_cancellation_reaches_handler(tmp_path: Path, raw: bool) -> 
                 await asyncio.gather(pending, return_exceptions=True)
 
 
+async def test_subscription_kinds_reach_cluster_and_shard_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, master, _, _, _ = await make_controller(tmp_path, monkeypatch)
+    log = log_record(1)
+    fields = log.model_dump(exclude={"line"})
+    records: dict[StreamKind, StreamRecord] = {
+        "logs": log,
+        "lifecycle": LifecycleRecord(
+            **fields, event=SavedEvent(path="session/world/1", snapshot=1)
+        ),
+        "events": GameEventRecord(
+            **fields,
+            event=ModOutdatedEvent(
+                v=2,
+                nonce=str(log.game_attempt),
+                generation=1,
+                session_id="world",
+                seq=1,
+                event="dst.mod.outdated",
+                tick=1,
+                monotonic_ms=1,
+                cycle=1,
+                data=ModOutdatedData(name="Insight"),
+            ),
+        ),
+    }
+    sources: dict[StreamKind, Broadcast[Any]] = {
+        "logs": master.logs,
+        "lifecycle": master.lifecycle,
+        "events": master.game_events,
+    }
+    try:
+        async with connected(tmp_path, controller) as client:
+            for kind, record in records.items():
+                async with (
+                    await client.subscribe(kind) as room,
+                    await client.shard("Master").subscribe(kind) as shard,
+                ):
+                    sources[kind].publish(record)
+                    async with asyncio.timeout(1):
+                        assert await room.next() == await shard.next() == (record,)
+    finally:
+        await controller.aclose()
+
+
 async def test_subscription_overflow_is_recoverable_and_close_releases(
     tmp_path: Path,
 ) -> None:
     controller = FakeController()
     async with connected(tmp_path, controller) as client:
-        subscription = await client.subscribe_logs()
+        subscription = await client.subscribe("logs")
         for sequence in range(1025):
             controller.master.logs.publish(log_record(sequence))
         with pytest.raises(RemoteError) as overflow:
@@ -510,13 +567,13 @@ async def test_subscription_overflow_is_recoverable_and_close_releases(
 async def test_subscription_validation_and_capability_gc(tmp_path: Path) -> None:
     controller = FakeController()
     async with connected(tmp_path, controller) as client:
-        subscription = await client.subscribe_logs()
+        subscription = await client.subscribe("logs")
         with pytest.raises(ValidationError):
             await subscription.next(0)
         response = await subscription._capability.next(maxItems=0)
         assert decode(ERROR, response.batch.error).code is ErrorCode.INVALID_ARGUMENT
         assert not controller.master.logs._subscriptions
-        subscription = await client.subscribe_logs()
+        subscription = await client.subscribe("logs")
         del subscription
         gc.collect()
         async with asyncio.timeout(1):
@@ -545,7 +602,7 @@ async def test_repeated_connections_release_subscriptions_and_roots(
         for sequence in range(10):
             async with (
                 await ClusterClient.connect(path) as client,
-                await client.subscribe_logs() as subscription,
+                await client.subscribe("logs") as subscription,
             ):
                 controller.master.logs.publish(log_record(sequence))
                 assert (await subscription.next())[0].sequence == sequence
@@ -590,7 +647,7 @@ async def test_remote_relay_releases_delivered_batch() -> None:
     source, target = Broadcast[LogRecord](), Broadcast[LogRecord]()
     incoming, outgoing = source.subscribe(), target.subscribe()
     subscription: Any = SimpleNamespace(next=lambda: incoming.next(256))
-    relay = asyncio.create_task(agent._relay_stream(subscription, target, LogRecord))
+    relay = asyncio.create_task(agent._relay_stream(subscription, target, "logs"))
     references = []
     for sequence in range(3):
         record = log_record(sequence, "x" * 1024 * 1024)
@@ -611,11 +668,8 @@ async def test_remote_relay_releases_delivered_batch() -> None:
             await agent.aclose()
 
 
-async def test_remote_reconnect_does_not_retain_failed_stream_frames(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_failed_remote_stream_exits_without_retaining_frames() -> None:
     agent = RemoteAgent(None)
-    reconnecting = asyncio.Event()
     references = []
 
     class BrokenSubscription:
@@ -628,24 +682,10 @@ async def test_remote_reconnect_does_not_retain_failed_stream_frames(
         async def close(self) -> None:
             pass
 
-    async def subscribe(*_: object) -> None:
-        reconnecting.set()
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(servant_module, "_STREAM_RETRY_DELAY", 0)
-    monkeypatch.setattr(agent, "_subscribe", subscribe)
-    pump = asyncio.create_task(
-        agent._pump(cast("Any", BrokenSubscription()), "logs", agent.logs, LogRecord)
-    )
-    try:
-        await wait_for_event(reconnecting, pump)
-        assert references
-        assert references[0]() is None
-    finally:
-        pump.cancel()
-        async with asyncio.timeout(5):
-            await asyncio.gather(pump, return_exceptions=True)
-            await agent.aclose()
+    await agent._pump(cast("Any", BrokenSubscription()), agent.logs, "logs")
+    assert references
+    assert references[0]() is None
+    await agent.aclose()
 
 
 async def test_remote_agent_close_releases_capability() -> None:

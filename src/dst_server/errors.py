@@ -15,7 +15,6 @@ class ErrorCode(StrEnum):
     UNAVAILABLE = "unavailable"
     TIMEOUT = "timeout"
     OVERFLOW = "overflow"
-    TOPOLOGY_CHANGE_REQUIRED = "topologyChangeRequired"
     INTERNAL = "internal"
     INDETERMINATE = "indeterminate"
 
@@ -74,41 +73,6 @@ class SubscriptionOverflowError(OverflowError):
     pass
 
 
-class ConfigurationStoreError(RuntimeError):
-    pass
-
-
-class GamesRunningError(ConfigurationStoreError):
-    def __init__(self) -> None:
-        super().__init__("all game processes must be stopped")
-
-
-class RevisionConflictError(ConfigurationStoreError):
-    def __init__(self, revision: ULID) -> None:
-        self.revision = revision
-        super().__init__("configuration revision conflict")
-
-
-class InvalidConfigurationError(ConfigurationStoreError):
-    def __init__(self, revision: ULID, paths: tuple[tuple[str, ...], ...]) -> None:
-        self.revision = revision
-        self.paths = paths
-        super().__init__("configuration is invalid")
-
-
-class TopologyChangeError(ConfigurationStoreError):
-    def __init__(self, paths: tuple[tuple[str, ...], ...]) -> None:
-        self.paths = paths
-        super().__init__("configuration changes deployment topology")
-
-
-class ConfigurationWriteError(ConfigurationStoreError):
-    def __init__(self, revision: ULID, paths: tuple[tuple[str, ...], ...]) -> None:
-        self.revision = revision
-        self.paths = paths
-        super().__init__("configuration write failed")
-
-
 def indeterminate_cause(error: BaseException) -> bool:
     if isinstance(error, TimeoutError | IndeterminateCommandError):
         return True
@@ -128,7 +92,7 @@ def indeterminate_info(error: ErrorInfo) -> ErrorInfo:
     )
 
 
-def error_info(error: BaseException) -> ErrorInfo:  # ruff: ignore[complex-structure, too-many-branches]
+def error_info(error: BaseException) -> ErrorInfo:  # ruff: ignore[complex-structure]
     if isinstance(error, RemoteError):
         return error.error
     error_id = getattr(error, "error_id", None) or ULID()
@@ -149,17 +113,6 @@ def error_info(error: BaseException) -> ErrorInfo:  # ruff: ignore[complex-struc
             code, message = ErrorCode.INVALID_ARGUMENT, "invalid argument"
         case KeyError():
             code, message = ErrorCode.NOT_FOUND, "resource not found"
-        case RevisionConflictError():
-            code, message = ErrorCode.CONFLICT, "configuration changed"
-        case GamesRunningError():
-            code, message = ErrorCode.INVALID_STATE, "game processes are running"
-        case InvalidConfigurationError():
-            code, message = ErrorCode.INVALID_ARGUMENT, "configuration is invalid"
-        case TopologyChangeError():
-            code, message = (
-                ErrorCode.TOPOLOGY_CHANGE_REQUIRED,
-                "configuration changes deployment topology",
-            )
         case TimeoutError():
             code, message = ErrorCode.TIMEOUT, "operation timed out"
         case SubscriptionOverflowError():
@@ -175,9 +128,7 @@ def error_info(error: BaseException) -> ErrorInfo:  # ruff: ignore[complex-struc
             code, message = ErrorCode.INDETERMINATE, "operation is indeterminate"
         case DisconnectedError():
             code, message = ErrorCode.UNAVAILABLE, "shard agent is unavailable"
-        case RuntimeError() if not isinstance(
-            error, ControllerOperationError | ConfigurationWriteError
-        ):
+        case RuntimeError() if not isinstance(error, ControllerOperationError):
             code, message = ErrorCode.INVALID_STATE, "operation is invalid now"
         case _:
             code, message = ErrorCode.INTERNAL, "internal operation error"

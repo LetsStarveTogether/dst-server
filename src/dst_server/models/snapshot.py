@@ -42,7 +42,7 @@ class SeasonRandomness(FrozenModel):
 class SnapshotClock(FrozenModel):
     segs: PhaseSegments | None = None
     cycles: NonNegativeInt | None = None
-    phase: Literal["day", "dusk", "night"] | None = None
+    phase: Identifier | None = None
     mooomphasecycle: PositiveInt | None = None
     totaltimeinphase: NonNegativeFloat | None = None
     remainingtimeinphase: NonNegativeFloat | None = None
@@ -53,7 +53,7 @@ class SnapshotSeasons(FrozenModel):
     premode: bool | None = None
     israndom: SeasonRandomness | None = None
     segs: SeasonSegments | None = None
-    season: Literal["autumn", "winter", "spring", "summer"] | None = None
+    season: Identifier | None = None
     totaldaysinseason: NonNegativeInt | None = None
     elapseddaysinseason: NonNegativeInt | None = None
     remainingdaysinseason: NonNegativeInt | None = None
