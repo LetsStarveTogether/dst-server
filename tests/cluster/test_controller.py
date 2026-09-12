@@ -16,7 +16,7 @@ from dst_server.cluster.controller import (
     AgentEndpoint,
     ClusterController,
 )
-from dst_server.cluster.subscriptions import Broadcast
+from dst_server.cluster.subscriptions import Broadcast, Subscription
 from dst_server.configuration.files import Shard
 from dst_server.configuration.store import (
     ConfigurationStore,
@@ -381,6 +381,65 @@ async def test_late_failure_cannot_fail_close_a_restarted_shard(
         assert calls.count("stop:Master") + calls.count("stop:Caves") == stops
 
 
+@pytest.mark.parametrize("action", ["stop", "restart", "close"])
+async def test_failure_observation_cannot_override_a_completed_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, _, caves, _, calls = room
+        caves.phase = ShardPhase.FAILED
+        stale = await caves.runtime_status()
+        original = caves.runtime_status
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_status() -> ShardRuntimeStatus:
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+                return stale
+            return await original()
+
+        monkeypatch.setattr(caves, "runtime_status", delayed_status)
+        failure = asyncio.create_task(instance.failed(caves))
+        try:
+            await wait_for_event(entered, failure)
+            if action == "close":
+                await instance.aclose()
+            else:
+                await getattr(instance, action)(notice=None)
+            completed = calls.copy()
+            release.set()
+            assert await failure is (action != "close")
+            assert not instance._fatal.is_set()
+            assert calls == completed
+        finally:
+            release.set()
+            await asyncio.gather(failure, return_exceptions=True)
+
+
+async def test_failure_report_does_not_cancel_an_in_progress_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, _, caves, _, _ = room
+        caves.phase = ShardPhase.FAILED
+        entered = caves.stop_entered = asyncio.Event()
+        release = caves.stop_release = asyncio.Event()
+        stopping = asyncio.create_task(instance.stop(notice=None))
+        try:
+            await wait_for_event(entered, stopping)
+            assert await instance.failed(caves)
+            assert not stopping.done()
+            assert not instance._fatal.is_set()
+        finally:
+            release.set()
+            await stopping
+        assert (await instance.status()).phase == "stopped"
+
+
 async def test_failure_report_fail_closes_when_status_is_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -548,6 +607,17 @@ async def test_known_offline_shard_is_unavailable_not_unknown(
             instance.shard("Unknown")
 
 
+class ReadyBroadcast[T](Broadcast[T]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.subscribed = asyncio.Event()
+
+    def subscribe(self) -> Subscription[T]:
+        subscription = super().subscribe()
+        self.subscribed.set()
+        return subscription
+
+
 async def test_internal_relay_continues_after_overflow(
     tmp_path: Path,
 ) -> None:
@@ -556,9 +626,10 @@ async def test_internal_relay_continues_after_overflow(
     calls: list[str] = []
     instance = ClusterController(ConfigurationStore(root))
     master = EndpointStub("Master", True, calls)
+    master.logs = logs = ReadyBroadcast[LogRecord]()
     await instance.register(master)
     subscription = instance.subscribe("logs")
-    await asyncio.sleep(0)
+    await wait_for_event(logs.subscribed)
     attempt = ULID()
     for sequence in range(1025):
         master.logs.publish(
@@ -570,8 +641,8 @@ async def test_internal_relay_continues_after_overflow(
                 line="burst",
             )
         )
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    async with asyncio.timeout(1):
+        await instance._mod_maintenance.wait()
     master.logs.publish(
         LogRecord(
             shard="Master",
@@ -596,10 +667,10 @@ async def test_internal_relay_releases_delivered_batch(tmp_path: Path) -> None:
     root = tmp_path / "cluster"
     configuration().save(root)
     instance = ClusterController(ConfigurationStore(root))
-    source, target = Broadcast[LogRecord](), Broadcast[LogRecord]()
+    source, target = ReadyBroadcast[LogRecord](), Broadcast[LogRecord]()
     subscription = target.subscribe()
     relay = instance._start_relay("Master", source, target.publish)
-    await asyncio.sleep(0)
+    await wait_for_event(source.subscribed, relay)
     references = []
     for sequence in range(3):
         record = LogRecord(
@@ -632,7 +703,8 @@ async def test_closed_internal_relay_does_not_stop_game_processes(
     async with managed_controller(tmp_path, monkeypatch) as room:
         instance, master, caves, _, calls = room
         master.logs.close()
-        await asyncio.sleep(0)
+        async with asyncio.timeout(1):
+            await instance._relays[master.name][0]
         status = await instance.status()
         assert status.phase == "running"
         assert status.error is None

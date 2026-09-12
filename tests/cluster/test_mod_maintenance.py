@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from ulid import ULID
 
-import dst_server.cluster.controller as controller_module
+import dst_server.mods.maintenance as maintenance_module
 from dst_server import commands as c
 from dst_server.concurrency import cancel_tasks
 from dst_server.events.world import ModOutdatedData, ModOutdatedEvent
@@ -25,7 +25,6 @@ async def room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
             await cancel_tasks(instance._mod_task)
             instance._mod_task = None
         instance._mod_maintenance.retry_at = 0
-        instance._mod_wakeup.clear()
         yield result
 
 
@@ -171,7 +170,7 @@ async def test_background_watcher_uses_retained_state_and_own_deadline(
 
     prepare.side_effect = update
     if trigger == "status":
-        monkeypatch.setattr(controller_module, "STATUS_INTERVAL", 0.01)
+        monkeypatch.setattr(maintenance_module, "STATUS_INTERVAL", 0.01)
     token = operation_deadline.set(asyncio.get_running_loop().time() - 1)
     try:
         instance._mod_task = asyncio.create_task(instance._watch_mods())
@@ -194,7 +193,8 @@ async def test_late_event_payload_cannot_restart_new_instances(room: Room) -> No
     old_attempt = caves.attempt
     await instance.restart()
     report(caves, attempt=old_attempt)
-    await wait_for_event(instance._mod_wakeup)
+    async with asyncio.timeout(1):
+        await instance._mod_maintenance.wait()
     await instance._maintain_mods()
     assert prepare.await_count == 2
     assert not (await instance.status()).mod_update.pending
@@ -217,7 +217,7 @@ async def test_close_cancels_automatic_update_and_cannot_start_games(
     master.outdated_mods = ("Insight",)
     calls.clear()
     instance._mod_task = asyncio.create_task(instance._watch_mods())
-    instance._mod_wakeup.set()
+    instance._mod_maintenance.wake()
     await wait_for_event(entered, instance._mod_task)
     await instance.aclose()
     assert cancelled.is_set()

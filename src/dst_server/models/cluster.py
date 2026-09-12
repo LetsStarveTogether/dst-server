@@ -37,7 +37,6 @@ class ShardPhase(StrEnum):
     STARTING = "starting"
     RUNNING = "running"
     STOPPING = "stopping"
-    RETRY_WAIT = "retryWait"
     FAILED = "failed"
 
 
@@ -53,8 +52,6 @@ class ShardRuntimeStatus(FrozenModel):
     session_id: str | None = None
     ready: bool = False
     returncode: int | None = None
-    retry_attempt: Annotated[int, Field(ge=0, le=4)] = 0
-    stable_since_ns: NonNegativeInt | None = None
     driver_health: DriverHealth | None = None
     driver_error: str | None = None
     telemetry_profile: TelemetryProfile

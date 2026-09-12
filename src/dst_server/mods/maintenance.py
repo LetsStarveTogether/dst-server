@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 from dst_server.models.cluster import ModUpdateStatus, ShardRuntimeStatus
@@ -19,6 +20,18 @@ class ModMaintenance:
         self.updating = False
         self.retry_at = 0.0
         self.error: str | None = None
+        self._wakeup = asyncio.Event()
+
+    def wake(self) -> None:
+        self._wakeup.set()
+
+    async def wait(self) -> None:
+        try:
+            async with asyncio.timeout(STATUS_INTERVAL):
+                await self._wakeup.wait()
+        except TimeoutError:
+            pass
+        self._wakeup.clear()
 
     def observe(self, statuses: tuple[ShardRuntimeStatus, ...]) -> None:
         if not self.updating:

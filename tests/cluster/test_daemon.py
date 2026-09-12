@@ -470,7 +470,10 @@ async def test_master_repeated_cancellation_waits_for_all_resource_cleanup(
     assert asyncio.all_tasks() <= existing_tasks
 
 
-async def test_abstract_registry_registers_and_unregisters_remote_agent() -> None:
+@pytest.mark.parametrize("ignored_reports", [0, 2])
+async def test_registered_agent_waits_for_disconnect_after_handled_reports(
+    ignored_reports: int,
+) -> None:
     calls: list[str] = []
     agent = AgentStub(calls)
     controller = ControllerStub(calls)
@@ -486,6 +489,14 @@ async def test_abstract_registry_registers_and_unregisters_remote_agent() -> Non
                 await wait_for_event(controller.registered, task)
                 await wait_for_event(agent.failure_waiting, task)
                 assert controller.endpoint.name == "Caves"
+                for _ in range(ignored_reports):
+                    agent.failure_waiting.clear()
+                    agent.failures.put_nowait(object())
+                    await wait_for_event(agent.failure_waiting, task)
+                    assert controller.failed_agent is controller.endpoint
+                    assert not controller.unregistered.is_set()
+                    assert not task.done()
+                    assert (await controller.endpoint.runtime_status()).name == "Caves"
             with pytest.raises(ConnectionError, match="controller disconnected"):
                 await task
             await wait_for_event(controller.unregistered)

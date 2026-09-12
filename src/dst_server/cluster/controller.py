@@ -41,8 +41,7 @@ from dst_server.models.cluster import (
 )
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog
 from dst_server.mods import ModUpdateError
-from dst_server.mods.maintenance import STATUS_INTERVAL, ModMaintenance
-from dst_server.runtime.supervisor import MAX_ATTEMPTS, RETRY_DELAY
+from dst_server.mods.maintenance import ModMaintenance
 from dst_server.timeouts import (
     DEFAULT_COMMAND_TIMEOUT,
     DEFAULT_CONNECT_TIMEOUT,
@@ -69,9 +68,7 @@ logger = Logger(__name__)
 AGENT_CALL_TIMEOUT = DEFAULT_COMMAND_TIMEOUT + RPC_TIMEOUT_MARGIN
 AGENT_STATUS_TIMEOUT = 30.0
 AGENT_START_TIMEOUT = (
-    MAX_ATTEMPTS * (DEFAULT_STARTUP_TIMEOUT + 2 * OUTPUT_DRAIN_TIMEOUT)
-    + (MAX_ATTEMPTS - 1) * RETRY_DELAY
-    + RPC_TIMEOUT_MARGIN
+    DEFAULT_STARTUP_TIMEOUT + 2 * OUTPUT_DRAIN_TIMEOUT + RPC_TIMEOUT_MARGIN
 )
 AGENT_STOP_TIMEOUT = (
     DEFAULT_STOP_TIMEOUT + 2 * OUTPUT_DRAIN_TIMEOUT + RPC_TIMEOUT_MARGIN
@@ -158,7 +155,6 @@ class ClusterController(ClusterAPI):
         self._fatal = asyncio.Event()
         self._mod_maintenance = ModMaintenance()
         self._mod_task: asyncio.Task[None] | None = None
-        self._mod_wakeup = asyncio.Event()
         self._streams = {kind: Broadcast[StreamRecord]() for kind in STREAM_MODELS}
         self._shard_streams = {
             name: {kind: Broadcast[StreamRecord]() for kind in STREAM_MODELS}
@@ -307,9 +303,20 @@ class ClusterController(ClusterAPI):
             "unavailable",
         }:
             return True
+        if self._desired[endpoint.name] is ShardDesired.STOPPED:
+            return True
         await self._interrupt_operation()
         async with self._serialized():
-            cleanup = await self._fail_close("shard retry budget exhausted")
+            if self._closed or self._agents.get(endpoint.name) is not endpoint:
+                return False
+            if self._desired[endpoint.name] is ShardDesired.STOPPED:
+                return True
+            if (await self._endpoint_status(endpoint)).phase not in {
+                "failed",
+                "unavailable",
+            }:
+                return True
+            cleanup = await self._fail_close("shard game process failed")
             self._fatal.set()
             if cleanup is not None:
                 raise cleanup
@@ -932,7 +939,6 @@ class ClusterController(ClusterAPI):
                 outdated_mods=(),
                 session_id=None,
                 returncode=None,
-                stable_since_ns=None,
                 driver_health=None,
                 driver_error=None,
                 error_id=ULID(),
@@ -1224,12 +1230,7 @@ class ClusterController(ClusterAPI):
         # This room-owned task must not inherit a registration RPC deadline.
         operation_deadline.set(None)
         while not self._closed:
-            try:
-                async with asyncio.timeout(STATUS_INTERVAL):
-                    await self._mod_wakeup.wait()
-            except TimeoutError:
-                pass
-            self._mod_wakeup.clear()
+            await self._mod_maintenance.wait()
             try:
                 await asyncio.create_task(self._maintain_mods(), name="dst-mod-update")
             except asyncio.CancelledError:
@@ -1292,7 +1293,7 @@ class ClusterController(ClusterAPI):
                     try:
                         batch = await subscription.next(256)
                     except SubscriptionOverflowError:
-                        self._mod_wakeup.set()
+                        self._mod_maintenance.wake()
                         logger.warning(
                             "internal shard relay dropped records: {shard}", shard=name
                         )
@@ -1303,7 +1304,7 @@ class ClusterController(ClusterAPI):
                         if isinstance(item, GameEventRecord) and isinstance(
                             item.event, ModOutdatedEvent
                         ):
-                            self._mod_wakeup.set()
+                            self._mod_maintenance.wake()
                         for emit in publish:
                             emit(item)
                     del batch, item

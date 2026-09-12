@@ -353,23 +353,22 @@ async def _registered_cycle(
             response = await registry.register(agent=servant)
         unwrap_outcome(response.result)
         disconnected = asyncio.ensure_future(client.on_disconnect())
-        failure = asyncio.create_task(
-            agent.next_failure(),
-            name=f"dst-failure-report-{agent.name}",
-        )
-        done, _ = await asyncio.wait(
-            {disconnected, failure},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if disconnected in done:
-            msg = "registered controller disconnected"
-            raise ConnectionError(msg)
-        failure.result()
-        async with asyncio.timeout(REGISTRY_FAILURE_TIMEOUT):
-            response = await registry.failed()
-        unwrap_outcome(response.result)
-        msg = "shard retry budget exhausted"
-        raise RuntimeError(msg)
+        while True:
+            failure = asyncio.create_task(
+                agent.next_failure(),
+                name=f"dst-failure-report-{agent.name}",
+            )
+            done, _ = await asyncio.wait(
+                {disconnected, failure},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnected in done:
+                msg = "registered controller disconnected"
+                raise ConnectionError(msg)
+            failure.result()
+            async with asyncio.timeout(REGISTRY_FAILURE_TIMEOUT):
+                response = await registry.failed()
+            unwrap_outcome(response.result)
     finally:
         stack.push_async_callback(servant.aclose)
         stack.push_async_callback(

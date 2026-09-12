@@ -67,7 +67,8 @@ async def test_arbitrary_lua_error_is_indeterminate_after_execution() -> None:
 
 
 @pytest.mark.parametrize(
-    "scenario", ["saved", "previous", "path", "world", "secondary", "error"]
+    "scenario",
+    ["saved", "unchanged", "rewound", "session", "world", "secondary", "error"],
 )
 def test_native_save_requires_its_own_completion(
     scenario: str,
@@ -79,6 +80,7 @@ def test_native_save_requires_its_own_completion(
         local commands = require("dst_server.commands")
         local wire = require("dst_server.wire")
         local invoked, completed, failed, response, coordinated = 0, nil, nil, nil, nil
+        local snapshot, queried = 27, false
         TheWorld = {
             ismastershard = scenario ~= "secondary",
             meta = {session_identifier = "SESSION"},
@@ -88,11 +90,10 @@ def test_native_save_requires_its_own_completion(
             end,
         }
         TheNet = {
-            GetCurrentSnapshot = function() return 27 end,
+            GetCurrentSnapshot = function() return snapshot end,
             GetWorldSessionFile = function()
-                return scenario == "path" and "session/OTHER/0000000027"
-                    or scenario == "previous" and "session/SESSION/0000000026"
-                    or "session/SESSION/0000000027"
+                queried = true
+                error("save must not select a snapshot for loading")
             end,
         }
         ShardGameIndex = {SaveCurrent = function(_, callback)
@@ -121,11 +122,25 @@ def test_native_save_requires_its_own_completion(
         end))
         assert(rejected.ok == false and invoked == 1)
         if scenario == "world" then TheWorld = {} end
+        if scenario == "session" then TheWorld.meta.session_identifier = "OTHER" end
+        snapshot = scenario == "unchanged" and 27 or scenario == "rewound" and 26 or 28
         completed()
-        if scenario == "path" or scenario == "world" then
+        assert(not queried)
+        if scenario == "unchanged" or scenario == "rewound"
+            or scenario == "session" or scenario == "world" then
             assert(response == nil and failed == "indeterminate")
         else
-            assert(failed == nil and response.snapshot == TheNet:GetWorldSessionFile())
+            assert(failed == nil and response.snapshot == "session/SESSION/0000000027")
+        end
+        if scenario == "saved" then
+            response = nil
+            commands.save({}, callback)
+            assert(invoked == 2 and coordinated == 28 and response == nil)
+            snapshot = 29
+            completed()
+            assert(not queried and failed == nil)
+            assert(response.snapshot == "session/SESSION/0000000028")
+            assert(TheNet:GetCurrentSnapshot() == 29)
         end
         """,
         lua_runtime,

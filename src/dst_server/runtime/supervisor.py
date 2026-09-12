@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -12,13 +12,9 @@ from dst_server.timeouts import operation_deadline
 
 from .server import Server
 
-MAX_ATTEMPTS = 4
-RETRY_DELAY = 1.0
-STABLE_WINDOW = 10 * 60.0
 logger = Logger(__name__)
 
 type ServerFactory = Callable[[], Server]
-type Clock = Callable[[float], Coroutine[object, object, None]]
 type ServerHook = Callable[[Server], Awaitable[None]]
 
 
@@ -33,8 +29,6 @@ class ShardSupervisorStatus:
     shard: str
     desired: ShardDesired
     phase: ShardPhase
-    attempt_id: str | None
-    attempts: int
     returncode: int | None
     error_id: ULID | None = None
 
@@ -48,8 +42,6 @@ class ShardSupervisor:
         shard: str,
         factory: ServerFactory,
         *,
-        clock: Clock = asyncio.sleep,
-        on_started: ServerHook | None = None,
         on_stopped: ServerHook | None = None,
         on_failed: FailureHook | None = None,
     ) -> None:
@@ -58,16 +50,12 @@ class ShardSupervisor:
             raise ValueError(msg)
         self.shard = shard
         self._factory = factory
-        self._clock = clock
-        self._on_started = on_started
         self._on_stopped = on_stopped
         self._on_failed = on_failed
         self._condition = asyncio.Condition()
         self._wake = asyncio.Event()
         self._desired = ShardDesired.STOPPED
         self._phase = ShardPhase.STOPPED
-        self._attempt_id: str | None = None
-        self._attempts = 0
         self._returncode: int | None = None
         self._error_id: ULID | None = None
         self._action: _Action | None = None
@@ -83,8 +71,6 @@ class ShardSupervisor:
             shard=self.shard,
             desired=self._desired,
             phase=self._phase,
-            attempt_id=self._attempt_id,
-            attempts=self._attempts,
             returncode=self._returncode,
             error_id=self._error_id,
         )
@@ -97,10 +83,8 @@ class ShardSupervisor:
         async with self._condition:
             self._require_available()
             if self._phase is ShardPhase.FAILED and self._server is None:
-                self._reset_attempts()
                 self._phase = ShardPhase.STOPPED
             elif self._phase is ShardPhase.FAILED:
-                self._reset_attempts()
                 self._phase = ShardPhase.STOPPING
                 self._action = _Action.RESTART
             self._desired = ShardDesired.RUNNING
@@ -129,14 +113,12 @@ class ShardSupervisor:
     async def restart(self) -> ShardSupervisorStatus:
         async with self._condition:
             self._require_available()
-            previous = self._attempt_id
+            previous = self._server
             self._desired = ShardDesired.RUNNING
             if self._phase is ShardPhase.FAILED and self._server is not None:
-                self._reset_attempts()
                 self._phase = ShardPhase.STOPPING
                 self._action = _Action.RESTART
             elif self._phase in {ShardPhase.STOPPED, ShardPhase.FAILED}:
-                self._reset_attempts()
                 self._phase = ShardPhase.STOPPED
             else:
                 self._action = _Action.RESTART
@@ -152,7 +134,7 @@ class ShardSupervisor:
                     }
                     or (
                         self._phase is ShardPhase.RUNNING
-                        and self._attempt_id != previous
+                        and self._server is not previous
                     )
                     or (
                         self._desired is ShardDesired.STOPPED
@@ -189,7 +171,6 @@ class ShardSupervisor:
                 ShardPhase.STOPPED,
                 ShardPhase.FAILED,
             }:
-                self._reset_attempts()
                 self._phase = ShardPhase.STOPPED
             else:
                 self._action = _Action.KILL
@@ -218,7 +199,6 @@ class ShardSupervisor:
                 ShardPhase.STOPPED,
                 ShardPhase.FAILED,
             }:
-                self._reset_attempts()
                 self._phase = ShardPhase.STOPPED
                 self._condition.notify_all()
                 return self.status
@@ -252,9 +232,6 @@ class ShardSupervisor:
                 self._run(),
                 name=f"dst-supervisor-{self.shard}",
             )
-
-    def _reset_attempts(self) -> None:
-        self._attempts = 0
 
     def _take_action(self) -> _Action | None:
         action = self._action
@@ -313,9 +290,7 @@ class ShardSupervisor:
         await self._failed(returncode)
 
     async def _attempt(self) -> None:
-        self._attempts += 1
         self._failure_reported = False
-        self._attempt_id = None
         self._returncode = None
         self._error_id = None
         await self._set_phase(ShardPhase.STARTING)
@@ -328,10 +303,9 @@ class ShardSupervisor:
             return
 
         self._server = server
-        self._attempt_id = server.game_events.nonce
         await self._notify()
         start_task = asyncio.create_task(
-            self._start_server(server),
+            server.start(),
             name=f"dst-start-{self.shard}",
         )
         try:
@@ -348,27 +322,18 @@ class ShardSupervisor:
             start_task.result()
         except Exception as error:
             self._record_error("start", error)
-            await self._terminate(server, force=True)
+            returncode = await self._terminate(server, force=True)
             await self._finish_attempt(server)
-            await self._failed()
+            await self._failed(returncode)
             return
 
         await self._set_phase(ShardPhase.RUNNING)
         await self._running(server)
 
-    async def _start_server(self, server: Server) -> None:
-        await server.start()
-        if self._on_started is not None:
-            await self._on_started(server)
-
     async def _running(self, server: Server) -> None:
         exit_task = asyncio.create_task(
             server.process.wait(),
             name=f"dst-exit-{self.shard}",
-        )
-        stable_task = asyncio.create_task(
-            self._reset_when_stable(server),
-            name=f"dst-stable-{self.shard}",
         )
         try:
             if not await self._await_or_action(exit_task):
@@ -382,13 +347,7 @@ class ShardSupervisor:
             await self._finish_attempt(server)
             await self._failed(returncode)
         finally:
-            await cancel_tasks(exit_task, stable_task)
-
-    async def _reset_when_stable(self, server: Server) -> None:
-        await self._clock(STABLE_WINDOW)
-        if self._server is server and self._phase is ShardPhase.RUNNING:
-            self._attempts = 1
-            await self._notify()
+            await cancel_tasks(exit_task)
 
     async def _stop_attempt(self, server: Server, action: _Action) -> None:
         await self._set_phase(ShardPhase.STOPPING)
@@ -399,8 +358,8 @@ class ShardSupervisor:
         if self._is_live(server):
             msg = f"failed to stop live shard process: {self.shard}"
             raise RuntimeError(msg)
-        action = self._take_action() or action
         await self._finish_attempt(server)
+        action = self._take_action() or action
         await self._after_action(action, returncode)
 
     async def _await_or_action[T](self, task: asyncio.Task[T]) -> bool:
@@ -426,7 +385,6 @@ class ShardSupervisor:
     ) -> None:
         self._returncode = returncode
         self._action = None
-        self._reset_attempts()
         if action is _Action.RESTART or self._desired is ShardDesired.RUNNING:
             self._desired = ShardDesired.RUNNING
         else:
@@ -439,48 +397,26 @@ class ShardSupervisor:
         *,
         terminal: bool = False,
     ) -> None:
-        self._returncode = returncode
-        self._attempt_id = None
-        if terminal:
-            self._action = None
-            await self._set_phase(ShardPhase.FAILED)
-            if self._failure_reported:
-                return
-            self._failure_reported = True
-            await self._report_failure()
+        action = self._take_action()
+        if action is not None and not terminal:
+            await self._after_action(action, returncode)
             return
-        if self._desired is ShardDesired.STOPPED:
-            self._action = None
-            self._reset_attempts()
+        self._returncode = returncode
+        if not terminal and self._desired is ShardDesired.STOPPED:
             await self._set_phase(ShardPhase.STOPPED)
             return
-        if self._attempts >= MAX_ATTEMPTS:
-            await self._set_phase(ShardPhase.FAILED)
-            self._failure_reported = True
-            await self._report_failure()
+        await self._set_phase(ShardPhase.FAILED)
+        if self._failure_reported:
             return
-
-        await self._set_phase(ShardPhase.RETRY_WAIT)
-        delay = asyncio.create_task(
-            self._clock(RETRY_DELAY),
-            name=f"dst-retry-{self.shard}",
-        )
-        try:
-            if await self._await_or_action(delay):
-                delay.result()
-                return
-        finally:
-            await cancel_tasks(delay)
-        await self._after_action(self._take_action())
+        self._failure_reported = True
+        await self._report_failure()
 
     async def _report_failure(self) -> None:
         self._error_id = self._error_id or ULID()
         logger.error(
-            "shard failed: {shard}: {error_id}: attempts={attempts}, "
-            "returncode={returncode}",
+            "shard failed: {shard}: {error_id}: returncode={returncode}",
             shard=self.shard,
             error_id=self._error_id,
-            attempts=self._attempts,
             returncode=self._returncode,
         )
         if self._on_failed is None:
@@ -496,13 +432,13 @@ class ShardSupervisor:
     def _record_error(self, stage: str, error: Exception) -> None:
         self._error_id = self._error_id or ULID()
         logger.error(
-            "shard attempt failed: {shard}: {error_id}: {stage}: "
-            "attempt={attempt}, game_attempt={game_attempt}",
+            "shard failed: {shard}: {error_id}: {stage}: game_attempt={game_attempt}",
             shard=self.shard,
             error_id=self._error_id,
             stage=stage,
-            attempt=self._attempts,
-            game_attempt=self._attempt_id,
+            game_attempt=(
+                self._server.game_events.nonce if self._server is not None else None
+            ),
             exc_info=error,
         )
 
@@ -516,7 +452,6 @@ class ShardSupervisor:
             except Exception:
                 logger.exception("shard stop hook failed: {shard}", shard=self.shard)
         self._server = None
-        self._attempt_id = None
         await self._notify()
 
     async def _terminate(self, server: Server, *, force: bool) -> int | None:

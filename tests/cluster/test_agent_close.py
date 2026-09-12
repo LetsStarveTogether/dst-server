@@ -111,7 +111,7 @@ async def test_close_keeps_detached_tail_failure_and_cleanup_errors(
         release.set()
         await asyncio.gather(tail, return_exceptions=True)
         agent.supervisor._server = None
-        agent._background_done(server, tail, critical=True)
+        agent._background_done(server, tail)
         if supervisor_fails:
             raise supervisor_error
 

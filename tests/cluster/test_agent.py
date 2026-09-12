@@ -45,8 +45,6 @@ def supervisor_status(
         shard="Master",
         desired=ShardDesired.RUNNING,
         phase=phase,
-        attempt_id=(server.game_events.nonce if server is not None else None),
-        attempts=1,
         returncode=(server.returncode if server is not None else None),
     )
 
@@ -546,8 +544,8 @@ async def test_failure_is_queued_and_public_status_is_sanitized(
 
 async def test_unread_failures_coalesce_to_the_latest_status(agent: ShardAgent) -> None:
     failed = supervisor_status(ShardPhase.FAILED)
-    for attempt in range(1000):
-        latest = replace(failed, attempts=attempt)
+    for code in range(10):
+        latest = replace(failed, returncode=code)
         await agent._failed(latest)
     assert agent.failures.qsize() == 1
     assert await agent.next_failure() == latest
@@ -602,20 +600,11 @@ async def test_relays_release_consumed_records_while_idle(
         await task
 
 
-@pytest.mark.parametrize(
-    ("phase", "critical", "fatal"),
-    [
-        (ShardPhase.RUNNING, True, True),
-        (ShardPhase.RUNNING, False, False),
-        (ShardPhase.STOPPING, True, True),
-    ],
-)
+@pytest.mark.parametrize("phase", [ShardPhase.RUNNING, ShardPhase.STOPPING])
 async def test_background_failure_boundary(
     agent: ShardAgent,
     running_server: SimpleNamespace,
     phase: ShardPhase,
-    critical: bool,
-    fatal: bool,
 ) -> None:
     attach(agent, running_server, phase)
     sensitive_message = "must-not-appear-in-public-error"
@@ -628,17 +617,11 @@ async def test_background_failure_boundary(
     agent._background_done(
         cast("Server", running_server),
         task,
-        critical=critical,
     )
 
-    if fatal:
-        with pytest.raises(RuntimeError, match="shard background task failed") as error:
-            await agent.wait_fatal()
-        assert sensitive_message not in str(error.value)
-    else:
-        with pytest.raises(TimeoutError):
-            async with asyncio.timeout(0.01):
-                await agent.wait_fatal()
+    with pytest.raises(RuntimeError, match="shard background task failed") as error:
+        await agent.wait_fatal()
+    assert sensitive_message not in str(error.value)
 
 
 @pytest.mark.parametrize("phase", [ShardPhase.STARTING, ShardPhase.RUNNING])
@@ -696,7 +679,7 @@ async def test_lifecycle_eof_does_not_hide_another_relay_ending_early(
         await agent._stopped(server)
 
 
-async def test_spawn_failure_closes_relays_without_poisoning_retry(
+async def test_spawn_failure_closes_relays_and_requires_an_explicit_restart(
     agent: ShardAgent, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     executable = agent.install_path / "fake-server"
@@ -719,10 +702,13 @@ async def test_spawn_failure_closes_relays_without_poisoning_retry(
     agent._activated = True
     try:
         async with asyncio.timeout(5):
+            assert (await agent.start()).phase is ShardPhase.FAILED
+            assert (await agent.next_failure()).phase is ShardPhase.FAILED
+            assert len(attempts) == 1
+            assert attempts[0].child is None
+            assert attempts[0].closed
             assert (await agent.start()).phase is ShardPhase.RUNNING
         assert len(attempts) == 2
-        assert attempts[0].child is None
-        assert attempts[0].closed
         assert not agent._fatal.is_set()
     finally:
         await agent.aclose()

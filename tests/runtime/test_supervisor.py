@@ -1,6 +1,6 @@
 import asyncio
 import signal
-from collections import defaultdict, deque
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from types import SimpleNamespace
 from typing import cast
@@ -12,34 +12,11 @@ from ulid import ULID
 from dst_server.models.cluster import ShardDesired, ShardPhase
 from dst_server.runtime import Server
 from dst_server.runtime.supervisor import (
-    MAX_ATTEMPTS,
-    RETRY_DELAY,
-    STABLE_WINDOW,
     ShardSupervisor,
     ShardSupervisorStatus,
 )
 from dst_server.timeouts import operation_deadline, timeout_scope
 from tests.helpers import wait_for_event
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.pending: defaultdict[float, deque[asyncio.Event]] = defaultdict(deque)
-        self.changed = asyncio.Event()
-
-    async def __call__(self, duration: float) -> None:
-        event = asyncio.Event()
-        self.pending[duration].append(event)
-        self.changed.set()
-        await event.wait()
-
-    async def release(self, duration: float) -> None:
-        async with asyncio.timeout(1):
-            while not self.pending[duration]:
-                self.changed.clear()
-                await self.changed.wait()
-            self.pending[duration].popleft().set()
-            await asyncio.sleep(0)
 
 
 class ProcessStub:
@@ -158,13 +135,10 @@ async def managed_supervisor() -> AsyncIterator[Callable[..., ShardSupervisor]]:
 async def wait_phase(
     supervisor: ShardSupervisor,
     phase: ShardPhase,
-    *,
-    attempts: int | None = None,
 ) -> ShardSupervisorStatus:
     async with asyncio.timeout(1):
         while supervisor.status.phase is not ShardPhase.UNAVAILABLE and (  # ruff: ignore[async-busy-wait]
             supervisor.status.phase is not phase
-            or (attempts is not None and supervisor.status.attempts != attempts)
         ):
             await asyncio.sleep(0)
     assert supervisor.status.phase is phase
@@ -194,76 +168,51 @@ async def test_public_action_matrix(
 ) -> None:
     first, second = ProcessStub(), ProcessStub()
     factory = Factory(first, second)
-    started: list[object] = []
     stopped: list[object] = []
     supervisor = managed_supervisor(
         "Forest",
         factory,
-        on_started=lambda server: _append(started, server),
         on_stopped=lambda server: _append(stopped, server),
     )
 
     running = await supervisor.start()
     assert running.phase is ShardPhase.RUNNING
-    assert running.attempt_id == first.game_events.nonce
-    assert (await supervisor.start()).attempt_id == running.attempt_id
+    assert supervisor.server is cast(Server, first)
+    assert await supervisor.start() == running
     result = await getattr(supervisor, action)()
 
     assert (result.phase, result.desired) == (phase, desired)
     assert (first.stop_calls, first.kill_calls) == calls
     assert factory.calls == factory_calls
-    assert started[0] is first
     assert stopped[0] is first
 
 
-@pytest.mark.parametrize("stage", ["factory", "start", "exit"])
-async def test_failures_share_one_retry_budget(
-    managed_supervisor: Callable[..., ShardSupervisor],
-    stage: str,
+@pytest.mark.parametrize("stage", ["factory", "start", "exit-zero", "exit-error"])
+async def test_first_failure_is_reported_without_restarting(
+    managed_supervisor: Callable[..., ShardSupervisor], stage: str
 ) -> None:
-    clock = Clock()
-    failed: list[object] = []
-    servers = tuple(
-        ProcessStub(
-            start_error=RuntimeError("start failed") if stage == "start" else None
-        )
-        for _ in range(MAX_ATTEMPTS)
+    server = ProcessStub(
+        start_error=RuntimeError("start failed") if stage == "start" else None
     )
     factory = Factory(
-        *servers,
+        server,
+        ProcessStub(),
         error=RuntimeError("factory failed") if stage == "factory" else None,
     )
+    failed: list[object] = []
     supervisor = managed_supervisor(
-        "Caves",
-        factory,
-        clock=clock,
-        on_failed=lambda status: _append(failed, status),
+        "Caves", factory, on_failed=lambda status: _append(failed, status)
     )
-    starting = asyncio.create_task(supervisor.start())
-
-    for attempt in range(1, MAX_ATTEMPTS):
-        if stage == "exit":
-            await wait_phase(supervisor, ShardPhase.RUNNING)
-            servers[attempt - 1].exit(23)
-        status = await wait_phase(
-            supervisor,
-            ShardPhase.RETRY_WAIT,
-            attempts=attempt,
-        )
-        assert status.attempts == attempt
-        await clock.release(RETRY_DELAY)
-    if stage == "exit":
-        await wait_phase(supervisor, ShardPhase.RUNNING)
-        servers[-1].exit(23)
-
-    status = (
-        await wait_phase(supervisor, ShardPhase.FAILED)
-        if stage == "exit"
-        else await starting
-    )
-    assert status.phase is ShardPhase.FAILED
-    assert status.attempts == MAX_ATTEMPTS
+    await supervisor.start()
+    if stage.startswith("exit"):
+        server.exit(0 if stage == "exit-zero" else 23)
+    status = await wait_phase(supervisor, ShardPhase.FAILED)
+    await asyncio.sleep(0)
     assert failed == [status]
+    assert factory.calls == 1
+    assert supervisor.server is None
+    if stage.startswith("exit"):
+        assert status.returncode == (0 if stage == "exit-zero" else 23)
 
 
 async def test_restarts_do_not_inherit_the_initial_request_deadline(
@@ -278,21 +227,88 @@ async def test_restarts_do_not_inherit_the_initial_request_deadline(
                 await super().start()
 
     first, second, third = TimedProcess(), TimedProcess(), TimedProcess()
-    clock = Clock()
-    supervisor = managed_supervisor(
-        "Forest", Factory(first, second, third), clock=clock
-    )
+    supervisor = managed_supervisor("Forest", Factory(first, second, third))
     async with timeout_scope(60) as request_deadline:
         await supervisor.start()
         assert operation_deadline.get() == request_deadline
     await supervisor.restart()
     second.exit(1)
-    await wait_phase(supervisor, ShardPhase.RETRY_WAIT)
-    await clock.release(RETRY_DELAY)
-    await wait_phase(supervisor, ShardPhase.RUNNING)
+    await wait_phase(supervisor, ShardPhase.FAILED)
+    await supervisor.start()
 
     assert len(deadlines) == 3
     assert all(deadline < request_deadline for deadline in deadlines)
+
+
+async def test_stop_during_restart_cleanup_prevents_another_start(
+    managed_supervisor: Callable[..., ShardSupervisor],
+) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def stopped(_: Server) -> None:
+        entered.set()
+        await release.wait()
+
+    factory = Factory(ProcessStub(), ProcessStub())
+    supervisor = managed_supervisor("Forest", factory, on_stopped=stopped)
+    await supervisor.start()
+    restarting = asyncio.create_task(supervisor.restart())
+    stopping: asyncio.Task[ShardSupervisorStatus] | None = None
+    try:
+        await wait_for_event(entered, restarting)
+        stopping = asyncio.create_task(supervisor.stop())
+        async with supervisor._condition:
+            await supervisor._condition.wait_for(
+                lambda: supervisor.status.desired is ShardDesired.STOPPED
+            )
+        release.set()
+        async with asyncio.timeout(1):
+            results = await asyncio.gather(restarting, stopping)
+        assert all(result.phase is ShardPhase.STOPPED for result in results)
+        assert factory.calls == 1
+    finally:
+        release.set()
+        tasks = (restarting,) if stopping is None else (restarting, stopping)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("stage", ["start", "exit"])
+async def test_restart_during_failure_cleanup_starts_next_process(
+    managed_supervisor: Callable[..., ShardSupervisor],
+    stage: str,
+) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def stopped(_: Server) -> None:
+        entered.set()
+        await release.wait()
+
+    first = ProcessStub(
+        start_error=RuntimeError("start failed") if stage == "start" else None
+    )
+    second = ProcessStub()
+    factory = Factory(first, second)
+    supervisor = managed_supervisor("Forest", factory, on_stopped=stopped)
+    starting = asyncio.create_task(supervisor.start())
+    restarting: asyncio.Task[ShardSupervisorStatus] | None = None
+    try:
+        if stage == "exit":
+            await starting
+            first.exit(23)
+        await wait_for_event(entered)
+        restarting = asyncio.create_task(supervisor.restart())
+        async with supervisor._condition:
+            await supervisor._condition.wait_for(lambda: supervisor._action is not None)
+        release.set()
+        async with asyncio.timeout(1):
+            result = await restarting
+        assert result.phase is ShardPhase.RUNNING
+        assert supervisor.server is cast(Server, second)
+        assert factory.calls == 2
+    finally:
+        release.set()
+        tasks = (starting,) if restarting is None else (starting, restarting)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.parametrize("stage", ["create", "start", "recover"])
@@ -305,11 +321,9 @@ async def test_failure_id_links_root_cause_logs_to_terminal_status(
         start_error=error if stage == "start" else None,
         kill_error=error if stage == "recover" else None,
     )
-    clock = Clock()
     supervisor = managed_supervisor(
         "Forest",
         Factory(server, error=error if stage == "create" else None),
-        clock=clock,
     )
     with logbook.TestHandler() as output:
         if stage == "recover":
@@ -318,7 +332,6 @@ async def test_failure_id_links_root_cause_logs_to_terminal_status(
                 await supervisor.kill()
             server.kill_error = None
         else:
-            supervisor._attempts = MAX_ATTEMPTS - 1
             await supervisor.start()
 
     status = supervisor.status
@@ -331,26 +344,8 @@ async def test_failure_id_links_root_cause_logs_to_terminal_status(
     assert any(f": {stage}:" in record.message for record in causes)
 
 
-async def test_stable_window_resets_attempts(
-    managed_supervisor: Callable[..., ShardSupervisor],
-) -> None:
-    first, second = ProcessStub(), ProcessStub()
-    clock = Clock()
-    supervisor = managed_supervisor("Forest", Factory(first, second), clock=clock)
-
-    await supervisor.start()
-    supervisor._attempts = MAX_ATTEMPTS - 1
-    await clock.release(STABLE_WINDOW)
-    await wait_phase(supervisor, ShardPhase.RUNNING, attempts=1)
-    first.exit(1)
-
-    assert (await wait_phase(supervisor, ShardPhase.RETRY_WAIT)).attempts == 1
-    await clock.release(RETRY_DELAY)
-    assert (await wait_phase(supervisor, ShardPhase.RUNNING)).attempts == 2
-
-
 @pytest.mark.parametrize("action", ["stop", "kill", "restart", "aclose"])
-async def test_action_interrupts_nonstable_startup(
+async def test_action_interrupts_startup(
     managed_supervisor: Callable[..., ShardSupervisor],
     action: str,
 ) -> None:
@@ -381,24 +376,6 @@ async def test_action_interrupts_nonstable_startup(
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
-
-
-async def test_stop_wins_retry_completion_race(
-    managed_supervisor: Callable[..., ShardSupervisor],
-) -> None:
-    first, second = ProcessStub(), ProcessStub()
-    clock = Clock()
-    factory = Factory(first, second)
-    supervisor = managed_supervisor("Forest", factory, clock=clock)
-    await supervisor.start()
-    first.exit(1)
-    await wait_phase(supervisor, ShardPhase.RETRY_WAIT)
-
-    stopping = asyncio.create_task(supervisor.stop())
-    await clock.release(RETRY_DELAY)
-
-    assert (await stopping).phase is ShardPhase.STOPPED
-    assert factory.calls == 1
 
 
 @pytest.mark.parametrize(
@@ -482,10 +459,9 @@ async def test_live_process_remains_retryable_after_kill_failure(
     assert supervisor.server is None
 
 
-@pytest.mark.parametrize("hook", ["started", "stopped", "failed"])
+@pytest.mark.parametrize("hook", ["stopped", "failed"])
 async def test_hook_failures_do_not_strand_the_supervisor(
-    managed_supervisor: Callable[..., ShardSupervisor],
-    hook: str,
+    managed_supervisor: Callable[..., ShardSupervisor], hook: str
 ) -> None:
     async def fail(_: object) -> None:
         await asyncio.sleep(0)
@@ -493,30 +469,15 @@ async def test_hook_failures_do_not_strand_the_supervisor(
         raise RuntimeError(message)
 
     server = ProcessStub()
-    clock = Clock()
     kwargs = {f"on_{hook}": fail}
-    supervisor = managed_supervisor("Forest", Factory(server), clock=clock, **kwargs)
-
-    if hook == "started":
-        starting = asyncio.create_task(supervisor.start())
-        assert (await wait_phase(supervisor, ShardPhase.RETRY_WAIT)).attempts == 1
-        starting.cancel()
-        await asyncio.gather(starting, return_exceptions=True)
-    elif hook == "stopped":
-        await supervisor.start()
+    supervisor = managed_supervisor("Forest", Factory(server), **kwargs)
+    await supervisor.start()
+    if hook == "stopped":
         assert (await supervisor.stop()).phase is ShardPhase.STOPPED
     else:
-        supervisor = managed_supervisor(
-            "Caves",
-            Factory(error=RuntimeError("factory failed")),
-            clock=clock,
-            on_failed=fail,
-        )
-        starting = asyncio.create_task(supervisor.start())
-        for _ in range(MAX_ATTEMPTS - 1):
-            await wait_phase(supervisor, ShardPhase.RETRY_WAIT)
-            await clock.release(RETRY_DELAY)
-        assert (await starting).phase is ShardPhase.FAILED
+        server.exit(1)
+        await wait_phase(supervisor, ShardPhase.FAILED)
+        assert (await supervisor.stop()).phase is ShardPhase.STOPPED
 
 
 @pytest.mark.parametrize("cancel_count", [1, 3])

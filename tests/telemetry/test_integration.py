@@ -158,32 +158,24 @@ async def test_operational_ingestion_uses_source_identity_time_and_severity(
     assert kwargs["attributes"]["dst.game.attempt.id"] == server.game_events.nonce
 
 
-async def test_telemetry_relays_start_before_process_readiness_and_are_critical(
+async def test_telemetry_relays_report_failure_before_process_readiness(
     relay: ShardAgent,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = event_server(relay, observation(str(ULID())))
-    failures = [OSError("event stream failed"), OSError("event stream failed")]
     monkeypatch.setattr(agent_module, "Server", Mock(return_value=server))
     monkeypatch.setattr(relay, "_drain_lifecycle", AsyncMock())
-    monkeypatch.setattr(relay, "_drain_game_events", AsyncMock(side_effect=failures[0]))
-    calls: list[tuple[str, bool]] = []
-
-    def done(
-        _: Server, task: asyncio.Task[None], *, critical: bool, expected_eof: bool
-    ) -> None:
-        del expected_eof
-        task.exception()
-        calls.append((task.get_name(), critical))
-
-    monkeypatch.setattr(relay, "_background_done", done)
+    monkeypatch.setattr(
+        relay,
+        "_drain_game_events",
+        AsyncMock(side_effect=OSError("event stream failed")),
+    )
     assert relay._new_server() is server
     assert len(relay._attempt_tasks) == 2
     await asyncio.gather(*relay._attempt_tasks, return_exceptions=True)
-    await asyncio.sleep(0)
-
-    assert ("dst-lifecycle-relay-forest", True) in calls
-    assert ("dst-game-event-relay-forest", True) in calls
+    async with asyncio.timeout(1):
+        with pytest.raises(RuntimeError, match="dst-game-event-relay-forest: OSError"):
+            await relay.wait_fatal()
 
 
 async def test_finished_process_does_not_hide_event_stream_failure(
@@ -205,7 +197,7 @@ async def test_finished_process_does_not_hide_event_stream_failure(
 
     task = asyncio.create_task(fail(), name="dst-operational-relay-forest")
     await asyncio.gather(task, return_exceptions=True)
-    relay._background_done(server, task, critical=True)
+    relay._background_done(server, task)
 
     async with asyncio.timeout(1):
         with pytest.raises(RuntimeError, match="background task failed"):

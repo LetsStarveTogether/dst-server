@@ -308,10 +308,14 @@ async def controller(
     )
     master = EndpointStub("Master", True, calls)
     caves = EndpointStub("Caves", False, calls)
-    await instance.register(master)
-    assert not prepare.await_count
-    await instance.register(caves)
-    await instance.wait_idle()
+    try:
+        await instance.register(master)
+        assert not prepare.await_count
+        await instance.register(caves)
+        await instance.wait_idle()
+    except BaseException:
+        await instance.aclose()
+        raise
     return instance, master, caves, prepare, calls
 
 

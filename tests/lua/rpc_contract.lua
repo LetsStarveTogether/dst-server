@@ -187,8 +187,9 @@ TheWorld = {
     HasTag = function() return false end,
     PushEvent = function(_, name, value) observed.world_events[name] = value end,
 }
+local snapshot = 26
 TheNet = {
-    GetCurrentSnapshot = function() return 26 end,
+    GetCurrentSnapshot = function() return snapshot end,
     ListSnapshots = function(_, session_id, online, count)
         assert(session_id == "SESSION" and online == true and count >= 2)
         return {
@@ -200,9 +201,8 @@ TheNet = {
         observed.truncated_snapshots = { session_id, offset }
     end,
     GetWorldSessionFile = function(_, session_id)
-        assert(session_id == "SESSION")
-        return observed.truncated_snapshots ~= nil and "save/session/SESSION/0000000023"
-            or "session/SESSION/0000000026"
+        assert(session_id == "SESSION" and observed.truncated_snapshots ~= nil)
+        return "save/session/SESSION/0000000023"
     end,
     GetServerName = function() return "Test Room" end,
     GetServerDescription = function() return "Description" end,
@@ -275,7 +275,11 @@ SpawnPrefab = function(prefab)
 end
 SetServerPaused = function(paused) observed.paused = paused end
 c_announce = function(message) observed.announcement = message end
-ShardGameIndex = { SaveCurrent = function(_, callback) observed.saved = true; callback() end }
+ShardGameIndex = { SaveCurrent = function(_, callback)
+    observed.saved = true
+    snapshot = snapshot + 1
+    callback()
+end }
 c_reset = function() observed.reset = true end
 c_regenerateworld = function() observed.regenerated = true end
 c_regenerateshard = function(erase) observed.regenerated_shard = erase end
@@ -345,7 +349,7 @@ assert(observed.world_listener == "ms_playerjoined")
 assert(observed.player_listener == "ms_skilltreeinitialized")
 assert(observed.announcement == "hello")
 assert(observed.saved == true and observed.reset == true and observed.regenerated == true)
-assert(observed.truncated_snapshots[1] == "SESSION" and observed.truncated_snapshots[2] == -3)
+assert(observed.truncated_snapshots[1] == "SESSION" and observed.truncated_snapshots[2] == -4)
 assert(observed.snapshot_rollback == 0)
 assert(observed.paused == true)
 assert(observed.regenerated_shard == false)

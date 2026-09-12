@@ -21,7 +21,7 @@ test:
 
 # Run the real game against an explicitly selected local image.
 test-system image:
-    DST_SERVER_IMAGE="{{ image }}" DST_SERVER_PODMAN_TEST=1 uv run --locked --all-extras pytest -m system tests/system/test_podman.py
+    DST_SERVER_IMAGE="{{ image }}" DST_SERVER_PODMAN_TEST=1 uv run --locked --all-extras pytest -m system tests/system
 
 # Also verify the OTLP round trip against a configured local Netdata.
 test-netdata-system image:

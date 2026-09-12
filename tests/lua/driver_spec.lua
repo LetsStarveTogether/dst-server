@@ -55,12 +55,17 @@ REMOTESHARDSTATE = { READY = 1 }
 GetTick = function() return 10 end
 GetTimeReal = function() return 20 end
 local saved = false
+local snapshot = 1
 TheWorld.ismastershard = true
 TheNet = {
-    GetCurrentSnapshot = function() return 1 end,
-    GetWorldSessionFile = function() return "session/SESSION/0000000001" end,
+    GetCurrentSnapshot = function() return snapshot end,
+    GetWorldSessionFile = function() error("save must not select a snapshot for loading") end,
 }
-ShardGameIndex = { SaveCurrent = function(_, callback) saved = true; callback() end }
+ShardGameIndex = { SaveCurrent = function(_, callback)
+    saved = true
+    snapshot = snapshot + 1
+    callback()
+end }
 
 local function options(profile)
     return {

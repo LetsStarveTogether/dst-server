@@ -33,12 +33,10 @@ function commands.save(args, callback)
         TheWorld:PushEvent("master_autosaverupdate", { snapshot = snapshot })
         ShardGameIndex:SaveCurrent(function()
             local confirmed, path = pcall(function()
-                local path = TheNet:GetWorldSessionFile(session)
-                local prefix = "session/" .. session .. "/"
                 assert(TheWorld == world and world.meta.session_identifier == session
-                    and type(path) == "string" and path:sub(1, #prefix) == prefix
-                    and path:sub(#prefix + 1):match("^%d+$") ~= nil)
-                return path
+                    and TheNet:GetCurrentSnapshot() > snapshot)
+                -- GetWorldSessionFile selects the saved snapshot and rewinds the counter.
+                return string.format("session/%s/%010d", session, snapshot)
             end)
             save_pending = false
             if not confirmed then

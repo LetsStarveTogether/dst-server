@@ -84,12 +84,10 @@ class ShardAgent:
         self._fatal_error: BaseException | None = None
         self._fatal = asyncio.Event()
         self._failure_id: ULID | None = None
-        self._started_at_ns: int | None = None
         self.failures: asyncio.Queue[ShardSupervisorStatus] = asyncio.Queue(maxsize=1)
         self.supervisor = ShardSupervisor(
             shard.name,
             self._new_server,
-            on_started=self._started,
             on_stopped=self._stopped,
             on_failed=self._failed,
         )
@@ -137,8 +135,6 @@ class ShardAgent:
             session_id=server.session_id if server is not None else None,
             ready=bool(server is not None and live and server.lifecycle.ready),
             returncode=status.returncode,
-            retry_attempt=status.attempts,
-            stable_since_ns=self._started_at_ns,
             driver_health=driver_health,
             driver_error=server.driver_error if server is not None else None,
             last_active_at=server.game_events.last_active_at
@@ -425,7 +421,6 @@ class ShardAgent:
                 lambda completed: self._background_done(
                     server,
                     completed,
-                    critical=True,
                     expected_eof=completed is lifecycle and server.lifecycle.eof,
                 )
             )
@@ -461,12 +456,7 @@ class ShardAgent:
             )
         )
 
-    async def _started(self, _server: Server) -> None:
-        self._failure_id = None
-        self._started_at_ns = time_ns()
-
     async def _stopped(self, _server: Server) -> None:
-        self._started_at_ns = None
         tasks, self._attempt_tasks = self._attempt_tasks, ()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -485,20 +475,17 @@ class ShardAgent:
         server: Server,
         task: asyncio.Task[None],
         *,
-        critical: bool,
         expected_eof: bool = False,
     ) -> None:
         if task.cancelled():
             return
-        error = task.exception()
-        if critical and error is None:
-            error = server.input_error
+        error = task.exception() or server.input_error
         if self._fatal.is_set():
             return
-        if not (critical and error is not None):
+        if error is None:
             if self.supervisor.server is not server:
                 return
-            if error is None and (
+            if (
                 expected_eof
                 or server.closed
                 or server.returncode is not None
@@ -506,14 +493,6 @@ class ShardAgent:
                 not in {ShardPhase.STARTING, ShardPhase.RUNNING}
             ):
                 return
-        if not critical:
-            logger.error(
-                "non-critical shard background task stopped: {shard}: {task}: {kind}",
-                shard=self.shard.name,
-                task=task.get_name(),
-                kind=type(error).__name__ if error is not None else "unexpected exit",
-            )
-            return
         message = (
             f"shard background task failed: {self.shard.name}: {task.get_name()}: "
             f"{type(error).__name__ if error is not None else 'unexpected exit'} "
