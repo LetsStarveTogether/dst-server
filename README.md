@@ -764,6 +764,8 @@ Standalone SDK callers receive the failure and can explicitly start again.
 The master container uses `Restart=on-failure`, `RestartSec=30`, and a limit of three starts per 600 seconds.
 Secondary containers use `Restart=no`.
 The master's `Wants` and each secondary's `BindsTo`/`PartOf` recreate them with the master.
+Shard services start and stop in parallel; Agent registration coordinates game startup.
+Each service sends TERM before Quadlet waits for container exit and removes it.
 The master is `PartOf` the Pod service, so a Pod restart also restarts every shard.
 After the service start limit is reached, fix the cause and use a manual `room start` or `room restart` to clear it.
 RPC connections and subscriptions must reconnect after management service recovery.

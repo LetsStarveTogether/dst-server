@@ -48,6 +48,17 @@ def _podman_name(value: str) -> str | None:
     return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value) else None
 
 
+def container_stop_command(unit: ContainerUnit) -> tuple[str, ...]:
+    # Signal before Quadlet's rm holds the Pod lock throughout graceful shutdown.
+    return (
+        "-/usr/bin/podman",
+        "kill",
+        "--signal",
+        "TERM",
+        unit.container_name or f"systemd-{unit.name}",
+    )
+
+
 def _ordered_shards(
     cluster: ClusterConfig,
 ) -> tuple[tuple[str, ShardConfig], ...]:
@@ -152,7 +163,7 @@ class QuadletApplication(RevalidatedFrozenModel):
                 bool(secondary.requires),
                 bool(secondary.wants),
                 secondary.binds_to != (master_source,),
-                secondary.after != (master_source,),
+                bool(secondary.after),
                 secondary.part_of != (f"{self.master.name}.service",),
             )):
                 msg = f"Quadlet secondary has invalid master binding: {secondary.name}"
@@ -269,7 +280,8 @@ class QuadletApplication(RevalidatedFrozenModel):
                     "--",
                     shard_name,
                 ),
-                after=(f"{master.name}.container",),
+                # Registration coordinates startup; ordering would reverse shutdown.
+                after=(),
                 binds_to=(f"{master.name}.container",),
                 part_of=(f"{master.name}.service",),
                 wants=(),
@@ -281,7 +293,14 @@ class QuadletApplication(RevalidatedFrozenModel):
             )
             for shard_name in secondary_names
         )
-        return cls(pod=pod, master=master, secondaries=secondaries)
+        return cls(
+            pod=pod,
+            master=master.replace(exec_stop=container_stop_command(master)),
+            secondaries=tuple(
+                unit.replace(exec_stop=container_stop_command(unit))
+                for unit in secondaries
+            ),
+        )
 
     @classmethod
     def load(

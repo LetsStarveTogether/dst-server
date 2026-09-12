@@ -273,6 +273,13 @@ def test_pod_userns_rejects_unsafe_values(userns: str) -> None:
                 after=("database.service",),
                 pod="room.pod",
                 exec=("/app/dst-server", "serve", "Cave World %n ${HOME}"),
+                exec_stop=(
+                    "-/usr/bin/podman",
+                    "kill",
+                    "--signal",
+                    "TERM",
+                    "systemd-worker",
+                ),
                 environment={"A": "1", "B": "two words %n ${HOME}"},
                 volumes=(
                     VolumeMount(
@@ -620,7 +627,8 @@ def test_application_builds_master_secondary_lifecycle(
     assert application.master.requires == application.master.after == ()
     assert application.master.binds_to == ()
     assert secondary.requires == secondary.wants == ()
-    assert secondary.after == secondary.binds_to == (master_source,)
+    assert secondary.after == ()
+    assert secondary.binds_to == (master_source,)
     assert application.master.part_of == ("dst-007-pod.service",)
     assert secondary.part_of == (f"{application.master.name}.service",)
     assert application.master.restart == "on-failure"
@@ -650,6 +658,13 @@ def test_application_builds_master_secondary_lifecycle(
     assert application.master.environment["DST_SERVER_TELEMETRY_PROFILE"] == "test"
     assert application.master.volumes == secondary.volumes
     for unit in (application.master, secondary):
+        assert unit.exec_stop == (
+            "-/usr/bin/podman",
+            "kill",
+            "--signal",
+            "TERM",
+            unit.container_name,
+        )
         assert unit.image == "quay.io/wh2099/dst-server:latest"
         assert unit.pull == "always"
         assert unit.log_driver == "journald"
@@ -722,7 +737,9 @@ def test_application_preserves_explicit_user_mapping(
         ),
         pytest.param(
             lambda app: {
-                "secondaries": (app.secondaries[0].replace(after=()),),
+                "secondaries": (
+                    app.secondaries[0].replace(after=(f"{app.master.name}.container",)),
+                ),
             },
             "invalid master binding",
             id="secondary-after",

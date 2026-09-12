@@ -12,7 +12,11 @@ from dst_server.configuration.files import (
     read_text,
     validate_directory,
 )
-from dst_server.deployment.application import MASTER_COMMAND, QuadletApplication
+from dst_server.deployment.application import (
+    MASTER_COMMAND,
+    QuadletApplication,
+    container_stop_command,
+)
 from dst_server.deployment.models import ContainerUnit, PodUnit
 from dst_server.deployment.quadlet import references_pod
 from dst_server.rooms import CONTROL_FILE, Control, write_control
@@ -38,7 +42,7 @@ def _application(directory: Path, number: int) -> QuadletApplication:
             ("serve",),
         }:
             unit = unit.replace(exec=(command[0], "agent", *command[1:]))
-        units.append(unit)
+        units.append(unit.replace(exec_stop=container_stop_command(unit)))
     masters = [unit for unit in units if unit.exec[:3] == MASTER_COMMAND]
     if len(masters) != 1:
         msg = f"expected one master for room {number:03d}"
@@ -52,6 +56,7 @@ def _application(directory: Path, number: int) -> QuadletApplication:
     )
     secondaries = tuple(
         unit.replace(
+            after=(),
             part_of=(f"{master.name}.service",),
             restart="no",
             restart_sec=None,

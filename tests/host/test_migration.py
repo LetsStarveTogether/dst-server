@@ -30,6 +30,10 @@ def legacy(tmp_path: Path) -> Host:
     for unit in (application.master, *application.secondaries):
         unit.replace(
             exec=(unit.exec[0], *unit.exec[2:]),
+            exec_stop=(),
+            after=()
+            if unit is application.master
+            else (f"{application.master.name}.container",),
             part_of=(),
             restart="on-failure",
             restart_sec=None,
@@ -81,6 +85,15 @@ async def test_preview_is_read_only_and_apply_preserves_native_data(
         "master",
     )
     assert application.secondaries[0].restart == "no"
+    assert application.secondaries[0].after == ()
+    for unit in (application.master, *application.secondaries):
+        assert unit.exec_stop == (
+            "-/usr/bin/podman",
+            "kill",
+            "--signal",
+            "TERM",
+            unit.container_name,
+        )
     for path, content in before.items():
         if str(path) in preview["remove"]:
             assert not path.exists()

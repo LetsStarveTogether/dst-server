@@ -23,6 +23,7 @@ StopTimeout=360
 Notify=true
 
 [Service]
+ExecStop=-/usr/bin/podman kill --signal TERM dst-000-forest
 Restart=on-failure
 RestartSec=30
 KillMode=control-group

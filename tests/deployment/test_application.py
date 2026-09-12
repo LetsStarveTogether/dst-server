@@ -57,7 +57,8 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
         "cave",
     )
     assert master.wants == (f"{secondary.name}.container",)
-    assert secondary.after == secondary.binds_to == (f"{master.name}.container",)
+    assert secondary.after == ()
+    assert secondary.binds_to == (f"{master.name}.container",)
     assert master.part_of == ("dst-000-pod.service",)
     assert secondary.part_of == (f"{master.name}.service",)
     assert master.restart == "on-failure"

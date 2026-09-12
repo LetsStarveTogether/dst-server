@@ -322,6 +322,9 @@ class ContainerUnit(QuadletUnit):
     remain_after_exit: Annotated[
         bool | None, UnitField("Service", "RemainAfterExit", "yesno")
     ] = None
+    exec_stop: Annotated[
+        tuple[NonEmptyUnitValue, ...], UnitField("Service", "ExecStop", "command")
+    ] = ()
     nice: Annotated[
         int | None, Field(ge=-20, le=19), UnitField("Service", "Nice", "integer")
     ] = None

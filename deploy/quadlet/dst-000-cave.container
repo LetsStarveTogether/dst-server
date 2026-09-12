@@ -2,7 +2,6 @@
 Description=Don't Starve Together shard cave
 BindsTo=dst-000-forest.container
 PartOf=dst-000-forest.service
-After=dst-000-forest.container
 
 [Container]
 Image=quay.io/wh2099/dst-server:latest
@@ -22,6 +21,7 @@ StopTimeout=360
 Notify=true
 
 [Service]
+ExecStop=-/usr/bin/podman kill --signal TERM dst-000-cave
 Restart=no
 KillMode=control-group
 WatchdogSec=300

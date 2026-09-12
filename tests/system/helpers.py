@@ -445,7 +445,7 @@ async def wait_for_client(
             try:
                 client = await ClusterClient.connect(socket_path)
                 status = await client.status()
-            except OSError, DisconnectedError:
+            except FileNotFoundError, ConnectionError, DisconnectedError:
                 pass
             else:
                 if predicate(status):

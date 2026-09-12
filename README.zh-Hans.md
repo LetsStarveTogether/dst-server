@@ -730,6 +730,8 @@ Supervisor 每次收到明确的启动或重启请求时，只尝试启动一次
 独立使用 SDK 时，调用方收到故障后可明确重新启动。
 主容器使用 `Restart=on-failure`、`RestartSec=30`，600 秒内最多启动三次。
 次容器使用 `Restart=no`，通过主容器的 `Wants` 及次容器的 `BindsTo`、`PartOf` 随主容器恢复。
+分片服务并行启动和停止；游戏启动由 Agent 注册协调。
+每个服务先发送 TERM，再由 Quadlet 等待容器退出并清理。
 主容器也通过 `PartOf` 归属 Pod，因此重启 Pod 会重启全部分片。
 达到 systemd 启动限制后，排除原因，再手动 `room start` 或 `room restart` 清除限制。
 管理服务恢复后，客户端需要重新连接 RPC 并重新订阅。
