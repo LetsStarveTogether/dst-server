@@ -1,10 +1,9 @@
-local root, scripts, native, profile = arg[1], arg[2], arg[3], arg[4]
+local root, scripts, profile = assert(arg[1]), assert(arg[2]), assert(arg[3])
 package.path = root .. "/src/dst_server/lua/?.lua;" .. scripts .. "/?.lua;" .. package.path
 json = require("json")
 require("class")
 Entity = {}
 require("entityscript")
-dofile(native)
 
 local outputs = {}
 nolineprint = function(line) outputs[#outputs + 1] = line end
@@ -25,8 +24,6 @@ TheWorld.state = { cycles = 3 }
 TheWorld.meta = { session_identifier = "SESSION" }
 TheWorld.ismastersim = true
 AllPlayers = { player }
-TheMixer = { PushMix = function() end, DeleteMix = function() end }
-TheHaptics = { PauseEffects = function() end }
 local state = require("dst_server.state")
 state.nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 state.generation = 1
@@ -40,6 +37,8 @@ if profile == "off" then
     assert(extensions.OnRespawnFromVineSave == original)
     return
 end
+OnSimPaused = function() end
+OnSimUnpaused = function() TheWorld:PushEvent("ms_simunpaused") end
 world_events.install_world()
 
 player:PushEvent("ms_respawnedfromghost")
@@ -67,8 +66,8 @@ player.components.health = {
     SetCurrentHealth = function(self, value) self.currenthealth = value end,
     ForceUpdateHUD = noop,
 }
-local result = require("dst_server.telemetry").pack(extensions.OnRespawnFromVineSave(player))
-assert(result.n == 0 and not player.charlie_vinesave)
+extensions.OnRespawnFromVineSave(player)
+assert(not player.charlie_vinesave)
 assert(player.components.health.currenthealth == 50 and announcements == 1)
 assert(#outputs == 3, "a vine rescue emits one revival")
 local failure = {}
@@ -76,11 +75,11 @@ player.components.inventory.Show = function() error(failure, 0) end
 local ok, err = pcall(extensions.OnRespawnFromVineSave, player)
 assert(not ok and err == failure and #outputs == 3)
 
--- The native server callback publishes its flags; the simulation callback is distinct.
-OnServerPauseDirty(true, false, false, "玩家")
-OnServerPauseDirty(false, true, false, nil)
-OnServerPauseDirty(false, false, true, nil)
-OnServerPauseDirty(false, false, false, nil)
+-- World notifications and simulation callbacks are separate SDK inputs.
+TheWorld:PushEvent("serverpauseddirty", { pause = true, source = "玩家" })
+TheWorld:PushEvent("serverpauseddirty", { autopause = true })
+TheWorld:PushEvent("serverpauseddirty", { gameautopause = true })
+TheWorld:PushEvent("serverpauseddirty", {})
 local unpaused = 0
 TheWorld:ListenForEvent("ms_simunpaused", function() unpaused = unpaused + 1 end)
 OnSimPaused()

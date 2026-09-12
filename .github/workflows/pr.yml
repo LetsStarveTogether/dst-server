@@ -66,17 +66,5 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes lua5.1 luajit
 
-      - name: Check
-        run: uv run --locked prek run --all-files
-
-      - name: Test
-        run: uv run --locked --all-extras pytest
-
-      - name: Build distributions
-        run: uv build --no-sources
-
-      - name: Smoke test wheel
-        env:
-          OTEL_EXPORTER_OTLP_ENDPOINT: http://collector.invalid
-          OTEL_SDK_DISABLED: 'true'
-        run: uv run --isolated --no-project --with dist/dst_server-*.whl python -I tests/distribution.py
+      - name: Verify
+        run: just verify

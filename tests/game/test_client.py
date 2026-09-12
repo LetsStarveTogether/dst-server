@@ -1,5 +1,6 @@
 import math
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -332,7 +333,9 @@ async def test_request_passes_untrusted_text_as_data() -> None:
     ]
 
 
-def test_native_snapshot_pages_cover_long_history(lua_runtime: str) -> None:
+def test_native_snapshot_pages_cover_long_history(
+    native_scripts: Path, lua_runtime: str
+) -> None:
     output = run_lua(
         """
         TheWorld = { meta = { session_identifier = "SESSION" } }
@@ -366,6 +369,7 @@ def test_native_snapshot_pages_cover_long_history(lua_runtime: str) -> None:
         assert(calls[1] == 101 and calls[#calls] > 237)
         """,
         lua_runtime,
+        native_scripts,
     )
     pages = []
     for line in output.decode().splitlines():
@@ -417,12 +421,13 @@ async def test_snapshot_page_bounds(arguments: dict[str, int], message: str) -> 
 
 
 async def test_indeterminate_lua_mutation_does_not_wait_for_reload(
-    lua_runtime: str, monkeypatch: pytest.MonkeyPatch
+    native_scripts: Path, lua_runtime: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     output = run_lua(
         'local wire=require("dst_server.wire");'
         "print(wire.response(wire.indeterminate))",
         lua_runtime,
+        native_scripts,
     )
     game, _ = make_game(output)
     wait = AsyncMock()
@@ -434,7 +439,9 @@ async def test_indeterminate_lua_mutation_does_not_wait_for_reload(
     wait.assert_not_awaited()
 
 
-async def test_partial_native_mutation_is_indeterminate(lua_runtime: str) -> None:
+async def test_partial_native_mutation_is_indeterminate(
+    native_scripts: Path, lua_runtime: str
+) -> None:
     output = run_lua(
         """
         local health = 1
@@ -457,6 +464,7 @@ async def test_partial_native_mutation_is_indeterminate(lua_runtime: str) -> Non
         print(result)
         """,
         lua_runtime,
+        native_scripts,
     )
     game, executed = make_game(output)
 
@@ -494,7 +502,10 @@ async def test_reload_wait_failure_is_indeterminate(
     "scenario", ["empty", "session_changed", "player_joined", "manual", "allow_players"]
 )
 async def test_regeneration_rechecks_world_and_players_at_execution(
-    scenario: str, lua_runtime: str, monkeypatch: pytest.MonkeyPatch
+    native_scripts: Path,
+    scenario: str,
+    lua_runtime: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = run_lua(
         f'local scenario="{scenario}";'
@@ -524,6 +535,7 @@ async def test_regeneration_rechecks_world_and_players_at_execution(
             or scenario == "allow_players"))
         """,
         lua_runtime,
+        native_scripts,
     )
     game, _ = make_game(output)
     wait = AsyncMock()
@@ -561,7 +573,10 @@ async def test_regeneration_rechecks_world_and_players_at_execution(
     ],
 )
 async def test_native_snapshot_rollback_checks_target_and_partial_mutation(
-    scenario: str, lua_runtime: str, monkeypatch: pytest.MonkeyPatch
+    native_scripts: Path,
+    scenario: str,
+    lua_runtime: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = run_lua(
         f'local scenario="{scenario}";'
@@ -629,6 +644,7 @@ async def test_native_snapshot_rollback_checks_target_and_partial_mutation(
         assert(reset == (restarted and 1 or 0))
         """,
         lua_runtime,
+        native_scripts,
     )
     game, _ = make_game(output)
     wait = AsyncMock()

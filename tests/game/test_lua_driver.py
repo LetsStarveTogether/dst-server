@@ -47,10 +47,10 @@ from tests.lua.helpers import run_lua_process
         "invalid_options",
     ],
 )
-def test_lua_driver(scenario: str, lua_runtime: str) -> None:
+def test_lua_driver(native_scripts: Path, scenario: str, lua_runtime: str) -> None:
     root = Path(__file__).parents[2]
     output = run_lua_process(
-        lua_runtime, root / "tests/lua/driver_spec.lua", root, scenario
+        lua_runtime, root / "tests/lua/driver_spec.lua", root, scenario, native_scripts
     )
     *lines, status = output.decode().splitlines()
     assert status == "ok"

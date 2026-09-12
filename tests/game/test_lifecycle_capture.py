@@ -7,32 +7,19 @@ from pydantic import ValidationError
 from dst_server.events.player import CombatData, RevivedEvent
 from dst_server.events.world import PauseChangedEvent, StateChangedEvent
 from dst_server.runtime.operational import classify_log
-from tests.lua.helpers import native_functions, native_scripts, run_lua_process
-
-
-@pytest.fixture(scope="module")
-def pause_handlers(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    path = tmp_path_factory.mktemp("pause-handlers") / "handlers.lua"
-    path.write_text(
-        "local Paused, Autopaused, GameAutopaused = false, false, false\n"
-        + native_functions(
-            "mainfunctions.lua", {"OnServerPauseDirty", "OnSimPaused", "OnSimUnpaused"}
-        )
-    )
-    return path
+from tests.lua.helpers import run_lua_process
 
 
 @pytest.mark.parametrize("profile", ["critical", "history", "off"])
-def test_native_revival_and_pause_facts(
-    luajit: str, pause_handlers: Path, profile: str
+def test_revival_and_pause_capture(
+    luajit: str, native_scripts: Path, profile: str
 ) -> None:
     root = Path(__file__).parents[2]
     output = run_lua_process(
         luajit,
         root / "tests/lua/lifecycle_contract.lua",
         root,
-        native_scripts(),
-        pause_handlers,
+        native_scripts,
         profile,
     )
     lines = output.decode().splitlines()

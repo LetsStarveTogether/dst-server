@@ -20,10 +20,12 @@ def capture_game_logs() -> Iterator[None]:
 
 @pytest.fixture(scope="session", autouse=True)  # ruff: ignore[pytest-fixture-autouse]
 def image_matches_expected_build() -> None:
+    assert IMAGE, "set DST_SERVER_IMAGE to the exact local image ID or tag"
+    assert os.geteuid() == 0, "rootful Podman is required for idmapped test volumes"
     expected_revision = os.environ.get("DST_SERVER_EXPECTED_REVISION")
     expected_version = os.environ.get("DST_SERVER_EXPECTED_VERSION")
     podman = shutil.which("podman")
-    assert podman is not None
+    assert podman is not None, "Podman is required for system tests"
     inspected = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
         (
             podman,
@@ -60,8 +62,7 @@ async def container_name() -> AsyncIterator[str]:
 
 @pytest.fixture
 async def quadlet_system(tmp_path: Path) -> AsyncIterator[QuadletSystem]:
-    if not HAS_QUADLET_RUNTIME:
-        pytest.skip("systemd Quadlet runtime is unavailable")
+    assert HAS_QUADLET_RUNTIME, "systemd Quadlet runtime is required for room tests"
     system = QuadletSystem.create(tmp_path)
     try:
         await system.install()

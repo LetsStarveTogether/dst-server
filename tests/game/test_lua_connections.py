@@ -9,24 +9,7 @@ from dst_server.events.connection import (
     PresenceEvent,
 )
 from dst_server.events.world import TelemetryErrorEvent
-from tests.lua.helpers import native_functions, run_lua_process
-
-
-@pytest.fixture(scope="module")
-def native_connections(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    names = {
-        "GetPlayerClientTable",
-        "ClientAuthenticationComplete",
-        "ClientDisconnected",
-    }
-    path = tmp_path_factory.mktemp("native-connections") / "handlers.lua"
-    path.write_text(
-        native_functions("networking.lua", names)
-        + "\nreturn {"
-        + ",".join(f"{name}={name}" for name in sorted(names))
-        + "}\n"
-    )
-    return path
+from tests.lua.helpers import run_lua_process
 
 
 @pytest.mark.parametrize(
@@ -40,15 +23,15 @@ def native_connections(tmp_path_factory: pytest.TempPathFactory) -> Path:
         "invalid_authentication",
     ],
 )
-def test_native_connections_and_periodic_presence(
-    native_connections: Path, lua_runtime: str, scenario: str
+def test_connection_events_and_periodic_presence(
+    native_scripts: Path, lua_runtime: str, scenario: str
 ) -> None:
     root = Path(__file__).parents[2]
     output = run_lua_process(
         lua_runtime,
         root / "tests/lua/connections_spec.lua",
         root,
-        native_connections,
+        native_scripts,
         scenario,
     )
     records = [

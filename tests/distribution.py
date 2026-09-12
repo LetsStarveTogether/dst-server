@@ -118,7 +118,9 @@ def check_cli(directory: Path) -> None:
         "--max-players",
         "11",
     )
-    run(*roots, "room", "edit", "299", "--set", "/recycle=true", module=True)
+    # Offline file editing needs no host extras or system-bus connection.
+    store = RoomStore(directory / "rooms", directory / "quadlets")
+    store.save(store.load(299).edit("/recycle", True))
     assert (
         orjson.loads(
             run(
@@ -128,11 +130,11 @@ def check_cli(directory: Path) -> None:
                 "299",
                 "--field",
                 "/cluster/settings/max_players",
+                module=True,
             )
         )
         == 11
     )
-    store = RoomStore(directory / "rooms")
     assert store.load(299).cluster.settings.max_players == 11
     assert store.load(299).recycle
     assert ClusterConfig.load(store.path(299)).settings.max_players == 11

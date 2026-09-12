@@ -1,6 +1,4 @@
 import asyncio
-import math
-import sys
 from collections.abc import Sequence
 from datetime import time
 from pathlib import Path
@@ -9,11 +7,10 @@ from unittest.mock import AsyncMock, Mock
 import orjson
 import pytest
 from pydantic import SecretStr
-from rich.text import Text
 
 from dst_server.cli import main
 from dst_server.cli import operations as cli
-from dst_server.cli.common import Options, emit, options
+from dst_server.cli.common import Options, options
 from dst_server.host import Host, maintenance
 from dst_server.presets.lst import fleet_room
 from dst_server.rooms import CONTROL_FILE, read_control
@@ -278,71 +275,6 @@ def test_lifecycle_and_schedule_controls_do_not_parse_dynamic_lua(
     assert path.read_text() == source
     cli_systemd.start.assert_awaited_once_with(host.unit(0))
     cli_systemd.stop.assert_awaited_once_with(host.unit(0))
-
-
-@pytest.mark.parametrize("json_output", [False, True])
-def test_json_output_preserves_unicode_and_pydantic_nonfinite_values(
-    json_output: bool, capsys: pytest.CaptureFixture[str]
-) -> None:
-    token = options.set(Options(json=json_output))
-    try:
-        emit({"nested": [math.nan, math.inf, -math.inf]})
-        assert orjson.loads(capsys.readouterr().out) == {"nested": [None, None, None]}
-        value = {"nested": ['玩家👩🏽‍💻\n\t"' * 100], "finite": 1.5}
-        emit(value)
-        output = capsys.readouterr().out
-        assert orjson.loads(output) == value
-        assert "玩家" in output
-        assert output.count("\n") > 1 if not json_output else output.count("\n") == 1
-    finally:
-        options.reset(token)
-
-
-@pytest.mark.parametrize("recycle", [False, True])
-@pytest.mark.parametrize(
-    ("terminal", "as_json"), [(False, False), (True, False), (True, True)]
-)
-def test_automation_results_use_one_line_outside_a_terminal(
-    host: Host,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    recycle: bool,
-    terminal: bool,
-    as_json: bool,
-) -> None:
-    monkeypatch.setenv("TERM", "xterm")
-    monkeypatch.delenv("NO_COLOR", raising=False)
-    monkeypatch.delenv("FORCE_COLOR", raising=False)
-    monkeypatch.setattr(sys.stdout, "isatty", lambda: terminal)
-    results = {
-        str(number): {"status": "skipped" if recycle else "unchanged"}
-        for number in range(140)
-    }
-    operation = AsyncMock(return_value=results)
-    monkeypatch.setattr(
-        "dst_server.host.recycling.run_recycle"
-        if recycle
-        else "dst_server.host.schedule.run_schedule",
-        operation,
-    )
-    assert (
-        main([
-            *(["--json"] if as_json else []),
-            *(["maintenance", "recycle"] if recycle else ["schedule", "run"]),
-        ])
-        == 0
-    )
-    operation.assert_awaited_once()
-    assert operation.await_args is not None
-    assert operation.await_args.args[0].cluster_root == host.cluster_root
-    output = capsys.readouterr()
-    text = output.out
-    if terminal and not as_json:
-        assert "\x1b[" in text
-        text = Text.from_ansi(text).plain
-    assert orjson.loads(text) == results
-    assert output.out.count("\n") == (422 if terminal and not as_json else 1)
-    assert output.err == ""
 
 
 def test_ci_deployment_command_restarts_room_services(

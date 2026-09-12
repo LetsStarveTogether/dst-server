@@ -1,6 +1,6 @@
 import os
 import shutil
-from collections.abc import Iterator
+from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
@@ -12,21 +12,27 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-@pytest.fixture(scope="session", autouse=True)  # ruff: ignore[pytest-fixture-autouse]
-def native_script_source(
-    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
-) -> Iterator[None]:
+@pytest.fixture(scope="session")
+def pinned_scripts() -> Path:
+    return Path(__file__).parents[1] / "dst-scripts/scripts"
+
+
+@pytest.fixture(scope="session")
+def native_scripts(
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+    pinned_scripts: Path,
+) -> Path:
     source = request.config.getoption("--scripts-zip")
-    with pytest.MonkeyPatch.context() as patch:
-        if source is not None:
-            directory = tmp_path_factory.mktemp("native-scripts")
-            with ZipFile(source) as archive:
-                archive.extractall(directory)
-            scripts = directory / "scripts"
-            if not (scripts / "json.lua").is_file():
-                pytest.fail("scripts.zip must contain scripts/json.lua")
-            patch.setenv("DST_SERVER_TEST_SCRIPTS", str(scripts))
-        yield
+    if source is None:
+        return pinned_scripts
+    directory = tmp_path_factory.mktemp("native-scripts")
+    with ZipFile(source) as archive:
+        archive.extractall(directory)
+    scripts = directory / "scripts"
+    if not (scripts / "json.lua").is_file():
+        pytest.fail("scripts.zip must contain scripts/json.lua")
+    return scripts
 
 
 @pytest.fixture(scope="session")

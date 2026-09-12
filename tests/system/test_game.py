@@ -31,13 +31,13 @@ from tests.system.helpers import (
     MASTER,
     OPERATION_TIMEOUT,
     STARTUP_TIMEOUT,
-    SYSTEM_MARKS,
     VOLUME_IDMAP,
     check_console_contract,
     copy_image_bundle,
     make_server,
     read_player,
     reap_server,
+    remove_container,
     replace_bundle_script,
     run_command,
     running_server,
@@ -49,7 +49,7 @@ from tests.system.helpers import (
     write_cluster,
 )
 
-pytestmark = SYSTEM_MARKS
+pytestmark = pytest.mark.system
 
 
 async def test_export_restores_world_and_encoded_player_save(tmp_path: Path) -> None:
@@ -482,6 +482,107 @@ async def test_sdk_real_game_core_contract(
         await reap_server(server, container_name)
 
 
+async def test_native_callbacks_publish_sdk_events(tmp_path: Path) -> None:
+    cluster = write_cluster(tmp_path)
+    script = cluster / "native-contract.lua"
+    script.write_text(
+        (Path(__file__).parents[1] / "lua/native_integration.lua").read_text()
+    )
+    async with running_server(tmp_path, cluster) as server:
+        await server.game.invoke(
+            c.ExecuteJson(
+                source="for _,userid in ipairs({'KU_NATIVE','KU_ATTACKER'}) do "
+                "local actor=SpawnPrefab('wilson');actor.userid=userid;"
+                "actor.Physics:Teleport("
+                "TheWorld.components.playerspawner:GetAnySpawnPoint()) "
+                "end;return true"
+            )
+        )
+        joined = set()
+        async with asyncio.timeout(OPERATION_TIMEOUT):
+            while joined != {"KU_NATIVE", "KU_ATTACKER"}:
+                observed = await server.read_game_event()
+                assert observed is not None
+                if isinstance(observed.record, player.ShardEnteredEvent):
+                    joined.add(observed.record.data.player.userid)
+        result = await server.game.invoke(
+            c.Evaluate(source=f"return dofile({lua_string(str(script))})")
+        )
+        assert result.error is None
+        records = []
+        async with asyncio.timeout(OPERATION_TIMEOUT):
+            while True:
+                observed = await server.read_game_event()
+                assert observed is not None
+                record = observed.record.model_dump(mode="json")
+                records.append(record)
+                if (
+                    record["event"] == "dst.server.system_message"
+                    and record["data"]["message"] == "native-contract-complete"
+                ):
+                    break
+        events = {record["event"] for record in records}
+        assert {
+            "dst.client.authenticated",
+            "dst.client.disconnected",
+            "dst.player.spawned",
+            "dst.player.chat",
+            "dst.mod.outdated",
+            "dst.server.pause_changed",
+            "dst.player.combat_received",
+            "dst.player.combat_hit",
+            "dst.player.unequipped",
+            "dst.player.finished_work",
+            "dst.player.picked",
+            "dst.player.action",
+            "dst.player.incident",
+            "dst.vote.started",
+            "dst.vote.cast",
+            "dst.vote.closed",
+            "dst.vote.result",
+        } <= events
+        assert "dst.telemetry.error" not in events
+        assert server.driver_health.errors == 0
+        received = next(
+            record["data"]
+            for record in records
+            if record["event"] == "dst.player.combat_received"
+        )
+        assert received["damage"] == received["original_damage"] == 10
+        assert received["damage_resolved"] == 10
+        assert received["player"]["userid"] == "KU_NATIVE"
+        assert received["attacker"]["userid"] == "KU_ATTACKER"
+        hit = next(
+            record["data"]
+            for record in records
+            if record["event"] == "dst.player.combat_hit"
+        )
+        assert hit["damage"] == hit["damage_resolved"] == 10
+        assert hit["player"]["userid"] == "KU_ATTACKER"
+        assert hit["target"]["userid"] == "KU_NATIVE"
+        incidents = {
+            record["data"]["kind"]
+            for record in records
+            if record["event"] == "dst.player.incident"
+            and record["data"]["player"]["userid"] == "KU_NATIVE"
+        }
+        assert {"sink", "fall_in_void"} <= incidents
+        chat = next(
+            record["data"] for record in records if record["event"] == "dst.player.chat"
+        )
+        assert chat["message"] == "你好\n世界"
+        assert chat["player"]["userid"] == "KU_NATIVE"
+        votes = [
+            record["data"]
+            for record in records
+            if record["event"].startswith("dst.vote.")
+        ]
+        assert len(votes) == 5
+        assert all(vote["vote_id"] == votes[0]["vote_id"] for vote in votes)
+        assert votes[-1]["passed"] is True
+        assert votes[-1]["total_voted"] == 2
+
+
 async def test_real_game_driver_restarts_with_unchanged_session_id(
     tmp_path: Path,
     container_name: str,
@@ -520,10 +621,11 @@ async def test_real_game_driver_restarts_with_unchanged_session_id(
 
 
 @pytest.mark.parametrize("fault", ["telemetry", "core"])
-async def test_real_game_driver_degrades_safely(
+async def test_real_game_driver_degrades_safely(  # ruff: ignore[too-many-statements]
     tmp_path: Path,
     container_name: str,
     fault: Literal["telemetry", "core"],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cluster = write_cluster(tmp_path)
     bundle = tmp_path / f"{fault}-failure-scripts.zip"
@@ -556,6 +658,14 @@ async def test_real_game_driver_degrades_safely(
     )
     try:  # ruff: ignore[too-many-statements-in-try-clause]
         if fault == "core":
+            kill = server.kill
+
+            async def kill_container() -> int:
+                # The Podman wrapper's game owns the inherited output FDs.
+                await remove_container(container_name)
+                return await kill()
+
+            monkeypatch.setattr(server, "kill", kill_container)
             with pytest.raises(RuntimeError, match="installation_failed"):
                 await server.start(startup_timeout=STARTUP_TIMEOUT)
             assert server.driver_error == "installation_failed"
@@ -569,9 +679,9 @@ async def test_real_game_driver_degrades_safely(
         async with asyncio.timeout(OPERATION_TIMEOUT):
             health = server.driver_health
             if fault == "telemetry":
-                assert health.telemetry_status == "failed"
+                assert health.telemetry_status == "degraded"
                 assert health.last_error is not None
-                assert health.last_error.stage == "install"
+                assert health.last_error.stage == "world.install"
                 assert health.last_error.message == "installation_failed"
                 diagnostic = await server.read_game_event()
                 assert diagnostic is not None

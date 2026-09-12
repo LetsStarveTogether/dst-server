@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import cast
 
 import orjson
@@ -16,7 +17,7 @@ from tests.lua.helpers import run_lua
 from tests.runtime.helpers import COMMAND_DONE, StubWriter, next_request
 
 
-async def evaluate(source: str, runtime: str) -> ConsoleResult:
+async def evaluate(native_scripts: Path, source: str, runtime: str) -> ConsoleResult:
     game, commands = make_game()
     nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
     writer = StubWriter()
@@ -44,6 +45,7 @@ async def evaluate(source: str, runtime: str) -> ConsoleResult:
                 f"ExecuteConsoleCommand({lua_string(packet)});"
                 "assert(print == original_print)",
                 runtime,
+                native_scripts,
             )
             reader.feed_data(output + COMMAND_DONE + b"\n")
             return await asyncio.wait_for(asyncio.shield(pending), 5)
@@ -82,12 +84,13 @@ async def evaluate(source: str, runtime: str) -> ConsoleResult:
     ],
 )
 async def test_console_evaluates_expressions_and_multiline_once(
+    native_scripts: Path,
     source: str,
     output: str,
     values: list[tuple[str, str]],
     lua_runtime: str,
 ) -> None:
-    result = await evaluate(source, lua_runtime)
+    result = await evaluate(native_scripts, source, lua_runtime)
     assert result.output == output
     assert [(item.type, item.text) for item in result.values] == values
     assert result.error is None
@@ -99,18 +102,22 @@ async def test_console_evaluates_expressions_and_multiline_once(
     [("local =", "compile"), ('error("failure")', "runtime")],
 )
 async def test_console_distinguishes_compile_and_runtime_errors(
-    source: str, kind: str, lua_runtime: str
+    native_scripts: Path, source: str, kind: str, lua_runtime: str
 ) -> None:
-    result = await evaluate(source, lua_runtime)
+    result = await evaluate(native_scripts, source, lua_runtime)
     assert result.error is not None
     assert result.error.kind == kind
     assert result.error.message
     assert result.values == ()
 
 
-async def test_runtime_error_does_not_retry_the_statement(lua_runtime: str) -> None:
+async def test_runtime_error_does_not_retry_the_statement(
+    native_scripts: Path, lua_runtime: str
+) -> None:
     result = await evaluate(
-        '(function() print("executed"); error("failure") end)()', lua_runtime
+        native_scripts,
+        '(function() print("executed"); error("failure") end)()',
+        lua_runtime,
     )
     assert result.output == "executed"
     assert result.error is not None
@@ -118,9 +125,11 @@ async def test_runtime_error_does_not_retry_the_statement(lua_runtime: str) -> N
 
 
 async def test_console_represents_arbitrary_objects_and_truncates(
+    native_scripts: Path,
     lua_runtime: str,
 ) -> None:
     result = await evaluate(
+        native_scripts,
         "return {}, function() end, coroutine.create(function() end), "
         'setmetatable({}, {__tostring=function() error("failed") end}), '
         'string.rep("中", 1000)',
@@ -139,8 +148,11 @@ async def test_console_represents_arbitrary_objects_and_truncates(
     assert result.truncated
 
 
-async def test_console_bounds_values_in_worst_case_json(lua_runtime: str) -> None:
+async def test_console_bounds_values_in_worst_case_json(
+    native_scripts: Path, lua_runtime: str
+) -> None:
     result = await evaluate(
+        native_scripts,
         "print(string.rep(string.char(0), 10000)); "
         "local values = {}; for i = 1, 100 do "
         "values[i] = string.rep(string.char(0), 10000) end; return unpack(values)",
@@ -166,9 +178,9 @@ async def test_console_bounds_values_in_worst_case_json(lua_runtime: str) -> Non
     ids=["many-lines", "large-line", "value-rendering"],
 )
 async def test_console_bounds_print_output_and_preserves_values(
-    source: str, lua_runtime: str
+    native_scripts: Path, source: str, lua_runtime: str
 ) -> None:
-    result = await evaluate(source, lua_runtime)
+    result = await evaluate(native_scripts, source, lua_runtime)
     assert result.output.startswith("x")
     assert len(result.output.encode()) <= 2048
     assert result.truncated
@@ -176,7 +188,9 @@ async def test_console_bounds_print_output_and_preserves_values(
     assert [value.text for value in result.values] == ["42"]
 
 
-def test_cached_console_print_forwards_after_evaluation(lua_runtime: str) -> None:
+def test_cached_console_print_forwards_after_evaluation(
+    native_scripts: Path, lua_runtime: str
+) -> None:
     output = run_lua(
         """
         local console = require("dst_server.console")
@@ -195,5 +209,6 @@ def test_cached_console_print_forwards_after_evaluation(lua_runtime: str) -> Non
         end
         """,
         lua_runtime,
+        native_scripts,
     )
     assert output == b"after-evaluation\nafter-evaluation\n"

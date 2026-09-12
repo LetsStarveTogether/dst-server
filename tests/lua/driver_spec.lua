@@ -1,8 +1,6 @@
 local root = assert(arg[1], "repository root is required")
 local scenario = assert(arg[2], "scenario is required")
-local scripts = os.getenv("DST_SERVER_TEST_SCRIPTS") or root .. "/dst-scripts/scripts"
-package.path = root .. "/src/dst_server/lua/?.lua;" .. scripts .. "/?.lua;" .. package.path
-json = require("json")
+dofile(root .. "/tests/lua/setup.lua")(root, assert(arg[3]))
 require("class")
 require("bufferedaction")
 
@@ -513,8 +511,8 @@ end
 
 function scenarios.print_boundary()
     local driver = install()
-    local size = assert(tonumber(arg[3]), "line size is required")
-    PRINT_SOURCE = arg[4] == "source"
+    local size = assert(tonumber(arg[4]), "line size is required")
+    PRINT_SOURCE = arg[5] == "source"
     local tags = {}
     for index = 1, 512 do tags[index] = "x" end
     Shard_UpdateWorldState("2", REMOTESHARDSTATE.READY, table.concat(tags, ","), nil, "Caves")
@@ -566,8 +564,8 @@ function scenarios.print_mixed()
     require("util")
     require("stacktrace")
     local driver = install()
-    PRINT_SOURCE = arg[3] == "source"
-    local write_log = assert(({ print = print, nolineprint = nolineprint })[arg[4]])
+    PRINT_SOURCE = arg[4] == "source"
+    local write_log = assert(({ print = print, nolineprint = nolineprint })[arg[5]])
     TheWorld.watchers.cycles(TheWorld, 2)
     local marker = outputs[1]
     local blocks = {
@@ -584,7 +582,7 @@ function scenarios.print_mixed()
         end,
         event = function() TheWorld.watchers.cycles(TheWorld, 3) end,
     }
-    for name in string.gmatch(arg[5], "[^_]+") do assert(blocks[name])() end
+    for name in string.gmatch(arg[6], "[^_]+") do assert(blocks[name])() end
     TheWorld.watchers.cycles(TheWorld, 4)
     assert(driver.health().events_emitted == 3 and driver.health().errors == 0)
 end

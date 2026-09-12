@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from dst_server import commands as c
@@ -71,6 +73,7 @@ async def test_arbitrary_lua_error_is_indeterminate_after_execution() -> None:
     ["saved", "unchanged", "rewound", "session", "world", "secondary", "error"],
 )
 def test_native_save_requires_its_own_completion(
+    native_scripts: Path,
     scenario: str,
     lua_runtime: str,
 ) -> None:
@@ -144,4 +147,5 @@ def test_native_save_requires_its_own_completion(
         end
         """,
         lua_runtime,
+        native_scripts,
     )

@@ -1,7 +1,5 @@
 local root, scenario = assert(arg[1]), assert(arg[2])
-local scripts = os.getenv("DST_SERVER_TEST_SCRIPTS") or root .. "/dst-scripts/scripts"
-package.path = root .. "/src/dst_server/lua/?.lua;" .. scripts .. "/?.lua;" .. package.path
-json = require("json")
+dofile(root .. "/tests/lua/setup.lua")(root, assert(arg[3]))
 require("class")
 
 local outputs = {}

@@ -451,13 +451,17 @@ async def test_line_limit_counts_utf8_event_bytes_only() -> None:
     assert events.invalid == 1
 
 
-async def lua_driver_output(luajit: str, *arguments: str) -> list[bytes]:
+async def lua_driver_output(
+    luajit: str, native_scripts: Path, scenario: str, *arguments: str
+) -> list[bytes]:
     root = Path(__file__).parents[2]
     output = await asyncio.to_thread(
         run_lua_process,
         luajit,
         root / "tests/lua/driver_spec.lua",
         root,
+        scenario,
+        native_scripts,
         *arguments,
     )
     *lines, status = output.split(b"\n")
@@ -469,9 +473,11 @@ async def lua_driver_output(luajit: str, *arguments: str) -> list[bytes]:
 @pytest.mark.parametrize("size", [65535, 65536, 65537])
 @pytest.mark.parametrize("source", ["normal", "source"])
 async def test_native_debugprint_preserves_telemetry_lines(
-    luajit: str, size: int, source: str
+    luajit: str, native_scripts: Path, size: int, source: str
 ) -> None:
-    (line,) = await lua_driver_output(luajit, "print_boundary", str(size), source)
+    (line,) = await lua_driver_output(
+        luajit, native_scripts, "print_boundary", str(size), source
+    )
     events = EventStream(Recorder("cluster", "shard"))
     events.nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
@@ -495,9 +501,11 @@ async def test_native_debugprint_preserves_telemetry_lines(
     "order", ["_".join(order) for order in permutations(("log", "error", "event"))]
 )
 async def test_native_debugprint_mixed_output_preserves_events(
-    luajit: str, source: str, output: str, order: str
+    luajit: str, native_scripts: Path, source: str, output: str, order: str
 ) -> None:
-    lines = await lua_driver_output(luajit, "print_mixed", source, output, order)
+    lines = await lua_driver_output(
+        luajit, native_scripts, "print_mixed", source, output, order
+    )
     for prefix in (b"", b"[125:59:59]: "):
         events = EventStream(Recorder("cluster", "shard"))
         events.nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV"

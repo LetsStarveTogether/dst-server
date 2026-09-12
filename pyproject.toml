@@ -44,7 +44,6 @@ requires = ["uv_build~=0.12.15"]
 build-backend = "uv_build"
 
 [tool.ruff]
-fix = true
 preview = true
 required-version = '>=0.16.7'
 

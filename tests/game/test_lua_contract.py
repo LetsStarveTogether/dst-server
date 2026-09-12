@@ -6,7 +6,7 @@ import pytest
 from dst_server import commands as c
 from dst_server.events import GAME_EVENT_ADAPTER
 from dst_server.game.rpc import SAVE_RESPONSE, response_adapter
-from tests.lua.helpers import native_scripts, run_lua_process
+from tests.lua.helpers import run_lua_process
 
 PREFIX = "DST_OTEL|"
 
@@ -19,20 +19,22 @@ RPC_ADAPTERS = {
 } | {"save": SAVE_RESPONSE}
 
 
-def run_lua_contract(script: str, luajit: str) -> list[str]:
+def run_lua_contract(native_scripts: Path, script: str, luajit: str) -> list[str]:
     root = Path(__file__).parents[2]
     output = run_lua_process(
         luajit,
         root / f"tests/lua/{script}",
         root / "src/dst_server/lua",
         root / "tests/lua",
-        native_scripts(),
+        native_scripts,
     )
     return output.decode().splitlines()
 
 
-def test_all_real_lua_event_producers_match_python_contract(luajit: str) -> None:
-    lines = run_lua_contract("event_contract.lua", luajit)
+def test_all_real_lua_event_producers_match_python_contract(
+    native_scripts: Path, luajit: str
+) -> None:
+    lines = run_lua_contract(native_scripts, "event_contract.lua", luajit)
     assert all(line.startswith(PREFIX) for line in lines)
 
     events = [
@@ -55,13 +57,13 @@ def test_all_real_lua_event_producers_match_python_contract(luajit: str) -> None
     assert all(event.session_id == "SESSION" for event in events)
 
 
-def test_native_announcement_repetition(luajit: str) -> None:
-    assert run_lua_contract("announcement_contract.lua", luajit) == []
+def test_native_announcement_repetition(native_scripts: Path, luajit: str) -> None:
+    assert run_lua_contract(native_scripts, "announcement_contract.lua", luajit) == []
 
 
 @pytest.fixture(scope="module")
-def rpc_data(luajit: str) -> dict[str, Any]:
-    lines = run_lua_contract("rpc_contract.lua", luajit)
+def rpc_data(native_scripts: Path, luajit: str) -> dict[str, Any]:
+    lines = run_lua_contract(native_scripts, "rpc_contract.lua", luajit)
     responses = dict(line.split("|", 1) for line in lines)
 
     assert len(responses) == len(lines), "duplicate method responses"

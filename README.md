@@ -282,6 +282,8 @@ Game saves can also rewrite settings, so stop the games before editing.
 `dst_server.deployment.QuadletApplication` derives Pod and container units from that configuration.
 Generate matching port mappings and startup arguments with `for_cluster(..., allocation=RoomPortAllocation(...))`.
 `.replace()` only updates the supplied fields.
+Typed world options follow the pinned game source; beta-only options require a compatible game version.
+Only explicitly set world overrides are written.
 This example generates an endless forest-and-caves configuration in a new directory:
 
 ```python
@@ -670,7 +672,7 @@ flowchart LR
 | [Controller](src/dst_server/cluster/controller.py) | Tracks expected shards and coordinates shared preparation and cluster operations. |
 | [Mods](src/dst_server/mods/__init__.py) | Prepares shared Mod files, runs the native updater, and tracks outdated reports for one room's maintenance. |
 | [Agent](src/dst_server/cluster/agent.py) | Owns one shard's process resources, consumes logs, lifecycle records, and events, and handles telemetry. |
-| [Supervisor](src/dst_server/runtime/supervisor.py) | Stops and retries game processes, creating a new `Server` for each attempt. |
+| [Supervisor](src/dst_server/runtime/supervisor.py) | Starts, stops, and explicitly restarts game processes; reports unexpected failures. |
 | [Server](src/dst_server/runtime/server.py) | Manages one DST subprocess and its communication channels; single use. |
 
 The master container runs `dst-server agent master`; secondaries run `dst-server agent serve <shard>`.
@@ -731,7 +733,7 @@ sequenceDiagram
 | `stop()` → `update_mods()` → `start()` | Manual refresh; the final step reuses the successful update. |
 | `update_mods(restart=True)` | Saves and stops running games, updates once, and restarts them inside the existing containers. |
 | Native outdated-Mod report | Schedules one internal room maintenance operation, using the same save, stop, update, and start steps. |
-| Single-shard restart or crash recovery | Reuses installed Mods without a shared update. |
+| Explicit single-shard restart | Reuses installed Mods without a shared update. |
 
 Shared updates require every Agent to be connected and every game process to be stopped.
 A failed state with a remaining PID does not count as stopped.
@@ -746,19 +748,19 @@ stateDiagram-v2
     [*] --> stopped
     stopped --> starting: start
     starting --> running: Startup completes
-    starting --> retryWait: Retryable failure
-    running --> retryWait: Unexpected exit
-    retryWait --> starting: Retry after 1 second
-    starting --> failed: Startup fails and budget is exhausted
-    running --> failed: Process exits and budget is exhausted
+    starting --> failed: Startup fails
+    running --> failed: Unexpected exit
     running --> stopping: stop
     stopping --> stopped: Exit and cleanup
     failed --> starting: Explicit start
 ```
 
-The Supervisor makes one initial attempt and up to three retries, one second apart.
-It resets the counter after ten minutes of stable operation.
-Exhausted game retries or a registered Agent disconnect stop the other games and fail the management service.
+The Supervisor makes one attempt per explicit start or restart request.
+A startup failure, unexpected game exit, or registered Agent disconnect stops the other games and fails the management service.
+An unexpected exit with status zero is also a failure.
+Requested stops, restarts, and Mod maintenance do not report the old process's exit as a failure.
+Native world resets and rollbacks change the Lua generation without restarting the operating system process.
+Standalone SDK callers receive the failure and can explicitly start again.
 The master container uses `Restart=on-failure`, `RestartSec=30`, and a limit of three starts per 600 seconds.
 Secondary containers use `Restart=no`.
 The master's `Wants` and each secondary's `BindsTo`/`PartOf` recreate them with the master.
@@ -923,6 +925,8 @@ The host path is `/srv/dst/<room>/.dst-server.sock`; inside containers it is `/c
 
 [commands.py](src/dst_server/commands.py) defines `Request[T]` subclasses.
 They declare typed arguments, result types, allowed scopes, and timeouts.
+The operation declarations distinguish ordinary game requests from world-reload requests.
+Python and Lua use the same command names.
 [api.py](src/dst_server/api.py) provides `ClusterAPI`, `ShardAPI`, and `PlayerAPI` convenience methods over `invoke(request)`.
 Import `commands as c` from `dst_server`.
 Then `await shard.world()` and `await shard.invoke(c.World())` use the same contract.
@@ -1581,7 +1585,7 @@ Historical posts are not used to infer current-version root causes.
 | Port bind failure | [Original error][bind-error]; one failed attempt does not prove final startup failure |
 
 [Event parser tests](tests/telemetry/test_stream.py) separately cover schema, nonce, size, and encoding.
-Lua tests execute native logging functions with varied output order.
+Lua tests verify SDK event capture with controlled callbacks and varied output order.
 [RPC tests](tests/game/test_protocol.py) cover special Unicode and truncation budgets.
 [CLI tests](tests/telemetry/test_integration.py) verify local and OTLP routing.
 Actual journald storage and terminal rendering need separate verification in the deployment environment.
@@ -1733,9 +1737,11 @@ The SDK separates data and formats from game processes, cluster coordination, an
 | [host](src/dst_server/host), [rooms](src/dst_server/rooms.py) | Async systemd operations, native room views, journals, schedules, and maintenance. |
 | [presets](src/dst_server/presets) | Packaged gameplay templates and the LST deployment preset. |
 | [deployment](src/dst_server/deployment) | Quadlet models and serialization, room ports, and Pod/systemd deployment derivation. |
-| [mods](src/dst_server/mods) | Mod declarations and files, native updates, and download process ownership. |
+| [mods](src/dst_server/mods) | Mod declarations and files, native updates, and maintenance scheduling. |
 | [lua_codec.py](src/dst_server/lua_codec.py) | Lua literal parsing/rendering and JSON value encoding without file I/O. |
-| [runtime](src/dst_server/runtime) | Game processes, FD protocols, command confirmation, driver readiness, and Supervisor retries. |
+| [json_codec.py](src/dst_server/json_codec.py) | Strict JSON validation, including duplicate object keys. |
+| [process.py](src/dst_server/process.py) | Subprocess output and cancellation-safe process-group cleanup. |
+| [runtime](src/dst_server/runtime) | Game processes, FD protocols, command confirmation, driver readiness, and explicit process control. |
 | [cluster](src/dst_server/cluster) | Agent registration, topology, coordinated operations, observation subscriptions, and daemon assembly. |
 | [rpc](src/dst_server/rpc) | Cap'n Proto connections and capabilities, validated payload transport, and remote subscriptions. |
 | [telemetry](src/dst_server/telemetry) | Collection and OpenTelemetry SDK export. |
@@ -1754,9 +1760,11 @@ The `otel` extra supplies OTLP and gRPC dependencies, and `export` supplies 7z a
 
 Tests are grouped by behavior: configuration, deployment, Mods, runtime, cluster, RPC, game/Lua, telemetry, and utilities.
 Native Lua tests default to the game source submodule.
-To check an installed game version, run `uv run --locked --all-extras pytest tests/game --scripts-zip /path/to/scripts.zip`.
+To check an installed game version, run `uv run --locked --all-extras pytest tests --scripts-zip /path/to/scripts.zip`.
 Image CI runs these contracts against the script bundle extracted from each built release or beta image.
-Hypothesis checks Lua value round trips and byte stream chunking.
+Configuration tests check complete field coverage against the pinned source and compatibility with the selected scripts.
+SDK event tests use controlled inputs; system tests exercise native behavior in the real game.
+Hypothesis checks Lua value round trips, byte stream chunking, and driver event ordering.
 Process and transport tests use local pipes, Unix sockets, and HTTP/gRPC services.
 Explicit synchronization gates exercise cancellation races.
 
@@ -1766,14 +1774,14 @@ Install Lua 5.1, LuaJIT, and just, then initialize the game source submodule; it
 git submodule update --init
 uv sync --all-extras --all-groups
 uv run prek install
-just check
-uv run rumdl check README.md README.zh-Hans.md
-just test
+just verify
 ```
 
-`just check` validates the lockfile, Python formatting, lint, and types.
+`just check` validates the lockfile, Python formatting, lint, types, and Markdown without modifying files.
 `just test` uses locked dependencies and excludes `system` tests by default.
-`just fmt` formats Python and Markdown; `just lint`, `just tc`, and prek hooks may change files.
+`just verify` runs the same hooks, tests, package build, and isolated wheel check used by PR, main, and release CI.
+`just tc` only checks types; `just fmt` formats Python and Markdown, and `just lint` also applies lint fixes.
+The local prek check runs `just check`; builtin whitespace and file-format hooks may modify files.
 Lua contract tests need Lua 5.1 and LuaJIT; missing interpreters skip tests locally and fail in CI.
 
 | Opt-in system validation | Prerequisites |
@@ -1783,7 +1791,8 @@ Lua contract tests need Lua 5.1 and LuaJIT; missing interpreters skip tests loca
 
 System tests start games or contact external services and require a separately prepared environment.
 They do not run as part of ordinary tests.
-Use `just build` to build the Python package; it runs tests before `uv build`.
+Explicitly selected system tests fail when their required image, permissions, or runtime are missing.
+Use `just build` to build the Python package without running tests.
 
 Documentation lives in these two READMEs; keep sections, examples, and links synchronized when editing.
 Diagrams use Mermaid [flowcharts](https://mermaid.js.org/syntax/flowchart.html), [sequence diagrams](https://mermaid.js.org/syntax/sequenceDiagram.html), and [state diagrams](https://mermaid.js.org/syntax/stateDiagram.html).

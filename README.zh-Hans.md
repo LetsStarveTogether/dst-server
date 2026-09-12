@@ -270,6 +270,8 @@ return {
 `dst_server.deployment.QuadletApplication` 根据配置推导 Pod 和容器单元。
 通过 `for_cluster(..., allocation=RoomPortAllocation(...))` 一起生成端口映射和启动参数。
 `.replace()` 只更新显式传入的字段。
+带类型的世界选项对应固定的游戏源码；测试版专属选项需要相应游戏版本支持。
+世界配置只写入显式设置的覆盖项。
 以下示例在新目录生成无尽森林与洞穴：
 
 ```python
@@ -642,7 +644,7 @@ flowchart LR
 | [Controller](src/dst_server/cluster/controller.py) | 维护预期分片名单，协调共享准备与集群操作。 |
 | [Mods](src/dst_server/mods/__init__.py) | 准备共享 Mod 文件、执行更新器，维护一个房间的过期报告。 |
 | [Agent](src/dst_server/cluster/agent.py) | 独占一个分片的进程资源，消费日志、生命周期、事件并处理遥测。 |
-| [Supervisor](src/dst_server/runtime/supervisor.py) | 停止和重试游戏进程，每次尝试创建新的 `Server`。 |
+| [Supervisor](src/dst_server/runtime/supervisor.py) | 启动、停止和显式重启游戏进程，上报意外故障。 |
 | [Server](src/dst_server/runtime/server.py) | 管理一次 DST 子进程及其通信通道；单次使用。 |
 
 主容器运行 `dst-server agent master`，次容器运行 `dst-server agent serve <shard>`。
@@ -700,7 +702,7 @@ sequenceDiagram
 | `stop()` → `update_mods()` → `start()` | 手动刷新；最后一步复用刚刚成功的更新。 |
 | `update_mods(restart=True)` | 保存并停止运行中的游戏，更新一次，再在原容器内重启游戏。 |
 | 游戏原生 Mod 过期报告 | 触发房间内部的一次维护，复用保存、停止、更新和启动流程。 |
-| 单分片重启或崩溃恢复 | 复用已安装 Mod，不做共享更新。 |
+| 显式重启单分片 | 复用已安装 Mod，不做共享更新。 |
 
 共享更新要求全部 Agent 已连接、全部游戏进程已停止；失败状态但仍有 PID 不算停止。
 更新失败时保持游戏停止，自动维护在 300 秒后重新尝试下载。
@@ -713,18 +715,19 @@ stateDiagram-v2
     [*] --> stopped
     stopped --> starting: start
     starting --> running: 启动流程完成
-    starting --> retryWait: 可重试失败
-    running --> retryWait: 意外退出
-    retryWait --> starting: 1 秒后重试
-    starting --> failed: 启动失败且预算耗尽
-    running --> failed: 退出且预算耗尽
+    starting --> failed: 启动失败
+    running --> failed: 意外退出
     running --> stopping: stop
     stopping --> stopped: 退出并清理
     failed --> starting: 显式 start
 ```
 
-Supervisor 首次启动失败后最多重试三次，失败间隔一秒，稳定运行十分钟后恢复重试预算。
-某个分片耗尽重试预算或已注册 Agent 断线时，停止其他游戏并让管理服务失败退出。
+Supervisor 每次收到明确的启动或重启请求时，只尝试启动一次。
+某个分片启动失败、游戏进程意外退出或已注册 Agent 断线时，停止其他游戏并让管理服务失败退出。
+意外退出即使退出码为零，也视为故障。
+主动停服、重启和 Mod 维护期间，旧进程的预期退出不算故障。
+原生世界重置和回滚改变 Lua generation，不重启操作系统进程。
+独立使用 SDK 时，调用方收到故障后可明确重新启动。
 主容器使用 `Restart=on-failure`、`RestartSec=30`，600 秒内最多启动三次。
 次容器使用 `Restart=no`，通过主容器的 `Wants` 及次容器的 `BindsTo`、`PartOf` 随主容器恢复。
 主容器也通过 `PartOf` 归属 Pod，因此重启 Pod 会重启全部分片。
@@ -866,6 +869,7 @@ asyncio.run(main())
 ### 共享请求与验证
 
 [commands.py](src/dst_server/commands.py) 定义 `Request[T]` 子类，统一声明类型化参数、结果类型、允许的调用范围和超时。
+操作声明同时区分普通游戏请求和世界重载请求，Python 与 Lua 使用相同命令名称。
 [api.py](src/dst_server/api.py) 的 `ClusterAPI`、`ShardAPI`、`PlayerAPI` 在 `invoke(request)` 之上提供便捷方法。
 例如，从 `dst_server` 导入 `commands as c` 后，`await shard.world()` 与 `await shard.invoke(c.World())` 使用同一契约。
 本地 Controller、游戏客户端和 RPC 客户端都在分发前验证同一份 Pydantic 请求。
@@ -1451,7 +1455,8 @@ Podman 使用 journald driver 时由 conmon 转交 journal。
 | 鉴权 / DNS | [token 报错][token-error]、[DNS 报错][dns-error]；另构造当前 CURL 格式样例 |
 | bind 端口失败 | [原始报错][bind-error]；单次尝试不证明最终启动失败 |
 
-[事件解析](tests/telemetry/test_stream.py) 另测 schema、nonce、大小和编码；Lua 测试执行原版日志函数并交叉输出顺序。
+[事件解析](tests/telemetry/test_stream.py) 另测 schema、nonce、大小和编码。
+Lua 测试使用可控回调并交叉输出顺序，验证 SDK 事件采集。
 [RPC](tests/game/test_protocol.py) 验证特殊 Unicode 和截断预算，[CLI](tests/telemetry/test_integration.py) 验证本地与 OTLP 分流。
 真实 journald 存储和终端渲染需在部署环境另行验证。
 
@@ -1594,9 +1599,11 @@ SDK 将数据与格式、游戏进程、集群协调和传输分开。
 | [host](src/dst_server/host)、[rooms](src/dst_server/rooms.py) | 异步 systemd 操作、原生房间视图、日志、定时与维护。 |
 | [presets](src/dst_server/presets) | 包内玩法模板和 LST 整套部署预设。 |
 | [deployment](src/dst_server/deployment) | Quadlet 模型与序列化、房间端口及 Pod/systemd 部署推导。 |
-| [mods](src/dst_server/mods) | Mod 声明与文件、原生更新和下载进程管理。 |
+| [mods](src/dst_server/mods) | Mod 声明与文件、原生更新和维护调度。 |
 | [lua_codec.py](src/dst_server/lua_codec.py) | 不含文件 I/O 的 Lua 字面量解析、渲染与 JSON 值编码。 |
-| [runtime](src/dst_server/runtime) | 游戏进程、FD 协议、命令确认、driver 就绪与 Supervisor 重试。 |
+| [json_codec.py](src/dst_server/json_codec.py) | 严格 JSON 校验，包括重复对象键检查。 |
+| [process.py](src/dst_server/process.py) | 子进程输出和取消时的完整进程组清理。 |
+| [runtime](src/dst_server/runtime) | 游戏进程、FD 协议、命令确认、driver 就绪与显式进程控制。 |
 | [cluster](src/dst_server/cluster) | Agent 注册、拓扑、协调操作、观测订阅与 daemon 组装。 |
 | [rpc](src/dst_server/rpc) | Cap'n Proto 连接与能力、经过验证的 payload 传输和远端订阅。 |
 | [telemetry](src/dst_server/telemetry) | 采集与 OpenTelemetry SDK 导出。 |
@@ -1615,9 +1622,11 @@ HTTPX2 提供 HTTP/2 请求支持，`klei` extra 增加 HTML 解析。
 
 测试按行为分组，覆盖配置、部署、Mod、runtime、cluster、RPC、游戏/Lua、遥测与辅助工具。
 原生 Lua 测试默认读取游戏源码子模块。
-验证某个已安装游戏版本时，运行 `uv run --locked --all-extras pytest tests/game --scripts-zip /path/to/scripts.zip`。
+验证某个已安装游戏版本时，运行 `uv run --locked --all-extras pytest tests --scripts-zip /path/to/scripts.zip`。
 镜像 CI 从构建出的 release 或 beta 镜像提取脚本包，并运行同一套契约测试。
-Hypothesis 验证 Lua 值往返和字节流分块。
+配置测试分别检查固定源码的字段完整性，以及所选脚本的兼容性。
+SDK 事件测试使用可控输入，系统测试在真实游戏中验证原生行为。
+Hypothesis 验证 Lua 值往返、字节流分块和 driver 事件顺序。
 进程和传输测试使用本地管道、Unix socket、HTTP/gRPC 服务，并以显式同步门闩验证取消竞态。
 
 先安装 Lua 5.1、LuaJIT 和 just，并初始化游戏源码子模块；仓库的子模块 URL 使用 GitHub SSH。
@@ -1626,13 +1635,14 @@ Hypothesis 验证 Lua 值往返和字节流分块。
 git submodule update --init
 uv sync --all-extras --all-groups
 uv run prek install
-just check
-uv run rumdl check README.md README.zh-Hans.md
-just test
+just verify
 ```
 
-`just check` 检查锁文件、Python 格式、lint 和类型；`just test` 使用锁定依赖，默认排除 `system` 测试。
-`just fmt` 格式化 Python 和 Markdown；`just lint`、`just tc` 及 prek 钩子可能修改文件。
+`just check` 检查锁文件、Python 格式、lint、类型和 Markdown，不修改文件。
+`just test` 使用锁定依赖，默认排除 `system` 测试。
+`just verify` 与 PR、主分支及发布 CI 共用同一套 hook、测试、打包和隔离安装验证。
+`just tc` 只检查类型；`just fmt` 格式化 Python 和 Markdown，`just lint` 还会应用 lint 修复。
+本地 prek 检查运行 `just check`；内置空白和文件格式钩子仍可能修改文件。
 Lua 契约测试需要 Lua 5.1 和 LuaJIT，本地缺失时跳过，CI 缺失时报错。
 
 | 显式启用的系统验证 | 前提 |
@@ -1641,7 +1651,8 @@ Lua 契约测试需要 Lua 5.1 和 LuaJIT，本地缺失时跳过，CI 缺失时
 | `just test-netdata-system IMAGE` | 再准备本机 Netdata，验证 OTLP 完整往返 |
 
 系统测试会实际启动游戏或访问外部服务，需要单独准备环境；不会随普通测试自动运行。
-构建 Python 包使用 `just build`，先运行测试再执行 `uv build`。
+显式选择系统测试后，缺少必要镜像、权限或运行环境会报错。
+`just build` 只构建 Python 包，不运行测试。
 
 文档统一维护在这两份 README，修改时同步章节、示例和链接。
 图表使用 Mermaid 的 [流程图](https://mermaid.js.org/syntax/flowchart.html)、[时序图](https://mermaid.js.org/syntax/sequenceDiagram.html) 和 [状态图](https://mermaid.js.org/syntax/stateDiagram.html)。

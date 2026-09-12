@@ -3,17 +3,6 @@ name: Build and Push Image
 on:
   push:
     branches: [main]
-    paths:
-      - '.containerignore'
-      - '.github/workflows/image.yml'
-      - '.python-version'
-      - 'Containerfile'
-      - 'src/**'
-      - 'tests/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
-      - 'README.md'
-      - 'LICENSE'
   workflow_dispatch:
     inputs:
       build_target:
@@ -49,7 +38,7 @@ env:
 
 jobs:
   test:
-    name: Test Python supervisor
+    name: Verify SDK
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
@@ -65,13 +54,16 @@ jobs:
       - name: Setup Python and uv
         uses: astral-sh/setup-uv@v10.1.0
 
+      - name: Setup just
+        uses: extractions/setup-just@v4.0.0
+
       - name: Install test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes lua5.1 luajit
 
-      - name: Test
-        run: uv run --locked --all-extras pytest
+      - name: Verify
+        run: just verify
 
   detect:
     name: Resolve image versions
@@ -199,6 +191,9 @@ jobs:
       - name: Checkout
         if: ${{ matrix.build }}
         uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
 
       - name: Log in to registry for build cache
         if: ${{ matrix.build }}
@@ -259,10 +254,9 @@ jobs:
           DST_SERVER_EXPECTED_REVISION: ${{ github.sha }}
           DST_SERVER_EXPECTED_VERSION: ${{ matrix.version }}
           DST_SERVER_IMAGE: ${{ steps.build.outputs.image-with-tag }}
-          DST_SERVER_PODMAN_TEST: '1'
         run: |
           podman save "$DST_SERVER_IMAGE" | sudo podman load
-          sudo --preserve-env=DST_SERVER_EXPECTED_REVISION,DST_SERVER_EXPECTED_VERSION,DST_SERVER_IMAGE,DST_SERVER_PODMAN_TEST \
+          sudo --preserve-env=DST_SERVER_EXPECTED_REVISION,DST_SERVER_EXPECTED_VERSION,DST_SERVER_IMAGE \
             "$(command -v uv)" run --locked --all-extras pytest -m system tests/system
 
       - name: Check publish source

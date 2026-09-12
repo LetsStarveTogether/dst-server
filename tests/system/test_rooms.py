@@ -24,7 +24,6 @@ from tests.system.helpers import (
     OPERATION_TIMEOUT,
     SHARDS,
     STARTUP_TIMEOUT,
-    SYSTEM_MARKS,
     next_matching,
     run_command,
     shard_status,
@@ -42,7 +41,7 @@ from tests.system.quadlet import (
     verify_watchdog_notifications,
 )
 
-pytestmark = SYSTEM_MARKS
+pytestmark = pytest.mark.system
 
 
 async def test_quadlet_waits_for_all_agents_and_keeps_watchdog_alive(

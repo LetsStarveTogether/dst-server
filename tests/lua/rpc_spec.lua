@@ -1,5 +1,5 @@
 local root, scenario = assert(arg[1]), assert(arg[2])
-local scripts = os.getenv("DST_SERVER_TEST_SCRIPTS") or root .. "/dst-scripts/scripts"
+local scripts = assert(arg[3], "native DST scripts root is required")
 package.path = root .. "/src/dst_server/lua/?.lua;" .. scripts .. "/?.lua;" .. package.path
 local wire = require("dst_server.wire")
 local state = require("dst_server.state")

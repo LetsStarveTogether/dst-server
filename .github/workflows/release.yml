@@ -70,22 +70,16 @@ jobs:
       - name: Setup Python and uv
         uses: astral-sh/setup-uv@v10.1.0
 
+      - name: Setup just
+        uses: extractions/setup-just@v4.0.0
+
       - name: Install test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes lua5.1 luajit
 
-      - name: Run tests
-        run: uv run --locked --all-extras pytest
-
-      - name: Build distributions
-        run: uv build --no-sources
-
-      - name: Smoke test wheel
-        env:
-          OTEL_EXPORTER_OTLP_ENDPOINT: http://collector.invalid
-          OTEL_SDK_DISABLED: 'true'
-        run: uv run --isolated --no-project --with dist/dst_server-*.whl python -I tests/distribution.py
+      - name: Verify
+        run: just verify
 
       - name: Upload distributions
         uses: actions/upload-artifact@v7.0.1

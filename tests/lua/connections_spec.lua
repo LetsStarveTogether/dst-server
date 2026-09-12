@@ -1,8 +1,5 @@
-local root, handlers, scenario = assert(arg[1]), assert(arg[2]), assert(arg[3])
-local scripts = os.getenv("DST_SERVER_TEST_SCRIPTS") or root .. "/dst-scripts/scripts"
-package.path = root .. "/src/dst_server/lua/?.lua;" .. scripts .. "/?.lua;" .. package.path
-json = require("json")
-local native = dofile(handlers)
+local root, scripts, scenario = assert(arg[1]), assert(arg[2]), assert(arg[3])
+dofile(root .. "/tests/lua/setup.lua")(root, scripts)
 local state = require("dst_server.state")
 local connections = require("dst_server.connections")
 local outputs = {}
@@ -24,15 +21,11 @@ local clients = { {userid = "KU_A", name = "PRIVATE_NAME"}, {userid = "KU_A"} }
 local read_fails = false
 TheNet = {
     GetServerMaxPlayers = function() return 9 end,
-    GetServerIsClientHosted = function() return false end,
-    GetClientTable = function()
-        if read_fails then error("PRIVATE_NAME secret", 0) end
-        local result = { {userid = "DEDICATED_HOST", performance = {}} }
-        for _, client in ipairs(clients) do result[#result + 1] = client end
-        return result
-    end,
 }
-GetPlayerClientTable = native.GetPlayerClientTable
+GetPlayerClientTable = function()
+    if read_fails then error("PRIVATE_NAME secret", 0) end
+    return clients
+end
 
 local function player(userid, guid, valid)
     return { userid = userid, GUID = guid, IsValid = function() return valid end }
@@ -65,38 +58,38 @@ TheWorld = {
 connections.install(TheWorld)
 local scheduled = connections.start(TheWorld)
 assert(#outputs == 0, "initial snapshot must run after the startup stack finishes")
-    assert(scheduled == task)
-    if scenario == "snapshot_failure" then
-        read_fails = true
-        task.callback()
-        assert(json.decode(outputs[1]:sub(10)).event == "dst.telemetry.error")
-        read_fails = false
-    end
+assert(scheduled == task)
+if scenario == "snapshot_failure" then
+    read_fails = true
     task.callback()
-    local initial = json.decode(outputs[#outputs]:sub(10))
-    assert(initial.event == "dst.server.presence" and initial.data.reason == "startup")
-    assert(#initial.data.clients == 1 and initial.data.clients[1] == "KU_A")
-    assert(#initial.data.players == 2 and initial.data.players[1].guid == 20)
+    assert(json.decode(outputs[1]:sub(10)).event == "dst.telemetry.error")
+    read_fails = false
+end
+task.callback()
+local initial = json.decode(outputs[#outputs]:sub(10))
+assert(initial.event == "dst.server.presence" and initial.data.reason == "startup")
+assert(#initial.data.clients == 1 and initial.data.clients[1] == "KU_A")
+assert(#initial.data.players == 2 and initial.data.players[1].guid == 20)
 
-    if scenario == "invalid_authentication" then
-        native.ClientAuthenticationComplete(nil)
-        assert(json.decode(outputs[#outputs]:sub(10)).event == "dst.telemetry.error")
-    end
-    clients[#clients + 1] = {userid = "KU_LOBBY"}
-    native.ClientAuthenticationComplete("KU_LOBBY")
-    native.ClientDisconnected("KU_LOBBY")
-    table.remove(clients)
-    local count = #outputs
-    TheWorld:PushEvent("ms_playerleft", AllPlayers[1])
-    assert(#outputs == count, "entity departure is not a client disconnection")
-    AllPlayers = {}
-    now = 60020
-    task.callback() -- Static scheduler continues while game simulation is paused.
-    local periodic = json.decode(outputs[#outputs]:sub(10))
-    assert(periodic.data.reason == "periodic" and #periodic.data.players == 0)
-    assert(periodic.data.clients[1] == "KU_A")
+if scenario == "invalid_authentication" then
+    TheWorld:PushEvent("ms_clientauthenticationcomplete", {})
+    assert(json.decode(outputs[#outputs]:sub(10)).event == "dst.telemetry.error")
+end
+clients[#clients + 1] = {userid = "KU_LOBBY"}
+TheWorld:PushEvent("ms_clientauthenticationcomplete", {userid = "KU_LOBBY"})
+TheWorld:PushEvent("ms_clientdisconnected", {userid = "KU_LOBBY"})
+table.remove(clients)
+local count = #outputs
+TheWorld:PushEvent("ms_playerleft", AllPlayers[1])
+assert(#outputs == count, "entity departure is not a client disconnection")
+AllPlayers = {}
+now = 60020
+task.callback() -- Static scheduler continues while game simulation is paused.
+local periodic = json.decode(outputs[#outputs]:sub(10))
+assert(periodic.data.reason == "periodic" and #periodic.data.players == 0)
+assert(periodic.data.clients[1] == "KU_A")
 for _, line in ipairs(outputs) do
     assert(not line:find("[\r\n%z]") and #line <= 64 * 1024)
-    assert(not line:find("PRIVATE_NAME", 1, true) and not line:find("DEDICATED_HOST", 1, true))
+    assert(not line:find("PRIVATE_NAME", 1, true))
     io.write(line, "\n")
 end

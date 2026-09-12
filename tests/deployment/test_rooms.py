@@ -235,6 +235,7 @@ def test_template_settings_worlds_and_shard_roles(
 
 @pytest.mark.parametrize(("kind", "_master", "shards", "downloads"), TEMPLATES)
 def test_template_mod_options_and_worlds_execute_in_native_lua(
+    native_scripts: Path,
     tmp_path: Path,
     luajit: str,
     kind: RoomType,
@@ -279,9 +280,9 @@ def test_template_mod_options_and_worlds_execute_in_native_lua(
         [
             luajit,
             str(repository / "tests/lua/room_contract.lua"),
-            str(repository),
             str(tmp_path),
             str(expected),
+            str(native_scripts),
         ],
         check=False,
         capture_output=True,

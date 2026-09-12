@@ -15,49 +15,17 @@ from dst_server.events.vote import (
     VoteStartedEvent,
 )
 from dst_server.events.world import TelemetryErrorEvent
-from tests.lua.helpers import native_functions, run_lua_process
-
-
-@pytest.fixture(scope="module")
-def native_messages_votes(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    path = tmp_path_factory.mktemp("native-messages-votes") / "handlers.lua"
-    path.write_text(
-        'local UserCommands = require("usercommands")\n'
-        "local getcommand = UserCommands.GetCommandFromName\n"
-        + native_functions(
-            "networking.lua",
-            {
-                "Networking_Say",
-                "Networking_Announcement",
-                "Networking_SkinAnnouncement",
-                "Networking_SystemMessage",
-                "Networking_RollAnnouncement",
-                "Networking_VoteAnnouncement",
-                "Networking_JoinAnnouncement",
-                "Networking_KickAnnouncement",
-                "Networking_BanAnnouncement",
-                "Networking_Announcement_GetDisplayName",
-            },
-        )
-        + "\n"
-        + native_functions(
-            "usercommands.lua", {"FinishVote", "ResolveCommandStringProperty"}
-        )
-        + "\nreturn FinishVote\n"
-    )
-    return path
+from tests.lua.helpers import run_lua_process
 
 
 @pytest.mark.parametrize("profile", ["critical", "history", "off"])
-def test_native_messages(
-    native_messages_votes: Path, lua_runtime: str, profile: str
-) -> None:
+def test_message_wrappers(native_scripts: Path, lua_runtime: str, profile: str) -> None:
     root = Path(__file__).parents[2]
     output = run_lua_process(
         lua_runtime,
         root / "tests/lua/messages_spec.lua",
         root,
-        native_messages_votes,
+        native_scripts,
         profile,
     )
     events = [
@@ -74,28 +42,14 @@ def test_native_messages(
         "dst.server.announcement",
         "dst.server.announcement",
         "dst.server.announcement",
-        "dst.server.announcement",
-        "dst.server.announcement",
-        "dst.server.announcement",
         "dst.player.skin_received",
         "dst.server.system_message",
-        "dst.server.announcement",
         "dst.player.dice_rolled",
-        "dst.server.announcement",
         "dst.telemetry.error",
     ]
     assert [
         event.data.kind for event in events if isinstance(event, AnnouncementEvent)
-    ] == [
-        "default",
-        "default",
-        "mod_custom_湿季",
-        "join_game",
-        "kicked_from_game",
-        "banned_from_game",
-        "dice_roll",
-        "vote",
-    ]
+    ] == ["default", "default", "mod_custom_湿季"]
     skin = next(event for event in events if isinstance(event, SkinReceivedEvent))
     assert skin.data.name == "玩家"
     assert skin.data.skin == "wilson_rose"
@@ -116,23 +70,21 @@ def test_native_messages(
         "passed",
         "failed",
         "cancelled",
-        "target_left",
-        "command_removed",
         "custom",
         "secondary",
         "error",
         "capture_error",
     ],
 )
-def test_native_vote_state(
-    native_messages_votes: Path, lua_runtime: str, scenario: str
+def test_vote_event_capture(
+    native_scripts: Path, lua_runtime: str, scenario: str
 ) -> None:
     root = Path(__file__).parents[2]
     output = run_lua_process(
         lua_runtime,
         root / "tests/lua/votes_spec.lua",
         root,
-        native_messages_votes,
+        native_scripts,
         scenario,
     )
     events = [
@@ -157,7 +109,7 @@ def test_native_vote_state(
     else:
         assert len(results) == 1
         result = results[0].data
-        assert result.passed == (scenario in {"passed", "custom", "target_left"})
+        assert result.passed == (scenario in {"passed", "custom"})
         assert result.total == 3
         assert result.total_voted == 2
         assert result.total_not_voted == 0

@@ -14,13 +14,16 @@ OPTIONS = {
 }
 
 
-def run_bootstrap(scenario: str, configuration: str | None, lua_runtime: str) -> None:
+def run_bootstrap(
+    native_scripts: Path, scenario: str, configuration: str | None, lua_runtime: str
+) -> None:
     root = Path(__file__).parents[2]
     output = run_lua_process(
         lua_runtime,
         root / "tests/lua/bootstrap_spec.lua",
         root,
         scenario,
+        native_scripts,
         input=(configuration or "").encode(),
     )
     *lines, status = output.decode().splitlines()
@@ -61,9 +64,9 @@ def run_bootstrap(scenario: str, configuration: str | None, lua_runtime: str) ->
         "configuration_read_failure",
     ],
 )
-def test_lua_bootstrap(scenario: str, lua_runtime: str) -> None:
+def test_lua_bootstrap(native_scripts: Path, scenario: str, lua_runtime: str) -> None:
     options = OPTIONS | {"profile": "off" if scenario == "off" else "history"}
-    run_bootstrap(scenario, orjson.dumps(options).decode(), lua_runtime)
+    run_bootstrap(native_scripts, scenario, orjson.dumps(options).decode(), lua_runtime)
 
 
 @pytest.mark.parametrize(
@@ -83,6 +86,6 @@ def test_lua_bootstrap(scenario: str, lua_runtime: str) -> None:
     ],
 )
 def test_lua_bootstrap_rejects_invalid_configuration(
-    configuration: str | None, lua_runtime: str
+    native_scripts: Path, configuration: str | None, lua_runtime: str
 ) -> None:
-    run_bootstrap("configuration_failure", configuration, lua_runtime)
+    run_bootstrap(native_scripts, "configuration_failure", configuration, lua_runtime)

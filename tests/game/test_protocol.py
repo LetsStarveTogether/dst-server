@@ -1,6 +1,7 @@
 import math
 import string
 import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -14,7 +15,7 @@ from dst_server.lua_codec import LuaValue, lua_string, render_literal
 from dst_server.models import Mod, Player
 from dst_server.models.driver import DriverHealth
 from dst_server.telemetry.recorder import Recorder
-from tests.lua.helpers import native_scripts, run_lua
+from tests.lua.helpers import run_lua
 
 SUCCESS_OVERHEAD = len(b'{"ok":true,"data":""}')
 TEXT = (
@@ -40,12 +41,15 @@ UNICODE_INPUTS = {
 TEXT += "".join(UNICODE_INPUTS.values())
 
 
-def response(body: str, luajit: str, *, setup: str = "") -> tuple[bytes, Any]:
+def response(
+    native_scripts: Path, body: str, luajit: str, *, setup: str = ""
+) -> tuple[bytes, Any]:
     output = run_lua(
         setup
         + 'local wire=require("dst_server.wire");'
         + f'io.write(wire.response(function() {body} end), "\\n")',
         luajit,
+        native_scripts,
     )
     assert output.endswith(b"\n")
     line = output[:-1]
@@ -57,8 +61,10 @@ def response(body: str, luajit: str, *, setup: str = "") -> tuple[bytes, Any]:
 
 
 @pytest.mark.parametrize("value", [TEXT, "", "\0" + "123", "\x1f" + "999"])
-def test_lua_string_preserves_every_byte(value: str, luajit: str) -> None:
-    output = run_lua(f"io.write({lua_string(value)})", luajit)
+def test_lua_string_preserves_every_byte(
+    native_scripts: Path, value: str, luajit: str
+) -> None:
+    output = run_lua(f"io.write({lua_string(value)})", luajit, native_scripts)
     assert output == value.encode()
 
 
@@ -68,7 +74,9 @@ def test_lua_string_rejects_surrogates(value: str) -> None:
         lua_string(value)
 
 
-def test_player_attribution_uses_native_follower_ownership(luajit: str) -> None:
+def test_player_attribution_uses_native_follower_ownership(
+    native_scripts: Path, luajit: str
+) -> None:
     run_lua(
         """
         require("class")
@@ -90,6 +98,7 @@ def test_player_attribution_uses_native_follower_ownership(luajit: str) -> None:
         assert(values.player_for(pet) == nil)
         """,
         luajit,
+        native_scripts,
     )
 
 
@@ -103,6 +112,7 @@ def test_player_attribution_uses_native_follower_ownership(luajit: str) -> None:
     ],
 )
 def test_player_queries_accept_unselected_characters(
+    native_scripts: Path,
     prefab: str | None,
     lobbycharacter: str,
     expected: str | None,
@@ -116,6 +126,7 @@ def test_player_queries_accept_unselected_characters(
     if prefab is not None:
         client["prefab"] = prefab
     line, _ = response(
+        native_scripts,
         'return require("dst_server.player_queries").list_players()',
         luajit,
         setup=(
@@ -135,7 +146,7 @@ def test_player_queries_accept_unselected_characters(
 )
 @pytest.mark.parametrize("source", ["lobby", "entity", "display-name"])
 def test_player_names_preserve_unicode_code_points(
-    name: str, source: str, luajit: str
+    native_scripts: Path, name: str, source: str, luajit: str
 ) -> None:
     client: dict[str, LuaValue] = {
         "userid": "KU_TEST",
@@ -148,6 +159,7 @@ def test_player_names_preserve_unicode_code_points(
         else "list_players()"
     )
     line, _ = response(
+        native_scripts,
         f'return require("dst_server.player_queries").{query}',
         luajit,
         setup=(
@@ -177,9 +189,10 @@ def test_player_names_preserve_unicode_code_points(
 @pytest.mark.parametrize("text", UNICODE_INPUTS.values(), ids=UNICODE_INPUTS)
 @pytest.mark.parametrize("budget", range(1, 9))
 def test_lua_text_limit_keeps_complete_utf8_code_points(
-    text: str, budget: int, luajit: str
+    native_scripts: Path, text: str, budget: int, luajit: str
 ) -> None:
     _, envelope = response(
+        native_scripts,
         f'return require("dst_server.values").text({lua_string(text)},{budget})',
         luajit,
     )
@@ -189,8 +202,11 @@ def test_lua_text_limit_keeps_complete_utf8_code_points(
     }
 
 
-def test_player_queries_accept_native_follower_counts(luajit: str) -> None:
+def test_player_queries_accept_native_follower_counts(
+    native_scripts: Path, luajit: str
+) -> None:
     line, _ = response(
+        native_scripts,
         'return require("dst_server.player_queries").get_player({userid="KU_TEST"})',
         luajit,
         setup="""
@@ -227,37 +243,17 @@ def test_player_queries_accept_native_follower_counts(luajit: str) -> None:
     [("N" * 257, "1"), ("Test", "v" * 129)],
     ids=["long-name", "long-version"],
 )
-def test_mod_queries_accept_native_metadata(
-    name: str, version: str, luajit: str
+def test_mod_queries_preserve_metadata(
+    native_scripts: Path, name: str, version: str, luajit: str
 ) -> None:
-    source = (native_scripts() / "modindex.lua").read_text()
-    declaration = "function ModIndex:InitializeModInfo(modname)"
-    initializer = (
-        declaration
-        + source.split(declaration, 1)[1].split(
-            "\nfunction ModIndex:GetModActualName", 1
-        )[0]
-    )
     line, _ = response(
+        native_scripts,
         'return require("dst_server.world_queries").mods()',
         luajit,
         setup=f"""
-        require("class")
-        require("util")
-        ModIndex = {{}}
-        LOC = {{GetLocaleCode=function() return "en" end}}
-        MODS_ROOT, MOD_API_VERSION = "/unused/", 10
-        function kleiloadlua()
-            return function()
-                name, version = {lua_string(name)}, {lua_string(version)}
-                description, author = "Test", "Test"
-                api_version, dst_compatible = 10, true
-            end
-        end
-        {initializer}
-        local info = ModIndex:InitializeModInfo("local-test")
-        assert(not info.failed)
-        KnownModIndex = {{GetModInfo=function() return info end}}
+        KnownModIndex = {{GetModInfo=function() return {{
+            name={lua_string(name)}, version={lua_string(version)}
+        }} end}}
         ModManager = {{GetEnabledModNames=function() return {{"local-test"}} end}}
         """,
     )
@@ -293,6 +289,7 @@ def test_mod_queries_accept_native_metadata(
     ],
 )
 def test_wire_encoder_preserves_json_types(
+    native_scripts: Path,
     expression: str,
     expected: Any,
     luajit: str,
@@ -300,25 +297,32 @@ def test_wire_encoder_preserves_json_types(
     output = run_lua(
         f'local wire=require("dst_server.wire");io.write(wire.encode({expression}))',
         luajit,
+        native_scripts,
     )
     assert orjson.dumps(
         orjson.loads(output), option=orjson.OPT_SORT_KEYS
     ) == orjson.dumps(expected, option=orjson.OPT_SORT_KEYS)
 
 
-def test_wire_encoder_escapes_all_controls_in_values_and_keys(luajit: str) -> None:
+def test_wire_encoder_escapes_all_controls_in_values_and_keys(
+    native_scripts: Path, luajit: str
+) -> None:
     literal = lua_string(TEXT)
     output = run_lua(
         'local wire=require("dst_server.wire");'
         f"io.write(wire.encode({{[{literal}]={literal}}}))",
         luajit,
+        native_scripts,
     )
     assert all(byte >= 32 for byte in output)
     assert orjson.loads(output) == {TEXT: TEXT}
 
 
-def test_wire_does_not_delegate_to_native_json_codec(luajit: str) -> None:
+def test_wire_does_not_delegate_to_native_json_codec(
+    native_scripts: Path, luajit: str
+) -> None:
     _, envelope = response(
+        native_scripts,
         "return {n=0,text=string.char(0),nothing=json.null}",
         luajit,
         setup=(
@@ -353,10 +357,11 @@ def test_wire_does_not_delegate_to_native_json_codec(luajit: str) -> None:
     ],
 )
 def test_wire_rejects_unsupported_values_with_stable_error(
+    native_scripts: Path,
     body: str,
     luajit: str,
 ) -> None:
-    _, envelope = response(body, luajit)
+    _, envelope = response(native_scripts, body, luajit)
     assert envelope == {"ok": False, "error": "invalid_json_value"}
 
 
@@ -379,6 +384,7 @@ def test_wire_rejects_unsupported_values_with_stable_error(
 @pytest.mark.parametrize("as_key", [False, True], ids=["value", "key"])
 @pytest.mark.parametrize("mixed", [False, True], ids=["isolated", "mixed-unicode"])
 def test_wire_rejects_invalid_utf8(
+    native_scripts: Path,
     bytes_: str,
     as_key: bool,
     mixed: bool,
@@ -388,15 +394,18 @@ def test_wire_rejects_invalid_utf8(
     if mixed:
         value = f'{lua_string(UNICODE_INPUTS["emoji-zwj"])}..{value}.."tail"'
     body = f"return {{[{value}]=true}}" if as_key else f"return {{nested={value}}}"
-    _, envelope = response(body, luajit)
+    _, envelope = response(native_scripts, body, luajit)
     assert envelope == {"ok": False, "error": "invalid_utf8"}
 
 
 def test_wire_accepts_shared_references_without_mistaking_them_for_cycles(
+    native_scripts: Path,
     luajit: str,
 ) -> None:
     _, envelope = response(
-        "local shared={value={json.null,false}};return {shared,shared}", luajit
+        native_scripts,
+        "local shared={value={json.null,false}};return {shared,shared}",
+        luajit,
     )
     assert envelope == {
         "ok": True,
@@ -419,14 +428,16 @@ def test_wire_accepts_shared_references_without_mistaking_them_for_cycles(
     ],
 )
 def test_callback_errors_are_private_and_have_a_stable_category(
+    native_scripts: Path,
     error: str,
     luajit: str,
 ) -> None:
-    _, envelope = response(f"error({error},0)", luajit)
+    _, envelope = response(native_scripts, f"error({error},0)", luajit)
     assert envelope == {"ok": False, "error": "lua_error"}
 
 
 def test_response_invokes_callback_once_and_never_stringifies_its_error(
+    native_scripts: Path,
     luajit: str,
 ) -> None:
     output = run_lua(
@@ -436,14 +447,17 @@ def test_response_invokes_callback_once_and_never_stringifies_its_error(
         'io.write(wire.response(function() calls=calls+1;error(failure,0) end), "\\n");'
         "assert(calls==1);assert(stringifications==0)",
         luajit,
+        native_scripts,
     )
     assert output == b'{"ok":false,"error":"lua_error"}\n'
 
 
 @pytest.mark.parametrize("overflow", [False, True], ids=["limit", "overflow"])
-def test_lua_result_line_limit(overflow: bool, luajit: str) -> None:
+def test_lua_result_line_limit(
+    native_scripts: Path, overflow: bool, luajit: str
+) -> None:
     size = rpc.MAX_RESULT_LINE_BYTES - SUCCESS_OVERHEAD + overflow
-    line, envelope = response(f'return string.rep("x",{size})', luajit)
+    line, envelope = response(native_scripts, f'return string.rep("x",{size})', luajit)
     if overflow:
         assert envelope == {"ok": False, "error": "response_too_large"}
     else:
@@ -453,10 +467,11 @@ def test_lua_result_line_limit(overflow: bool, luajit: str) -> None:
 
 @pytest.mark.parametrize("value", ["string.char(0)", '"😀"'])
 def test_response_limits_encoded_bytes_not_source_character_count(
+    native_scripts: Path,
     value: str,
     luajit: str,
 ) -> None:
-    _, envelope = response(f"return string.rep({value},20000)", luajit)
+    _, envelope = response(native_scripts, f"return string.rep({value},20000)", luajit)
     assert envelope == {"ok": False, "error": "response_too_large"}
 
 
@@ -470,7 +485,7 @@ def test_response_limits_encoded_bytes_not_source_character_count(
     ids=["large-string", "escaped-string", "large-array"],
 )
 def test_wire_stops_encoding_when_the_byte_budget_is_exhausted(
-    source: str, luajit: str
+    native_scripts: Path, source: str, luajit: str
 ) -> None:
     run_lua(
         f"""
@@ -486,6 +501,7 @@ def test_wire_stops_encoding_when_the_byte_budget_is_exhausted(
         collectgarbage("restart")
         """,
         luajit,
+        native_scripts,
     )
 
 

@@ -38,7 +38,7 @@ def request(**changes: object) -> dict[str, object]:
 
 
 def run_rpc(
-    payload: bytes, lua_runtime: str, *, scenario: str = "ready"
+    native_scripts: Path, payload: bytes, lua_runtime: str, *, scenario: str = "ready"
 ) -> list[dict[str, object]]:
     root = Path(__file__).parents[2]
     output = run_lua_process(
@@ -46,6 +46,7 @@ def run_rpc(
         root / "tests/lua/rpc_spec.lua",
         root,
         scenario,
+        native_scripts,
         input=payload,
     )
     records = []
@@ -58,23 +59,31 @@ def run_rpc(
     return records
 
 
-def invoke(lua_runtime: str, **changes: object) -> list[dict[str, object]]:
-    return run_rpc(PREFIX + orjson.dumps(request(**changes)) + b"\n", lua_runtime)
+def invoke(
+    native_scripts: Path, lua_runtime: str, **changes: object
+) -> list[dict[str, object]]:
+    return run_rpc(
+        native_scripts, PREFIX + orjson.dumps(request(**changes)) + b"\n", lua_runtime
+    )
 
 
 @given(value=JSON_VALUES)
 def test_strict_decoder_round_trips_json_without_lua_compilation(
-    value: JsonValue, lua_runtime: str
+    native_scripts: Path, value: JsonValue, lua_runtime: str
 ) -> None:
-    records = invoke(lua_runtime, method="echo", arguments={"value": value})
+    records = invoke(
+        native_scripts, lua_runtime, method="echo", arguments={"value": value}
+    )
     assert records[-1]["result"] == {"ok": True, "data": {"value": value}}
 
 
 @pytest.mark.parametrize("scenario", ["ready", "changed_install"])
 def test_lua_rpc_has_one_acceptance_and_correlated_result(
-    scenario: str, lua_runtime: str
+    native_scripts: Path, scenario: str, lua_runtime: str
 ) -> None:
-    records = run_rpc(PREFIX + orjson.dumps(request()), lua_runtime, scenario=scenario)
+    records = run_rpc(
+        native_scripts, PREFIX + orjson.dumps(request()), lua_runtime, scenario=scenario
+    )
     header = {"v": 1, "nonce": NONCE, "id": IDENTIFIER, "generation": 7}
     assert records == [
         header | {"accepted": True},
@@ -82,15 +91,21 @@ def test_lua_rpc_has_one_acceptance_and_correlated_result(
     ]
 
 
-def test_lua_rpc_preserves_native_console(lua_runtime: str) -> None:
-    assert run_rpc(b"", lua_runtime, scenario="native") == []
+def test_lua_rpc_preserves_native_console(
+    native_scripts: Path, lua_runtime: str
+) -> None:
+    assert run_rpc(native_scripts, b"", lua_runtime, scenario="native") == []
 
 
 def test_lua_rpc_keeps_business_prints_out_of_native_control_pipe(
+    native_scripts: Path,
     lua_runtime: str,
 ) -> None:
     records = run_rpc(
-        PREFIX + orjson.dumps(request(method="noise")), lua_runtime, scenario="noise"
+        native_scripts,
+        PREFIX + orjson.dumps(request(method="noise")),
+        lua_runtime,
+        scenario="noise",
     )
     assert len(records) == 2
     assert records[0]["accepted"] is True
@@ -109,10 +124,13 @@ def test_lua_rpc_keeps_business_prints_out_of_native_control_pipe(
     ],
 )
 def test_lua_rpc_save_correlates_its_deferred_completion(
-    scenario: str, result: dict[str, object], lua_runtime: str
+    native_scripts: Path, scenario: str, result: dict[str, object], lua_runtime: str
 ) -> None:
     records = run_rpc(
-        PREFIX + orjson.dumps(request(method="save")), lua_runtime, scenario=scenario
+        native_scripts,
+        PREFIX + orjson.dumps(request(method="save")),
+        lua_runtime,
+        scenario=scenario,
     )
     assert len(records) == 2
     assert records[0]["accepted"] is True
@@ -138,9 +156,9 @@ def test_lua_rpc_save_correlates_its_deferred_completion(
     ],
 )
 def test_lua_rpc_rejects_before_acceptance(
-    changes: dict[str, object], error: str, lua_runtime: str
+    native_scripts: Path, changes: dict[str, object], error: str, lua_runtime: str
 ) -> None:
-    records = invoke(lua_runtime, **changes)
+    records = invoke(native_scripts, lua_runtime, **changes)
     assert len(records) == 1
     assert records[0]["result"] == {"ok": False, "error": error}
     assert "accepted" not in records[0]
@@ -177,9 +195,9 @@ def test_lua_rpc_rejects_before_acceptance(
     ],
 )
 def test_lua_rpc_rejects_non_json_without_evaluation(
-    payload: bytes, lua_runtime: str
+    native_scripts: Path, payload: bytes, lua_runtime: str
 ) -> None:
-    records = run_rpc(PREFIX + payload, lua_runtime)
+    records = run_rpc(native_scripts, PREFIX + payload, lua_runtime)
     assert len(records) == 1
     assert records[0]["id"] is None
     assert records[0]["result"] == {"ok": False, "error": "invalid_request"}
@@ -195,14 +213,16 @@ def test_lua_rpc_rejects_non_json_without_evaluation(
     ],
 )
 def test_lua_rpc_returns_safe_execution_errors(
-    method: str, error: str, lua_runtime: str
+    native_scripts: Path, method: str, error: str, lua_runtime: str
 ) -> None:
-    accepted, result = invoke(lua_runtime, method=method)
+    accepted, result = invoke(native_scripts, lua_runtime, method=method)
     assert accepted["accepted"] is True
     assert result["result"] == {"ok": False, "error": error}
 
 
-def test_lua_rpc_preserves_json_values_and_unicode(lua_runtime: str) -> None:
+def test_lua_rpc_preserves_json_values_and_unicode(
+    native_scripts: Path, lua_runtime: str
+) -> None:
     values = {
         "null": None,
         "empty": {},
@@ -214,9 +234,9 @@ def test_lua_rpc_preserves_json_values_and_unicode(lua_runtime: str) -> None:
         "你好👩🏽‍💻".encode(),
         rb"\u4f60\u597d\ud83d\udc69\ud83c\udffd\u200d\ud83d\udcbb",
     )
-    records = run_rpc(PREFIX + payload, lua_runtime)
+    records = run_rpc(native_scripts, PREFIX + payload, lua_runtime)
     assert records[-1]["result"] == {"ok": True, "data": values}
-    assert invoke(lua_runtime, method="nothing")[-1]["result"] == {
+    assert invoke(native_scripts, lua_runtime, method="nothing")[-1]["result"] == {
         "ok": True,
         "data": None,
     }
@@ -224,7 +244,7 @@ def test_lua_rpc_preserves_json_values_and_unicode(lua_runtime: str) -> None:
 
 @pytest.mark.parametrize("excess", [0, 1])
 def test_lua_rpc_response_limit_includes_envelope_and_newline(
-    excess: int, lua_runtime: str
+    native_scripts: Path, excess: int, lua_runtime: str
 ) -> None:
     empty = {
         "v": 1,
@@ -234,7 +254,9 @@ def test_lua_rpc_response_limit_includes_envelope_and_newline(
         "result": {"ok": True, "data": ""},
     }
     size = LIMIT - len(PREFIX + orjson.dumps(empty) + b"\n")
-    records = invoke(lua_runtime, method="large", arguments={"size": size + excess})
+    records = invoke(
+        native_scripts, lua_runtime, method="large", arguments={"size": size + excess}
+    )
     if excess:
         assert records[-1]["result"] == {"ok": False, "error": "response_too_large"}
     else:
@@ -244,10 +266,12 @@ def test_lua_rpc_response_limit_includes_envelope_and_newline(
 
 @pytest.mark.parametrize("excess", [0, 1])
 def test_lua_rpc_request_limit_includes_prefix_and_newline(
-    excess: int, lua_runtime: str
+    native_scripts: Path, excess: int, lua_runtime: str
 ) -> None:
     size = 4096 - len(PREFIX + orjson.dumps(request(arguments={"pad": ""})) + b"\n")
-    records = invoke(lua_runtime, arguments={"pad": "x" * (size + excess)})
+    records = invoke(
+        native_scripts, lua_runtime, arguments={"pad": "x" * (size + excess)}
+    )
     assert records[-1]["result"] == (
         {"ok": False, "error": "invalid_request"}
         if excess
@@ -259,8 +283,10 @@ def test_lua_rpc_request_limit_includes_prefix_and_newline(
     ("scenario", "error"), [("not_ready", "not_ready"), ("write_error", "lua_error")]
 )
 def test_lua_rpc_never_executes_before_successful_acceptance(
-    scenario: str, error: str, lua_runtime: str
+    native_scripts: Path, scenario: str, error: str, lua_runtime: str
 ) -> None:
-    records = run_rpc(PREFIX + orjson.dumps(request()), lua_runtime, scenario=scenario)
+    records = run_rpc(
+        native_scripts, PREFIX + orjson.dumps(request()), lua_runtime, scenario=scenario
+    )
     assert len(records) == 1
     assert records[0]["result"] == {"ok": False, "error": error}

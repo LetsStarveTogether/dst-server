@@ -35,9 +35,9 @@ language = 'system'
 files = '^prek\.toml$'
 
 [[repos.hooks]]
-id = 'just-tc'
-name = 'just tc'
-entry = 'just tc'
+id = 'just-check'
+name = 'just check'
+entry = 'just check'
 language = 'system'
 always_run = true
 pass_filenames = false

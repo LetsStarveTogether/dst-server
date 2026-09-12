@@ -4,6 +4,8 @@ from unittest.mock import Mock
 
 import orjson
 import pytest
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 from dst_server import commands as c
 from dst_server.events import GAME_EVENT_ADAPTER, GameEvent
@@ -362,3 +364,77 @@ def test_observe_health_rejects_mismatched_response_generation(
     )
 
     assert driver.health == initial
+
+
+@given(
+    st.lists(
+        st.tuples(
+            st.sampled_from((
+                "starting",
+                "ready",
+                "event",
+                "health",
+                "failed",
+                "close",
+            )),
+            st.integers(0, 4),
+            st.integers(1, 20),
+            st.integers(0, 5),
+        ),
+        max_size=40,
+    )
+)
+@example([
+    ("ready", 0, 10, 2),
+    ("event", 0, 1, 1),
+    ("starting", 2, 1, 0),
+    ("ready", 1, 20, 5),
+    ("ready", 2, 1, 0),
+    ("close", 2, 1, 0),
+    ("ready", 3, 20, 5),
+])
+def test_driver_action_sequences_preserve_generation_and_health(  # ruff: ignore[complex-structure]
+    actions: list[tuple[str, int, int, int]],
+) -> None:
+    driver = Driver()
+
+    def snapshot() -> tuple[int, bool, str | None, DriverHealth | None]:
+        return (
+            driver.generation,
+            driver.closed,
+            driver.error,
+            driver.health if driver.is_ready(driver.generation) else None,
+        )
+
+    for action, generation, sequence, errors in actions:
+        before = snapshot()
+        match action:
+            case "starting":
+                driver.starting(generation)
+            case "ready":
+                driver.ready(health(sequence, generation=generation, errors=errors))
+            case "event":
+                driver.observe_event(
+                    event(generation, sequence, error_count=errors or None)
+                )
+            case "health":
+                driver.observe_health(
+                    generation, health(sequence, generation=generation, errors=errors)
+                )
+            case "failed":
+                driver.failed("installation_failed")
+            case "close":
+                driver.close()
+        after = snapshot()
+        assert after[0] >= before[0]
+        if (
+            before[1]
+            or (action in {"starting", "ready"} and generation < before[0])
+            or (action in {"event", "health"} and generation != before[0])
+        ):
+            assert after == before
+        if after[0] == before[0] and before[3] is not None and after[3] is not None:
+            assert after[3].events_emitted >= before[3].events_emitted
+            assert after[3].errors >= before[3].errors
+        if driver.closed or action == "failed":
+            assert not driver.is_ready(driver.generation)

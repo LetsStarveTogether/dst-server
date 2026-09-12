@@ -1,4 +1,5 @@
 from enum import IntEnum, StrEnum
+from pathlib import Path
 from typing import Any
 
 import orjson
@@ -9,12 +10,15 @@ from dst_server.game import Emoji, Emote, EmoteType
 from tests.lua.helpers import run_lua
 
 
-def lua_json(source: str, luajit: str) -> Any:
-    return orjson.loads(run_lua(source, luajit, driver_path=False))
+def lua_json(native_scripts: Path, source: str, luajit: str) -> Any:
+    return orjson.loads(run_lua(source, luajit, native_scripts, driver_path=False))
 
 
-def test_game_enums_match_all_native_definitions(luajit: str) -> None:
+def test_game_enums_match_all_native_definitions(
+    native_scripts: Path, luajit: str
+) -> None:
     native = lua_json(
+        native_scripts,
         """
         require("emoji_items")
         require("emote_items")

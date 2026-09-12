@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Literal, cast
 from zipfile import ZipFile
 
-import pytest
 from pydantic import JsonValue, SecretStr
 from ulid import ULID
 
@@ -42,21 +41,6 @@ from dst_server.telemetry import TelemetrySettings
 REPOSITORY_ROOT = Path(__file__).parents[2]
 IMAGE = os.environ.get("DST_SERVER_IMAGE", "")
 VOLUME_IDMAP = "uids=0-1000-1;gids=0-1000-1"
-SYSTEM_MARKS = [
-    pytest.mark.system,
-    pytest.mark.skipif(
-        os.environ.get("DST_SERVER_PODMAN_TEST") != "1",
-        reason="run just test-system IMAGE to test a local image",
-    ),
-    pytest.mark.skipif(
-        not IMAGE,
-        reason="set DST_SERVER_IMAGE to the exact local image ID or tag",
-    ),
-    pytest.mark.skipif(
-        os.geteuid() != 0,
-        reason="rootful Podman is required for the idmapped test volumes",
-    ),
-]
 GAME_EXECUTABLE = "/install/bin64/dontstarve_dedicated_server_nullrenderer_x64"
 STARTUP_TIMEOUT = 300
 OPERATION_TIMEOUT = 60
