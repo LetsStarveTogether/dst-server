@@ -80,7 +80,7 @@ class ClusterArchive:
 
 
 @contextmanager
-def export_cluster(  # ruff: ignore[complex-structure, too-many-branches]
+def export_cluster(  # ruff: ignore[complex-structure]
     directory: Path,
     *,
     configuration: ClusterConfig | None = None,
@@ -117,34 +117,7 @@ def export_cluster(  # ruff: ignore[complex-structure, too-many-branches]
         ):
             msg = "export configuration must preserve the source player path encoding"
             raise ValueError(msg)
-    exported = configuration.replace(
-        settings=ClusterSettings.model_validate(
-            configuration.settings.model_dump(
-                exclude_unset=True,
-                exclude={
-                    "cluster_password",
-                    "cluster_key",
-                    "steam_group_id",
-                    "steam_group_only",
-                    "steam_group_admins",
-                },
-            )
-        ),
-        shards={
-            name: shard.replace(
-                settings=shard.settings.replace(
-                    cluster_key=None,
-                    encode_user_path=True
-                    if encode_user_path
-                    else shard.settings.encode_user_path,
-                )
-            )
-            for name, shard in configuration.shards.items()
-        },
-    )
-    files = exported.files()
-    for name in ("cluster_token.txt", *PERMISSION_FILES):
-        del files[Path(name)]
+    files = _configuration_files(configuration, encode_user_path)
     for path in files:
         _validate_archive_path(path)
     saves = _save_files(directory, configuration, encode_user_path)
@@ -173,9 +146,44 @@ def export_cluster(  # ruff: ignore[complex-structure, too-many-branches]
                         )
                     else:
                         archive.writef(saved, arcname)
-        del saves, files, exported, configuration
+        del saves, files, configuration
         stream.seek(0)
         yield ClusterArchive(filename, stream)
+
+
+def _configuration_files(
+    configuration: ClusterConfig, encode_user_path: bool
+) -> dict[Path, str]:
+    """Rebuild shareable game configuration without copying deployment files."""
+    exported = configuration.replace(
+        settings=ClusterSettings.model_validate(
+            configuration.settings.model_dump(
+                exclude_unset=True,
+                exclude={
+                    "cluster_password",
+                    "cluster_key",
+                    "steam_group_id",
+                    "steam_group_only",
+                    "steam_group_admins",
+                },
+            )
+        ),
+        shards={
+            name: shard.replace(
+                settings=shard.settings.replace(
+                    cluster_key=None,
+                    encode_user_path=True
+                    if encode_user_path
+                    else shard.settings.encode_user_path,
+                )
+            )
+            for name, shard in configuration.shards.items()
+        },
+    )
+    files = exported.files()
+    for name in ("cluster_token.txt", *PERMISSION_FILES):
+        del files[Path(name)]
+    return files
 
 
 def _save_files(  # ruff: ignore[complex-structure, too-many-branches]
@@ -209,20 +217,19 @@ def _save_files(  # ruff: ignore[complex-structure, too-many-branches]
         ).exists():
             msg = "legacy saveindex must be migrated by the game before export"
             raise ValueError(msg)
-        paths = list(root.rglob("*"))
+        paths = []
+        for parent, directories, filenames in root.walk():
+            directories[:] = [name for name in directories if not _sdk_entry(name)]
+            paths.extend(parent / name for name in filenames if not _sdk_entry(name))
         paths.extend(root.parent.glob("mod_config_data/mod_worldjump_data_*"))
         for filename in ("shardindex", "recipebook", "reforged_achievements_server"):
             path = root.parent / filename
             if path.exists() or path.is_symlink():
                 paths.append(path)
         for source in sorted(paths):
-            if source.name == ".last_login" or source.name.startswith("..last_login."):
-                continue
             state = source.lstat()
-            if stat.S_ISDIR(state.st_mode) and source.is_relative_to(root):
-                continue
             if not stat.S_ISREG(state.st_mode):
-                msg = f"save entry must be a regular file or directory: {source}"
+                msg = f"save entry must be a regular file: {source}"
                 raise ValueError(msg)
             target = source.relative_to(directory)
             _validate_archive_path(target)
@@ -247,6 +254,16 @@ def _save_files(  # ruff: ignore[complex-structure, too-many-branches]
                     raise ValueError(msg)
             files[source] = target
     return files
+
+
+def _sdk_entry(name: str) -> bool:
+    """Exclude SDK state and its atomic-write leftovers, even inside a session."""
+    return name in {".last_login", "dst_server_driver.json"} or name.startswith((
+        ".dst-",
+        "..dst-",
+        "..last_login.",
+        ".dst_server_driver.json.",
+    ))
 
 
 def _validate_archive_path(path: Path) -> None:

@@ -102,6 +102,13 @@ def saved_cluster(tmp_path: Path) -> Path:
         "whitelist.txt",
         "blocklist.txt",
         "mainlist.txt",
+        ".dst-control.json",
+        "..dst-control.json.abcd1234",
+        ".dst-operation.lock",
+        ".dst-mod-update.lock",
+        ".dst-maintenance/result.json",
+        "forest/dst_server_driver.json",
+        "forest/.dst_server_driver.json.abcd1234",
         "mods/workshop-123/modmain.lua",
         "mods/ugc/content/322330/123/modmain.lua",
         "forest/backup/server_log.txt",
@@ -259,15 +266,27 @@ def test_export_generates_keys_only_when_recipient_saves(
     assert recipient.settings.cluster_key is None
 
 
-def test_export_omits_local_login_timestamps(
+def test_export_omits_sdk_state_at_every_save_depth(
     saved_cluster: Path, tmp_path: Path
 ) -> None:
     for shard in ("forest", "cave"):
-        session = saved_cluster / shard / "save/session/0123456789ABCDEF"
-        for filename in (".last_login", "..last_login.abcd1234"):
-            (session / filename).write_text(
-                "2026-09-10T08:00:00+00:00\n", encoding="utf-8"
-            )
+        root = saved_cluster / shard / "save/session"
+        session = root / "0123456789ABCDEF"
+        for parent in (root, session, session / "KU_ABCDEFG__"):
+            for filename in (
+                ".last_login",
+                "..last_login.abcd1234",
+                ".dst-control.json",
+                "..dst-control.json.abcd1234",
+                ".dst-operation.lock",
+                "dst_server_driver.json",
+                ".dst_server_driver.json.abcd1234",
+            ):
+                (parent / filename).write_text("sdk-private", encoding="utf-8")
+            directory = parent / ".dst-maintenance"
+            directory.mkdir()
+            (directory / "result.json").write_text("sdk-private", encoding="utf-8")
+            os.mkfifo(parent / ".dst-server.sock")
         (session / ".world_metadata").write_bytes(b"hidden world metadata")
     destination = tmp_path / "extracted"
     with (
@@ -276,10 +295,45 @@ def test_export_omits_local_login_timestamps(
     ):
         compressed.extractall(destination)
     for shard in ("forest", "cave"):
-        session = destination / "001" / shard / "save/session/0123456789ABCDEF"
-        assert not (session / ".last_login").exists()
-        assert not (session / "..last_login.abcd1234").exists()
-        assert (session / ".world_metadata").read_bytes() == b"hidden world metadata"
+        root = destination / "001" / shard / "save/session"
+        assert {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file()
+        } == {
+            f"0123456789ABCDEF/{name}"
+            for name in (
+                "0000000001",
+                "0000000001.meta",
+                ".world_metadata",
+                f"{encode_klei_id('KU_ABCDEFG_')}/0000000001",
+                f"{encode_klei_id('KU_ABCDEFG_')}/savelocation",
+            )
+        }
+        assert (root / "0123456789ABCDEF/.world_metadata").read_bytes() == (
+            b"hidden world metadata"
+        )
+
+
+def test_export_customizes_shared_configuration_without_changing_source(
+    saved_cluster: Path, tmp_path: Path
+) -> None:
+    configuration = ClusterConfig.load(saved_cluster)
+    shared = configuration.replace(
+        settings=configuration.settings.replace(
+            cluster_name="Shared world", max_players=6
+        )
+    )
+    with (
+        archive.export_cluster(saved_cluster, configuration=shared) as exported,
+        SevenZipFile(exported.stream) as compressed,
+    ):
+        compressed.extractall(tmp_path / "extracted")
+    settings = ClusterSettings.load(tmp_path / "extracted/001/cluster.ini")
+    assert settings.cluster_name == "Shared world"
+    assert settings.max_players == 6
+    assert settings.cluster_password is None
+    assert ClusterConfig.load(saved_cluster) == configuration
 
 
 @pytest.mark.parametrize("source_encoded", [True, False])

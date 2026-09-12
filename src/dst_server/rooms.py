@@ -165,6 +165,39 @@ class Room(RevalidatedFrozenModel):
             (directory / path).unlink(missing_ok=True)
         return written
 
+    def save(
+        self, directory: Path, *, quadlet_dir: Path | None = None
+    ) -> tuple[Path, ...]:
+        """Generate or update an offline room without changing shard topology."""
+        room = Room.model_validate(self)
+        for path in (directory, quadlet_dir):
+            if path is not None and not path.is_absolute():
+                msg = "room and Quadlet directories must be absolute paths"
+                raise ValueError(msg)
+        read_control(directory)
+        previous = (
+            Room(number=room.number, cluster=ClusterConfig.load(directory))
+            if configuration_file_exists(directory / "cluster.ini")
+            else None
+        )
+        if previous is not None and {
+            (name, shard.settings.is_master)
+            for name, shard in previous.cluster.shards.items()
+        } != {
+            (name, shard.settings.is_master)
+            for name, shard in room.cluster.shards.items()
+        }:
+            msg = "room topology changes require Host.edit"
+            raise ValueError(msg)
+        application = room.application(directory) if quadlet_dir is not None else None
+        if application is not None and quadlet_dir is not None:
+            application.validate_save(quadlet_dir)
+        written = room.save_game(directory, previous=previous)
+        room.save_policy(directory)
+        if application is not None and quadlet_dir is not None:
+            written += application.save(quadlet_dir)
+        return written
+
     def save_policy(self, path: Path) -> None:
         current = read_control(path)
         updates: dict[str, Any] = {
@@ -417,24 +450,7 @@ class RoomStore:
         room.save_policy(self.path(room.number))
 
     def save(self, room: Room) -> tuple[Path, ...]:
-        """Generate native room files and deployment from an explicit template."""
-        room = Room.model_validate(room)
-        directory = self.path(room.number)
+        """Save an offline room in its numbered directory."""
         if self.root.exists() or self.root.is_symlink():
             validate_directory(self.root)
-        read_control(directory)
-        application = (
-            room.application(directory) if self.quadlet_dir is not None else None
-        )
-        if application is not None and self.quadlet_dir is not None:
-            application.validate_save(self.quadlet_dir)
-        previous = (
-            self.load(room.number)
-            if configuration_file_exists(directory / "cluster.ini")
-            else None
-        )
-        written = room.save_game(directory, previous=previous)
-        self.save_policy(room)
-        if application is not None and self.quadlet_dir is not None:
-            written += application.save(self.quadlet_dir)
-        return written
+        return room.save(self.path(room.number), quadlet_dir=self.quadlet_dir)

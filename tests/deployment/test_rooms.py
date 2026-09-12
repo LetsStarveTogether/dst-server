@@ -24,16 +24,13 @@ from dst_server.presets.lst import (
     RoomType,
     build,
     build_template,
-    generate_configured_room,
-    generate_configured_rooms,
-    generate_room,
-    generate_rooms,
+    fleet_room,
     room,
     room_name,
     room_schedule,
 )
 from dst_server.presets.mod_configurations import MOD_CONFIGURATIONS
-from dst_server.rooms import RoomStore
+from dst_server.rooms import Room, RoomDeployment, RoomStore, read_control
 
 TOKEN = SecretStr("template-test-token")
 CLUSTER_KEY = SecretStr("template-test-cluster-key")
@@ -607,30 +604,35 @@ def test_template_generation_preserves_permission_lists(tmp_path: Path) -> None:
         (None, "keep-id:uid=1000,gid=1000"),
     ],
 )
-def test_generate_room_saves_cluster_and_quadlet_application(
+@pytest.mark.parametrize("directory_name", ["007", "custom-room"])
+def test_room_saves_cluster_and_quadlet_application(
     tmp_path: Path,
     volume_idmap: str | None,
     userns: str | None,
+    directory_name: str,
 ) -> None:
-    cluster_dir = tmp_path / "007"
+    cluster_dir = tmp_path / directory_name
     quadlet_dir = tmp_path / "quadlet"
 
-    written = generate_room(
+    definition = fleet_room(
         7,
         token=TOKEN,
         cluster_key=CLUSTER_KEY,
-        cluster_dir=cluster_dir,
-        quadlet_dir=quadlet_dir,
-        environment={"OTEL_SDK_DISABLED": "true"},
         volume_idmap=volume_idmap,
         userns=userns,
     )
+    definition = definition.replace(
+        deployment=definition.deployment.replace(
+            environment={"OTEL_SDK_DISABLED": "true"}
+        )
+    )
+    written = definition.save(cluster_dir, quadlet_dir=quadlet_dir)
 
     assert written
     assert all(path.is_file() for path in written)
     assert len(written) == len(set(written))
     assert ClusterConfig.load(cluster_dir).settings.cluster_name == room_name(7)
-    assert RoomStore(cluster_dir.parent, quadlet_dir).load(7).recycle
+    assert read_control(cluster_dir).recycle
     application = QuadletApplication.load(quadlet_dir)
     units = (application.master, *application.secondaries)
     assert len(units) == 2
@@ -643,7 +645,7 @@ def test_generate_room_saves_cluster_and_quadlet_application(
         assert unit.timeout_start_sec == 1800
         assert all(volume.idmap == volume_idmap for volume in unit.volumes)
         assert unit.environment["OTEL_SDK_DISABLED"] == "true"
-        assert unit.environment["DST_SERVER_CLUSTER_NAME"] == "dst-007"
+        assert unit.environment["DST_SERVER_CLUSTER_NAME"] == f"dst-{directory_name}"
         assert (unit.notify, unit.watchdog_sec, unit.restart) == (
             True,
             300,
@@ -652,17 +654,14 @@ def test_generate_room_saves_cluster_and_quadlet_application(
         assert (unit.kill_mode, unit.watchdog_signal) == ("control-group", "SIGKILL")
 
 
-def test_generate_configured_room_rejects_topology_changes_before_writing(
+def test_room_save_rejects_topology_changes_before_writing(
     tmp_path: Path,
 ) -> None:
     cluster_dir = tmp_path / "000"
     quadlet_dir = tmp_path / "quadlet"
     for _ in range(2):
-        generate_configured_room(
-            0,
-            cluster=build(0, token=TOKEN),
-            cluster_dir=cluster_dir,
-            quadlet_dir=quadlet_dir,
+        Room(number=0, cluster=build(0, token=TOKEN)).save(
+            cluster_dir, quadlet_dir=quadlet_dir
         )
     world = cluster_dir / "forest/save/world"
     world.parent.mkdir()
@@ -670,11 +669,8 @@ def test_generate_configured_room_rejects_topology_changes_before_writing(
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
     with pytest.raises(ValueError, match=r"topology changes require Host\.edit"):
-        generate_configured_room(
-            0,
-            cluster=build_template("forge", token=TOKEN),
-            cluster_dir=cluster_dir,
-            quadlet_dir=quadlet_dir,
+        Room(number=0, cluster=build_template("forge", token=TOKEN)).save(
+            cluster_dir, quadlet_dir=quadlet_dir
         )
 
     assert {
@@ -682,16 +678,16 @@ def test_generate_configured_room_rejects_topology_changes_before_writing(
     } == before
 
 
-def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
+def test_room_store_writes_the_complete_fleet(tmp_path: Path) -> None:
     cluster_root = tmp_path / "clusters"
     quadlet_dir = tmp_path / "quadlet"
 
-    written = generate_rooms(
-        ROOM_NUMBERS,
-        token=TOKEN,
-        cluster_root=cluster_root,
-        quadlet_dir=quadlet_dir,
-    )
+    store = RoomStore(cluster_root, quadlet_dir)
+    written = [
+        path
+        for number in ROOM_NUMBERS
+        for path in store.save(fleet_room(number, token=TOKEN))
+    ]
 
     assert written
     assert len(written) == len(set(written))
@@ -763,16 +759,13 @@ def test_generate_rooms_writes_the_complete_fleet(tmp_path: Path) -> None:
     assert max(ports) == 32151
 
 
-def test_generate_rooms_uses_distinct_persistent_cluster_keys(tmp_path: Path) -> None:
+def test_room_store_uses_distinct_persistent_cluster_keys(tmp_path: Path) -> None:
     cluster_root = tmp_path / "clusters"
     keys = []
     for _ in range(2):
-        generate_rooms(
-            (0, 7, 200),
-            token=TOKEN,
-            cluster_root=cluster_root,
-            quadlet_dir=tmp_path / "quadlet",
-        )
+        store = RoomStore(cluster_root, tmp_path / "quadlet")
+        for number in (0, 7, 200):
+            store.save(fleet_room(number, token=TOKEN))
         keys.append(
             tuple(
                 ClusterSettings.load(
@@ -810,13 +803,15 @@ def test_explicit_configurations_cover_remaining_port_slots(
         for number in (7, 140, 299)
     }
 
-    generate_configured_rooms(
-        configurations,
-        cluster_root=tmp_path / "clusters",
-        quadlet_dir=tmp_path / "quadlet",
-        volume_idmap=volume_idmap,
-        userns=userns,
-    )
+    store = RoomStore(tmp_path / "clusters", tmp_path / "quadlet")
+    for number, cluster in configurations.items():
+        store.save(
+            Room(
+                number=number,
+                cluster=cluster,
+                deployment=RoomDeployment(volume_idmap=volume_idmap, userns=userns),
+            )
+        )
 
     for number, base in ((7, 30070), (140, 31400), (299, 32990)):
         cluster = ClusterConfig.load(tmp_path / "clusters" / f"{number:03d}")
@@ -841,15 +836,11 @@ def test_explicit_configurations_cover_remaining_port_slots(
     ("cluster_dir", "quadlet_dir"),
     [(Path("room"), Path("/quadlet")), (Path("/room"), Path("quadlet"))],
 )
-def test_generate_room_requires_absolute_directories(
+def test_room_save_requires_absolute_directories(
     cluster_dir: Path,
     quadlet_dir: Path,
 ) -> None:
-    with pytest.raises(ValueError, match="must be an absolute path"):
-        generate_room(
-            0,
-            token=TOKEN,
-            cluster_key=CLUSTER_KEY,
-            cluster_dir=cluster_dir,
-            quadlet_dir=quadlet_dir,
+    with pytest.raises(ValueError, match="must be absolute paths"):
+        fleet_room(0, token=TOKEN, cluster_key=CLUSTER_KEY).save(
+            cluster_dir, quadlet_dir=quadlet_dir
         )

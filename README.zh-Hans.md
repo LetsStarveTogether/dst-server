@@ -286,10 +286,27 @@ config = compose(FOREST_CAVES, ENDLESS).build(
 config.save(Path("cluster"))
 ```
 
-- 读取与修改：`ClusterConfig.load(path)`、`.replace(...)`。
-- 生成自定义房间和 Quadlet：`dst_server.presets.lst.generate_configured_room()`，传入绝对目录。
-- 批量自定义房间：`generate_configured_rooms()`，可使用 `000–299` 中任意槽位。
-- 自定义生成函数默认不配置遥测导出，通过 `environment` / `environments` 显式传入。
+读取与修改使用 `ClusterConfig.load(path)`、`.replace(...)`。
+房间创建分为三层：
+
+- **定义房间：**先构造 `ClusterConfig`，再创建 `Room(number=..., cluster=...)`；LST 房间直接用 `presets.lst.fleet_room(...)`。
+- **离线写文件：**`room.save(directory, quadlet_dir=...)` 使用指定的绝对目录。
+  `RoomStore(root, quadlet_dir).save(room)` 按编号写入 `root/NNN`。
+- **管理部署：**`Host.create(room)` 拒绝覆盖已有房间；`Host.edit(room)` 检查房间已停机，并处理部署变更。
+
+自定义 `Room` 可使用 `000–299` 任意槽位，默认不配置遥测导出。
+LST 房间统一采用预设的遥测配置，可在保存前修改 `room.deployment.environment`。
+离线保存保留游戏进度和权限名单，但不允许改变分片名称或主从角色；这些变更使用 `Host.edit()`。
+批量创建时先构造全部房间，再逐个保存，避免写到一半才发现编号无效：
+
+```python
+from dst_server.rooms import Room, RoomStore
+
+store = RoomStore(Path("/srv/dst"), Path("/etc/containers/systemd"))
+rooms = [Room(number=number, cluster=config) for number in (0, 1)]
+for room in rooms:
+    store.save(room)
+```
 
 构建配置、`load()` 和 `files()` 允许省略 `cluster_key`，不会因此生成密钥或写入磁盘。
 `save(path)` 会复用目标目录已有的共享密钥，没有可复用密钥时才生成并保存到 `cluster.ini`。
@@ -298,6 +315,8 @@ config.save(Path("cluster"))
 
 `dst_server.rooms.Room` 是原生游戏配置、部署设置和运营策略的内存视图。
 `RoomStore.load(number)` 每次直接读取文件，也能读到游戏自身写入的修改。
+保存 `Room` 会应用完整定义，包括时段和回收策略。
+修改已有房间时先加载再修改，避免默认值覆盖原有策略；离线保存要求现有游戏配置可以正常解析。
 停服后使用 `room edit` 或 `dst_server.host.Host.edit()` 校验并写入配置。
 所有编辑都要求房间已停止，包括策略修改；编辑本身不启动或停止服务。
 SDK 只解析受支持的声明式 Lua，不执行脚本；修改配置时遇到不支持的动态 Lua 会拒绝操作。
@@ -331,14 +350,15 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
-from dst_server.presets.lst import generate_room
+from dst_server.presets.lst import fleet_room
 
-generate_room(
+fleet_room(
     0,
     token=SecretStr(os.environ["DST_SERVER_CLUSTER_TOKEN"]),
-    cluster_dir=Path.home() / ".local/share/dst/000",
-    quadlet_dir=Path.home() / ".config/containers/systemd",
     userns="keep-id:uid=1000,gid=1000",
+).save(
+    Path.home() / ".local/share/dst/000",
+    quadlet_dir=Path.home() / ".config/containers/systemd",
 )
 ```
 
@@ -1104,16 +1124,17 @@ with export_cluster(Path("/srv/dst/000")) as archive:
 将导出路径替换为自己的已有目录；持久文件由调用方管理。
 SDK 使用匿名 `TemporaryFile`，流可读取和定位，离开 `with` 后自动关闭清理。
 默认文件名为 `DST-<room-id>-<UTC时间>.7z`，例如 `DST-000-20260909T010203Z.7z`。
-`room_id` 默认取源目录名，可显式指定；`configuration=` 可复用已加载的 `ClusterConfig`，源目录始终必填。
+`room_id` 默认取源目录名，可显式指定。
+`configuration=` 可以修改分享包内的设置，不改源房间；分片名称和主从角色必须保持一致，源目录始终必填。
 归档使用 ZSTD 级别 22，请用 `py7zr` 或 `7-Zip-zstd` 读取，原版 `7z` 不一定支持。
 
 | 归档内容 | 处理方式 |
 | --- | --- |
 | SDK 支持的游戏配置 | 保留世界与 Mod 声明，清除密码及所有部署用 `cluster_key`。 |
-| `save/session/` | 保留全部普通文件，包括人物快照、`.meta` 和 `savelocation`。 |
+| `save/session/` | 保留游戏和 Mod 进度，包括人物快照、`.meta` 和 `savelocation`，排除 SDK 文件及目录。 |
 | 已有 `save/shardindex` | 保留世界、session 与 Mod 信息并清除凭据；缺失时不补建。 |
 | 额外进度 | 保留 `save/recipebook`、`save/reforged_achievements_server`、`save/mod_config_data/mod_worldjump_data_*`。 |
-| 不包含 | token、权限名单、日志、Mod 内容、UGC 缓存、临时文件及其余辅助索引。 |
+| 不包含 | token、权限名单、日志、Mod 内容、UGC 缓存、SDK 控制文件、锁、socket、驱动配置及其余辅助索引。 |
 
 导出不生成替代密钥。
 导出配置省略 Steam 组字段和空的 `[STEAM]` 段。

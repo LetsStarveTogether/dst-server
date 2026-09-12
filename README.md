@@ -298,10 +298,29 @@ config = compose(FOREST_CAVES, ENDLESS).build(
 config.save(Path("cluster"))
 ```
 
-- Read and edit: `ClusterConfig.load(path)` and `.replace(...)`.
-- Custom room and Quadlet units: `dst_server.presets.lst.generate_configured_room()`, with absolute directory paths.
-- Generate custom rooms in bulk: `generate_configured_rooms()`, using any slots in `000–299`.
-- Custom generation functions do not configure telemetry export by default; pass it explicitly through `environment` / `environments`.
+Room creation has three layers:
+
+- **Define:** build a `ClusterConfig`, then `Room(number=..., cluster=...)`.
+  `presets.lst.fleet_room(...)` supplies an LST room definition.
+- **Write files offline:** `room.save(directory, quadlet_dir=...)` uses explicit absolute paths.
+  `RoomStore(root, quadlet_dir).save(room)` places it in `root/NNN`.
+- **Manage a deployment:** `Host.create(room)` rejects existing rooms.
+  `Host.edit(room)` requires a stopped room and handles deployment changes.
+
+Custom `Room` definitions use slots `000–299` and have no telemetry export by default.
+LST definitions consistently include their preset telemetry settings; customize `room.deployment.environment` before saving.
+Offline saves preserve game progress and permission lists, but reject changes to shard names or master roles.
+Use `Host.edit()` for those changes.
+For a batch, construct all definitions before writing, so invalid room numbers fail before any files are created:
+
+```python
+from dst_server.rooms import Room, RoomStore
+
+store = RoomStore(Path("/srv/dst"), Path("/etc/containers/systemd"))
+rooms = [Room(number=number, cluster=config) for number in (0, 1)]
+for room in rooms:
+    store.save(room)
+```
 
 Building a configuration, `load()`, and `files()` allow an omitted `cluster_key`.
 They do not generate a key or write to disk.
@@ -312,6 +331,8 @@ This also applies to single-shard rooms.
 
 `dst_server.rooms.Room` is an in-memory view of native game configuration, deployment settings, and operational policy.
 `RoomStore.load(number)` reads the files on each call, including changes written by the game.
+Saving a `Room` applies its complete definition, including schedule and recycling policy.
+To change an existing room, load it first and edit that definition; offline saves require readable existing game configuration.
 Use `room edit` or `dst_server.host.Host.edit()` to validate and write configuration after stopping the room.
 Every edit requires a stopped room, including policy changes; editing never starts or stops services.
 The SDK parses supported declarative Lua without executing scripts.
@@ -347,14 +368,15 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
-from dst_server.presets.lst import generate_room
+from dst_server.presets.lst import fleet_room
 
-generate_room(
+fleet_room(
     0,
     token=SecretStr(os.environ["DST_SERVER_CLUSTER_TOKEN"]),
-    cluster_dir=Path.home() / ".local/share/dst/000",
-    quadlet_dir=Path.home() / ".config/containers/systemd",
     userns="keep-id:uid=1000,gid=1000",
+).save(
+    Path.home() / ".local/share/dst/000",
+    quadlet_dir=Path.home() / ".config/containers/systemd",
 )
 ```
 
@@ -1181,16 +1203,17 @@ The SDK uses an anonymous `TemporaryFile` with a readable, seekable stream.
 The stream closes and cleans up when the `with` block ends.
 The default filename is `DST-<room-id>-<UTC timestamp>.7z`, for example `DST-000-20260909T010203Z.7z`.
 `room_id` defaults to the source directory name and can be overridden.
-`configuration=` reuses a loaded `ClusterConfig`, but the source directory is always required.
+`configuration=` supplies settings for the sharing archive without changing the source room.
+It must keep the same shard names and master roles; the source directory is always required.
 Archives use ZSTD level 22; read them with `py7zr` or `7-Zip-zstd`, as standard `7z` may not support the codec.
 
 | Archive contents | Handling |
 | --- | --- |
 | SDK-supported game configuration | Preserves world and Mod declarations; removes passwords and all deployment `cluster_key` values. |
-| `save/session/` | Preserves all regular files, including player snapshots, `.meta`, and `savelocation`. |
+| `save/session/` | Preserves game and Mod progress, including player snapshots, `.meta`, and `savelocation`; excludes SDK files and directories. |
 | Existing `save/shardindex` | Preserves world, session, and Mod information and removes credentials; missing indexes are not created. |
 | Additional progress | Preserves `save/recipebook`, `save/reforged_achievements_server`, and `save/mod_config_data/mod_worldjump_data_*`. |
-| Excluded | Token, permission lists, logs, Mod content, UGC caches, temporary files, and other supporting indexes. |
+| Excluded | Token, permission lists, logs, Mod content, UGC caches, SDK control files, locks, sockets, driver configuration, and other supporting indexes. |
 
 Export does not generate a replacement key.
 Steam group fields and the empty `[STEAM]` section are omitted from exported configuration.

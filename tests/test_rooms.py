@@ -105,7 +105,7 @@ def test_changing_players_only_writes_cluster_ini(tmp_path: Path) -> None:
     previous = store.load(0)
     changed = previous.edit("/cluster/settings/max_players", 12)
 
-    written = changed.save_game(directory, previous=previous)
+    written = store.save(changed)
 
     assert written == (directory / "cluster.ini",)
     assert store.load(0).cluster.settings.max_players == 12
@@ -268,7 +268,7 @@ def test_policy_updates_preserve_control_state_and_native_files(tmp_path: Path) 
         ("/schedule/-", {"start": "22:00", "end": "05:00"}),
     ))
 
-    store.save_policy(changed)
+    store.save(changed)
 
     policy = read_control(directory)
     assert policy.template == "custom"
@@ -407,17 +407,15 @@ def test_readding_shard_does_not_reactivate_its_old_overrides(tmp_path: Path) ->
     world.parent.mkdir()
     world.write_bytes(b"existing cave world")
     original = store.load(0)
-    store.save(original.edit("/cluster/shards/cave", unset=True))
+    original.edit("/cluster/shards/cave", unset=True).save_game(
+        directory, previous=original
+    )
     assert (directory / "cave/worldgenoverride.lua").exists()
     cave = original.cluster.shards["cave"].replace(world=None)
     current = store.load(0)
-    store.save(
-        current.replace(
-            cluster=current.cluster.replace(
-                shards={**current.cluster.shards, "cave": cave}
-            )
-        )
-    )
+    current.replace(
+        cluster=current.cluster.replace(shards={**current.cluster.shards, "cave": cave})
+    ).save_game(directory, previous=current)
     assert store.load(0).cluster.shards["cave"].world is None
     assert not (directory / "cave/worldgenoverride.lua").exists()
     assert world.read_bytes() == b"existing cave world"

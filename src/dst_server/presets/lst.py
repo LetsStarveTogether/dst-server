@@ -1,11 +1,8 @@
-from collections.abc import Iterable, Mapping
 from datetime import time
 from enum import StrEnum
-from pathlib import Path
 
 from pydantic import SecretStr
 
-from dst_server.configuration.files import configuration_file_exists, discover
 from dst_server.configuration.models import (
     ClusterConfig,
     ClusterSettings,
@@ -36,7 +33,7 @@ from dst_server.deployment import (
     RoomPortAllocation,
 )
 from dst_server.presets.mod_configurations import MOD_CONFIGURATIONS
-from dst_server.rooms import DailyWindow, Room, RoomDeployment, RoomStore, read_control
+from dst_server.rooms import DailyWindow, Room, RoomDeployment
 
 CLUSTER_DESCRIPTION = "朗诵团：924715341 频道：饥荒联机版 Let's Starve Together!"  # ruff: ignore[ambiguous-unicode-character-string]
 TOKEN_ENVIRONMENT = "DST_SERVER_CLUSTER_TOKEN"  # ruff: ignore[hardcoded-password-string]
@@ -386,138 +383,3 @@ def build(
         cluster_key=cluster_key,
         settings=ClusterSettings(cluster_name=room_name(number)),
     )
-
-
-def generate_configured_room(
-    number: int,
-    *,
-    cluster: ClusterConfig,
-    cluster_dir: Path,
-    quadlet_dir: Path,
-    image: str = DEFAULT_IMAGE,
-    environment: Mapping[str, str] | None = None,
-    volume_idmap: str | None = None,
-    userns: str | None = None,
-    start_on_boot: bool = True,
-) -> tuple[Path, ...]:
-    for label, directory in (
-        ("cluster_dir", cluster_dir),
-        ("quadlet_dir", quadlet_dir),
-    ):
-        if not directory.is_absolute():
-            msg = f"{label} must be an absolute path"
-            raise ValueError(msg)
-
-    configured = Room(
-        number=number,
-        cluster=cluster,
-        deployment=RoomDeployment(
-            image=image,
-            environment=environment or {},
-            volume_idmap=volume_idmap,
-            userns=userns,
-            start_on_boot=start_on_boot,
-        ),
-    )
-    if configuration_file_exists(cluster_dir / "cluster.ini") and {
-        (shard.name, shard.master) for shard in discover(cluster_dir)
-    } != {(name, shard.settings.is_master) for name, shard in cluster.shards.items()}:
-        msg = "room topology changes require Host.edit"
-        raise ValueError(msg)
-    application = configured.application(cluster_dir)
-    application.validate_save(quadlet_dir)
-    return (*configured.save_game(cluster_dir), *application.save(quadlet_dir))
-
-
-def generate_room(
-    number: int,
-    *,
-    token: SecretStr,
-    cluster_key: SecretStr | None = None,
-    cluster_dir: Path,
-    quadlet_dir: Path,
-    image: str = DEFAULT_IMAGE,
-    environment: Mapping[str, str] | None = None,
-    volume_idmap: str | None = None,
-    userns: str | None = None,
-) -> tuple[Path, ...]:
-    configured = fleet_room(
-        number,
-        token=token,
-        cluster_key=cluster_key,
-        image=image,
-        volume_idmap=volume_idmap,
-        userns=userns,
-    )
-    read_control(cluster_dir)
-    written = generate_configured_room(
-        number,
-        cluster=configured.cluster,
-        cluster_dir=cluster_dir,
-        quadlet_dir=quadlet_dir,
-        image=image,
-        environment=environment,
-        volume_idmap=volume_idmap,
-        userns=userns,
-        start_on_boot=configured.deployment.start_on_boot,
-    )
-    configured.save_policy(cluster_dir)
-    return written
-
-
-def generate_configured_rooms(
-    configurations: Mapping[int, ClusterConfig],
-    *,
-    cluster_root: Path,
-    quadlet_dir: Path,
-    image: str = DEFAULT_IMAGE,
-    environments: Mapping[int, Mapping[str, str]] | None = None,
-    volume_idmap: str | None = None,
-    userns: str | None = None,
-) -> tuple[Path, ...]:
-    """Generate explicitly configured rooms in any port slot from 000 through 299."""
-    written = []
-    for number, cluster in sorted(configurations.items()):
-        written.extend(
-            generate_configured_room(
-                number,
-                cluster=cluster,
-                cluster_dir=cluster_root / f"{number:03d}",
-                quadlet_dir=quadlet_dir,
-                image=image,
-                environment=(environments or {}).get(number),
-                volume_idmap=volume_idmap,
-                userns=userns,
-            )
-        )
-    return tuple(written)
-
-
-def generate_rooms(
-    numbers: Iterable[int],
-    *,
-    token: SecretStr,
-    cluster_root: Path,
-    quadlet_dir: Path,
-    image: str = DEFAULT_IMAGE,
-    volume_idmap: str | None = None,
-    userns: str | None = None,
-) -> tuple[Path, ...]:
-    selected = tuple(dict.fromkeys(numbers))
-    for number in selected:
-        room(number)
-    store = RoomStore(cluster_root, quadlet_dir)
-    written = []
-    for number in selected:
-        written.extend(
-            store.save(
-                fleet_room(
-                    number,
-                    token=token,
-                    image=image,
-                    volume_idmap=volume_idmap,
-                    userns=userns,
-                )
-            )
-        )
-    return tuple(written)
