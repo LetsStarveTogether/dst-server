@@ -4,8 +4,9 @@ import socket
 from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import urlsplit
 
-from .process import download_environment, run_process
+from dst_server.process import run_process
 
 EXECUTABLE = Path("bin64/dontstarve_dedicated_server_nullrenderer_x64")
 UPDATE_PROCESS_TIMEOUT = 30 * 60
@@ -118,3 +119,43 @@ def free_udp_ports(count: int) -> tuple[int, ...]:
     finally:
         for value in sockets:
             value.close()
+
+
+def validate_argument(name: str, value: str) -> str:
+    if not isinstance(value, str) or not value:
+        msg = f"{name} must not be empty"
+        raise ValueError(msg)
+    if not value.isprintable():
+        msg = f"{name} must not contain control characters"
+        raise ValueError(msg)
+    return value
+
+
+def validate_proxy(proxy: str | None) -> str | None:
+    if proxy is not None:
+        try:
+            address = urlsplit(validate_argument("download proxy", proxy))
+            valid = (
+                address.scheme in {"http", "https"}
+                and bool(address.hostname)
+                and (address.port is None or address.port > 0)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            msg = "download proxy must be an HTTP(S) URL with a valid host and port"
+            raise ValueError(msg)
+    return proxy
+
+
+def download_environment(proxy: str | None = None) -> dict[str, str]:
+    proxy = validate_proxy(proxy)
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name.lower()
+        not in {"http_proxy", "https_proxy", "all_proxy", "ftp_proxy", "no_proxy"}
+    }
+    if proxy is not None:
+        environment.update(dict.fromkeys(("http_proxy", "https_proxy"), proxy))
+    return environment

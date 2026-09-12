@@ -1,11 +1,8 @@
 # ruff: file-ignore[blocking-path-method-in-async-function]
 import asyncio
-import gc
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock
 from weakref import ref
 
@@ -14,13 +11,6 @@ from pydantic import ValidationError
 from ulid import ULID
 
 from dst_server import commands as c
-from dst_server.api import ClusterAPI, ShardAPI
-from dst_server.cluster.subscriptions import (
-    Broadcast,
-    StreamKind,
-    StreamRecord,
-    Subscription,
-)
 from dst_server.errors import (
     ErrorCode,
     IndeterminateCommandError,
@@ -28,158 +18,21 @@ from dst_server.errors import (
     RemoteError,
 )
 from dst_server.events.server import SavedEvent
-from dst_server.events.world import ModOutdatedData, ModOutdatedEvent
 from dst_server.models.cluster import (
-    ClusterStatus,
-    GameEventRecord,
-    LifecycleRecord,
-    LogRecord,
     ModUpdateStatus,
-    ShardDesired,
-    ShardPhase,
-    ShardRuntimeStatus,
-)
-from dst_server.models.snapshot import (
-    Snapshot,
-    SnapshotCatalog,
-    SnapshotClock,
-    WorldSnapshotMetadata,
 )
 from dst_server.rpc import servants as servant_module
 from dst_server.rpc.client import ClusterClient, rpc_runtime
-from dst_server.rpc.codec import ERROR, decode, unwrap_outcome
-from dst_server.rpc.schema import load_schema
+from dst_server.rpc.codec import unwrap_outcome
 from dst_server.rpc.servants import (
-    AgentServant,
     BootstrapServant,
-    ClusterEndpoint,
-    RemoteAgent,
-    WorkerRegistryServant,
 )
-from dst_server.rpc.transport import abstract_rpc_server, filesystem_rpc_server
+from dst_server.rpc.transport import filesystem_rpc_server
 from tests.cluster.helpers import controller as make_controller
 from tests.helpers import wait_for_event
+from tests.rpc.helpers import FakeController, connected
 
 capnp: Any = pytest.importorskip("capnp")
-type Hook = Callable[[c.Request[Any]], Awaitable[Any]]
-
-
-def shard_status() -> ShardRuntimeStatus:
-    return ShardRuntimeStatus(
-        name="Master",
-        is_master=True,
-        desired=ShardDesired.RUNNING,
-        phase=ShardPhase.RUNNING,
-        agent_incarnation=ULID(),
-        ready=True,
-        telemetry_profile="critical",
-    )
-
-
-def log_record(sequence: int, line: str = "line") -> LogRecord:
-    return LogRecord(
-        shard="Master",
-        game_attempt=ULID(),
-        sequence=sequence,
-        observed_timestamp_ns=sequence,
-        line=line,
-    )
-
-
-class FakeShard(ShardAPI):
-    def __init__(self) -> None:
-        self.value = shard_status()
-        self.logs = Broadcast[LogRecord]()
-        self.lifecycle = Broadcast[Any]()
-        self.game_events = Broadcast[Any]()
-        self.requests: list[c.Request[Any]] = []
-        self.hook: Hook | None = None
-        self.catalog = SnapshotCatalog(
-            session_id="SESSION",
-            snapshots=(
-                Snapshot(
-                    snapshot_id=31,
-                    world_file="session/SESSION/0000000031",
-                    metadata=WorldSnapshotMetadata(clock=SnapshotClock(cycles=20)),
-                ),
-                Snapshot(snapshot_id=0),
-            ),
-            has_more=True,
-        )
-
-    async def invoke[T](self, command: c.Request[T]) -> T:
-        self.requests.append(command)
-        if self.hook is not None:
-            return cast("T", await self.hook(command))
-        match command:
-            case c.Status():
-                value = self.value
-            case c.Execute():
-                value = command.source
-            case c.Snapshots():
-                value = self.catalog
-            case c.Save():
-                value = SavedEvent(path="session/SESSION/0000000031", snapshot=31)
-            case _:
-                value = None
-        return cast("T", value)
-
-    def subscribe(self, kind: StreamKind) -> Subscription[Any]:
-        return {
-            "logs": self.logs,
-            "lifecycle": self.lifecycle,
-            "events": self.game_events,
-        }[kind].subscribe()
-
-
-class FakeController(ClusterAPI):
-    def __init__(self) -> None:
-        self.master = FakeShard()
-        self.value = ClusterStatus(
-            epoch=ULID(), phase="running", master="Master", shards=(self.master.value,)
-        )
-        self.requests: list[c.Request[Any]] = []
-        self.hook: Hook | None = None
-
-    async def invoke[T](self, command: c.Request[T]) -> T:
-        self.requests.append(command)
-        if self.hook is not None:
-            return cast("T", await self.hook(command))
-        match command:
-            case c.ClusterStatusQuery():
-                value = self.value
-            case c.Snapshots():
-                value = self.master.catalog
-            case c.RollbackToDay():
-                value = self.master.catalog.snapshots[0]
-            case _:
-                value = None
-        return cast("T", value)
-
-    def shard(self, name: str) -> FakeShard:
-        if name != "Master":
-            raise KeyError(name)
-        return self.master
-
-    def subscribe(self, kind: StreamKind) -> Subscription[Any]:
-        return self.master.subscribe(kind)
-
-
-@asynccontextmanager
-async def connected(
-    tmp_path: Path, controller: ClusterEndpoint
-) -> AsyncIterator[ClusterClient]:
-    tmp_path.chmod(0o700)
-    path = tmp_path / "cluster.sock"
-    watchdog = asyncio.timeout(5)
-    async with (
-        watchdog,
-        rpc_runtime(),
-        filesystem_rpc_server(path, lambda: BootstrapServant(controller)),
-        await ClusterClient.connect(path) as client,
-    ):
-        yield client
-    assert not watchdog.expired(), "RPC test exceeded its watchdog"
 
 
 async def test_typed_commands_cross_real_capabilities(tmp_path: Path) -> None:
@@ -501,120 +354,6 @@ async def test_query_cancellation_reaches_handler(tmp_path: Path, raw: bool) -> 
                 await asyncio.gather(pending, return_exceptions=True)
 
 
-async def test_subscription_kinds_reach_cluster_and_shard_clients(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    controller, master, _, _, _ = await make_controller(tmp_path, monkeypatch)
-    log = log_record(1)
-    fields = log.model_dump(exclude={"line"})
-    records: dict[StreamKind, StreamRecord] = {
-        "logs": log,
-        "lifecycle": LifecycleRecord(
-            **fields, event=SavedEvent(path="session/world/1", snapshot=1)
-        ),
-        "events": GameEventRecord(
-            **fields,
-            event=ModOutdatedEvent(
-                v=2,
-                nonce=str(log.game_attempt),
-                generation=1,
-                session_id="world",
-                seq=1,
-                event="dst.mod.outdated",
-                tick=1,
-                monotonic_ms=1,
-                cycle=1,
-                data=ModOutdatedData(name="Insight"),
-            ),
-        ),
-    }
-    sources: dict[StreamKind, Broadcast[Any]] = {
-        "logs": master.logs,
-        "lifecycle": master.lifecycle,
-        "events": master.game_events,
-    }
-    try:
-        async with connected(tmp_path, controller) as client:
-            for kind, record in records.items():
-                async with (
-                    await client.subscribe(kind) as room,
-                    await client.shard("Master").subscribe(kind) as shard,
-                ):
-                    sources[kind].publish(record)
-                    async with asyncio.timeout(1):
-                        assert await room.next() == await shard.next() == (record,)
-    finally:
-        await controller.aclose()
-
-
-async def test_subscription_overflow_is_recoverable_and_close_releases(
-    tmp_path: Path,
-) -> None:
-    controller = FakeController()
-    async with connected(tmp_path, controller) as client:
-        subscription = await client.subscribe("logs")
-        for sequence in range(1025):
-            controller.master.logs.publish(log_record(sequence))
-        with pytest.raises(RemoteError) as overflow:
-            await subscription.next()
-        assert overflow.value.error.code is ErrorCode.OVERFLOW
-        assert (await subscription.next())[0].sequence == 1024
-        await subscription.close()
-        assert subscription.closed
-        assert not controller.master.logs._subscriptions
-
-
-async def test_subscription_validation_and_capability_gc(tmp_path: Path) -> None:
-    controller = FakeController()
-    async with connected(tmp_path, controller) as client:
-        subscription = await client.subscribe("logs")
-        with pytest.raises(ValidationError):
-            await subscription.next(0)
-        response = await subscription._capability.next(maxItems=0)
-        assert decode(ERROR, response.batch.error).code is ErrorCode.INVALID_ARGUMENT
-        assert not controller.master.logs._subscriptions
-        subscription = await client.subscribe("logs")
-        del subscription
-        gc.collect()
-        async with asyncio.timeout(1):
-            while controller.master.logs._subscriptions:  # ruff: ignore[async-busy-wait]
-                await asyncio.sleep(0)
-
-
-async def test_repeated_connections_release_subscriptions_and_roots(
-    tmp_path: Path,
-) -> None:
-    tmp_path.chmod(0o700)
-    controller = FakeController()
-    roots = []
-
-    def bootstrap() -> BootstrapServant:
-        servant = BootstrapServant(controller)
-        roots.append(ref(servant))
-        return servant
-
-    path = tmp_path / "cluster.sock"
-    async with (
-        asyncio.timeout(5),
-        rpc_runtime(),
-        filesystem_rpc_server(path, bootstrap) as server,
-    ):
-        for sequence in range(10):
-            async with (
-                await ClusterClient.connect(path) as client,
-                await client.subscribe("logs") as subscription,
-            ):
-                controller.master.logs.publish(log_record(sequence))
-                assert (await subscription.next())[0].sequence == sequence
-            del subscription, client
-        async with asyncio.timeout(1):
-            while server.tasks:  # ruff: ignore[async-busy-wait]
-                await asyncio.sleep(0)
-        assert not server.connections
-        assert not controller.master.logs._subscriptions
-        assert all(reference() is None for reference in roots)
-
-
 async def test_shard_handles_are_cached_only_while_in_use(tmp_path: Path) -> None:
     controller = FakeController()
     async with connected(tmp_path, controller) as client:
@@ -640,67 +379,6 @@ def test_client_close_releases_connection_and_shard_capabilities() -> None:
     client.close()
 
     assert all(reference() is None for reference in references)
-
-
-async def test_remote_relay_releases_delivered_batch() -> None:
-    agent = RemoteAgent(None)
-    source, target = Broadcast[LogRecord](), Broadcast[LogRecord]()
-    incoming, outgoing = source.subscribe(), target.subscribe()
-    subscription: Any = SimpleNamespace(next=lambda: incoming.next(256))
-    relay = asyncio.create_task(agent._relay_stream(subscription, target, "logs"))
-    references = []
-    for sequence in range(3):
-        record = log_record(sequence, "x" * 1024 * 1024)
-        references.append(ref(record))
-        source.publish(record)
-    del record
-    try:
-        async with asyncio.timeout(1):
-            batch = await outgoing.next(3)
-        assert len(batch) == 3
-        del batch
-        assert all(reference() is None for reference in references)
-    finally:
-        source.close()
-        outgoing.close()
-        async with asyncio.timeout(5):
-            await relay
-            await agent.aclose()
-
-
-async def test_failed_remote_stream_exits_without_retaining_frames() -> None:
-    agent = RemoteAgent(None)
-    references = []
-
-    class BrokenSubscription:
-        async def next(self) -> None:
-            record = log_record(0, "x" * 1024 * 1024)
-            references.append(ref(record))
-            msg = "stream failed"
-            raise ValueError(msg)
-
-        async def close(self) -> None:
-            pass
-
-    await agent._pump(cast("Any", BrokenSubscription()), agent.logs, "logs")
-    assert references
-    assert references[0]() is None
-    await agent.aclose()
-
-
-async def test_remote_agent_close_releases_capability() -> None:
-    class Capability:
-        pass
-
-    capability = Capability()
-    reference = ref(capability)
-    agent = RemoteAgent(capability)
-    del capability
-
-    async with asyncio.timeout(5):
-        await agent.aclose()
-
-    assert reference() is None
 
 
 async def test_client_releases_encoded_request_while_waiting(
@@ -742,7 +420,7 @@ async def test_call_releases_native_request_before_running_handler(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
-    respond = servant_module._EndpointMethods._respond
+    respond = servant_module.EndpointMethods._respond
 
     async def inspect_context(
         self: Any, context: Any, method: str, *args: Any, **kwargs: Any
@@ -758,7 +436,7 @@ async def test_call_releases_native_request_before_running_handler(
         assert isinstance(command, c.Execute)
         return command.source
 
-    monkeypatch.setattr(servant_module._EndpointMethods, "_respond", inspect_context)
+    monkeypatch.setattr(servant_module.EndpointMethods, "_respond", inspect_context)
     controller = FakeController()
     controller.master.hook = blocked
     async with connected(tmp_path, controller) as client:
@@ -790,121 +468,3 @@ async def test_connection_timeout_covers_socket_creation(
     async with asyncio.timeout(5):
         with pytest.raises(TimeoutError):
             await ClusterClient.connect("unused", timeout=0.01)
-
-
-class RegistryController:
-    def __init__(self, *, blocked: bool = False) -> None:
-        self.registered: Any = None
-        self.unregistered = asyncio.Event()
-        self.registration_entered = asyncio.Event()
-        self.registration_release = asyncio.Event()
-        self.blocked = blocked
-        self.registration_calls = 0
-
-    async def register(self, endpoint: Any) -> None:
-        self.registration_calls += 1
-        self.registration_entered.set()
-        if self.blocked:
-            await self.registration_release.wait()
-        self.registered = endpoint
-
-    async def unregister(self, endpoint: Any) -> bool:
-        assert endpoint is self.registered
-        self.unregistered.set()
-        return True
-
-    async def failed(self, endpoint: Any) -> bool:
-        return endpoint is self.registered
-
-
-async def open_registry(name: str) -> tuple[Any, Any, Any, Any]:
-    stream = await capnp.AsyncIoStream.create_unix_connection(f"\0{name}")
-    client = capnp.TwoPartyClient(stream)
-    return (
-        stream,
-        client,
-        client.bootstrap().cast_as(load_schema().WorkerRegistry),
-        client.on_disconnect(),
-    )
-
-
-async def test_registry_capability_and_disconnect_lifecycle() -> None:
-    controller = RegistryController()
-    target = FakeShard()
-    servant = AgentServant(target)
-    name = f"dst-registry-{ULID()}"
-    try:
-        async with (
-            asyncio.timeout(5),
-            rpc_runtime(),
-            abstract_rpc_server(lambda: WorkerRegistryServant(controller), name),
-        ):
-            stream, client, registry, disconnected = await open_registry(name)
-            try:
-                unwrap_outcome((await registry.register(agent=servant)).result)
-                remote = controller.registered
-                assert (remote.name, remote.master, remote.incarnation) == (
-                    "Master",
-                    True,
-                    str(target.value.agent_incarnation),
-                )
-                assert (
-                    await remote.invoke(c.Snapshots(limit=7, before=0))
-                    == target.catalog
-                )
-                assert target.requests[-1] == c.Snapshots(limit=7, before=0)
-                with pytest.raises(RemoteError) as duplicate:
-                    unwrap_outcome((await registry.register(agent=servant)).result)
-                assert duplicate.value.error.code is ErrorCode.INVALID_STATE
-                forwarded = remote.logs.subscribe()
-                try:
-                    record = log_record(1, "forwarded")
-                    target.logs.publish(record)
-                    assert await forwarded.next(1) == (record,)
-                finally:
-                    forwarded.close()
-                unwrap_outcome((await registry.failed()).result)
-            finally:
-                client.close()
-                stream.close()
-            await disconnected
-            await wait_for_event(controller.unregistered)
-    finally:
-        async with asyncio.timeout(5):
-            await servant.aclose()
-    assert not target.logs._subscriptions
-
-
-async def test_disconnect_during_registration_rolls_back_capability() -> None:
-    controller = RegistryController(blocked=True)
-    target = FakeShard()
-    servant = AgentServant(target)
-    name = f"dst-registry-race-{ULID()}"
-    try:
-        async with (
-            asyncio.timeout(5),
-            rpc_runtime(),
-            abstract_rpc_server(lambda: WorkerRegistryServant(controller), name),
-        ):
-            stream, client, registry, disconnected = await open_registry(name)
-            pending = asyncio.ensure_future(registry.register(agent=servant))
-            try:
-                await wait_for_event(controller.registration_entered, pending)
-                client.close()
-                stream.close()
-                await disconnected
-                controller.registration_release.set()
-                with pytest.raises(capnp.KjException):
-                    await pending
-                await wait_for_event(controller.unregistered)
-            finally:
-                controller.registration_release.set()
-                client.close()
-                stream.close()
-                pending.cancel()
-                async with asyncio.timeout(5):
-                    await asyncio.gather(pending, return_exceptions=True)
-    finally:
-        async with asyncio.timeout(5):
-            await servant.aclose()
-    assert not target.logs._subscriptions

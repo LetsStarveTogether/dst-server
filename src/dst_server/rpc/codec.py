@@ -2,8 +2,8 @@ from typing import Any
 
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
-from dst_server.commands import validate_json_structure
 from dst_server.errors import ErrorCode, ErrorInfo, IndeterminateError, RemoteError
+from dst_server.json_codec import validate_json_structure
 from dst_server.models.base import JSON_VALUE
 
 ERROR = TypeAdapter(ErrorInfo)

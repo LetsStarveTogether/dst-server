@@ -53,7 +53,7 @@ function commands.save(args, callback)
     if not ok then require("dst_server.wire").indeterminate() end
 end
 
-function commands.set_server_paused(args)
+function commands.pause(args)
     local paused = values.required_boolean(args, "paused")
     SetServerPaused(paused)
     return TheNet:IsServerPaused(true) == paused
@@ -64,7 +64,7 @@ function commands.reset()
     return true
 end
 
-function commands.regenerate_world(args)
+function commands.regenerate(args)
     if args.expected_session_id ~= nil then
         local expected = values.required_string(args, "expected_session_id")
         if TheWorld == nil or TheWorld.meta == nil or TheWorld.meta.session_identifier ~= expected then
@@ -130,12 +130,12 @@ function commands.rollback_to_snapshot(args)
     return true
 end
 
-function commands.kick_player(args)
+function commands.kick(args)
     TheNet:Kick(values.required_string(args, "userid"))
     return true
 end
 
-function commands.ban_player(args)
+function commands.ban(args)
     local userid = values.required_string(args, "userid")
     if args.seconds == nil then
         TheNet:Ban(userid)
@@ -145,7 +145,7 @@ function commands.ban_player(args)
     return true
 end
 
-function commands.get_blocklist()
+function commands.blocklist()
     local result = {}
     for _, entry in ipairs(TheNet:GetBlacklist() or {}) do
         if type(entry) == "table" then
@@ -172,7 +172,7 @@ function commands.is_blocked(args)
     return false
 end
 
-function commands.unban_player(args)
+function commands.unban(args)
     local userid = values.required_string(args, "userid")
     local blacklist = TheNet:GetBlacklist() or {}
     local changed = false
@@ -194,19 +194,19 @@ function commands.is_whitelisted(args)
     return TheNet:IsWhiteListed(values.required_string(args, "userid")) == true
 end
 
-function commands.whitelist_player(args)
+function commands.whitelist(args)
     local userid = values.required_string(args, "userid")
     TheNet:AddToWhiteList(userid)
     return TheNet:IsWhiteListed(userid) == true
 end
 
-function commands.unwhitelist_player(args)
+function commands.unwhitelist(args)
     local userid = values.required_string(args, "userid")
     TheNet:RemoveFromWhiteList(userid)
     return TheNet:IsWhiteListed(userid) ~= true
 end
 
-function commands.set_player_vitals(args)
+function commands.set_vitals(args)
     local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
     if player == nil or player:HasTag("playerghost") then
         return false
@@ -244,7 +244,7 @@ function commands.kill_player(args)
     return true
 end
 
-function commands.revive_player(args)
+function commands.revive(args)
     local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
     if player == nil then
         return false
@@ -260,7 +260,7 @@ function commands.revive_player(args)
     return false
 end
 
-function commands.despawn_player(args)
+function commands.despawn(args)
     local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
     if player == nil or not player:IsValid() then
         return false
@@ -271,7 +271,7 @@ function commands.despawn_player(args)
     return true
 end
 
-function commands.migrate_player(args)
+function commands.migrate(args)
     local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
     local world_id = values.required_string(args, "shard_id")
     local portal_id = values.required_integer(args, "portal_id", 1)
@@ -289,7 +289,7 @@ function commands.migrate_player(args)
     return true
 end
 
-function commands.teleport_player(args)
+function commands.teleport(args)
     local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
     if player == nil then
         return false
@@ -308,9 +308,9 @@ function commands.teleport_player(args)
     return true
 end
 
-function commands.give_item(args)
+function commands.give(args)
     local userid = values.required_string(args, "userid")
-    local prefab = string.lower(values.required_string(args, "prefab"))
+    local prefab = string.lower(values.required_string(args, "item"))
     local count = values.required_integer(args, "count", 1)
     if count > MAX_GIVE_ITEMS then
         error("count must not exceed " .. tostring(MAX_GIVE_ITEMS))
@@ -335,12 +335,12 @@ function commands.give_item(args)
     return created
 end
 
-function commands.remove_item(args)
+function commands.remove(args)
     local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
     if player == nil or player.components.inventory == nil then
         return 0
     end
-    local prefab = string.lower(values.required_string(args, "prefab"))
+    local prefab = string.lower(values.required_string(args, "item"))
     local count = values.required_integer(args, "count", 1)
     local inventory = player.components.inventory
     local _, found = inventory:Has(prefab, count)
@@ -349,7 +349,7 @@ function commands.remove_item(args)
     return removed
 end
 
-function commands.execute_script(args)
+function commands.execute_json(args)
     local source = values.required_string(args, "source")
     local callback, message = loadstring(source, "@dst-server-sdk")
     if callback == nil then

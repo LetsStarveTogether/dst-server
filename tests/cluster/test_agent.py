@@ -34,7 +34,7 @@ from dst_server.runtime.supervisor import (
     ShardSupervisor,
     ShardSupervisorStatus,
 )
-from tests.helpers import FAKE_SERVER
+from tests.runtime.helpers import FAKE_SERVER
 
 
 def supervisor_status(

@@ -9,7 +9,6 @@ from pydantic import JsonValue, ValidationError
 from dst_server import commands as c
 from dst_server.errors import IndeterminateCommandError
 from dst_server.game import GameClient
-from dst_server.game.client import _METHODS
 from dst_server.game.rpc import (
     MAX_RESULT_LINE_BYTES,
     LuaRequestError,
@@ -33,7 +32,8 @@ from dst_server.models.driver import DriverHealth
 from dst_server.models.snapshot import SnapshotCatalog
 from dst_server.timeouts import DEFAULT_RELOAD_TIMEOUT
 from tests.game.helpers import make_game
-from tests.helpers import run_lua, structured_result
+from tests.lua.helpers import run_lua
+from tests.runtime.helpers import structured_result
 
 MAX_GIVE_ITEMS = 64
 
@@ -42,23 +42,23 @@ type Invocation = Callable[[GameClient], Awaitable[object]]
 
 ROUTES = [
     (lambda game: game.invoke(c.Health()), "health", {}, DriverHealth),
-    (lambda game: game.invoke(c.Room()), "get_room", {}, Room),
-    (lambda game: game.invoke(c.World()), "get_world", {}, World),
-    (lambda game: game.invoke(c.Runtime()), "get_runtime", {}, Runtime),
+    (lambda game: game.invoke(c.Room()), "room", {}, Room),
+    (lambda game: game.invoke(c.World()), "world", {}, World),
+    (lambda game: game.invoke(c.Runtime()), "runtime", {}, Runtime),
     (
         lambda game: game.invoke(c.Snapshots(limit=23, before=101)),
-        "get_snapshots",
+        "list_snapshots",
         {"limit": 23, "before": 101},
         SnapshotCatalog,
     ),
-    (lambda game: game.invoke(c.Mods()), "get_mods", {}, tuple[Mod, ...]),
+    (lambda game: game.invoke(c.Mods()), "mods", {}, tuple[Mod, ...]),
     (
         lambda game: game.invoke(c.ConnectedShards()),
-        "get_shards",
+        "connected_shards",
         {"current_name": "Master"},
         tuple[ShardStatus, ...],
     ),
-    (lambda game: game.players.list(), "get_players", {}, tuple[Player, ...]),
+    (lambda game: game.players.list(), "list_players", {}, tuple[Player, ...]),
     (
         lambda game: game.players.get("KU_TEST"),
         "get_player",
@@ -67,7 +67,7 @@ ROUTES = [
     ),
     (
         lambda game: game.players.inventory("KU_TEST"),
-        "get_player_inventory",
+        "inventory",
         {"userid": "KU_TEST"},
         Inventory | None,
     ),
@@ -79,7 +79,7 @@ ROUTES = [
     ),
     (
         lambda game: game.invoke(c.Pause(paused=True)),
-        "set_server_paused",
+        "pause",
         {"paused": True},
         bool,
     ),
@@ -88,7 +88,7 @@ ROUTES = [
         lambda game: game.invoke(
             c.Regenerate(expected_session_id="SESSION", require_empty=True)
         ),
-        "regenerate_world",
+        "regenerate",
         {"expected_session_id": "SESSION", "require_empty": True},
         bool,
     ),
@@ -114,19 +114,19 @@ ROUTES = [
     ),
     (
         lambda game: game.players.kick("KU_TEST"),
-        "kick_player",
+        "kick",
         {"userid": "KU_TEST"},
         bool,
     ),
     (
         lambda game: game.players.ban("KU_TEST", seconds=60),
-        "ban_player",
+        "ban",
         {"userid": "KU_TEST", "seconds": 60},
         bool,
     ),
     (
         lambda game: game.players.blocklist(),
-        "get_blocklist",
+        "blocklist",
         {},
         tuple[Identifier, ...],
     ),
@@ -138,7 +138,7 @@ ROUTES = [
     ),
     (
         lambda game: game.players.unban("KU_TEST"),
-        "unban_player",
+        "unban",
         {"userid": "KU_TEST"},
         bool,
     ),
@@ -150,13 +150,13 @@ ROUTES = [
     ),
     (
         lambda game: game.invoke(c.Whitelist(userid="KU_TEST")),
-        "whitelist_player",
+        "whitelist",
         {"userid": "KU_TEST"},
         bool,
     ),
     (
         lambda game: game.invoke(c.Unwhitelist(userid="KU_TEST")),
-        "unwhitelist_player",
+        "unwhitelist",
         {"userid": "KU_TEST"},
         bool,
     ),
@@ -168,7 +168,7 @@ ROUTES = [
             temperature=25,
             moisture=0,
         ),
-        "set_player_vitals",
+        "set_vitals",
         {
             "userid": "KU_TEST",
             "health": 0.5,
@@ -186,43 +186,43 @@ ROUTES = [
     ),
     (
         lambda game: game.players.revive("KU_TEST"),
-        "revive_player",
+        "revive",
         {"userid": "KU_TEST"},
         bool,
     ),
     (
         lambda game: game.players.despawn("KU_TEST"),
-        "despawn_player",
+        "despawn",
         {"userid": "KU_TEST"},
         bool,
     ),
     (
         lambda game: game.players.migrate("KU_TEST", "2", portal_id=3),
-        "migrate_player",
+        "migrate",
         {"userid": "KU_TEST", "shard_id": "2", "portal_id": 3},
         bool,
     ),
     (
         lambda game: game.players.teleport("KU_TEST", x=1, y=0, z=-2.5),
-        "teleport_player",
+        "teleport",
         {"userid": "KU_TEST", "x": 1.0, "y": 0.0, "z": -2.5},
         bool,
     ),
     (
         lambda game: game.players.give("KU_TEST", "Twigs", 3),
-        "give_item",
-        {"userid": "KU_TEST", "prefab": "twigs", "count": 3},
+        "give",
+        {"userid": "KU_TEST", "item": "Twigs", "count": 3},
         int,
     ),
     (
         lambda game: game.players.remove("KU_TEST", "Twigs", 2),
-        "remove_item",
-        {"userid": "KU_TEST", "prefab": "twigs", "count": 2},
+        "remove",
+        {"userid": "KU_TEST", "item": "Twigs", "count": 2},
         int,
     ),
     (
         lambda game: game.invoke(c.ExecuteJson(source="return {answer=42}")),
-        "execute_script",
+        "execute_json",
         {"source": "return {answer=42}"},
         JsonValue,
     ),
@@ -237,16 +237,16 @@ ROUTES = [
 VOID_METHODS = {
     "announce",
     "reset",
-    "regenerate_world",
+    "regenerate",
     "regenerate_shard",
     "rollback",
     "rollback_to_snapshot",
-    "kick_player",
-    "ban_player",
+    "kick",
+    "ban",
 }
 RELOAD_METHODS = {
     "reset",
-    "regenerate_world",
+    "regenerate",
     "regenerate_shard",
     "rollback",
     "rollback_to_snapshot",
@@ -254,7 +254,9 @@ RELOAD_METHODS = {
 
 
 def test_routing_cases_cover_every_registered_game_method() -> None:
-    assert {method for _, method, _, _ in ROUTES} == set(_METHODS.values())
+    assert {method for _, method, _, _ in ROUTES} == {
+        spec.request.method for spec in c.OPERATIONS if spec.game
+    }
 
 
 @pytest.mark.parametrize(
@@ -272,10 +274,10 @@ async def test_public_api_routes_typed_requests(
     game, _ = make_game()
     response: object = object()
     expected_player_count = 0
-    if method == "get_room":
+    if method == "room":
         response = SimpleNamespace(player_count=3)
         expected_player_count = 3
-    elif method == "get_players":
+    elif method == "list_players":
         response = (object(), object())
         expected_player_count = 2
     request = AsyncMock(return_value=response)
@@ -306,6 +308,15 @@ async def test_save_returns_only_the_correlated_snapshot_path() -> None:
     assert saved.snapshot == 27
     assert saved.path == "session/SESSION/0000000027"
     assert commands == [("save", {})]
+
+
+@pytest.mark.parametrize(
+    "path", ["", "session/SESSION/unknown", "session/SESSION/9007199254740992"]
+)
+async def test_save_rejects_missing_or_invalid_snapshot_number(path: str) -> None:
+    game, _ = make_game(structured_result({"snapshot": path}))
+    with pytest.raises(IndeterminateCommandError):
+        await game.request_save()
 
 
 async def test_request_passes_untrusted_text_as_data() -> None:
@@ -343,7 +354,7 @@ def test_native_snapshot_pages_cover_long_history(lua_runtime: str) -> None:
                 return result, count < 237
             end,
         }
-        local query = require("dst_server.world_queries").get_snapshots
+        local query = require("dst_server.world_queries").list_snapshots
         local wire = require("dst_server.wire")
         local before = nil
         repeat
@@ -438,7 +449,7 @@ async def test_partial_native_mutation_is_indeterminate(lua_runtime: str) -> Non
             }
         end
         local result = require("dst_server.wire").response(function()
-            return require("dst_server.commands").set_player_vitals({
+            return require("dst_server.commands").set_vitals({
                 userid = "KU_TEST", health = 0.5, hunger = 0.5,
             })
         end)
@@ -455,7 +466,7 @@ async def test_partial_native_mutation_is_indeterminate(lua_runtime: str) -> Non
     assert isinstance(caught.value.__cause__, LuaRequestError)
     assert caught.value.__cause__.code == "lua_error"
     assert executed == [
-        ("set_player_vitals", {"userid": "KU_TEST", "health": 0.5, "hunger": 0.5})
+        ("set_vitals", {"userid": "KU_TEST", "health": 0.5, "hunger": 0.5})
     ]
 
 
@@ -498,7 +509,7 @@ async def test_regeneration_rechecks_world_and_players_at_execution(
             require_empty = scenario ~= "allow_players",
         }
         local queued = function()
-            return require("dst_server.commands").regenerate_world(args)
+            return require("dst_server.commands").regenerate(args)
         end
         -- Conditions may change after a request is queued and before Lua executes it.
         if scenario == "session_changed" or scenario == "manual" then
@@ -664,8 +675,8 @@ async def test_give_enforces_spawn_limit(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert await game.players.give("KU_TEST", "Twigs", MAX_GIVE_ITEMS) == 64
     request.assert_awaited_once_with(
-        "give_item",
-        {"userid": "KU_TEST", "prefab": "twigs", "count": MAX_GIVE_ITEMS},
+        "give",
+        {"userid": "KU_TEST", "item": "Twigs", "count": MAX_GIVE_ITEMS},
         response_adapter(int),
     )
 

@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from dst_server.events.player import CombatData, RevivedEvent
 from dst_server.events.world import PauseChangedEvent, StateChangedEvent
 from dst_server.runtime.operational import classify_log
-from tests.helpers import native_functions, native_scripts, run_lua_process
+from tests.lua.helpers import native_functions, native_scripts, run_lua_process
 
 
 @pytest.fixture(scope="module")

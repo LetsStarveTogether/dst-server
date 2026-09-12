@@ -5,15 +5,17 @@ import pytest
 
 from dst_server import commands as c
 from dst_server.events import GAME_EVENT_ADAPTER
-from dst_server.game.client import _METHODS
 from dst_server.game.rpc import SAVE_RESPONSE, response_adapter
-from tests.helpers import native_scripts, run_lua_process
+from tests.lua.helpers import native_scripts, run_lua_process
 
 PREFIX = "DST_OTEL|"
 
 RPC_ADAPTERS = {
-    method: response_adapter(c.operation("agent", command.method).result_type or bool)
-    for command, method in _METHODS.items()
+    spec.request.method: response_adapter(
+        bool if spec.result_type is None else spec.result_type
+    )
+    for spec in c.OPERATIONS
+    if spec.game
 } | {"save": SAVE_RESPONSE}
 
 
@@ -83,17 +85,17 @@ def test_registered_lua_queries(rpc_data: dict[str, Any]) -> None:
         "events_emitted": 0,
         "errors": 0,
     }
-    assert data["get_room"]["name"] == "Test Room"
-    assert data["get_room"]["player_count"] == 2
-    assert data["get_room"]["max_players"] == 6
-    assert data["get_room"]["playstyle"] is None
-    assert data["get_world"]["age"] == 1000
-    assert data["get_world"]["day"] == 11
-    assert data["get_world"]["phase"] == "day"
-    assert data["get_world"]["season"] == "autumn"
-    assert data["get_runtime"]["session_id"] == "SESSION"
-    assert data["get_runtime"]["snapshot"] == 26
-    assert data["get_snapshots"] == {
+    assert data["room"]["name"] == "Test Room"
+    assert data["room"]["player_count"] == 2
+    assert data["room"]["max_players"] == 6
+    assert data["room"]["playstyle"] is None
+    assert data["world"]["age"] == 1000
+    assert data["world"]["day"] == 11
+    assert data["world"]["phase"] == "day"
+    assert data["world"]["season"] == "autumn"
+    assert data["runtime"]["session_id"] == "SESSION"
+    assert data["runtime"]["snapshot"] == 26
+    assert data["list_snapshots"] == {
         "session_id": "SESSION",
         "snapshots": [
             {
@@ -104,10 +106,10 @@ def test_registered_lua_queries(rpc_data: dict[str, Any]) -> None:
         ],
         "has_more": True,
     }
-    assert data["get_mods"] == [
+    assert data["mods"] == [
         {"id": "workshop-1", "name": "Test Mod", "version": "1.2.3"}
     ]
-    assert data["get_shards"] == [
+    assert data["connected_shards"] == [
         {"id": "1", "name": "Master", "is_current": True, "ready": True, "tags": []},
         {
             "id": "2",
@@ -132,9 +134,9 @@ def test_registered_lua_queries(rpc_data: dict[str, Any]) -> None:
 def test_world_response_preserves_mod_state(
     rpc_data: dict[str, Any], field: str, value: str
 ) -> None:
-    response = RPC_ADAPTERS["get_world"].validate_python({
+    response = RPC_ADAPTERS["world"].validate_python({
         "ok": True,
-        "data": rpc_data["get_world"] | {field: value},
+        "data": rpc_data["world"] | {field: value},
     })
 
     assert response.ok
@@ -143,7 +145,7 @@ def test_world_response_preserves_mod_state(
 
 def test_lua_player_values_and_loading_state(rpc_data: dict[str, Any]) -> None:
     data = rpc_data
-    player, loading = data["get_players"]
+    player, loading = data["list_players"]
     assert player["userid"] == "KU_TEST"
     assert player["position"] == {"x": 1, "y": 0, "z": 2}
     assert player["age"] == {"seconds": 100, "days": 2, "display_days": 3}
@@ -171,7 +173,7 @@ def test_lua_player_values_and_loading_state(rpc_data: dict[str, Any]) -> None:
 
 
 def test_lua_inventory_values(rpc_data: dict[str, Any]) -> None:
-    inventory = rpc_data["get_player_inventory"]
+    inventory = rpc_data["inventory"]
     assert inventory["userid"] == "KU_TEST"
     assert inventory["items"] == [
         {
@@ -200,13 +202,13 @@ def test_lua_inventory_values(rpc_data: dict[str, Any]) -> None:
 
 def test_lua_mutation_results(rpc_data: dict[str, Any]) -> None:
     data = rpc_data
-    assert data["get_blocklist"] == ["KU_BLOCKED", "KU_KEEP", "Steam_ONLY"]
+    assert data["blocklist"] == ["KU_BLOCKED", "KU_KEEP", "Steam_ONLY"]
     for method, adapter in RPC_ADAPTERS.items():
         if adapter is response_adapter(bool):
             assert data[method] is True, method
-    assert data["give_item"] == 1
-    assert data["remove_item"] == 1
-    assert data["execute_script"] == {"answer": 42}
+    assert data["give"] == 1
+    assert data["remove"] == 1
+    assert data["execute_json"] == {"answer": 42}
     assert data["evaluate"] == {
         "output": "",
         "values": [

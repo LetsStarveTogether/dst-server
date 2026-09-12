@@ -39,7 +39,7 @@ from dst_server.logs import (
     NetdataLogResult,
     NetdataLogs,
 )
-from dst_server.mods.process import run_process
+from dst_server.process import run_process
 from dst_server.rooms import (
     DEFAULT_QUADLET_DIR,
     DEFAULT_ROOT,

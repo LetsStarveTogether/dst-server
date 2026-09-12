@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from dst_server.events import GAME_EVENT_ADAPTER
-from tests.helpers import run_lua_process
+from tests.lua.helpers import run_lua_process
 
 
 @pytest.mark.parametrize(

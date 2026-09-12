@@ -8,7 +8,7 @@ import pytest
 
 from dst_server.mods import native as mods
 from tests.helpers import process_stopped
-from tests.mods.test_files import write_updater
+from tests.mods.helpers import write_updater
 
 COMPLETE = (
     "[00:00:31]: FinishDownloadingServerMods Complete! Process trying to quit nicely.."

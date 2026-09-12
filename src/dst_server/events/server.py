@@ -21,6 +21,11 @@ class SavedEvent(FrozenModel):
     path: Annotated[str, Field(max_length=4096)]
     snapshot: NonNegativeSafeLuaInteger | None
 
+    @classmethod
+    def from_path(cls, path: str) -> SavedEvent:
+        tail = path.rsplit("/", 1)[-1]
+        return cls(path=path, snapshot=int(tail) if tail.isdigit() else None)
+
 
 class StoppingEvent(FrozenModel):
     event: Literal["stopping"] = "stopping"
@@ -54,12 +59,7 @@ def parse_event(line: str) -> Event:
             if session_id:
                 return SessionEvent(session_id=session_id)
         if line == "DST_Saved" or line.startswith("DST_Saved|"):
-            path = line.partition("|")[2]
-            tail = path.rsplit("/", 1)[-1]
-            return SavedEvent(
-                path=path,
-                snapshot=int(tail) if tail.isdigit() else None,
-            )
+            return SavedEvent.from_path(line.partition("|")[2])
         if line == "DST_Stopping":
             return StoppingEvent()
         if line == "DST_Shutdown":

@@ -13,7 +13,8 @@ from dst_server.events.server import SavedEvent
 from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime import server as server_module
 from dst_server.runtime.console import Console
-from tests.helpers import StubWriter, feed_response, next_request, wait_for_event
+from tests.helpers import wait_for_event
+from tests.runtime.helpers import StubWriter, feed_response, next_request
 
 
 @pytest.mark.parametrize("kind", ["log", "stats", "log-then-stats"])

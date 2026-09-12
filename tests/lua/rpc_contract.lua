@@ -288,40 +288,40 @@ driver.install({ nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV", generation = 1, profile =
 
 local calls = {
     { "health", {} },
-    { "get_room", {} },
-    { "get_world", {} },
-    { "get_runtime", {} },
-    { "get_snapshots", { limit = 1 } },
-    { "get_mods", {} },
-    { "get_shards", { current_name = "Master" } },
-    { "get_players", {} },
+    { "room", {} },
+    { "world", {} },
+    { "runtime", {} },
+    { "list_snapshots", { limit = 1 } },
+    { "mods", {} },
+    { "connected_shards", { current_name = "Master" } },
+    { "list_players", {} },
     { "get_player", { userid = "KU_LOADING" } },
-    { "get_player_inventory", { userid = "KU_TEST" } },
+    { "inventory", { userid = "KU_TEST" } },
     { "announce", { message = "hello" } },
     { "save", {} },
-    { "set_server_paused", { paused = true } },
+    { "pause", { paused = true } },
     { "reset", {} },
-    { "regenerate_world", {} },
+    { "regenerate", {} },
     { "regenerate_shard", { preserve_settings = true } },
     { "rollback", { count = 1 } },
     { "rollback_to_snapshot", { session_id = "SESSION", snapshot_id = 23 } },
-    { "kick_player", { userid = "KU_TEST" } },
-    { "ban_player", { userid = "KU_TEST", seconds = 60 } },
-    { "get_blocklist", {} },
+    { "kick", { userid = "KU_TEST" } },
+    { "ban", { userid = "KU_TEST", seconds = 60 } },
+    { "blocklist", {} },
     { "is_blocked", { userid = "Steam_BLOCKED" } },
-    { "unban_player", { userid = "KU_BLOCKED" } },
+    { "unban", { userid = "KU_BLOCKED" } },
     { "is_whitelisted", { userid = "KU_TEST" } },
-    { "whitelist_player", { userid = "KU_FRIEND" } },
-    { "unwhitelist_player", { userid = "KU_TEST" } },
-    { "set_player_vitals", { userid = "KU_TEST", health = 0.5 } },
+    { "whitelist", { userid = "KU_FRIEND" } },
+    { "unwhitelist", { userid = "KU_TEST" } },
+    { "set_vitals", { userid = "KU_TEST", health = 0.5 } },
     { "kill_player", { userid = "KU_TEST" } },
-    { "revive_player", { userid = "KU_TEST" } },
-    { "despawn_player", { userid = "KU_TEST" } },
-    { "migrate_player", { userid = "KU_TEST", shard_id = "2", portal_id = 1 } },
-    { "teleport_player", { userid = "KU_TEST", x = 1, y = 0, z = 2 } },
-    { "give_item", { userid = "KU_TEST", prefab = "twigs", count = 1 } },
-    { "remove_item", { userid = "KU_TEST", prefab = "twigs", count = 1 } },
-    { "execute_script", { source = "return {answer=42}" } },
+    { "revive", { userid = "KU_TEST" } },
+    { "despawn", { userid = "KU_TEST" } },
+    { "migrate", { userid = "KU_TEST", shard_id = "2", portal_id = 1 } },
+    { "teleport", { userid = "KU_TEST", x = 1, y = 0, z = 2 } },
+    { "give", { userid = "KU_TEST", item = "Twigs", count = 1 } },
+    { "remove", { userid = "KU_TEST", item = "Twigs", count = 1 } },
+    { "execute_json", { source = "return {answer=42}" } },
     { "evaluate", { source = "1 + 2, '中文', nil" } },
 }
 
@@ -357,9 +357,9 @@ assert(#observed.blacklist == 2 and observed.blacklist[1].netid == "Steam_ONLY"
 assert(observed.set_blacklist_calls == 1)
 assert(whitelist.KU_FRIEND == true and whitelist.KU_TEST == nil)
 assert(driver.call("is_blocked", { userid = "KU_BLOCKED" }) == false)
-assert(driver.call("unban_player", { userid = "KU_MISSING" }) == false)
+assert(driver.call("unban", { userid = "KU_MISSING" }) == false)
 assert(observed.set_blacklist_calls == 1)
-local remaining = driver.call("get_blocklist", {})
+local remaining = driver.call("blocklist", {})
 assert(#remaining == 2 and remaining[1] == "KU_KEEP"
     and remaining[2] == "Steam_ONLY")
 assert(driver.call("is_whitelisted", { userid = "KU_TEST" }) == false)
@@ -391,11 +391,11 @@ for _, invalid in ipairs({
         moisture = 0.5, temperature = -10,
     }
     for name, value in pairs(invalid) do args[name] = value end
-    assert(not pcall(driver.call, "set_player_vitals", args))
+    assert(not pcall(driver.call, "set_vitals", args))
     assert(observed.health == 0.5 and observed.hunger == nil and observed.sanity == nil
         and observed.moisture == nil and observed.temperature == nil)
 end
-assert(driver.call("set_player_vitals", {
+assert(driver.call("set_vitals", {
     userid = "KU_TEST", health = 0, hunger = 1, sanity = 0.25,
     moisture = 0.5, temperature = -10,
 }))
@@ -405,7 +405,7 @@ assert(observed.health == 0 and observed.hunger == 1 and observed.sanity == 0.25
 for _, nonfinite in ipairs({ math.huge, -math.huge, 0 / 0 }) do
     assert(not pcall(driver.call, "rollback", { count = nonfinite }))
     assert(observed.rollback == 1)
-    assert(not pcall(driver.call, "teleport_player", {
+    assert(not pcall(driver.call, "teleport", {
         userid = "KU_TEST", x = nonfinite, y = 0, z = 2,
     }))
     assert(observed.teleported[1] == 1 and observed.teleported[2] == 0
@@ -413,15 +413,15 @@ for _, nonfinite in ipairs({ math.huge, -math.huge, 0 / 0 }) do
 end
 
 local spawned = observed.spawned
-assert(driver.call("give_item", {
+assert(driver.call("give", {
     userid = "KU_TEST",
-    prefab = "twigs",
+    item = "twigs",
     count = 64,
 }) == 64)
 assert(observed.spawned == spawned + 64)
-local accepted = pcall(driver.call, "give_item", {
+local accepted = pcall(driver.call, "give", {
     userid = "KU_TEST",
-    prefab = "twigs",
+    item = "twigs",
     count = 65,
 })
 assert(not accepted and observed.spawned == spawned + 64)

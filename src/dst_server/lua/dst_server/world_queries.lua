@@ -1,7 +1,7 @@
 local values = require("dst_server.values")
 local queries = {}
 
-function queries.get_runtime()
+function queries.runtime()
     if TheWorld == nil or TheWorld.meta == nil then
         error("world metadata unavailable")
     end
@@ -22,7 +22,7 @@ function queries.get_runtime()
     }
 end
 
-function queries.get_snapshots(args)
+function queries.list_snapshots(args)
     if TheWorld == nil or TheWorld.meta == nil then
         error("world metadata unavailable")
     end
@@ -56,7 +56,7 @@ function queries.get_snapshots(args)
     end
 end
 
-function queries.get_mods()
+function queries.mods()
     local result = {}
     for _, id in ipairs(ModManager:GetEnabledModNames()) do
         local info = KnownModIndex:GetModInfo(id)
@@ -70,7 +70,7 @@ function queries.get_mods()
     return result
 end
 
-function queries.get_room()
+function queries.room()
     if TheWorld == nil then
         error("world unavailable")
     end
@@ -96,7 +96,7 @@ function queries.get_room()
     }
 end
 
-function queries.get_world()
+function queries.world()
     if TheWorld == nil or TheWorld.components.worldstate == nil then
         error("world state unavailable")
     end
@@ -154,7 +154,7 @@ function queries.get_world()
     }
 end
 
-function queries.get_shards(args)
+function queries.connected_shards(args)
     local result = {
         {
             id = tostring(TheShard:GetShardId()),

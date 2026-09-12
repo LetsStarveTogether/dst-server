@@ -10,7 +10,6 @@ import orjson
 from pydantic import JsonValue
 from ulid import ULID
 
-from dst_server.commands import validate_json_structure
 from dst_server.concurrency import cancel_tasks, complete
 from dst_server.errors import IndeterminateCommandError
 from dst_server.game.rpc import (
@@ -20,6 +19,7 @@ from dst_server.game.rpc import (
     Accepted,
     Failure,
 )
+from dst_server.json_codec import validate_json_structure
 from dst_server.telemetry.recorder import Recorder
 from dst_server.timeouts import DEFAULT_COMMAND_TIMEOUT, positive_timeout
 

@@ -6,7 +6,7 @@ from luaparser import ast
 from luaparser.astnodes import Call, Name, String
 
 from dst_server.events import GAME_EVENT_ADAPTER
-from tests.helpers import native_functions, native_scripts, run_lua_process
+from tests.lua.helpers import native_functions, native_scripts, run_lua_process
 
 POSITION = {"x": 1, "y": 0, "z": 2}
 PLAYER = {

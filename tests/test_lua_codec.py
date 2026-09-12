@@ -10,7 +10,7 @@ from dst_server.lua_codec import (
     parse_return_table,
     render_literal,
 )
-from tests.helpers import run_lua_process
+from tests.lua.helpers import run_lua_process
 
 
 @pytest.mark.parametrize(

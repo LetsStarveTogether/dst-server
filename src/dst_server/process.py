@@ -4,7 +4,6 @@ import signal
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from dst_server.concurrency import cancel_tasks, complete
 
@@ -29,7 +28,7 @@ async def run_process(
     )
     if process.stdout is None:
         await complete(terminate_process(process))
-        msg = "Mod updater stdout pipe is unavailable"
+        msg = "Subprocess stdout pipe is unavailable"
         raise RuntimeError(msg)
     waiting = asyncio.create_task(process.wait())
     reading = asyncio.create_task(_read_output(process.stdout, on_line))
@@ -83,43 +82,3 @@ async def terminate_process(process: asyncio.subprocess.Process) -> None:
 def signal_process_group(process_id: int, value: signal.Signals) -> None:
     with suppress(ProcessLookupError):
         os.killpg(process_id, value)
-
-
-def validate_argument(name: str, value: str) -> str:
-    if not isinstance(value, str) or not value:
-        msg = f"{name} must not be empty"
-        raise ValueError(msg)
-    if not value.isprintable():
-        msg = f"{name} must not contain control characters"
-        raise ValueError(msg)
-    return value
-
-
-def validate_proxy(proxy: str | None) -> str | None:
-    if proxy is not None:
-        try:
-            address = urlsplit(validate_argument("download proxy", proxy))
-            valid = (
-                address.scheme in {"http", "https"}
-                and bool(address.hostname)
-                and (address.port is None or address.port > 0)
-            )
-        except ValueError:
-            valid = False
-        if not valid:
-            msg = "download proxy must be an HTTP(S) URL with a valid host and port"
-            raise ValueError(msg)
-    return proxy
-
-
-def download_environment(proxy: str | None = None) -> dict[str, str]:
-    proxy = validate_proxy(proxy)
-    environment = {
-        name: value
-        for name, value in os.environ.items()
-        if name.lower()
-        not in {"http_proxy", "https_proxy", "all_proxy", "ftp_proxy", "no_proxy"}
-    }
-    if proxy is not None:
-        environment.update(dict.fromkeys(("http_proxy", "https_proxy"), proxy))
-    return environment

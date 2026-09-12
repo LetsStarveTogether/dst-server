@@ -2,7 +2,7 @@ local player_values = require("dst_server.player_values")
 local values = require("dst_server.values")
 local queries = {}
 
-function queries.get_players()
+function queries.list_players()
     local result = {}
     for _, client in ipairs(GetPlayerClientTable()) do
         local player = LookupPlayerInstByUserID(client.userid)
@@ -34,7 +34,7 @@ function queries.get_player(args)
     return player_values.player(client, player)
 end
 
-function queries.get_player_inventory(args)
+function queries.inventory(args)
     local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
     if player == nil or player.components.inventory == nil then
         return json.null

@@ -1,6 +1,5 @@
-import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, Any, ClassVar, Literal, Self
 
 import orjson
@@ -16,6 +15,7 @@ from dst_server.announcements import (
 )
 from dst_server.configuration.models import ClusterConfig
 from dst_server.events.server import SavedEvent
+from dst_server.json_codec import validate_json_structure
 from dst_server.models import Inventory as PlayerInventory
 from dst_server.models import Mod, Player, ShardStatus
 from dst_server.models import Room as RoomInfo
@@ -469,9 +469,14 @@ class WaitGeneration(Request[int]):
 @dataclass(frozen=True, slots=True)
 class Operation:
     request: type[Request[Any]]
-    response: TypeAdapter[Any]
-    mutation: bool
     result_type: Any
+    mutation: bool
+    scopes: tuple[Scope, ...]
+    game: Literal["request", "reload"] | None = None
+    response: TypeAdapter[Any] = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "response", TypeAdapter(self.result_type))
 
 
 class MethodDescription(FrozenModel):
@@ -492,71 +497,67 @@ _SHARD: tuple[Scope, ...] = ("shard", "agent")
 _MASTER: tuple[Scope, ...] = ("cluster", "agent")
 _CLUSTER: tuple[Scope, ...] = ("cluster",)
 _AGENT: tuple[Scope, ...] = ("agent",)
-_DECLARATIONS: tuple[
-    tuple[type[Request[Any]], object, bool, tuple[Scope, ...]], ...
-] = (
-    (Status, ShardRuntimeStatus, False, _SHARD),
-    (ClusterStatusQuery, ClusterStatus, False, _CLUSTER),
-    (Start, None, True, _ALL),
-    (Stop, None, True, _ALL),
-    (Restart, None, True, _ALL),
-    (Kill, None, True, _ALL),
-    (UpdateMods, None, True, _CLUSTER),
-    (ReadConfiguration, ClusterConfig, False, _CLUSTER),
-    (Execute, str, True, _SHARD),
-    (ExecuteJson, JsonValue, True, _SHARD),
-    (Evaluate, ConsoleResult, True, _SHARD),
-    (ExecuteAll, tuple[ShardResult[str], ...], True, _CLUSTER),
-    (Announce, None, True, _MASTER),
-    (Save, SavedEvent, True, _SHARD),
-    (ClusterSave, ClusterSaveResult, True, _CLUSTER),
-    (Pause, bool, True, _SHARD),
-    (ClusterPause, tuple[ShardResult[bool], ...], True, _CLUSTER),
-    (Reset, None, True, _MASTER),
-    (Rollback, None, True, _MASTER),
-    (Regenerate, None, True, _MASTER),
-    (RegenerateShard, None, True, _SHARD),
-    (Snapshots, SnapshotCatalog, False, _ALL),
-    (RollbackToDay, Snapshot, True, _CLUSTER),
-    (RollbackToSnapshot, None, True, _AGENT),
-    (Health, DriverHealth, False, _SHARD),
-    (Room, RoomInfo, False, _SHARD),
-    (World, WorldInfo, False, _SHARD),
-    (Runtime, RuntimeInfo, False, _SHARD),
-    (Mods, tuple[Mod, ...], False, _SHARD),
-    (ConnectedShards, tuple[ShardStatus, ...], False, _SHARD),
-    (ListPlayers, tuple[Player, ...], False, _SHARD),
-    (LocatePlayers, tuple[LocatedPlayer, ...], False, _CLUSTER),
-    (GetPlayer, Player | None, False, _SHARD),
-    (LocatePlayer, LocatedPlayer | None, False, _CLUSTER),
-    (Inventory, PlayerInventory | None, False, _SHARD),
-    (Kick, None, True, _SHARD),
-    (Ban, None, True, _SHARD),
-    (Blocklist, tuple[Identifier, ...], False, _SHARD),
-    (IsBlocked, bool, False, _SHARD),
-    (Unban, bool, True, _SHARD),
-    (IsAdmin, bool | None, False, _SHARD),
-    (SetVitals, bool, True, _SHARD),
-    (KillPlayer, bool, True, _SHARD),
-    (Revive, bool, True, _SHARD),
-    (Despawn, bool, True, _SHARD),
-    (Migrate, bool, True, _SHARD),
-    (Teleport, bool, True, _SHARD),
-    (Give, int, True, _SHARD),
-    (Remove, int, True, _SHARD),
-    (IsWhitelisted, bool, False, _MASTER),
-    (Whitelist, bool, True, _MASTER),
-    (Unwhitelist, bool, True, _MASTER),
-    (Activate, None, True, _AGENT),
-    (SaveMarker, ObservationCursor, False, _AGENT),
-    (WaitSaved, SavedEvent, False, _AGENT),
-    (GenerationMarker, ObservationCursor, False, _AGENT),
-    (WaitGeneration, int, False, _AGENT),
+OPERATIONS = (
+    Operation(Status, ShardRuntimeStatus, False, _SHARD),
+    Operation(ClusterStatusQuery, ClusterStatus, False, _CLUSTER),
+    Operation(Start, None, True, _ALL),
+    Operation(Stop, None, True, _ALL),
+    Operation(Restart, None, True, _ALL),
+    Operation(Kill, None, True, _ALL),
+    Operation(UpdateMods, None, True, _CLUSTER),
+    Operation(ReadConfiguration, ClusterConfig, False, _CLUSTER),
+    Operation(Execute, str, True, _SHARD),
+    Operation(ExecuteJson, JsonValue, True, _SHARD, game="request"),
+    Operation(Evaluate, ConsoleResult, True, _SHARD, game="request"),
+    Operation(ExecuteAll, tuple[ShardResult[str], ...], True, _CLUSTER),
+    Operation(Announce, None, True, _MASTER, game="request"),
+    Operation(Save, SavedEvent, True, _SHARD),
+    Operation(ClusterSave, ClusterSaveResult, True, _CLUSTER),
+    Operation(Pause, bool, True, _SHARD, game="request"),
+    Operation(ClusterPause, tuple[ShardResult[bool], ...], True, _CLUSTER),
+    Operation(Reset, None, True, _MASTER, game="reload"),
+    Operation(Rollback, None, True, _MASTER, game="reload"),
+    Operation(Regenerate, None, True, _MASTER, game="reload"),
+    Operation(RegenerateShard, None, True, _SHARD, game="reload"),
+    Operation(Snapshots, SnapshotCatalog, False, _ALL, game="request"),
+    Operation(RollbackToDay, Snapshot, True, _CLUSTER),
+    Operation(RollbackToSnapshot, None, True, _AGENT, game="reload"),
+    Operation(Health, DriverHealth, False, _SHARD, game="request"),
+    Operation(Room, RoomInfo, False, _SHARD, game="request"),
+    Operation(World, WorldInfo, False, _SHARD, game="request"),
+    Operation(Runtime, RuntimeInfo, False, _SHARD, game="request"),
+    Operation(Mods, tuple[Mod, ...], False, _SHARD, game="request"),
+    Operation(ConnectedShards, tuple[ShardStatus, ...], False, _SHARD, game="request"),
+    Operation(ListPlayers, tuple[Player, ...], False, _SHARD, game="request"),
+    Operation(LocatePlayers, tuple[LocatedPlayer, ...], False, _CLUSTER),
+    Operation(GetPlayer, Player | None, False, _SHARD, game="request"),
+    Operation(LocatePlayer, LocatedPlayer | None, False, _CLUSTER),
+    Operation(Inventory, PlayerInventory | None, False, _SHARD, game="request"),
+    Operation(Kick, None, True, _SHARD, game="request"),
+    Operation(Ban, None, True, _SHARD, game="request"),
+    Operation(Blocklist, tuple[Identifier, ...], False, _SHARD, game="request"),
+    Operation(IsBlocked, bool, False, _SHARD, game="request"),
+    Operation(Unban, bool, True, _SHARD, game="request"),
+    Operation(IsAdmin, bool | None, False, _SHARD),
+    Operation(SetVitals, bool, True, _SHARD, game="request"),
+    Operation(KillPlayer, bool, True, _SHARD, game="request"),
+    Operation(Revive, bool, True, _SHARD, game="request"),
+    Operation(Despawn, bool, True, _SHARD, game="request"),
+    Operation(Migrate, bool, True, _SHARD, game="request"),
+    Operation(Teleport, bool, True, _SHARD, game="request"),
+    Operation(Give, int, True, _SHARD, game="request"),
+    Operation(Remove, int, True, _SHARD, game="request"),
+    Operation(IsWhitelisted, bool, False, _MASTER, game="request"),
+    Operation(Whitelist, bool, True, _MASTER, game="request"),
+    Operation(Unwhitelist, bool, True, _MASTER, game="request"),
+    Operation(Activate, None, True, _AGENT),
+    Operation(SaveMarker, ObservationCursor, False, _AGENT),
+    Operation(WaitSaved, SavedEvent, False, _AGENT),
+    Operation(GenerationMarker, ObservationCursor, False, _AGENT),
+    Operation(WaitGeneration, int, False, _AGENT),
 )
 _OPERATIONS = {
-    (scope, request.method): Operation(request, TypeAdapter(result), mutation, result)
-    for request, result, mutation, scopes in _DECLARATIONS
-    for scope in scopes
+    (scope, spec.request.method): spec for spec in OPERATIONS for scope in spec.scopes
 }
 
 
@@ -602,35 +603,6 @@ class _Envelope(FrozenModel):
     method: NonEmptyText
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
     timeout: Timeout | None = None
-
-
-_JSON_OBJECT_TOKENS = re.compile(rb'("(?:[^"\\]|\\.)*")\s*(:)?|([{}])')
-
-
-def validate_json_structure(payload: bytes) -> None:
-    try:
-        orjson.loads(payload)
-    except orjson.JSONDecodeError as error:
-        # CLI fields may fall back to plain text on syntax errors, but must
-        # reject non-finite JSON constants instead of treating them as strings.
-        if error.doc[error.pos :].startswith(("NaN", "Infinity", "-Infinity")):
-            msg = "invalid JSON constant"
-            raise ValueError(msg) from error
-        raise
-    # orjson validates the syntax; inspect only object boundaries and keys
-    # because its decoder has no hook for rejecting duplicate keys.
-    objects: list[set[str]] = []
-    for token in _JSON_OBJECT_TOKENS.finditer(payload):
-        if token[3] == b"{":
-            objects.append(set())
-        elif token[3] == b"}":
-            objects.pop()
-        elif token[2] is not None:
-            key = orjson.loads(token[1])
-            if key in objects[-1]:
-                msg = f"duplicate JSON object key: {key!r}"
-                raise ValueError(msg)
-            objects[-1].add(key)
 
 
 def encode_request(request: Request[Any]) -> bytes:

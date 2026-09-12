@@ -15,7 +15,7 @@ from dst_server.events.vote import (
     VoteStartedEvent,
 )
 from dst_server.events.world import TelemetryErrorEvent
-from tests.helpers import native_functions, run_lua_process
+from tests.lua.helpers import native_functions, run_lua_process
 
 
 @pytest.fixture(scope="module")

@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from pydantic import JsonValue, ValidationError
 from ulid import ULID
 
-from dst_server.commands import validate_json_structure
 from dst_server.events import GAME_EVENT_ADAPTER, GameEvent, ObservedGameEvent
 from dst_server.events.connection import (
     ClientAuthenticatedEvent,
@@ -21,6 +20,7 @@ from dst_server.events.player import (
     ShardLeftEvent,
 )
 from dst_server.events.world import ModOutdatedEvent
+from dst_server.json_codec import validate_json_structure
 from dst_server.models.driver import DRIVER_RECORD_ADAPTER, DriverFailed, DriverRecord
 from dst_server.models.telemetry import TelemetryProfile
 

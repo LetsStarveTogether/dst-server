@@ -28,8 +28,8 @@ from dst_server.models.cluster import (
     ShardRuntimeStatus,
 )
 from dst_server.rpc import ClusterClient, rpc_runtime
-from dst_server.rpc.servants import WorkerRegistryServant
 from dst_server.rpc.transport import abstract_rpc_server
+from dst_server.rpc.workers import WorkerRegistryServant
 from tests.helpers import wait_for_event
 
 

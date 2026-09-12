@@ -12,7 +12,8 @@ from dst_server.models.console import ConsoleResult
 from dst_server.runtime.console import Console
 from dst_server.telemetry.recorder import Recorder
 from tests.game.helpers import make_game
-from tests.helpers import COMMAND_DONE, StubWriter, next_request, run_lua
+from tests.lua.helpers import run_lua
+from tests.runtime.helpers import COMMAND_DONE, StubWriter, next_request
 
 
 async def evaluate(source: str, runtime: str) -> ConsoleResult:

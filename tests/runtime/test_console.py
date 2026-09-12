@@ -13,7 +13,7 @@ from dst_server.game.rpc import MAX_RESULT_LINE_BYTES, RPC_PREFIX
 from dst_server.runtime.console import MAX_PENDING, Console, StaleGenerationError
 from dst_server.runtime.request import RequestState, track_request
 from dst_server.telemetry.recorder import Recorder
-from tests.helpers import (
+from tests.runtime.helpers import (
     COMMAND_DONE,
     StubWriter,
     feed_response,

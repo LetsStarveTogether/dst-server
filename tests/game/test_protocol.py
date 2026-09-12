@@ -14,7 +14,7 @@ from dst_server.lua_codec import LuaValue, lua_string, render_literal
 from dst_server.models import Mod, Player
 from dst_server.models.driver import DriverHealth
 from dst_server.telemetry.recorder import Recorder
-from tests.helpers import native_scripts, run_lua
+from tests.lua.helpers import native_scripts, run_lua
 
 SUCCESS_OVERHEAD = len(b'{"ok":true,"data":""}')
 TEXT = (
@@ -116,7 +116,7 @@ def test_player_queries_accept_unselected_characters(
     if prefab is not None:
         client["prefab"] = prefab
     line, _ = response(
-        'return require("dst_server.player_queries").get_players()',
+        'return require("dst_server.player_queries").list_players()',
         luajit,
         setup=(
             f"GetPlayerClientTable=function() return {{{render_literal(client)}}} end;"
@@ -145,7 +145,7 @@ def test_player_names_preserve_unicode_code_points(
     query = (
         'get_player({userid="KU_TEST"})'
         if source == "display-name"
-        else "get_players()"
+        else "list_players()"
     )
     line, _ = response(
         f'return require("dst_server.player_queries").{query}',
@@ -239,7 +239,7 @@ def test_mod_queries_accept_native_metadata(
         )[0]
     )
     line, _ = response(
-        'return require("dst_server.world_queries").get_mods()',
+        'return require("dst_server.world_queries").mods()',
         luajit,
         setup=f"""
         require("class")

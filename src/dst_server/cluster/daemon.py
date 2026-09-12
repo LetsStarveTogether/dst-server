@@ -17,17 +17,14 @@ from dst_server.configuration.store import ConfigurationStore
 from dst_server.rpc.client import rpc_runtime
 from dst_server.rpc.codec import unwrap_outcome
 from dst_server.rpc.schema import load_schema
-from dst_server.rpc.servants import (
-    AgentServant,
-    BootstrapServant,
-    WorkerRegistryServant,
-)
+from dst_server.rpc.servants import BootstrapServant
 from dst_server.rpc.transport import (
     INTERNAL_RPC_ADDRESS,
     PUBLIC_RPC_SOCKET,
     abstract_rpc_server,
     filesystem_rpc_server,
 )
+from dst_server.rpc.workers import AgentServant, WorkerRegistryServant
 from dst_server.telemetry import TelemetrySettings
 from dst_server.timeouts import (
     DEFAULT_CONNECT_TIMEOUT,

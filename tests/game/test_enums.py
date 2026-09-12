@@ -6,7 +6,7 @@ import pytest
 from pydantic import JsonValue, TypeAdapter
 
 from dst_server.game import Emoji, Emote, EmoteType
-from tests.helpers import run_lua
+from tests.lua.helpers import run_lua
 
 
 def lua_json(source: str, luajit: str) -> Any:

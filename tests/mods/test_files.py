@@ -4,25 +4,10 @@ from pathlib import Path
 import pytest
 
 from dst_server import mods
+from dst_server import process as mod_process
 from dst_server.configuration.overrides import WorkshopDownloads
-from dst_server.mods import process as mod_process
 from tests.helpers import process_stopped
-
-FAKE_UPDATER = r"""#!/usr/bin/env python3
-import os
-import signal
-import subprocess
-import sys
-
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-child = subprocess.Popen([
-    sys.executable,
-    "-c",
-    "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); signal.pause()",
-])
-print(f"READY|{os.getpid()}|{os.getpgrp()}|{child.pid}", flush=True)
-signal.pause()
-"""
+from tests.mods.helpers import write_updater
 
 EXITING_UPDATER = r"""#!/usr/bin/env python3
 import os
@@ -144,18 +129,6 @@ def test_strict_setup_rejects_non_ascii_ids(tmp_path: Path) -> None:
     assert mods.scan_setup(setup) == ((), ())
     with pytest.raises(ValueError, match="invalid Workshop ID"):
         WorkshopDownloads.load(setup)
-
-
-def write_updater(
-    tmp_path: Path,
-    source: str = FAKE_UPDATER,
-) -> tuple[Path, Path]:
-    executable = tmp_path / "fake-updater"
-    executable.write_text(source, encoding="utf-8")
-    executable.chmod(0o755)
-    ugc = tmp_path / "ugc"
-    ugc.mkdir()
-    return executable, ugc
 
 
 def parse_processes(line: str) -> tuple[int, int]:

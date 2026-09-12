@@ -3,13 +3,15 @@ import pytest
 from dst_server import commands as c
 from dst_server.errors import IndeterminateCommandError
 from tests.game.helpers import make_game
-from tests.helpers import run_lua
+from tests.lua.helpers import run_lua
 
 
 async def test_game_boundary_rejects_lifecycle_and_copied_invalid_commands() -> None:
     game, executed = make_game()
     with pytest.raises(ValueError, match="game"):
         await game.invoke(c.Start())
+    with pytest.raises(ValueError, match="game"):
+        await game.invoke(c.Save())
     with pytest.raises(ValueError, match="count"):
         await game.invoke(
             c.Give(userid="KU_TEST", item="twigs").model_copy(update={"count": 65})

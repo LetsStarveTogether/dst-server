@@ -17,7 +17,8 @@ from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.console import Console, StaleGenerationError
 from dst_server.runtime.lifecycle import Lifecycle
 from dst_server.telemetry import TelemetryProfile, TelemetrySettings
-from tests.helpers import FAKE_SERVER, structured_result, wait_for_event
+from tests.helpers import wait_for_event
+from tests.runtime.helpers import FAKE_SERVER, structured_result
 
 
 async def native_ready(server: Server, generation: int) -> None:

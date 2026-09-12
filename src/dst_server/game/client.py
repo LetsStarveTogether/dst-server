@@ -1,13 +1,14 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import cast
 
 from pydantic import JsonValue
 
 from dst_server import commands as c
 from dst_server.api import EndpointAPI, PlayerAPI
 from dst_server.errors import IndeterminateCommandError
-from dst_server.events.server import SavedEvent, parse_event
+from dst_server.events.server import SavedEvent
+from dst_server.json_codec import validate_json_structure
 from dst_server.models.driver import DriverHealth
 from dst_server.telemetry.recorder import Recorder
 from dst_server.timeouts import DEFAULT_RELOAD_TIMEOUT
@@ -21,48 +22,8 @@ from .rpc import (
     response_adapter,
 )
 
-_METHODS: dict[type[c.Request[Any]], str] = {
-    c.Health: "health",
-    c.Room: "get_room",
-    c.World: "get_world",
-    c.Runtime: "get_runtime",
-    c.Snapshots: "get_snapshots",
-    c.Mods: "get_mods",
-    c.ConnectedShards: "get_shards",
-    c.ListPlayers: "get_players",
-    c.GetPlayer: "get_player",
-    c.Inventory: "get_player_inventory",
-    c.Announce: "announce",
-    c.Pause: "set_server_paused",
-    c.Reset: "reset",
-    c.Regenerate: "regenerate_world",
-    c.RegenerateShard: "regenerate_shard",
-    c.Rollback: "rollback",
-    c.RollbackToSnapshot: "rollback_to_snapshot",
-    c.Kick: "kick_player",
-    c.Ban: "ban_player",
-    c.Blocklist: "get_blocklist",
-    c.IsBlocked: "is_blocked",
-    c.Unban: "unban_player",
-    c.IsWhitelisted: "is_whitelisted",
-    c.Whitelist: "whitelist_player",
-    c.Unwhitelist: "unwhitelist_player",
-    c.SetVitals: "set_player_vitals",
-    c.KillPlayer: "kill_player",
-    c.Revive: "revive_player",
-    c.Despawn: "despawn_player",
-    c.Migrate: "migrate_player",
-    c.Teleport: "teleport_player",
-    c.Give: "give_item",
-    c.Remove: "remove_item",
-    c.ExecuteJson: "execute_script",
-    c.Evaluate: "evaluate",
-}
-_RELOADS = {c.Reset, c.Regenerate, c.RegenerateShard, c.Rollback, c.RollbackToSnapshot}
 _MUTATIONS = {
-    method
-    for command, method in _METHODS.items()
-    if c.operation("agent", command.method).mutation
+    spec.request.method for spec in c.OPERATIONS if spec.game and spec.mutation
 } | {"save"}
 
 
@@ -96,16 +57,14 @@ class GameClient(EndpointAPI):
                 c.GetPlayer(userid=command.userid, timeout=command.timeout)
             )
             return cast("T", None if player is None else player.admin)
-        method = _METHODS.get(type(command))
-        if method is None:
+        if spec.game is None:
             msg = f"command {command.method!r} is not available to the game"
             raise ValueError(msg)
+        method = command.method
         arguments = command.model_dump(
             mode="json", exclude={"timeout"}, exclude_none=True
         )
-        if isinstance(command, c.Give | c.Remove):
-            arguments["prefab"] = arguments.pop("item").lower()
-        elif isinstance(command, c.ConnectedShards):
+        if isinstance(command, c.ConnectedShards):
             arguments["current_name"] = self.shard
         adapter = response_adapter(
             bool if spec.result_type is None else spec.result_type
@@ -114,7 +73,7 @@ class GameClient(EndpointAPI):
             async with asyncio.timeout(command.timeout):
                 value = (
                     await self.reload(method, arguments, adapter, command.timeout)
-                    if type(command) in _RELOADS
+                    if spec.game == "reload"
                     else await self.request(method, arguments, adapter)
                 )
         except TimeoutError as error:
@@ -132,9 +91,12 @@ class GameClient(EndpointAPI):
 
     async def request_save(self) -> SavedEvent:
         result = await self.request("save", {}, SAVE_RESPONSE)
-        event = parse_event("DST_Saved|" + result.snapshot)
-        if not isinstance(event, SavedEvent) or event.snapshot is None:
-            msg = "DST save callback did not identify a completed snapshot"
+        msg = "DST save callback did not identify a completed snapshot"
+        try:
+            event = SavedEvent.from_path(result.snapshot)
+        except ValueError as error:
+            raise IndeterminateCommandError(msg) from error
+        if event.snapshot is None:
             raise IndeterminateCommandError(msg)
         return event
 
@@ -194,7 +156,7 @@ class GameClient(EndpointAPI):
         if len(payload) > MAX_RESULT_LINE_BYTES:
             msg = "DST command result exceeds the line size limit"
             raise RuntimeError(msg)
-        c.validate_json_structure(payload)
+        validate_json_structure(payload)
         envelope = adapter.validate_json(payload, strict=True)
         if isinstance(envelope, Failure):
             if envelope.error == "indeterminate":

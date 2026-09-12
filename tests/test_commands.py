@@ -17,6 +17,23 @@ def test_requests_preserve_typed_arguments_and_operation_policy() -> None:
     assert commands.operation("shard", request).mutation
     assert not commands.operation("shard", commands.Status()).mutation
     assert commands.Reset().timeout == DEFAULT_RELOAD_TIMEOUT
+    assert commands.operation("agent", request) is commands.operation("shard", request)
+    assert commands.operation("agent", request).game == "request"
+    assert commands.operation("agent", commands.Reset()).game == "reload"
+    assert commands.operation("agent", commands.Save()).game is None
+
+
+def test_operation_catalog_defines_each_scoped_method_once() -> None:
+    keys = [
+        (scope, spec.request.method)
+        for spec in commands.OPERATIONS
+        for scope in spec.scopes
+    ]
+    assert len(keys) == len(set(keys))
+    for spec in commands.OPERATIONS:
+        if spec.game is not None:
+            assert "agent" in spec.scopes
+            assert spec.game != "reload" or spec.mutation
 
 
 @pytest.mark.parametrize(
@@ -103,43 +120,3 @@ def test_copied_requests_are_revalidated(timeout: object) -> None:
         commands.operation("shard", copied)
     with pytest.raises(ValidationError):
         commands.encode_request(copied)
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        b'{"key":1,"key":2}',
-        rb'{"key":1,"\u006bey":2}',
-        rb'{"nested":[{"a\\\"}":1,"a\\\"}":2}]}',
-        b'{"":0,"":1}',
-    ],
-)
-def test_json_structure_rejects_duplicate_keys(payload: bytes) -> None:
-    with pytest.raises(ValueError, match="duplicate JSON object key"):
-        commands.validate_json_structure(payload)
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        b'[{"key":1},{"key":2}]',
-        b'{"key":{"key":1},"other":{"key":2}}',
-        rb'{"text":"{\"key\":1,\"key\":2}","literal":"NaN"}',
-        rb'{"\u006bey":1,"a\\\"}":2}',
-        b"[0,true,false,null,18446744073709551616]",
-    ],
-)
-def test_json_structure_accepts_distinct_keys_and_string_contents(
-    payload: bytes,
-) -> None:
-    commands.validate_json_structure(payload)
-
-
-@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity"])
-@pytest.mark.parametrize("nested", [False, True])
-def test_json_structure_rejects_nonfinite_constants(
-    constant: bytes, nested: bool
-) -> None:
-    payload = b'{"value":' + constant + b"}" if nested else constant
-    with pytest.raises(ValueError, match="invalid JSON constant"):
-        commands.validate_json_structure(payload)

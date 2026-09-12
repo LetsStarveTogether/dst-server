@@ -22,6 +22,7 @@ from dst_server.cli.common import (
     select_rooms,
 )
 from dst_server.host import Host
+from dst_server.json_codec import validate_json_structure
 from dst_server.models.console import ConsoleResult
 from dst_server.rpc.client import ClusterClient, RemoteEndpoint, ShardClient
 from dst_server.timeouts import (
@@ -626,7 +627,7 @@ def _arguments(file: Path | None, fields: tuple[str, ...]) -> dict[str, JsonValu
     arguments: dict[str, JsonValue] = {}
     if file is not None:
         text = _read_input(file)
-        c.validate_json_structure(text.encode())
+        validate_json_structure(text.encode())
         value = orjson.loads(text)
         if not isinstance(value, dict):
             msg = "RPC input must be a JSON object"
@@ -641,7 +642,7 @@ def _arguments(file: Path | None, fields: tuple[str, ...]) -> dict[str, JsonValu
             msg = f"duplicate RPC argument: {name}"
             raise ValueError(msg)
         try:
-            c.validate_json_structure(text.encode())
+            validate_json_structure(text.encode())
             value = orjson.loads(text)
         except orjson.JSONDecodeError:
             value = text

@@ -6,7 +6,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from pydantic import JsonValue
 
-from tests.helpers import run_lua_process
+from tests.lua.helpers import run_lua_process
 
 NONCE = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 IDENTIFIER = "01ARZ3NDEKTSV4RRFFQ69G5FAW"

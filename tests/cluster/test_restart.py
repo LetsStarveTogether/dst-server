@@ -12,7 +12,7 @@ from dst_server.errors import ControllerOperationError
 from dst_server.models.cluster import ShardPhase
 from dst_server.runtime import ServerConfig
 from tests.cluster.helpers import layout, managed_controller
-from tests.helpers import FAKE_SERVER
+from tests.runtime.helpers import FAKE_SERVER
 
 
 @pytest.mark.parametrize("automatic_updates", ["true", "false"])

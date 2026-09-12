@@ -17,7 +17,7 @@ from dst_server.telemetry import stream
 from dst_server.telemetry.otel import Pipeline
 from dst_server.telemetry.recorder import Recorder
 from dst_server.telemetry.stream import PREFIX, EventStream
-from tests.helpers import run_lua_process
+from tests.lua.helpers import run_lua_process
 
 PLAYER = {"prefab": "wilson", "guid": 42, "userid": "KU_TEST", "position": None}
 NATIVE_PREFIXES = ["", "[00:00:01]: ", "[125:59:59]: "]
