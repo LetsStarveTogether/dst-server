@@ -72,18 +72,18 @@ def return_info(body: Any) -> list[ReturnInfo]:
 
 
 class BaseVisitor(ast.ASTVisitor):
-    def __init__(self, filename: str, local_var: str) -> None:
+    def __init__(self, filename: str) -> None:
         self.filename = filename
-        self.local_var = local_var
         self.processed = set[str]()
 
-    def build_annotations(
+    def build_function(
         self,
+        name: str,
         parameters: list[str],
         returns: list[ReturnInfo],
         node: Any,
         source_prefix: str = "",
-    ) -> list[str]:
+    ) -> str:
         token = getattr(node, "first_token", None)
         line = getattr(token, "line", "unknown")
         annotations = [f"---@source {source_prefix}{self.filename}.lua:{line}"]
@@ -97,19 +97,8 @@ class BaseVisitor(ast.ASTVisitor):
         if returns and returns[-1]:
             annotations.append(f"---@return {', '.join(returns[-1])}")
 
-        return annotations
-
-    def build_function(
-        self,
-        name: str,
-        parameters: list[str],
-        returns: list[ReturnInfo],
-        node: Any,
-        source_prefix: str = "",
-    ) -> str:
-        lines = self.build_annotations(parameters, returns, node, source_prefix)
-        lines.append(f"function {name}({', '.join(parameters)}) end")
-        return "\n".join(lines)
+        annotations.append(f"function {name}({', '.join(parameters)}) end")
+        return "\n".join(annotations)
 
 
 class ComponentVisitor(BaseVisitor):
@@ -118,9 +107,8 @@ class ComponentVisitor(BaseVisitor):
         filename: str,
         class_name: str,
         folder_name: str,
-        local_var: str = DEFAULT_VAR,
     ) -> None:
-        super().__init__(filename, local_var)
+        super().__init__(filename)
         self.class_name = class_name
         self.folder_name = folder_name
         self.methods: list[str] = []
@@ -134,7 +122,7 @@ class ComponentVisitor(BaseVisitor):
         self.processed.add(name)
         self.methods.append(
             self.build_function(
-                f"{self.local_var}:{name}",
+                f"{DEFAULT_VAR}:{name}",
                 argument_names(node.args),
                 return_info(node.body),
                 node,
@@ -169,7 +157,7 @@ class ComponentVisitor(BaseVisitor):
         self.processed.add(name)
         self.methods.append(
             self.build_function(
-                f"{self.local_var}.{name}",
+                f"{DEFAULT_VAR}.{name}",
                 argument_names(node.args),
                 return_info(node.body),
                 node,
@@ -187,7 +175,7 @@ class ComponentVisitor(BaseVisitor):
 
 class ModutilVisitor(BaseVisitor):
     def __init__(self, filename: str) -> None:
-        super().__init__(filename, "_m")
+        super().__init__(filename)
         self.functions: list[str] = []
 
     def visit_Assign(self, node: Any) -> None:

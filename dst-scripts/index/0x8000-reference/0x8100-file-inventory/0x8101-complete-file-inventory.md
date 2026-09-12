@@ -1,6 +1,6 @@
 # `0x81010000` Complete File Inventory
 
-This page lists all 4,087 paths returned by `git ls-files --recurse-submodules scripts`.
+This page lists all 4,088 paths returned by `git ls-files --recurse-submodules scripts`.
 
 ## `0x81011111` Inventory Source
 
@@ -423,6 +423,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/deerclopsspawner.lua`
 - `scripts/components/deerherding.lua`
 - `scripts/components/deerherdspawner.lua`
+- `scripts/components/deflectable.lua`
 - `scripts/components/deployable.lua`
 - `scripts/components/deployhelper.lua`
 - `scripts/components/desolationspawner.lua`

@@ -1,13 +1,10 @@
 import json
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
-import sys
 from pathlib import Path
 from typing import cast
 
 import pytest
-from pydantic import SecretStr, ValidationError
-
-sys.path.insert(0, str(Path(__file__).parents[2]))
+from pydantic import SecretStr
 
 from dst_server.configuration.models import (
     ClusterConfig,
@@ -24,7 +21,6 @@ from dst_server.presets.lst import (
     NETDATA_ENVIRONMENT,
     ROOM_NUMBERS,
     ROOMS,
-    TOKEN_ENVIRONMENT,
     RoomType,
     build,
     build_template,
@@ -38,7 +34,6 @@ from dst_server.presets.lst import (
 )
 from dst_server.presets.mod_configurations import MOD_CONFIGURATIONS
 from dst_server.rooms import RoomStore
-from scripts.generate_rooms import main
 
 TOKEN = SecretStr("template-test-token")
 CLUSTER_KEY = SecretStr("template-test-cluster-key")
@@ -811,136 +806,6 @@ def test_explicit_configurations_cover_remaining_port_slots(
             for unit in (application.master, *application.secondaries)
             for volume in unit.volumes
         )
-
-
-@pytest.mark.parametrize(
-    ("mapping_options", "volume_idmap", "userns"),
-    [
-        ((), None, None),
-        (
-            ("--volume-idmap", "uids=0-1000-1;gids=0-1000-1"),
-            "uids=0-1000-1;gids=0-1000-1",
-            None,
-        ),
-        (("--userns", "keep-id:uid=1000,gid=1000"), None, "keep-id:uid=1000,gid=1000"),
-    ],
-)
-def test_main_can_generate_selected_rooms(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mapping_options: tuple[str, ...],
-    volume_idmap: str | None,
-    userns: str | None,
-) -> None:
-    token_file = tmp_path / "token"
-    token_file.write_text("template-test-token\n", encoding="utf-8")
-    monkeypatch.setenv(TOKEN_ENVIRONMENT, "ignored-environment-token")
-    cluster_root = tmp_path / "clusters"
-    quadlet_dir = tmp_path / "quadlet"
-
-    main([
-        "0",
-        "139",
-        "--cluster-root",
-        str(cluster_root),
-        "--quadlet-dir",
-        str(quadlet_dir),
-        "--token-file",
-        str(token_file),
-        *mapping_options,
-    ])
-
-    assert {path.name for path in cluster_root.iterdir()} == {
-        "000",
-        "139",
-    }
-    assert {path.name for path in quadlet_dir.glob("*.pod")} == {
-        "dst-000.pod",
-        "dst-139.pod",
-    }
-    for number in (0, 139):
-        application = QuadletApplication.load(quadlet_dir, name=f"dst-{number:03d}")
-        assert application.pod.userns == userns
-        assert all(
-            volume.idmap == volume_idmap
-            for unit in (application.master, *application.secondaries)
-            for volume in unit.volumes
-        )
-    generated_token = cluster_root / "000" / "cluster_token.txt"
-    assert generated_token.read_text(encoding="utf-8") == "template-test-token\n"
-    assert generated_token.stat().st_mode & 0o777 == 0o600
-
-
-def test_main_reads_token_from_environment_and_preserves_beta_image(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(TOKEN_ENVIRONMENT, "environment-token")
-    cluster_root = tmp_path / "clusters"
-
-    main([
-        "0",
-        "--cluster-root",
-        str(cluster_root),
-        "--quadlet-dir",
-        str(tmp_path / "quadlet"),
-        "--image",
-        "quay.io/wh2099/dst-server:beta",
-    ])
-
-    application = QuadletApplication.load(tmp_path / "quadlet")
-    for unit in (application.master, *application.secondaries):
-        assert unit.image == "quay.io/wh2099/dst-server:beta"
-        assert unit.pull == "always"
-    token = cluster_root / "000" / "cluster_token.txt"
-    assert token.read_text(encoding="utf-8") == "environment-token\n"
-    assert token.stat().st_mode & 0o777 == 0o600
-
-
-@pytest.mark.parametrize(
-    ("token", "from_file", "invalid"),
-    [
-        (None, False, False),
-        ("", False, False),
-        ("invalid token", False, True),
-        ("\n", True, False),
-    ],
-    ids=("missing", "empty-environment", "invalid-environment", "empty-file"),
-)
-def test_main_rejects_invalid_token_before_writing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    token: str | None,
-    from_file: bool,
-    invalid: bool,
-) -> None:
-    cluster_root = tmp_path / "clusters"
-    quadlet_dir = tmp_path / "quadlet"
-    arguments = [
-        "0",
-        "--cluster-root",
-        str(cluster_root),
-        "--quadlet-dir",
-        str(quadlet_dir),
-    ]
-    if from_file:
-        assert token is not None
-        token_file = tmp_path / "token"
-        token_file.write_text(token, encoding="utf-8")
-        arguments.extend(("--token-file", str(token_file)))
-        monkeypatch.delenv(TOKEN_ENVIRONMENT, raising=False)
-    elif token is None:
-        monkeypatch.delenv(TOKEN_ENVIRONMENT, raising=False)
-    else:
-        monkeypatch.setenv(TOKEN_ENVIRONMENT, token)
-
-    error = ValidationError if invalid else SystemExit
-    message = "cluster tokens" if error is ValidationError else None
-    with pytest.raises(error, match=message):
-        main(arguments)
-
-    assert not cluster_root.exists()
-    assert not quadlet_dir.exists()
 
 
 @pytest.mark.parametrize(

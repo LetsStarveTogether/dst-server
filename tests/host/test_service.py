@@ -658,6 +658,11 @@ async def test_offline_permission_write_and_automation_paths_are_literal(
     assert arguments[arguments.index("--cluster-root") + 1] == str(
         host.cluster_root
     ).replace("%", "%%").replace("$", "$$")
+    assert arguments[1:3] == ["-m", "dst_server"]
+    assert arguments[-2:] == ["schedule", "run"]
+    recycle = (target / "dst-room-recycle.service").read_text()
+    assert " -m dst_server " in recycle
+    assert recycle.rstrip().endswith("maintenance recycle")
 
 
 async def test_failed_native_edit_does_not_create_desired_state_or_rewrite_on_start(

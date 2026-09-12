@@ -1,6 +1,6 @@
 # `0x82020000` Component Catalog
 
-The Component directory contains 829 Lua files.
+The Component directory contains 830 Lua files.
 
 ## `0x82021111` Component Files
 
@@ -175,6 +175,7 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/deerclopsspawner.lua`
 - `scripts/components/deerherding.lua`
 - `scripts/components/deerherdspawner.lua`
+- `scripts/components/deflectable.lua`
 - `scripts/components/deployable.lua`
 - `scripts/components/deployhelper.lua`
 - `scripts/components/desolationspawner.lua`

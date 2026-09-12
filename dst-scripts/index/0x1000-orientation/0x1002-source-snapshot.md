@@ -1,10 +1,8 @@
 # `0x10020000` Source Snapshot
 
-The tracked `scripts` tree contains 4,087 files, including 4,072 Lua files.
+The tracked `scripts` tree contains 4,088 files, including 4,073 Lua files.
 
-The `scripts` submodule is pinned to `64f28a7` (build `752118`, authored 2026-09-10).
-
-Compared with `6ea1ee2` (build `747465`), this snapshot adds 46 files, removes four, and modifies 248.
+The `scripts` submodule tracks build `752666`, authored 2026-09-12.
 
 ## `0x10021111` Purpose
 
@@ -35,8 +33,6 @@ Count tracked files first, use directory totals to choose a runtime topic, and l
 
 - The tracked total includes 15 non-Lua files.
 - They are `scripts/.github/workflows/update.yml`, `scripts/controller.vdf`, and 13 files under `scripts/languages/`.
-- Compared with `6ea1ee2` (build `747465`), the delta contains 30,643 insertions and 5,781 deletions across 298 files.
-- The changed files comprise 296 Lua files, `languages/strings.pot`, and `.github/workflows/update.yml`.
 - Directory totals guide reading effort but do not replace the reference coverage inventory.
 
 ## `0x10024111` Directory Breakdown
@@ -45,7 +41,7 @@ Count tracked files first, use directory totals to choose a runtime topic, and l
 | --- | ---: | --- |
 | `scripts/` root | 222 | Startup, global services, and data entry points |
 | `scripts/prefabs/` | 1,610 | The largest entity-assembly area |
-| `scripts/components/` | 829 | Primary server-side behaviour state |
+| `scripts/components/` | 830 | Primary server-side behaviour state |
 | `scripts/stategraphs/` | 264 | Action presentation and animation state machines |
 | `scripts/brains/` | 195 | AI decision entry points |
 | `scripts/behaviours/` | 29 | Behaviour-tree nodes |
@@ -61,15 +57,14 @@ Count tracked files first, use directory totals to choose a runtime topic, and l
 
 ## `0x10024211` Focus Areas
 
-Builds `751350` through `752118` change these clusters:
-
-- Virtual rooms move from the removed Vault-specific components into `virtualroommanager`, `virtualroomset`, and `virtualroomteleporter`.
+- Virtual rooms use `virtualroommanager`, `virtualroomset`, and `virtualroomteleporter`.
 - `world.lua` installs the shared virtual-room manager and `worldstaticlayouts`; `cave.lua` registers the Vault layout.
-- Prefab, Brain, and StateGraph updates cover Charlie, bat, and rocky bosses and the Atrium ritual.
-- Three new bat-boss cave layouts extend world-generation data.
+- Prefabs, Brains, and StateGraphs implement Charlie, bat, and rocky bosses and the Atrium ritual.
+- Three bat-boss cave layouts provide world-generation data.
 - `aoeutil.lua` provides shared area-attack and work helpers.
-- `feedback.lua`, the feedback screen, and screenshot utilities add a feedback path.
-- Entity, combat, customization, and world-settings changes are relevant to native Lua contract checks.
+- `feedback.lua`, the feedback screen, and screenshot utilities handle player feedback.
+- Native Lua contract checks cover entity, combat, customization, and world-settings behavior.
+- `Combat:GetAttacked` delegates to `GetAttacked_Internal` and discards its return value.
 
 ## `0x10025100` Verification
 
@@ -83,8 +78,6 @@ git ls-files --recurse-submodules scripts/prefabs | rg "\.lua$" | wc -l
 git ls-files --recurse-submodules scripts/components | rg "\.lua$" | wc -l
 git -C scripts rev-parse --short=7 HEAD
 git -C scripts log -1 --format='%as %s'
-git -C scripts diff --shortstat 6ea1ee2..64f28a7
-git -C scripts diff --name-status 6ea1ee2..64f28a7
 ~~~
 
 ### `0x10025111` Next Step

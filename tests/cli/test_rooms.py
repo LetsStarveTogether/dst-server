@@ -309,6 +309,107 @@ def test_missing_token_never_reads_existing_room_token(
     assert cli_host.rooms.load(1).cluster.token == SecretStr("explicit-token")
 
 
+@pytest.mark.parametrize(
+    ("mapping_options", "volume_idmap", "userns"),
+    [
+        ((), None, None),
+        (
+            ("--volume-idmap", "uids=0-1000-1;gids=0-1000-1"),
+            "uids=0-1000-1;gids=0-1000-1",
+            None,
+        ),
+        (("--userns", "keep-id:uid=1000,gid=1000"), None, "keep-id:uid=1000,gid=1000"),
+    ],
+)
+def test_deployment_generates_selected_rooms_with_explicit_token_and_mapping(
+    cli_host: Host,
+    tmp_path: Path,
+    mapping_options: tuple[str, ...],
+    volume_idmap: str | None,
+    userns: str | None,
+) -> None:
+    token_file = tmp_path / "token"
+    token_file.write_text("explicit-token\n")
+    assert (
+        main([
+            "deployment",
+            "lst",
+            "--room",
+            "0,139",
+            "--token-file",
+            str(token_file),
+            *mapping_options,
+        ])
+        == 0
+    )
+    assert cli_host.rooms.numbers() == (0, 139)
+    assert {path.name for path in cli_host.quadlet_dir.glob("*.pod")} == {
+        "dst-000.pod",
+        "dst-139.pod",
+    }
+    for number in (0, 139):
+        application = QuadletApplication.load(
+            cli_host.quadlet_dir, name=f"dst-{number:03d}"
+        )
+        assert application.pod.userns == userns
+        assert all(
+            volume.idmap == volume_idmap
+            for unit in (application.master, *application.secondaries)
+            for volume in unit.volumes
+        )
+        token = cli_host.rooms.path(number) / "cluster_token.txt"
+        assert token.read_text() == "explicit-token\n"
+        assert token.stat().st_mode & 0o777 == 0o600
+
+
+def test_deployment_uses_environment_token_and_requested_image(cli_host: Host) -> None:
+    assert (
+        main([
+            "deployment",
+            "lst",
+            "--room",
+            "0",
+            "--image",
+            "quay.io/wh2099/dst-server:beta",
+        ])
+        == 0
+    )
+    application = QuadletApplication.load(cli_host.quadlet_dir)
+    for unit in (application.master, *application.secondaries):
+        assert unit.image == "quay.io/wh2099/dst-server:beta"
+        assert unit.pull == "always"
+    token = cli_host.rooms.path(0) / "cluster_token.txt"
+    assert token.read_text() == "test-cluster-token\n"
+    assert token.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    ("token", "from_file"),
+    [(None, False), ("", False), ("invalid token", False), ("\n", True)],
+    ids=("missing", "empty-environment", "invalid-environment", "empty-file"),
+)
+def test_deployment_rejects_invalid_token_before_writing(
+    cli_host: Host,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    token: str | None,
+    from_file: bool,
+) -> None:
+    arguments = ["deployment", "lst", "--room", "0"]
+    if from_file:
+        assert token is not None
+        token_file = tmp_path / "token"
+        token_file.write_text(token)
+        arguments.extend(("--token-file", str(token_file)))
+    elif token is None:
+        monkeypatch.delenv(TOKEN_ENVIRONMENT)
+    else:
+        monkeypatch.setenv(TOKEN_ENVIRONMENT, token)
+    assert main(arguments) == 1
+    assert not cli_host.cluster_root.exists()
+    assert not cli_host.quadlet_dir.exists()
+
+
 def test_running_game_edits_require_restart_but_policy_edits_do_not(
     cli_host: Host, cli_systemd: Mock, capsys: pytest.CaptureFixture[str]
 ) -> None:

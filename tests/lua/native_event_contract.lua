@@ -151,11 +151,11 @@ cases.migrate_string = function() migrate("oceanwhirlbigportal", "2") end
 cases.migrate_without_destination = function() migrate(7, nil) end
 
 local function combat(damage, blocked, health)
-    local component = {
+    local component = setmetatable({
         inst = player,
         ShouldRecoil = function(_, _, _, incoming) return blocked, incoming end,
         externaldamagetakenmultipliers = { Get = function() return 1 end },
-    }
+    }, { __index = require("components/combat") })
     if health then
         player.components.health = {
             IsDead = function() return false end,
@@ -166,7 +166,7 @@ local function combat(damage, blocked, health)
             end,
         }
     end
-    assert(require("components/combat").GetAttacked(component, attacker, damage) == not blocked)
+    assert(component:GetAttacked(attacker, damage) == nil)
 end
 cases.combat_without_damage = function() combat(nil, false, false) end
 cases.combat_resolved_damage = function() combat(10, false, true) end

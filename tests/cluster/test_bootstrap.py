@@ -352,7 +352,6 @@ runpy.run_path(entrypoint, run_name="__main__")
     assert not {
         "capnp",
         "dbus_fast",
-        "pystemd",
         "prompt_toolkit",
         "dst_server.cluster.daemon",
         "dst_server.host.service",

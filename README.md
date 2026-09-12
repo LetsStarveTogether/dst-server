@@ -87,7 +87,7 @@ See [permissions](#container-users-and-directory-permissions) for rootless gener
 | `console`, `logs`, `rpc` | Lua evaluation, retained journal logs, method discovery, direct calls, and live subscriptions. |
 | `agent`, `annotations`, `completion` | Container process entry points, Lua annotations, and shell completion output. |
 
-Defaults match the maintained host: `/srv/dst` and `/etc/containers/systemd`.
+The default directories are `/srv/dst` and `/etc/containers/systemd`.
 Override them with `--cluster-root` / `--quadlet-dir` or `DST_SERVER_CLUSTER_ROOT` / `DST_SERVER_QUADLET_DIR`.
 Place global options before the command:
 
@@ -126,8 +126,6 @@ Template application explicitly replaces gameplay, world, and Mod configuration.
 It retains the room number, name, description, password, token, shared key, and deployment settings.
 Templates never update existing rooms automatically.
 Core generation and maintenance code ships in the package and is callable through the async SDK.
-Legacy repository script entry points remain temporarily for deployed timers that still reference the checkout.
-Switch those deployments separately before removing the old entry points.
 
 ## Configuration and Deployment
 
@@ -216,7 +214,7 @@ In `cluster.ini`, `[NETWORK]` controls the name and access restrictions.
 See [ClusterSettings / ShardSettings](src/dst_server/configuration/models.py) for all fields, ranges, and defaults.
 The SDK defaults to `encode_user_path=True` and always writes its current value to `server.ini`.
 It preserves an explicit `False`.
-With existing saves, changing this value also requires migrating the [player directories](#player-path-encoding).
+With existing saves, changing this value also requires updating the [player directories](#player-path-encoding).
 
 ### World Settings
 
@@ -395,7 +393,6 @@ Version tags are `:<version>` for stable images and `:beta-<version>` for beta i
 
 ### Console and Logs
 
-The public console FIFO has been removed.
 `console` evaluates Lua through the room's Agent RPC and defaults to the master shard:
 
 ```shell
@@ -449,10 +446,12 @@ The installed timer checks each minute and chains idle recycling after each sche
 Recycling checks each room independently.
 Manual controls and configuration edits invalidate pending regeneration before it is submitted.
 `deployment install` writes the packaged systemd units; enabling the timer is a separate deployment action.
-The current production timers still use the legacy repository scripts and have not been switched by this refactor.
-Before switching them, seed the existing 140 rooms' template, opening-window, and recycling policy in `.dst-control.json`.
-Preserve their native game configuration.
-Stop the old timers and finish their active jobs in a maintenance window before installing and enabling the new automation.
+[Packaged unit templates](src/dst_server/host/systemd) are the only source for automation service configuration.
+Installed services run `python -m dst_server schedule run` and `python -m dst_server maintenance recycle`.
+The installer records the current Python executable, cluster root, and Quadlet directory in these commands.
+Room creation stores template, opening-window, and recycling policy in `.dst-control.json`.
+Automation reads this per-room policy; rooms without it have no scheduled windows and recycling disabled.
+Run `deployment install` again after changing the Python environment or deployment paths, then enable the timer.
 
 ```shell
 dst-server maintenance recycle --dry-run
@@ -780,7 +779,7 @@ Live subscriptions do not replay history; [journal logs](#console-and-logs) prov
 Use [Netdata](#netdata-deployment-and-queries) for exported events.
 
 Applications that manage a single game process themselves can use `dst_server.runtime.Server` and `server.game`.
-The caller must continuously consume lifecycle, game, and operational observation streams and clean up the process.
+The caller must continuously consume lifecycle and game-event notifications and clean up the process.
 Standard Pod deployments can use `ClusterClient`.
 For a running `Server`, pass `server.game` to a function such as:
 
@@ -800,7 +799,7 @@ async def inspect_game(game: GameClient) -> None:
 
 ### Emoji and Emote Enums
 
-`dst_server.game` provides static enums mapped to the repository's pinned DST build `747465`.
+`dst_server.game` provides static enums for native emoji characters and emote commands.
 The SDK does not read game Lua files at runtime.
 
 | Enum | Values and additional fields |
@@ -1001,11 +1000,11 @@ The SDK does not generate random Klei tokens.
 By default, `encode_user_path=True` checks the source `server.ini` to decide whether to convert player directories.
 It synchronizes the encoding flags in exported configuration and `shardindex`.
 Passing `False` preserves source settings and directory names.
-Legacy saves with only `saveindex` must first be migrated by the game.
+Saves containing only `saveindex` are unsupported.
 A corrupt or unsupported existing `shardindex` causes export to fail.
 Export detects file changes but cannot guarantee an atomic snapshot of an online multi-shard cluster.
 The input must remain unchanged.
-Exports and uploads are available; there is no import API yet.
+The archive API supports export and upload.
 
 Pass S3 connection settings and credentials directly when uploading to R2:
 
@@ -1047,11 +1046,11 @@ Explicit values override the corresponding environment settings, including `AWS_
 `None` leaves that field to [obstore's environment configuration](https://developmentseed.org/obstore/latest/api/store/aws/#obstore.store.S3Config).
 This fallback applies per field: an omitted `session_token` can still come from the environment when both keys are explicit.
 Other obstore options retain their environment behavior.
-Calling `upload()` without connection or credential arguments continues to use AWS environment variables.
+Calling `upload()` without connection or credential arguments uses AWS environment variables.
 
 `upload()` reads from the start of the stream and returns `ArchiveUploadResult` with `key` and `url` fields.
 The object key is `object_prefix + archive.filename`; `object_prefix` defaults to an empty string.
-The filename remains `DST-<room-id>-<UTC timestamp>.7z`, with the timestamp precise to seconds.
+The filename is `DST-<room-id>-<UTC timestamp>.7z`, with the timestamp precise to seconds.
 Uploading the same filename with the same prefixes reuses the key and URL and replaces the existing object.
 `url` is `None` unless `url_prefix` is supplied; otherwise it is exactly `url_prefix + key.rsplit("/", 1)[-1]`.
 Both prefixes are explicit SDK arguments and are concatenated literally.
@@ -1271,8 +1270,6 @@ Events not yet queued before closure or cancellation count toward `telemetry_dro
 
 Logs are never persisted locally for export, and receiver recovery only allows subsequent batches to be exported.
 The SDK queue and export losses do not count toward the input counters `telemetry_invalid` or `telemetry_dropped`.
-Old `.telemetry.sqlite3` files and their `-wal` / `-shm` companions are not read, migrated, or deleted.
-After stopping the shard, you can remove those files manually.
 A game event's `log.record.uid` is `nonce:generation:seq`, useful for identifying duplicates.
 Do not assume the backend deduplicates automatically.
 Lua's `events_emitted` is only the highest allocated output sequence number; output failures can leave gaps.
@@ -1280,7 +1277,7 @@ It does not confirm Python validation or delivery.
 
 ### Log Boundaries
 
-Python reads merged game stdout and stderr and can no longer distinguish their sources.
+Python reads merged game stdout and stderr without source labels.
 FD 3 command input, FD 4 responses, and FD 5 lifecycle events stay separate.
 Matching markers in stdout do not complete commands, advance Sessions, or confirm saves.
 The standard CLI writes Agent logs through Logbook to container stdout.

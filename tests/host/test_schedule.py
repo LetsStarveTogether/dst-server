@@ -48,6 +48,7 @@ def now(hour: int, minute: int = 0, second: int = 0) -> datetime:
         (12, {19, 20, 21, 22, 23}),
         (16, {22, 23, 0, 1, 2, 3, 4}),
         (0, set(range(24))),
+        (100, set(range(24))),
     ],
 )
 def test_daily_windows_include_start_exclude_end(number: int, hours: set[int]) -> None:
@@ -92,15 +93,19 @@ def test_unscheduled_and_paused_are_not_automatically_managed(tmp_path: Path) ->
     assert schedule.effective_state(tmp_path, make_room(), now(10)) is None
 
 
+@pytest.mark.parametrize(
+    ("number", "closing", "opening"),
+    [(4, 12, "09:00"), (8, 18, "13:00"), (12, 0, "19:00"), (16, 5, "22:00")],
+)
 @pytest.mark.parametrize("minutes", range(1, 9))
 @pytest.mark.parametrize("seconds", [0, 1, 59])
 def test_shutdown_notice_rounds_remaining_minutes(
-    tmp_path: Path, minutes: int, seconds: int
+    tmp_path: Path, number: int, closing: int, opening: str, minutes: int, seconds: int
 ) -> None:
-    instant = now(12) - timedelta(minutes=minutes, seconds=-seconds)
-    assert schedule.shutdown_notice(tmp_path, make_room(), instant) == (
+    instant = now(closing) - timedelta(minutes=minutes, seconds=-seconds)
+    assert schedule.shutdown_notice(tmp_path, make_room(number), instant) == (
         f"本房间将在约 {minutes} 分钟后定时关闭，请提前安排游戏进度。"  # ruff: ignore[ambiguous-unicode-character-string]
-        "下次开放时间：09:00。"  # ruff: ignore[ambiguous-unicode-character-string]
+        f"下次开放时间：{opening}。"  # ruff: ignore[ambiguous-unicode-character-string]
     )
 
 
@@ -122,6 +127,43 @@ def fake_host(tmp_path: Path, numbers: tuple[int, ...]) -> Mock:
     connection.__aenter__.return_value = host
     host.connect.return_value = connection
     return host
+
+
+@pytest.mark.parametrize(
+    ("hour", "load", "active", "job_type", "expected"),
+    [
+        (10, "loaded", "inactive", "", "started"),
+        (10, "loaded", "active", "", "unchanged"),
+        (10, "loaded", "activating", "", "unchanged"),
+        (10, "loaded", "deactivating", "", "unchanged"),
+        (12, "loaded", "inactive", "", "unchanged"),
+        (12, "loaded", "active", "", "stopped"),
+        (12, "loaded", "activating", "", "stopped"),
+        (12, "loaded", "deactivating", "", "unchanged"),
+        (10, "masked", "inactive", "", "unchanged"),
+        (12, "masked", "active", "", "unchanged"),
+        (10, "loaded", "failed", "", "failed"),
+        (12, "loaded", "failed", "", "failed"),
+        (10, "not-found", "inactive", "", "failed"),
+        (10, "loaded", "inactive", "start", "unchanged"),
+        (10, "loaded", "inactive", "restart", "unchanged"),
+        (10, "loaded", "inactive", "stop", "unchanged"),
+        (12, "loaded", "inactive", "stop", "unchanged"),
+        (10, "loaded", "active", "stop", "unchanged"),
+        (12, "loaded", "active", "stop", "unchanged"),
+    ],
+)
+async def test_schedule_respects_unit_state_and_pending_jobs(
+    tmp_path: Path, hour: int, load: str, active: str, job_type: str, expected: str
+) -> None:
+    host = fake_host(tmp_path, (4,))
+    host.status.return_value.update(
+        load=load, active=active, job_id=int(bool(job_type)), job_type=job_type
+    )
+    result = await schedule.run_schedule(host, now(hour))
+    assert result[4]["status"] == expected
+    assert host.start.await_count == (expected == "started")
+    assert host.stop.await_count == (expected == "stopped")
 
 
 async def test_each_schedule_run_announces_without_persistence_and_respects_manual_stop(
@@ -157,6 +199,14 @@ async def test_room_errors_do_not_cancel_other_rooms(tmp_path: Path) -> None:
     result = await schedule.run_schedule(host, now(10))
     assert result[4] == {"status": "failed", "error": "unavailable"}
     assert result[5] == {"status": "started"}
+
+
+async def test_announcement_errors_do_not_cancel_other_rooms(tmp_path: Path) -> None:
+    host = fake_host(tmp_path, (4, 5))
+    host.announce.side_effect = [RuntimeError("unavailable"), None]
+    result = await schedule.run_schedule(host, now(11, 55))
+    assert result[4] == {"status": "failed", "error": "unavailable"}
+    assert "announcement" in result[5]
 
 
 async def test_pausing_and_resuming_invalidates_overrides(tmp_path: Path) -> None:

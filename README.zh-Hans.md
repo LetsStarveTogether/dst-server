@@ -86,7 +86,7 @@ Mod 更新器的清理流程依赖 [Python 3.14.7 的进程等待修复](https:/
 | `console`、`logs`、`rpc` | Lua 求值、历史日志、方法发现、直接调用与实时订阅。 |
 | `agent`、`annotations`、`completion` | 容器进程入口、Lua 注解、输出 shell 补全。 |
 
-默认目录沿用维护环境的 `/srv/dst` 和 `/etc/containers/systemd`。
+默认目录为 `/srv/dst` 和 `/etc/containers/systemd`。
 通过 `--cluster-root` / `--quadlet-dir` 或 `DST_SERVER_CLUSTER_ROOT` / `DST_SERVER_QUADLET_DIR` 覆写。
 全局选项放在命令之前：
 
@@ -124,8 +124,6 @@ dst-server template apply forge --room 299 --restart
 应用模板会显式替换玩法、世界和 Mod 配置，保留房间编号、名称、介绍、密码、token、共享密钥及部署参数。
 已有房间不会自动继承模板变化。
 核心生成与维护代码随包发布，可直接调用异步 SDK。
-仓库暂时保留旧脚本入口，因为已部署的定时器仍引用工作区路径。
-这些部署单独切换后再移除旧入口。
 
 ## 配置与部署
 
@@ -171,7 +169,7 @@ cluster/
 | `<shard>/save/session/<session_id>/.last_login` | 最后一次玩家成功加载世界的 UTC ISO 8601 时间，仅一行，导出时排除。 |
 
 配置来源是原生 INI/Lua 文件和 Quadlet，包括由 systemd 处理的 drop-in。
-不再额外持久化一份完整房间定义。
+房间定义没有额外的持久化副本。
 缺少 `.dst-control.json` 时，房间默认没有开放时段，也不自动回收。
 启动读取现有文件并准备 Mod，不重新生成游戏配置。
 `cluster.ini`、`cluster_token.txt` 和每个启用分片的 `server.ini` 必须存在，且只能有一个主分片。
@@ -208,7 +206,7 @@ cluster/
 `cluster.ini` 的 `[NETWORK]` 管理名称与访问限制，`[GAMEPLAY]` 管理人数、PVP 和空房暂停。
 完整字段、范围和默认值见 [ClusterSettings / ShardSettings](src/dst_server/configuration/models.py)。
 SDK 默认 `encode_user_path=True`，始终在 `server.ini` 中写入当前值，也保留显式 `False`。
-已有存档时，修改此值必须同步迁移 [玩家目录](#玩家路径编码)。
+已有存档时，修改此值必须同步调整 [玩家目录](#玩家路径编码)。
 
 ### 世界设置
 
@@ -275,7 +273,7 @@ SDK 只解析受支持的声明式 Lua，不执行脚本；修改配置时遇到
 启动和调度命令不需要解析世界 Lua。
 写回的原生文件会规范化排版并移除该文件的原注释，其他文件保持不动。
 文件逐个替换，不是整个配置树的跨文件事务。
-权限名单和存档仍是独立的实时文件，房间编辑会保留它们。
+权限名单和存档是独立的实时文件，房间编辑会保留它们。
 
 [ClusterClient](#连接集群) 的 `read_configuration()` 只读原生配置，返回配置快照或验证错误。
 其中的 revision 标识该控制器观察到的配置，不代表待生效配置或部署版本。
@@ -376,7 +374,6 @@ dst-server room stop 299
 
 ### 控制台与日志
 
-公开的 console FIFO 已移除。
 `console` 通过房间 Agent 的 RPC 执行 Lua，默认选择主分片：
 
 ```shell
@@ -392,7 +389,7 @@ dst-server console --room 299 --interactive --follow
 Lua 只执行一次，表达式与语句在编译阶段区分，不会因执行失败而重复执行。
 交互模式只接受一个房间，通过 `--shard NAME` 指定次分片，`--follow` 同时显示后台日志。
 Ctrl+D 关闭输入，Ctrl+C 清除当前输入行。
-Lua 执行仍是可信管理操作，不代表保存已经确认。
+Lua 执行是可信管理操作，不代表保存已经确认。
 
 ```shell
 dst-server logs --room 299 --lines 100
@@ -405,7 +402,7 @@ Quadlet 显式使用 `LogDriver=journald`。
 日志可以在房间关闭时查询，也能覆盖此前容器运行和宿主重启之前的记录，保留时长遵循 journald 策略。
 `--follow` 用同一个读取进程先查询历史再持续跟随，默认历史为 100 条。
 异步 SDK 提供 `dst_server.host.logs.logs()` 和 `JournalRecord`，提前结束迭代时使用 `contextlib.aclosing`。
-RPC 订阅仍只推送实时记录，Netdata 独立查询已导出的结构化事件。
+RPC 订阅只推送实时记录，Netdata 独立查询已导出的结构化事件。
 
 ### 定时与维护任务
 
@@ -423,11 +420,14 @@ systemctl enable --now dst-room-schedule.timer
 `pause` 暂停自动管理，`resume` 恢复并清除手动覆盖。
 `--always` 移除定时窗口，`schedule run` 执行一次检查。
 计划关闭前八分钟，每分钟发送一次公告。
-安装的 timer 每分钟检查一次，检查成功后继续执行空闲回收。
+安装的 timer 每分钟检查一次，检查结束后无论成功或失败都会继续执行空闲回收。
 `deployment install` 写入包内的 systemd 单元，启用 timer 是单独的部署动作。
-当前生产定时器仍使用旧仓库脚本，本次重构没有切换这些部署。
-切换前应将现有 140 个房间的模板标签、开放时段和回收策略写入 `.dst-control.json`，保留原生游戏配置。
-在维护窗口停止旧定时器并等待正在运行的任务结束，再安装和启用新自动维护入口。
+[包内单元模板](src/dst_server/host/systemd) 是自动维护服务配置的唯一来源。
+安装后的服务执行 `python -m dst_server schedule run` 和 `python -m dst_server maintenance recycle`。
+安装器将当前 Python 解释器、房间根目录和 Quadlet 目录写入命令。
+创建房间时将模板、开放时段和回收策略写入 `.dst-control.json`。
+自动维护读取各房间策略；缺少该文件的房间默认没有定时窗口，且关闭回收。
+修改 Python 环境或部署路径后，重新执行 `deployment install`，再启用 timer。
 
 ```shell
 dst-server maintenance recycle --dry-run
@@ -722,7 +722,7 @@ async def inspect_console(shard: ShardClient) -> None:
 实时订阅不提供历史重放，进程历史输出使用 [日志查询](#控制台与日志)，已导出的事件使用 [Netdata](#netdata-部署与查询)。
 
 需要自行管理单个游戏进程的应用可使用 `dst_server.runtime.Server` 与 `server.game`。
-调用方负责持续消费 lifecycle、game 和 operational 观察流，以及进程清理。
+调用方负责持续消费生命周期和游戏事件通知，以及进程清理。
 常规 Pod 部署使用 `ClusterClient` 即可。
 对于已运行的 `Server`，可将 `server.game` 传给以下函数：
 
@@ -742,7 +742,7 @@ async def inspect_game(game: GameClient) -> None:
 
 ### 表情与动作枚举
 
-`dst_server.game` 提供静态枚举，映射对应仓库固定的 DST build `747465`。
+`dst_server.game` 为原生表情字符和动作命令提供静态枚举。
 SDK 运行时不读取游戏 Lua 文件。
 
 | 枚举 | 值与附加字段 |
@@ -927,9 +927,9 @@ SDK 不会随机生成 Klei token。
 
 默认 `encode_user_path=True` 按源 `server.ini` 判断是否转换人物目录，并同步导出配置与 `shardindex` 的编码标志。
 传入 `False` 则保留源设置与目录名。
-旧版仅有 `saveindex` 的存档需先由游戏迁移，已有 `shardindex` 损坏或格式不支持时会失败。
+不支持仅有 `saveindex` 的存档，已有 `shardindex` 损坏或格式不支持时会失败。
 导出会检测文件变化，但不能保证在线多分片的原子快照；输入必须保持静止。
-目前提供导出与上传，尚无导入接口。
+归档 API 支持导出与上传。
 
 上传 R2 时可直接传入 S3 连接配置和凭据：
 
@@ -970,12 +970,12 @@ print(result.url)
 显式值覆盖对应的环境配置，其中 `endpoint` 也会覆盖 `AWS_ENDPOINT_URL_S3`。
 传入 `None` 的字段仍由 [obstore 的环境配置](https://developmentseed.org/obstore/latest/api/store/aws/#obstore.store.S3Config) 提供。
 回退按字段生效：即使两个密钥已显式传入，省略的 `session_token` 仍可能来自环境变量。
-obstore 的其它选项仍沿用其环境变量行为。
-不传连接和机密参数调用 `upload()` 时，继续使用 AWS 环境变量。
+obstore 的其它选项遵循其环境变量行为。
+不传连接和机密参数调用 `upload()` 时，使用 AWS 环境变量。
 
 `upload()` 从流开头上传，返回含 `key` 和 `url` 字段的 `ArchiveUploadResult`。
 对象 key 为 `object_prefix + archive.filename`，`object_prefix` 默认为空字符串。
-归档文件名仍为 `DST-<room-id>-<UTC timestamp>.7z`，时间戳精确到秒。
+归档文件名为 `DST-<room-id>-<UTC timestamp>.7z`，时间戳精确到秒。
 使用相同前缀再次上传同名归档时，key 和 URL 保持相同，并替换原对象。
 未传入 `url_prefix` 时，`url` 为 `None`；否则严格等于 `url_prefix + key.rsplit("/", 1)[-1]`。
 两个前缀都是显式 SDK 参数，按字面拼接。
@@ -1175,14 +1175,12 @@ Python 校验类型、字段、UTF-8 和当前进程 nonce；`DST_OTEL|` 加 JSO
 
 Logs 不为导出在本地持久化，接收端恢复后仅能继续导出后续批次。
 SDK 队列或导出丢失不计入入口计数 `telemetry_invalid`、`telemetry_dropped`。
-程序不读取、迁移或删除旧 `.telemetry.sqlite3`、`.telemetry.sqlite3-wal`、`.telemetry.sqlite3-shm` 文件。
-停服后可手工清理这些文件。
 游戏事件的 `log.record.uid` 为 `nonce:generation:seq`，可用于辨认重复，不能假定后端自动去重。
 Lua `events_emitted` 只是已分配输出序号的高水位；输出失败可能留下缺号，不代表 Python 已校验或送达。
 
 ### 日志边界
 
-游戏 stdout 与 stderr 合流后由 Python 读取，无法再区分来源。
+游戏 stdout 与 stderr 合流后由 Python 读取，不区分来源。
 FD 3 命令输入、FD 4 命令响应、FD 5 生命周期保持独立；stdout 中的相同标记不完成命令、推进 Session 或确认保存。
 标准 CLI 通过 Logbook 将 Agent 日志写到容器 stdout。
 普通 Logbook 记录不会自动通过 OTLP 导出，结构化游戏事件和白名单运行诊断保持显式分流。

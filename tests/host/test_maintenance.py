@@ -614,18 +614,12 @@ async def test_worker_retains_all_140_room_results_and_full_errors(
     assert host.restart.await_count == 140
 
 
-@pytest.mark.parametrize(
-    "relative",
-    [
-        "src/dst_server/host/systemd/dst-room-schedule.service",
-        "deploy/systemd/dst-room-schedule.service",
-    ],
-)
-def test_recycling_runs_after_both_successful_and_failed_schedule(
-    relative: str,
-) -> None:
+def test_recycling_runs_after_both_successful_and_failed_schedule() -> None:
     config = ConfigParser(interpolation=None)
-    config.read(Path(__file__).parents[2] / relative)
+    config.read(
+        Path(__file__).parents[2]
+        / "src/dst_server/host/systemd/dst-room-schedule.service"
+    )
     assert config["Unit"]["OnSuccess"] == "dst-room-recycle.service"
     assert config["Unit"]["OnFailure"] == "dst-room-recycle.service"
 

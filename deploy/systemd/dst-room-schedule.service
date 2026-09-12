@@ -1,9 +1,0 @@
-[Unit]
-Description=Apply DST room opening hours
-OnSuccess=dst-room-recycle.service
-OnFailure=dst-room-recycle.service
-
-[Service]
-Type=oneshot
-ExecStart=/srv/dst/dst-server/.venv/bin/dst-server schedule run
-TimeoutStartSec=120

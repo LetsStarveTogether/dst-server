@@ -57,7 +57,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           submodules: true
@@ -68,7 +68,7 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes lua5.1 luajit libsystemd-dev pkg-config build-essential
+          sudo apt-get install --yes lua5.1 luajit
 
       - name: Test
         run: uv run --locked --all-extras pytest
@@ -83,7 +83,7 @@ jobs:
     steps:
       - name: Resolve image versions
         id: detect
-        uses: actions/github-script@v9
+        uses: actions/github-script@v9.0.0
         env:
           BUILD_TARGET: ${{ inputs.build_target || 'both' }}
           FORCE_BUILD: ${{ inputs.force_build }}
@@ -188,7 +188,7 @@ jobs:
     steps:
       - name: Check build source
         if: ${{ matrix.build }}
-        uses: actions/github-script@v9
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             const { data } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
@@ -198,7 +198,7 @@ jobs:
 
       - name: Checkout
         if: ${{ matrix.build }}
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Log in to registry for build cache
         if: ${{ matrix.build }}
@@ -212,7 +212,7 @@ jobs:
       - name: Build image
         if: ${{ matrix.build }}
         id: build
-        uses: redhat-actions/buildah-build@v3
+        uses: redhat-actions/buildah-build@v3.1.0
         with:
           image: ${{ env.IMAGE_NAME }}
           tags: ${{ matrix.version_tag }} ${{ matrix.image_tag }}
@@ -238,12 +238,6 @@ jobs:
         if: ${{ matrix.build }}
         uses: astral-sh/setup-uv@v10.1.0
 
-      - name: Install host dependency build tools
-        if: ${{ matrix.build }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes libsystemd-dev pkg-config build-essential
-
       - name: Test built image with the real game
         if: ${{ matrix.build }}
         timeout-minutes: 40
@@ -259,7 +253,7 @@ jobs:
 
       - name: Check publish source
         if: ${{ matrix.build }}
-        uses: actions/github-script@v9
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             const { data } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
@@ -270,7 +264,7 @@ jobs:
       - name: Push to registry
         if: ${{ matrix.build }}
         id: push
-        uses: redhat-actions/push-to-registry@v3
+        uses: redhat-actions/push-to-registry@v3.0.0
         with:
           image: ${{ steps.build.outputs.image }}
           tags: ${{ steps.build.outputs.tags }}
