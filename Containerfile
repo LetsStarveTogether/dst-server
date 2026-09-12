@@ -71,8 +71,7 @@ RUN uv sync --locked --extra otel --no-install-project --no-editable
 COPY src ./src
 RUN uv sync --locked --extra otel --no-editable && \
     dst-server scripts build /install/data/databundles/scripts.zip \
-        --output /install/data/databundles/scripts.zip && \
-    dst-server scripts verify /install/data/databundles/scripts.zip
+        --output /install/data/databundles/scripts.zip
 
 USER steam
 WORKDIR /

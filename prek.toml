@@ -30,7 +30,7 @@ repo = 'local'
 [[repos.hooks]]
 id = 'prek-validate-config'
 name = 'prek validate-config'
-entry = 'uv run prek validate-config'
+entry = 'uv run --locked prek validate-config'
 language = 'system'
 files = '^prek\.toml$'
 

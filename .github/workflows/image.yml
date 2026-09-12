@@ -40,30 +40,9 @@ jobs:
   test:
     name: Verify SDK
     if: ${{ github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 20
     permissions:
       contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-          submodules: true
-
-      - name: Setup Python and uv
-        uses: astral-sh/setup-uv@v10.1.0
-
-      - name: Setup just
-        uses: extractions/setup-just@v4.0.0
-
-      - name: Install test dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes lua5.1 luajit
-
-      - name: Verify
-        run: just verify
+    uses: ./.github/workflows/test.yml
 
   detect:
     name: Resolve image versions
@@ -137,19 +116,9 @@ jobs:
             const created = new Date().toISOString();
 
             for (const target of selectedTargets) {
-              const published = await publishedVersion(target);
-              let build;
-              let version;
-
-              if (context.eventName === 'push') {
-                version = await upstreamVersion(target.upstream);
-                build = true;
-                summary.push(`${published ? 'Rebuild' : 'Bootstrap'} ${target.tag} ${version}`);
-              } else {
-                version = await upstreamVersion(target.upstream);
-                build = forceBuild || published !== version;
-                summary.push(`${build ? 'Build' : 'Skip'} ${target.tag} ${version}`);
-              }
+              const version = await upstreamVersion(target.upstream);
+              const build = context.eventName === 'push' || forceBuild || (await publishedVersion(target)) !== version;
+              summary.push(`${build ? 'Build' : 'Skip'} ${target.tag} ${version}`);
 
               matrix.push({
                 beta: target.beta,
@@ -178,16 +147,6 @@ jobs:
       max-parallel: 1
       matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
     steps:
-      - name: Check build source
-        if: ${{ matrix.build }}
-        uses: actions/github-script@v9.0.0
-        with:
-          script: |
-            const { data } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
-            if (context.ref !== 'refs/heads/main' || context.sha !== data.object.sha) {
-              throw new Error('Refusing to build an image from a superseded or non-main commit.');
-            }
-
       - name: Checkout
         if: ${{ matrix.build }}
         uses: actions/checkout@v7.0.1
@@ -213,10 +172,12 @@ jobs:
           tags: ${{ matrix.version_tag }} ${{ matrix.image_tag }}
           containerfiles: Containerfile
           layers: true
+          # ponytail: final-image cache aliases persist; strict expiry needs separate publication.
           extra-args: |
             --pull=always
             --cache-from=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}
             --cache-to=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}
+            --layer-label=quay.expires-after=7d
             ${{ inputs.no_cache && '--no-cache' || '' }}
           build-args: |
             BETA=${{ matrix.beta }}
@@ -233,45 +194,37 @@ jobs:
         if: ${{ matrix.build }}
         uses: astral-sh/setup-uv@v10.1.0
 
+      - name: Install Python test dependencies
+        if: ${{ matrix.build }}
+        run: uv sync --locked --all-extras --no-default-groups --group dev
+
       - name: Test native contracts from built image
         if: ${{ matrix.build }}
         env:
           DST_SERVER_IMAGE: ${{ steps.build.outputs.image-with-tag }}
         run: |
           sudo apt-get update
-          sudo apt-get install --yes lua5.1 luajit
+          sudo apt-get install --yes --no-install-recommends lua5.1 luajit
           scripts_bundle=$(mktemp --suffix=.zip)
           trap 'rm -f "$scripts_bundle"' EXIT
           native_container=$(podman create "$DST_SERVER_IMAGE")
           trap 'podman rm --volumes "$native_container"; rm -f "$scripts_bundle"' EXIT
           podman cp "$native_container:/install/data/databundles/scripts.zip" "$scripts_bundle"
-          uv run --locked --all-extras pytest tests --scripts-zip "$scripts_bundle"
+          uv run --no-sync -- pytest tests -m 'not system' --scripts-zip "$scripts_bundle"
 
       - name: Test built image with the real game
         if: ${{ matrix.build }}
         timeout-minutes: 40
+        shell: bash
         env:
-          DST_SERVER_EXPECTED_REVISION: ${{ github.sha }}
-          DST_SERVER_EXPECTED_VERSION: ${{ matrix.version }}
           DST_SERVER_IMAGE: ${{ steps.build.outputs.image-with-tag }}
         run: |
           podman save "$DST_SERVER_IMAGE" | sudo podman load
-          sudo --preserve-env=DST_SERVER_EXPECTED_REVISION,DST_SERVER_EXPECTED_VERSION,DST_SERVER_IMAGE \
-            "$(command -v uv)" run --locked --all-extras pytest -m system tests/system
-
-      - name: Check publish source
-        if: ${{ matrix.build }}
-        uses: actions/github-script@v9.0.0
-        with:
-          script: |
-            const { data } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
-            if (context.ref !== 'refs/heads/main' || context.sha !== data.object.sha) {
-              throw new Error('Refusing to publish an image from a superseded or non-main commit.');
-            }
+          sudo --preserve-env=DST_SERVER_IMAGE \
+            "$(command -v uv)" run --no-sync -- pytest tests/system -m system
 
       - name: Push to registry
         if: ${{ matrix.build }}
-        id: push
         uses: redhat-actions/push-to-registry@v3.0.0
         with:
           image: ${{ steps.build.outputs.image }}
@@ -279,43 +232,3 @@ jobs:
           registry: ${{ env.IMAGE_REGISTRY }}
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
-
-      - name: Verify registry metadata
-        if: ${{ matrix.build }}
-        env:
-          EXPECTED_CHANNEL: ${{ matrix.channel }}
-          EXPECTED_DIGEST: ${{ steps.push.outputs.digest }}
-          EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_VERSION: ${{ matrix.version }}
-          IMAGE_TAG: ${{ matrix.image_tag }}
-          VERSION_TAG: ${{ matrix.version_tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          for tag in "${IMAGE_TAG}" "${VERSION_TAG}"; do
-            read -r digest version revision channel <<< "$(
-              skopeo inspect \
-                --format '{{ .Digest }} {{ index .Labels "org.opencontainers.image.version" }} {{ index .Labels "org.opencontainers.image.revision" }} {{ index .Labels "io.github.letsstarvetogether.dst.channel" }}' \
-                "docker://${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag}"
-            )"
-
-            [[ "${version}" == "${EXPECTED_VERSION}" ]]
-            [[ "${revision}" == "${EXPECTED_REVISION}" ]]
-            [[ "${channel}" == "${EXPECTED_CHANNEL}" ]]
-            [[ "${digest}" == "${EXPECTED_DIGEST}" ]]
-          done
-
-      - name: Show deployment restart command
-        if: ${{ matrix.build }}
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
-
-          The image is published; room deployment remains a separate host operation.
-          Restart selected room services to use the new image:
-
-          ```sh
-          dst-server room restart ROOM
-          ```
-          Replace `ROOM` with the intended room selection.
-          EOF

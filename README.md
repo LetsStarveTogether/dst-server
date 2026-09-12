@@ -490,6 +490,9 @@ dst-server room stop 299
 
 The large game installation has its own cached layer, keyed by game version and channel.
 SDK changes reuse this layer.
+Newly built intermediate cache images carry `quay.expires-after=7d` for automatic tag expiration in Quay.
+The final image, including `latest`, `beta`, version tags, and its hash cache alias, has no expiration label.
+Tag expiration does not immediately remove shared layers; Quay garbage collection determines when storage is reclaimed.
 In the image workflow, `force_build` builds even when that game version is already published.
 `no_cache` disables cached layer reuse for a build.
 Select both to rebuild an already published version without cache.
@@ -497,10 +500,10 @@ The image workflow publishes images; it does not deploy rooms.
 Run `room restart 299` to recreate containers and pull their configured images.
 For configuration changes, run `room stop`, edit the stopped room, and run `room start`.
 `maintenance restart` only restarts games inside the existing containers, so it does not apply a new image.
-Only the current `main` commit can build and publish.
+The image workflow builds and publishes only runs targeting `main`.
 GitHub's native concurrency cancels earlier runs of this workflow on the same ref when a new run starts.
 Rerunning an old commit can therefore interrupt a run for a newer commit.
-Other refs are skipped, and HEAD checks reject superseded commits before building and publishing.
+Other refs are skipped.
 Version tags are `:<version>` for stable images and `:beta-<version>` for beta images.
 
 ### Console and Logs
@@ -1780,9 +1783,14 @@ just verify
 ```
 
 `just check` validates the lockfile, Python formatting, lint, types, and Markdown without modifying files.
-`just test` uses locked dependencies and excludes `system` tests by default.
-`just verify` runs the same hooks, tests, package build, and isolated wheel check used by PR, main, and release CI.
-`just tc` only checks types; `just fmt` formats Python and Markdown, and `just lint` also applies lint fixes.
+Local recipes run in order: `fmt → lint → tc → test → build → verify`; each runs its prerequisites first.
+`fmt` formats Python and Markdown, `lint` applies lint fixes, and `tc` checks types.
+`test` uses locked dependencies and excludes `system` tests by default.
+`build` creates the package, and `verify` adds repository hooks and an isolated wheel check.
+CI lists the commands explicitly in `.github/workflows/test.yml`; PR, image, and release workflows call it.
+Test dependencies are synchronized with `uv sync --locked`; subsequent tools use `uv run --no-sync`.
+The release workflow runs tag verification, shared tests, then builds and checks the distributions for publication.
+Isolated wheel checks resolve dependencies from the package metadata without the project's extras or lockfile.
 The local prek check runs `just check`; builtin whitespace and file-format hooks may modify files.
 Lua contract tests need Lua 5.1 and LuaJIT; missing interpreters skip tests locally and fail in CI.
 
@@ -1794,7 +1802,6 @@ Lua contract tests need Lua 5.1 and LuaJIT; missing interpreters skip tests loca
 System tests start games or contact external services and require a separately prepared environment.
 They do not run as part of ordinary tests.
 Explicitly selected system tests fail when their required image, permissions, or runtime are missing.
-Use `just build` to build the Python package without running tests.
 
 Documentation lives in these two READMEs; keep sections, examples, and links synchronized when editing.
 Diagrams use Mermaid [flowcharts](https://mermaid.js.org/syntax/flowchart.html), [sequence diagrams](https://mermaid.js.org/syntax/sequenceDiagram.html), and [state diagrams](https://mermaid.js.org/syntax/stateDiagram.html).

@@ -277,20 +277,9 @@ def test_lifecycle_and_schedule_controls_do_not_parse_dynamic_lua(
     cli_systemd.stop.assert_awaited_once_with(host.unit(0))
 
 
-def test_ci_deployment_command_restarts_room_services(
-    host: Host, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import shlex
-
-    workflow = Path(__file__).parents[2] / ".github/workflows/image.yml"
-    command = next(
-        line.strip()
-        for line in workflow.read_text().splitlines()
-        if line.strip().startswith("dst-server room restart ")
-    )
+def test_room_restart_calls_host(host: Host, monkeypatch: pytest.MonkeyPatch) -> None:
     operation = AsyncMock(return_value={"number": 0, "action": "restart"})
     monkeypatch.setattr(Host, "restart", operation)
-    arguments = shlex.split(command.replace("ROOM", "000"))[1:]
-    assert main(arguments) == 0
+    assert main(["room", "restart", "000"]) == 0
     operation.assert_awaited_once_with(0, wait=True, timeout=10800.0)
     assert host.rooms.numbers() == (0, 1)

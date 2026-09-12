@@ -6,18 +6,26 @@ sync:
     uv run prek install
 
 fmt:
-    uv run ruff format
-    uv run rumdl fmt
+    uv run --locked ruff format .
+    uv run --locked rumdl fmt .
 
 lint: fmt
-    uv run ruff check --fix
-    uv run rumdl check --fix
+    uv run --locked ruff check --fix .
+    uv run --locked rumdl check --fix .
 
-tc:
-    uv run --all-extras ty check
+tc: lint
+    uv run --locked --all-extras ty check
 
-test:
+test: tc
     uv run --locked --all-extras pytest
+
+build: test
+    uv build --clear --out-dir dist --no-create-gitignore --no-sources
+
+# Run the full dependency chain, repository hooks, and isolated wheel check.
+verify: build
+    uv run --locked prek run --all-files --show-diff-on-failure --skip just-check
+    uv run --isolated --no-project --no-config --with dist/dst_server-*.whl -- python -I tests/distribution.py
 
 # Run the real game against an explicitly selected local image.
 test-system image:
@@ -29,19 +37,10 @@ test-netdata-system image:
 
 check:
     uv lock --check
-    uv run ruff format --check
-    uv run ruff check
-    uv run --all-extras ty check
-    uv run rumdl check
-
-build:
-    uv build --no-create-gitignore --no-sources
-
-# The same validation gate is used locally, for PRs, and before publishing.
-verify:
-    uv run --locked prek run --all-files
-    just test build
-    uv run --isolated --no-project --with dist/dst_server-*.whl python -I tests/distribution.py
+    uv run --locked ruff format --check .
+    uv run --locked ruff check --no-fix .
+    uv run --locked --all-extras ty check
+    uv run --locked rumdl check .
 
 clean:
     fd -I -t d -F __pycache__ -x rm -rf

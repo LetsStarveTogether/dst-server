@@ -466,16 +466,19 @@ dst-server room stop 299
 - RPC `restart()` 在现有容器内重启全部游戏进程、检查共享 Mod，并重新激活各分片资源。
 
 镜像将体积较大的游戏安装保留为独立缓存层，以游戏版本和渠道区分；仅修改 SDK 时可以复用。
+新生成的中间构建缓存镜像带有 `quay.expires-after=7d`，由 Quay 自动过期其标签。
+最终成品镜像不带过期标签，包括 `latest`、`beta`、版本标签和它的 hash 缓存别名。
+标签过期不会立即删除共享镜像层，实际空间回收由 Quay 的垃圾回收机制决定。
 镜像工作流的 `force_build` 让已发布的游戏版本也重新构建，`no_cache` 则禁止这次构建复用缓存层。
 要对已发布版本执行无缓存构建，同时勾选两个参数。
 镜像工作流只发布镜像，不会自动部署房间。
 宿主执行 `room restart 299` 重建容器并拉取配置中的镜像。
 修改配置时，先 `room stop`，修改完成后 `room start`。
 `maintenance restart` 只重启现有容器里的游戏，不应用新镜像。
-只有当前 `main` 提交可以构建和发布。
+镜像工作流只对 `main` 上的运行进行构建和发布。
 使用 GitHub 原生并发控制，同一工作流和 ref 上的新运行会取消此前的运行。
 因此，重新运行旧提交也会打断较新提交的运行。
-其他 ref 的运行会跳过，构建前和发布前的 HEAD 检查会拒绝过期提交。
+其他 ref 的运行会跳过。
 正式镜像的版本标签为 `:<version>`，测试镜像为 `:beta-<version>`。
 
 ### 控制台与日志
@@ -1641,9 +1644,13 @@ just verify
 ```
 
 `just check` 检查锁文件、Python 格式、lint、类型和 Markdown，不修改文件。
-`just test` 使用锁定依赖，默认排除 `system` 测试。
-`just verify` 与 PR、主分支及发布 CI 共用同一套 hook、测试、打包和隔离安装验证。
-`just tc` 只检查类型；`just fmt` 格式化 Python 和 Markdown，`just lint` 还会应用 lint 修复。
+本地命令依次为 `fmt → lint → tc → test → build → verify`，每条命令都会先执行前置依赖。
+`fmt` 格式化 Python 和 Markdown，`lint` 应用 lint 修复，`tc` 检查类型。
+`test` 使用锁定依赖，默认排除 `system` 测试；`build` 构建安装包，`verify` 再运行仓库钩子和隔离安装检查。
+CI 在 `.github/workflows/test.yml` 中显式列出命令，由 PR、镜像和发布工作流调用。
+测试依赖先通过 `uv sync --locked` 同步，后续工具通过 `uv run --no-sync` 复用环境。
+发布工作流依次验证标签、运行共享测试，再构建并检查待发布的安装包。
+隔离安装检查按包的元数据解析依赖，不使用项目的可选依赖和锁文件。
 本地 prek 检查运行 `just check`；内置空白和文件格式钩子仍可能修改文件。
 Lua 契约测试需要 Lua 5.1 和 LuaJIT，本地缺失时跳过，CI 缺失时报错。
 
@@ -1654,7 +1661,6 @@ Lua 契约测试需要 Lua 5.1 和 LuaJIT，本地缺失时跳过，CI 缺失时
 
 系统测试会实际启动游戏或访问外部服务，需要单独准备环境；不会随普通测试自动运行。
 显式选择系统测试后，缺少必要镜像、权限或运行环境会报错。
-`just build` 只构建 Python 包，不运行测试。
 
 文档统一维护在这两份 README，修改时同步章节、示例和链接。
 图表使用 Mermaid 的 [流程图](https://mermaid.js.org/syntax/flowchart.html)、[时序图](https://mermaid.js.org/syntax/sequenceDiagram.html) 和 [状态图](https://mermaid.js.org/syntax/stateDiagram.html)。

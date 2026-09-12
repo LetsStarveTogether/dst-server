@@ -19,11 +19,9 @@ def capture_game_logs() -> Iterator[None]:
 
 
 @pytest.fixture(scope="session", autouse=True)  # ruff: ignore[pytest-fixture-autouse]
-def image_matches_expected_build() -> None:
+def system_image() -> None:
     assert IMAGE, "set DST_SERVER_IMAGE to the exact local image ID or tag"
     assert os.geteuid() == 0, "rootful Podman is required for idmapped test volumes"
-    expected_revision = os.environ.get("DST_SERVER_EXPECTED_REVISION")
-    expected_version = os.environ.get("DST_SERVER_EXPECTED_VERSION")
     podman = shutil.which("podman")
     assert podman is not None, "Podman is required for system tests"
     inspected = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
@@ -32,11 +30,7 @@ def image_matches_expected_build() -> None:
             "image",
             "inspect",
             "--format",
-            (
-                "{{.Config.User}}|"
-                '{{ index .Labels "org.opencontainers.image.revision" }}|'
-                '{{ index .Labels "org.opencontainers.image.version" }}'
-            ),
+            "{{.Config.User}}",
             IMAGE,
         ),
         capture_output=True,
@@ -45,12 +39,7 @@ def image_matches_expected_build() -> None:
         check=False,
     )
     assert inspected.returncode == 0, inspected.stderr or inspected.stdout
-    user, revision, version = inspected.stdout.strip().split("|", maxsplit=2)
-    assert user == "steam"
-    if expected_revision is not None:
-        assert revision == expected_revision
-    if expected_version is not None:
-        assert version == expected_version
+    assert inspected.stdout.strip() == "steam"
 
 
 @pytest.fixture

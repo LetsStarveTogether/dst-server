@@ -11,8 +11,8 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="Workflow checks require Node.js")
 
 
-def workflow_script(step: str) -> str:
-    block = WORKFLOW.read_text().split(f"      - name: {step}\n", 1)[1]
+def workflow_script() -> str:
+    block = WORKFLOW.read_text().split("      - name: Resolve image versions\n", 1)[1]
     lines = block.split("          script: |\n", 1)[1].splitlines()
     script = []
     for line in lines:
@@ -22,20 +22,12 @@ def workflow_script(step: str) -> str:
     return "\n".join(script)
 
 
-def run_script(step: str, **scenario: Any) -> dict[str, Any]:
+def run_script(**scenario: Any) -> dict[str, Any]:
     # Execute the shipped JavaScript, replacing only its external API boundaries.
     harness = r"""
 const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 const result = { outputs: {}, calls: [], messages: [], error: null };
-const context = {
-  ref: 'refs/heads/main', sha: 'current', eventName: 'workflow_dispatch',
-  repo: { owner: 'owner', repo: 'repo' }, ...input.context,
-};
-const github = { rest: { git: { getRef: async (args) => {
-  result.calls.push(['getRef', args]);
-  if (input.fail === 'getRef') throw new Error('getRef forbidden');
-  return { data: { object: { sha: input.head || 'current' } } };
-} } } };
+const context = { eventName: 'workflow_dispatch', ...input.context };
 const core = {
   setOutput: (name, value) => { result.outputs[name] = value; },
   warning: (message) => result.messages.push(message),
@@ -58,10 +50,10 @@ const fakeRequire = () => ({
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 try {
   const execute = new AsyncFunction(
-    'github', 'context', 'core', 'exec', 'fetch', 'process', 'require', input.script,
+    'context', 'core', 'exec', 'fetch', 'process', 'require', input.script,
   );
   await execute(
-    github, context, core, exec, fetch, process, fakeRequire,
+    context, core, exec, fetch, process, fakeRequire,
   );
 } catch (error) {
   result.error = error.message;
@@ -70,7 +62,7 @@ console.log(JSON.stringify(result));
 """
     completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]
         [str(NODE), "--input-type=commonjs", "-e", f"(async () => {{{harness}}})()"],
-        input=orjson.dumps({"script": workflow_script(step), **scenario}).decode(),
+        input=orjson.dumps({"script": workflow_script(), **scenario}).decode(),
         capture_output=True,
         text=True,
         timeout=5,
@@ -79,41 +71,28 @@ console.log(JSON.stringify(result));
     return orjson.loads(completed.stdout)
 
 
-@pytest.mark.parametrize("step", ["Check build source", "Check publish source"])
 @pytest.mark.parametrize(
-    ("scenario", "allowed"),
+    ("event", "force", "published", "build", "inspections"),
     [
-        ({}, True),
-        ({"head": "newer"}, False),
-        ({"context": {"ref": "refs/heads/feature"}}, False),
-        ({"fail": "getRef"}, False),
-    ],
-    ids=["current", "superseded", "branch", "denied"],
-)
-def test_build_and_publish_recheck_main(
-    step: str, scenario: dict[str, Any], allowed: bool
-) -> None:
-    result = run_script(step, **scenario)
-    assert (result["error"] is None) is allowed
-
-
-@pytest.mark.parametrize(
-    ("event", "force", "build"),
-    [
-        ("workflow_dispatch", "false", False),
-        ("workflow_dispatch", "true", True),
-        ("push", "false", True),
+        ("workflow_dispatch", "false", "100", False, 2),
+        ("workflow_dispatch", "true", "100", True, 0),
+        ("push", "false", "100", True, 0),
+        ("workflow_dispatch", "false", "99", True, 2),
+        ("workflow_dispatch", "false", None, True, 2),
     ],
 )
-def test_channel_tags_and_same_version_rebuild(
-    event: str, force: str, build: bool
+def test_channel_tags_and_build_selection(
+    event: str, force: str, published: str | None, build: bool, inspections: int
 ) -> None:
     result = run_script(
-        "Resolve image versions",
         context={"eventName": event},
         env={"FORCE_BUILD": force},
         builds={"release": ["99", "100"], "updatebeta": ["100"]},
-        published={"latest": "100|release", "beta": "100|beta"},
+        published=(
+            {"latest": f"{published}|release", "beta": f"{published}|beta"}
+            if published is not None
+            else {}
+        ),
     )
     assert result["error"] is None
     matrix = orjson.loads(result["outputs"]["matrix"])["include"]
@@ -122,24 +101,4 @@ def test_channel_tags_and_same_version_rebuild(
         ("beta", "beta-100"),
     ]
     assert all(item["build"] is build for item in matrix)
-
-
-def test_publication_gates_are_wired_before_mutations() -> None:
-    workflow = WORKFLOW.read_text()
-    assert (
-        "\nconcurrency:\n"
-        "  group: ${{ github.workflow }}-${{ github.ref }}\n"
-        "  cancel-in-progress: true\n"
-    ) in workflow
-    assert workflow.count("concurrency:") == 1
-    assert workflow.count("if: ${{ github.ref == 'refs/heads/main' }}") == 3
-    assert "actions: write" not in workflow
-    assert workflow.index("- name: Check build source") < workflow.index(
-        "- name: Log in to registry"
-    )
-    assert workflow.index("- name: Check publish source") < workflow.index(
-        "- name: Push to registry"
-    )
-    release = WORKFLOW.with_name("release.yml").read_text()
-    assert "makeLatest: true" not in release
-    assert "makeLatest: legacy" in release
+    assert len(result["calls"]) == inspections

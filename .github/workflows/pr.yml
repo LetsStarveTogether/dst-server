@@ -44,27 +44,6 @@ jobs:
 
   python:
     name: Python
-    runs-on: ubuntu-26.04
-    timeout-minutes: 20
     permissions:
       contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-          submodules: true
-
-      - name: Setup Python and uv
-        uses: astral-sh/setup-uv@v10.1.0
-
-      - name: Setup just
-        uses: extractions/setup-just@v4.0.0
-
-      - name: Install test dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes lua5.1 luajit
-
-      - name: Verify
-        run: just verify
+    uses: ./.github/workflows/test.yml
