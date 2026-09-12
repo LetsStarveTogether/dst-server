@@ -1,5 +1,4 @@
-import json
-
+import orjson
 from pydantic import SecretStr
 
 from dst_server.models.base import FrozenModel
@@ -17,11 +16,11 @@ def test_secret_serialization_preserves_field_schemas() -> None:
     assert schema["properties"]["token"]["type"] == "string"
     assert schema["properties"]["token"]["writeOnly"] is True
     record = SecretRecord(count=7, token=SecretStr("test-token"))
-    assert json.loads(record.model_dump_json()) == {
+    assert orjson.loads(record.model_dump_json()) == {
         "count": 7,
         "token": "**********",
     }
-    assert json.loads(record.model_dump_json(context={"secrets": True})) == {
+    assert orjson.loads(record.model_dump_json(context={"secrets": True})) == {
         "count": 7,
         "token": "test-token",
     }

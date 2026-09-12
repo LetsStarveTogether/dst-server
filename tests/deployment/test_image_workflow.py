@@ -1,9 +1,9 @@
-import json
 import shutil
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 from typing import Any
 
+import orjson
 import pytest
 
 WORKFLOW = Path(__file__).parents[2] / ".github/workflows/image.yml"
@@ -70,13 +70,13 @@ console.log(JSON.stringify(result));
 """
     completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]
         [str(NODE), "--input-type=commonjs", "-e", f"(async () => {{{harness}}})()"],
-        input=json.dumps({"script": workflow_script(step), **scenario}),
+        input=orjson.dumps({"script": workflow_script(step), **scenario}).decode(),
         capture_output=True,
         text=True,
         timeout=5,
         check=True,
     )
-    return json.loads(completed.stdout)
+    return orjson.loads(completed.stdout)
 
 
 @pytest.mark.parametrize("step", ["Check build source", "Check publish source"])
@@ -116,7 +116,7 @@ def test_channel_tags_and_same_version_rebuild(
         published={"latest": "100|release", "beta": "100|beta"},
     )
     assert result["error"] is None
-    matrix = json.loads(result["outputs"]["matrix"])["include"]
+    matrix = orjson.loads(result["outputs"]["matrix"])["include"]
     assert [(item["image_tag"], item["version_tag"]) for item in matrix] == [
         ("latest", "100"),
         ("beta", "beta-100"),

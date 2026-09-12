@@ -1,10 +1,10 @@
 import asyncio
 import gzip
-import json
 from collections.abc import Iterator
 from datetime import date
 
 import httpx2
+import orjson
 import pytest
 from pydantic import ValidationError
 
@@ -148,17 +148,18 @@ async def test_klei_client_queries_lobby_and_room_in_order(
     credential = "credential-value"
 
     def handler(request: httpx2.Request) -> httpx2.Response:
-        payload = json.loads(request.content) if request.content else None
+        payload = orjson.loads(request.content) if request.content else None
         calls.append((request.method, str(request.url), payload))
         if str(request.url) == LOBBY_URL:
-            content = gzip.compress(json.dumps({"GET": [lobby_row()]}).encode())
+            content = gzip.compress(orjson.dumps({"GET": [lobby_row()]}))
             return httpx2.Response(
                 200,
                 content=content,
                 headers={"Content-Encoding": "gzip"},
             )
         if str(request.url) == ROOM_URL:
-            return httpx2.Response(200, json={"GET": [room]})
+            assert request.headers["Content-Type"] == "application/json"
+            return httpx2.Response(200, content=orjson.dumps({"GET": [room]}))
         msg = f"unexpected URL: {request.url}"
         raise AssertionError(msg)
 
@@ -207,7 +208,7 @@ def test_klei_room_empty_players(players: str | None) -> None:
     }
 
     response = DataResponse[Room].model_validate_json(
-        json.dumps({"GET": [payload]}),
+        orjson.dumps({"GET": [payload]}),
         context={"region": Region.US_EAST},
     )
 
@@ -238,7 +239,7 @@ def test_klei_room_players_reject_executable_or_non_array_data(players: str) -> 
 
     with pytest.raises(ValidationError) as raised:
         DataResponse[Room].model_validate_json(
-            json.dumps({"GET": [payload]}),
+            orjson.dumps({"GET": [payload]}),
             context={"region": Region.US_EAST},
         )
 
@@ -251,16 +252,18 @@ async def test_klei_client_parses_strict_endpoints() -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         urls.append(str(request.url))
         responses = {
-            BUILD_URL: httpx2.Response(200, json={"release": [736958, "736959"]}),
+            BUILD_URL: httpx2.Response(
+                200, content=orjson.dumps({"release": [736958, "736959"]})
+            ),
             VERSION_URL: httpx2.Response(200, text=VERSION_HTML),
             REGION_URL: httpx2.Response(
                 200,
-                json={
+                content=orjson.dumps({
                     "LobbyRegions": [
                         {"Region": "us-east-1"},
                         {"Region": "eu-central-1"},
                     ]
-                },
+                }),
             ),
         }
         return responses[str(request.url)]
@@ -295,7 +298,7 @@ async def test_klei_client_has_explicit_error_boundaries(failure: str) -> None:
 
 async def test_klei_client_only_closes_its_own_http_client() -> None:
     transport = httpx2.MockTransport(
-        lambda _: httpx2.Response(200, json={"release": [736959]})
+        lambda _: httpx2.Response(200, content=orjson.dumps({"release": [736959]}))
     )
     external = httpx2.AsyncClient(transport=transport)
     client = KleiClient(client=external)
@@ -378,7 +381,7 @@ async def test_region_is_validated_before_any_request(
 async def test_valid_region_string_is_normalized_for_request_and_response() -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         assert str(request.url) == LOBBY_URL
-        return httpx2.Response(200, json={"GET": [lobby_row()]})
+        return httpx2.Response(200, content=orjson.dumps({"GET": [lobby_row()]}))
 
     async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
         rows = await KleiClient(client=http).lobby("us-east-1", Platform.STEAM)
@@ -405,7 +408,7 @@ async def test_room_queries_bound_pending_work_and_preserve_order(finish: str) -
             ready.set()
         try:
             await release.wait()
-            row_id = json.loads(request.content)["query"]["__rowId"]
+            row_id = orjson.loads(request.content)["query"]["__rowId"]
             if row_id == "0":
                 await last.wait()
             elif row_id == "199":
@@ -413,7 +416,7 @@ async def test_room_queries_bound_pending_work_and_preserve_order(finish: str) -
             await asyncio.sleep(0)
             return httpx2.Response(
                 200,
-                json={
+                content=orjson.dumps({
                     "GET": [
                         {
                             **lobby_row(),
@@ -423,7 +426,7 @@ async def test_room_queries_bound_pending_work_and_preserve_order(finish: str) -
                             "nat": 1,
                         }
                     ]
-                },
+                }),
             )
         finally:
             active -= 1

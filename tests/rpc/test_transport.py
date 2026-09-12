@@ -1,12 +1,12 @@
 # ruff: file-ignore[blocking-path-method-in-async-function, invalid-argument-name]
 import asyncio
-import json
 import socket
 import stat
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import orjson
 import pytest
 from ulid import ULID
 
@@ -201,7 +201,7 @@ async def test_raw_call_uses_server_metadata_for_locally_unknown_methods(
             _context.results.result = success(encode(c.METHOD_DESCRIPTIONS, (method,)))
 
         async def call(self, request: bytes, _context: Any) -> None:
-            payload = json.loads(request)
+            payload = orjson.loads(request)
             assert payload == {
                 "method": "future_method",
                 "arguments": {"value": "hello"},

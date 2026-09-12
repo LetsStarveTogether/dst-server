@@ -16,6 +16,7 @@ from dst_server.configuration.models import ClusterConfig
 from dst_server.host import service
 from dst_server.host.service import Host
 from dst_server.host.systemd import UnitStatus
+from dst_server.logs import JournalResult
 from dst_server.models.cluster import (
     ClusterStatus,
     ShardDesired,
@@ -735,8 +736,6 @@ async def test_transition_timeout_covers_the_whole_operation(
 async def test_diagnostics_remain_available_when_native_configuration_is_damaged(
     host: Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dst_server.host import logs
-
     units = host.units(0)
     (host.quadlet_dir / "dst-001-forest.container").write_text("broken other room")
     (host.rooms.path(0) / "forest/server.ini").write_text(
@@ -746,19 +745,25 @@ async def test_diagnostics_remain_available_when_native_configuration_is_damaged
     queried: list[tuple[str, ...]] = []
 
     async def history(  # ruff: ignore[unused-async]
-        names: tuple[str, ...], **_: object
-    ) -> AsyncIterator[object]:
+        names: tuple[str, ...], *_: object, **__: object
+    ) -> JournalResult:
         queried.append(names)
-        for record in ():
-            yield record
+        return JournalResult(
+            records=(),
+            next_cursor=None,
+            has_more=False,
+            diagnostics="journal warning",
+            diagnostics_truncated=False,
+        )
 
-    monkeypatch.setattr(logs, "logs", history)
+    monkeypatch.setattr(host.journal_logs, "query", history)
     result = await host.diagnose(0)
     assert result["active"] == "failed"
     assert result["configuration_error"] == "room configuration could not be loaded"
     assert "private-token" not in str(result)
     assert set(result["units"]) == set(units)
-    assert queried == [units]
+    assert queried == [("dst-000-pod.service", "dst-000-*.service")]
+    assert result["logs"].diagnostics == "journal warning"
     assert host.shard_unit(0, "forest") in units
 
 

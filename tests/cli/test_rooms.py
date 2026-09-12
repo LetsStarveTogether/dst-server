@@ -1,7 +1,7 @@
-import json
 from pathlib import Path
 from unittest.mock import Mock
 
+import orjson
 import pytest
 from pydantic import SecretStr
 
@@ -69,7 +69,7 @@ def test_create_any_template_writes_native_configuration_and_deployment(
     assert game.token == definition.cluster.token == SecretStr("test-cluster-token")
     assert game.settings.game_mode == "lavaarena"
     assert application == definition.application(cli_host.rooms.path(299))
-    assert json.loads(capsys.readouterr().out)["number"] == 299
+    assert orjson.loads(capsys.readouterr().out)["number"] == 299
     before = {
         path: path.read_bytes()
         for path in cli_host.rooms.path(299).rglob("*")
@@ -81,7 +81,7 @@ def test_create_any_template_writes_native_configuration_and_deployment(
     assert main(["--json", "room", "show", "299"]) == 0
     output = capsys.readouterr().out
     assert "test-cluster-token" not in output
-    assert json.loads(output)["cluster"]["token"] == str(definition.cluster.token)
+    assert orjson.loads(output)["cluster"]["token"] == str(definition.cluster.token)
 
 
 def test_edit_fields_and_mods_preserves_unrelated_configuration(
@@ -158,7 +158,7 @@ def test_show_reads_direct_native_edits(
         ])
         == 0
     )
-    assert json.loads(capsys.readouterr().out) == 12
+    assert orjson.loads(capsys.readouterr().out) == 12
     assert not (directory / ".dst-room.json").exists()
 
 
@@ -218,7 +218,7 @@ def test_mutations_require_targets_and_parse_ranges(
         main(["--json", "room", "start", "000-001", "--no-wait", "--timeout", "123"])
         == 0
     )
-    output = json.loads(capsys.readouterr().out)
+    output = orjson.loads(capsys.readouterr().out)
     assert [record["room"] for record in output] == [0, 1]
     assert all(record["ok"] and record["result"]["waiting"] for record in output)
     assert {call.args[0] for call in cli_systemd.start.await_args_list} == {
@@ -418,7 +418,7 @@ def test_running_game_edits_require_restart_but_policy_edits_do_not(
     assert main(["room", "start", "0", "--no-wait"]) == 0
     capsys.readouterr()
     assert main(["--json", "room", "edit", "0", "--max-players", "12"]) == 1
-    (record,) = json.loads(capsys.readouterr().out)
+    (record,) = orjson.loads(capsys.readouterr().out)
     assert "--restart" in record["error"]
     assert cli_host.rooms.load(0) == before
     assert main(["room", "edit", "0", "--set", "/recycle=true"]) == 0

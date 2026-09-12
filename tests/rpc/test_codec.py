@@ -1,7 +1,7 @@
-import json
 from pathlib import Path
 from typing import Literal
 
+import orjson
 import pytest
 from pydantic import BaseModel, JsonValue, SecretStr, ValidationError
 from ulid import ULID
@@ -160,10 +160,10 @@ def test_shard_status_with_telemetry_counters_round_trip_and_validation() -> Non
         ("telemetry_dropped", -1),
         ("unknown", 0),
     ):
-        invalid = json.loads(encoded)
+        invalid = orjson.loads(encoded)
         invalid[field] = value
         with pytest.raises(ValidationError):
-            decode_model(ShardRuntimeStatus, json.dumps(invalid).encode())
+            decode_model(ShardRuntimeStatus, orjson.dumps(invalid))
 
 
 @pytest.mark.parametrize(
@@ -266,11 +266,11 @@ def test_custom_world_and_event_discriminators_round_trip() -> None:
 
 def test_configuration_world_discriminator_is_stable_and_checked() -> None:
     value = WorldgenOverride.forest(overrides=ForestOverrides(day="onlynight"))
-    encoded = json.loads(encode_model(value))
+    encoded = orjson.loads(encode_model(value))
     assert encoded["overrides"] == {"kind": "forest", "values": {"day": "onlynight"}}
     encoded["overrides"]["kind"] = "future"
     with pytest.raises(ValidationError):
-        decode_model(WorldgenOverride, json.dumps(encoded).encode())
+        decode_model(WorldgenOverride, orjson.dumps(encoded))
 
 
 @pytest.mark.parametrize(

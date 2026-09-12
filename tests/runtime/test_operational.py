@@ -1,10 +1,10 @@
 import asyncio
-import json
 import tracemalloc
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
+import orjson
 import pytest
 from ulid import ULID
 
@@ -251,7 +251,7 @@ async def test_network_diagnostic_never_exports_host_or_error_details() -> None:
         "service": "other",
         "code": 7,
     }
-    encoded = json.dumps(records[0].body)
+    encoded = orjson.dumps(records[0].body).decode()
     for private in ("secret", "internal", "192.0.2.1", "KU_private"):
         assert private not in encoded
 
@@ -342,7 +342,7 @@ async def test_mixed_byte_stream_preserves_log_and_event_boundaries(
     name += "\u0085\u2028\u2029"
     first, last = [
         b"DST_OTEL|"
-        + json.dumps(
+        + orjson.dumps(
             {
                 "v": 2,
                 "nonce": server.game_events.nonce,
@@ -355,8 +355,7 @@ async def test_mixed_byte_stream_preserves_log_and_event_boundaries(
                 "cycle": 2,
                 "data": {"name": "cycles", "value": 2},
             },
-            ensure_ascii=False,
-        ).encode()
+        )
         for sequence in (1, 2)
     ]
     ordinary = [line.encode() for line in corpus.split("\n")]
@@ -457,7 +456,7 @@ async def test_native_lifecycle_is_projected_once_without_raw_paths_or_details(
     ]
     assert len({record.uid for record in records}) == len(records)
     assert all(record.severity_text == "INFO" for record in records)
-    assert "secret" not in json.dumps([record.body for record in records])
+    assert "secret" not in orjson.dumps([record.body for record in records]).decode()
     lifecycle = []
     while (event := await server.read_event()) is not None:
         lifecycle.append(event.event)
@@ -638,7 +637,10 @@ async def test_process_creation_failure_closes_all_observation_readers(
         assert await server.read_game_event() is None
         records = await observations(server)
     assert server.closed
-    assert "private executable" not in json.dumps([record.body for record in records])
+    assert (
+        "private executable"
+        not in orjson.dumps([record.body for record in records]).decode()
+    )
 
 
 async def test_crash_before_ready_keeps_diagnostics_and_process_attempt(

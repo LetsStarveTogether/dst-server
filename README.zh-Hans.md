@@ -105,7 +105,8 @@ dst-server world save --room 299
 支持逗号分隔编号、闭区间范围，以及相应命令提供的 `--template` 或显式 `--all`。
 `room list` 发现包含 `cluster.ini` 的三位编号房间目录，操作命令要求明确选择目标。
 批量操作逐房间返回结果，任何房间失败都会使整体退出码非零。
-`--json` 输出 JSON，持续输出按记录逐行发送，诊断写入 stderr。
+stdout 非终端时默认输出紧凑的单行 JSON；终端中也可用 `--json` 选择该格式。
+持续输出按记录逐行发送 JSON；日志与诊断写入 stderr，非终端输出会转义内容中的换行。
 `room edit --set` 使用 JSON Pointer 路径和 JSON 值，`--unset` 删除显式设置。
 游戏和部署配置要求停服修改，或使用 `--restart` 先停止服务再写入。
 时段和管理策略可以在线修改，不需要解析世界 Lua。
@@ -394,14 +395,68 @@ Lua 执行是可信管理操作，不代表保存已经确认。
 ```shell
 dst-server logs --room 299 --lines 100
 dst-server logs --room 299 --since yesterday --until now
-dst-server --json logs --room 299 --after-cursor 's=...'
+dst-server --json logs --room 299 --cursor 's=...' --direction forward
 dst-server logs --room 299 --follow
 ```
 
 Quadlet 显式使用 `LogDriver=journald`。
-日志可以在房间关闭时查询，也能覆盖此前容器运行和宿主重启之前的记录，保留时长遵循 journald 策略。
+房间关闭、配置损坏或分片删除后仍可查询历史。
+房间和分片身份由固定部署名称确定，覆盖历次运行和仍被保留的宿主重启前记录。
+保留时长遵循 journald 策略。
 `--follow` 用同一个读取进程先查询历史再持续跟随，默认历史为 100 条。
-异步 SDK 提供 `dst_server.host.logs.logs()` 和 `JournalRecord`，提前结束迭代时使用 `contextlib.aclosing`。
+有限 `--json` 查询返回完整页面，包含 `records`、`next_cursor`、`has_more` 和有界诊断信息。
+默认 `backward` 从新到旧，`forward` 从旧到新。
+人类可读输出按时间正序展示每页，JSON 保持查询方向。
+使用同方向和过滤条件传入 `next_cursor` 续查；若原查询使用了 `since`，续查时以 cursor 替换它。
+`cursor` 与 `since` 是互斥的原生起点。
+限定时间范围时使用 forward 分页并保留 `until`。
+backward 续查清除 `since` 后会失去原时间下界。
+游标在所选范围不可用时抛出 `JournalCursorError`，不会悄悄从另一条记录继续。
+已经被保留策略删除的记录无法由游标恢复。
+
+SDK 提供 `Host.journal()`、`Host.follow_journal()` 和 `Host.telemetry()`，支持单个房间或房间编号序列。
+这些操作不加载房间文件，不连接 systemd 或 Cluster RPC。
+`shard=` 使用原分片目录名，也支持已经删除的分片名。
+`Host.log_units()` 返回对应的历史 unit 选择。
+整房间 follow 在启动时展开 unit 模式，之后新建的分片需要重新订阅。
+显式指定分片时，可以等待该 unit 的第一条日志。
+自定义 unit 或历史服务身份可直接使用 `dst_server.logs` 下的 `JournalLogs`、`NetdataLogs`。
+
+```python
+import asyncio
+
+from dst_server.host import Host
+from dst_server.logs import JournalQuery
+
+
+async def main():
+    host = Host()
+    page = await host.journal(299, JournalQuery(limit=50))
+    print(page.model_dump_json())
+    if page.has_more:
+        older = await host.journal(299, JournalQuery(cursor=page.next_cursor, limit=50))
+        print(older.model_dump_json())
+
+    async with host.follow_journal(299, shard="forest") as stream:
+        async for record in stream:
+            print(record.message)
+            break
+    print(stream.diagnostics)
+
+
+asyncio.run(main())
+```
+
+SDK follow 默认只读新记录且始终向前；需要初始历史时传入 `JournalQuery(direction="forward", limit=100)`。
+带 cursor 时读取其后所有仍被保留的记录，初始历史条数不会截断积压记录。
+follow 游标不可用时，在读取器返回首条记录或退出时报告错误。
+退出 follow 上下文会关闭并回收子进程，取消和异常也一样。
+`JournalRecord.fields` 保留原始元数据、多值字段和二进制数组。
+`message`、`unit`、`timestamp`、`cursor` 是派生视图，显示解码不改写原字段。
+两个读取器默认单条上限 4 MiB、有限查询总输出上限 64 MiB，可通过构造参数调整。
+follow 仅限制单条大小，不限制整个订阅的累计字节数。
+诊断保留最后 64 KiB，并通过 `diagnostics_truncated` 标明截断。
+成功且结果为空时仍保留警告。
 RPC 订阅只推送实时记录，Netdata 独立查询已导出的结构化事件。
 
 ### 定时与维护任务
@@ -1182,7 +1237,8 @@ Lua `events_emitted` 只是已分配输出序号的高水位；输出失败可�
 
 游戏 stdout 与 stderr 合流后由 Python 读取，不区分来源。
 FD 3 命令输入、FD 4 命令响应、FD 5 生命周期保持独立；stdout 中的相同标记不完成命令、推进 Session 或确认保存。
-标准 CLI 通过 Logbook 将 Agent 日志写到容器 stdout。
+标准 CLI 通过 Logbook 将 Agent 日志写到容器 stderr。
+每条 Python 日志在格式化后转义内部的 CR、LF 和 NUL，异常堆栈也保留在同一行。
 普通 Logbook 记录不会自动通过 OTLP 导出，结构化游戏事件和白名单运行诊断保持显式分流。
 Podman 使用 journald driver 时由 conmon 转交 journal。
 
@@ -1255,23 +1311,32 @@ Podman 使用 journald driver 时由 conmon 转交 journal。
 `NetdataLogs` 在宿主直接执行 `/usr/lib/netdata/plugins.d/otel-plugin`，读取 `/etc/netdata/otel.yaml`。
 调用进程需要插件、配置与存储的访问权限；此接口不属于 Cluster RPC。
 
+```shell
+dst-server logs telemetry --room 299 --since 2026-09-12T00:00:00Z --limit 100
+dst-server --json logs telemetry --room 299 --since 2026-09-12T00:00:00Z --filter event_name=dst.player.shard_entered
+```
+
+可重复使用 `--filter FIELD=VALUE` 和 `--field FIELD` 设置匹配与字段投影。
+OTel CLI 时间必须带时区，来源诊断同时写入 stderr。
+
 ```python
 import asyncio
 from datetime import UTC, datetime, timedelta
 
-from dst_server.netdata import NetdataLogQuery, NetdataLogs
+from dst_server.host import Host
+from dst_server.logs import NetdataLogQuery
 
 
 async def main():
-    result = await NetdataLogs().query(
+    result = await Host().telemetry(
+        0,
         NetdataLogQuery(
             since=datetime.now(UTC) - timedelta(minutes=15),
-            filters=(("attributes.dst.cluster.name", "dst-000"),),
             limit=100,
-        )
+        ),
+        shard="forest",
     )
-    print(result.records)
-    print(result.diagnostics)
+    print(result.model_dump_json())
 
 
 asyncio.run(main())
@@ -1279,11 +1344,22 @@ asyncio.run(main())
 
 | 查询设置 | 语义 |
 | --- | --- |
-| `since` / `until` | 必须带时区，规范化为 UTC 整秒；结束时间晚于开始时间 |
-| `service_name` / `limit` | 默认 `dst-server` / `200` |
-| `filters` / `query` / `fields` | 精确匹配 / 搜索表达式 / 返回字段；玩家过滤可用 `body.player.userid` |
+| `since` / `until` | UTC 整秒区间 `[since, until)`；省略的结束时间在排队前捕获，包含当前秒 |
+| `service_name` / `limit` | 默认不限服务 / `200`；Host 以稳定的房间属性限定范围 |
+| `service_namespace` | 需要服务名；省略或空字符串选择空 namespace，不代表所有 namespace |
+| `filters` / `query` / `fields` | 精确匹配 / `key=value` 正则搜索 / 返回字段；玩家过滤可用 `body.player.userid` |
 | 并发 / 超时 | 默认 1 / 120 秒，包含并发槽位等待；超时清理查询进程 |
-| 结果 | 有序键值对保留重复字段，`diagnostics` 保留查询警告；只返回窗口内最新有限条，无游标分页 |
+| 结果 | 最新有限条、后端报告的 `matched`、实际时间窗、`truncated` 与有界诊断；没有 cursor 或 follow |
+
+同字段多个过滤值取 OR，不同字段取 AND。
+`Host.telemetry()` 管理房间和分片属性过滤，拒绝调用方再次设置这两个字段。
+默认覆盖此前使用过的服务名，不读取当前 exporter 配置。
+复用房间编号会包含此前世界的日志，需要时用事件、session 或 attempt 字段进一步筛选。
+`NetdataLogRecord.fields` 保留有序重复字段，`values(key)` 返回同名字段的全部值。
+它不从 Netdata 扁平字段重建原始 OTel 值类型。
+`matched` 是后端报告，不是完整性保证；跳过文件时仍可能成功返回并附带警告。
+诊断被截断且 summary 不可见时，`matched` 和 `truncated` 为 `None`。
+离线 CLI 可能暂时看不到活动写入，也无法读取已 offload 并删除本地副本的文件。
 
 ### 遥测排障
 
@@ -1354,7 +1430,7 @@ SDK 将数据与格式、游戏进程、集群协调和传输分开。
 | [telemetry](src/dst_server/telemetry) | 采集与 OpenTelemetry SDK 导出。 |
 | [archive.py](src/dst_server/archive.py) | 存档导出、凭据清理、7z 归档与对象存储上传。 |
 | [concurrency.py](src/dst_server/concurrency.py) / [timeouts.py](src/dst_server/timeouts.py) | 取消时的完整清理与共享截止时间处理。 |
-| [klei](src/dst_server/klei) / [annotations](src/dst_server/annotations) / [netdata.py](src/dst_server/netdata.py) | 外部查询、Lua 注解生成与历史日志查询。 |
+| [klei](src/dst_server/klei) / [annotations](src/dst_server/annotations) / [logs](src/dst_server/logs) | 外部查询、Lua 注解生成与原生日志查询。 |
 
 Controller 使用共享请求和模型契约，不导入 RPC client 或 wire schema。
 配置与部署模型使用 Pydantic 字段声明驱动验证和序列化。

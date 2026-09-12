@@ -1,8 +1,9 @@
-import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any, ClassVar, Literal, Self
 
+import orjson
 from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
 from dst_server.events.server import SavedEvent
@@ -589,24 +590,33 @@ class _Envelope(FrozenModel):
     timeout: Timeout | None = None
 
 
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            msg = f"duplicate JSON object key: {key!r}"
-            raise ValueError(msg)
-        result[key] = value
-    return result
+_JSON_OBJECT_TOKENS = re.compile(rb'("(?:[^"\\]|\\.)*")\s*(:)?|([{}])')
 
 
 def validate_json_structure(payload: bytes) -> None:
-    def invalid_constant(value: str) -> None:
-        msg = f"invalid JSON constant: {value}"
-        raise ValueError(msg)
-
-    json.loads(
-        payload, object_pairs_hook=_unique_object, parse_constant=invalid_constant
-    )
+    try:
+        orjson.loads(payload)
+    except orjson.JSONDecodeError as error:
+        # CLI fields may fall back to plain text on syntax errors, but must
+        # reject non-finite JSON constants instead of treating them as strings.
+        if error.doc[error.pos :].startswith(("NaN", "Infinity", "-Infinity")):
+            msg = "invalid JSON constant"
+            raise ValueError(msg) from error
+        raise
+    # orjson validates the syntax; inspect only object boundaries and keys
+    # because its decoder has no hook for rejecting duplicate keys.
+    objects: list[set[str]] = []
+    for token in _JSON_OBJECT_TOKENS.finditer(payload):
+        if token[3] == b"{":
+            objects.append(set())
+        elif token[3] == b"}":
+            objects.pop()
+        elif token[2] is not None:
+            key = orjson.loads(token[1])
+            if key in objects[-1]:
+                msg = f"duplicate JSON object key: {key!r}"
+                raise ValueError(msg)
+            objects[-1].add(key)
 
 
 def encode_request(request: Request[Any]) -> bytes:
@@ -642,4 +652,4 @@ def parse_request(payload: bytes, *, scope: Scope) -> Request[Any]:
     arguments = envelope.arguments
     if envelope.timeout is not None:
         arguments |= {"timeout": envelope.timeout}
-    return spec.request.model_validate_json(json.dumps(arguments, allow_nan=False))
+    return spec.request.model_validate_json(orjson.dumps(arguments))

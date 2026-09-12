@@ -250,7 +250,7 @@ async def test_stopped_waits_for_both_telemetry_tails(relay: ShardAgent) -> None
         "invalid_utf8",
     ],
 )
-def test_child_log_routing_reaches_the_actual_cli_stdout(
+def test_child_log_routing_reaches_the_actual_cli_stderr(
     relay: ShardAgent,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -325,8 +325,11 @@ def test_child_log_routing_reaches_the_actual_cli_stdout(
     if kind == "invalid_payload":
         expected.append("discard invalid DST game event")
     captured = capsys.readouterr()
-    assert captured.out == "".join(value + "\n" for value in expected)
-    assert captured.err == ""
+    assert captured.out == ""
+    assert captured.err == "".join(
+        value.replace("\0", r"\0") + "\n" for value in expected
+    )
+    assert captured.err.count("\n") == len(expected)
     assert rpc_lines == (line.split("\n") if ordinary else [])
     assert relay._log_sequence == len(rpc_lines)
     assert relay._game_sequence == int(kind == "event")

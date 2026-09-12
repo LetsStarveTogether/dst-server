@@ -1,8 +1,9 @@
 import asyncio
-import json
 import os
+import sys
 from pathlib import Path
 
+import orjson
 import pytest
 
 from dst_server.mods import native as mods
@@ -13,8 +14,9 @@ COMPLETE = (
     "[00:00:31]: FinishDownloadingServerMods Complete! Process trying to quit nicely.."
 )
 TIMEOUT = "[00:00:31]: DownloadServerMods timed out with no response from Workshop..."
-UPDATER = r"""#!/usr/bin/env python3
-import os
+UPDATER = (
+    f"#!{sys.executable}\n"
+    r"""import os
 import sys
 import time
 from pathlib import Path
@@ -29,6 +31,7 @@ if attempt > 1:
     assert partial.read_bytes() == b"retained download"
 partial.write_bytes(b"retained download")
 """
+)
 
 
 def native_updater(
@@ -56,8 +59,8 @@ async def test_native_download_uses_only_explicit_proxy(
     monkeypatch.setenv("DST_KEEP_ENV", "retained")
     executable, ugc = write_updater(
         tmp_path,
-        UPDATER + "\nimport json\n"
-        '(ugc / "environment").write_text(json.dumps(dict(os.environ)))\n'
+        UPDATER + "\nimport orjson\n"
+        '(ugc / "environment").write_bytes(orjson.dumps(dict(os.environ)))\n'
         + 'print(os.environ.get("http_proxy", "direct"))\n'
         + f"print({COMPLETE!r})\n",
     )
@@ -65,7 +68,7 @@ async def test_native_download_uses_only_explicit_proxy(
 
     await mods.update(executable, ugc, proxy=proxy, log_handler=lines.append)
 
-    environment = json.loads((ugc / "environment").read_text())
+    environment = orjson.loads((ugc / "environment").read_text())
     assert environment["DST_KEEP_ENV"] == "retained"
     assert {
         name: value for name, value in environment.items() if name.lower() in variables

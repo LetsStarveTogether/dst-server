@@ -4,13 +4,17 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     PlainSerializer,
     SecretStr,
     SerializationInfo,
     SerializerFunctionWrapHandler,
+    TypeAdapter,
     field_serializer,
 )
 from ulid import ULID
+
+JSON_VALUE = TypeAdapter(JsonValue, config=ConfigDict(allow_inf_nan=False, strict=True))
 
 type FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 type NonNegativeFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]

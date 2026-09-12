@@ -4,11 +4,13 @@
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, Self
 from uuid import uuid4
+
+from pydantic import TypeAdapter
 
 from dst_server.concurrency import complete
 from dst_server.configuration.files import (
@@ -19,10 +21,19 @@ from dst_server.configuration.files import (
     read_text,
     write_files,
 )
-from dst_server.configuration.models import cluster_structure
+from dst_server.configuration.models import ShardName, cluster_structure
 from dst_server.deployment.application import QuadletApplication, _escape_unit_name
 from dst_server.deployment.quadlet import _escape_expansions, references_pod
 from dst_server.klei_id import encode_klei_id
+from dst_server.logs import (
+    JournalLogs,
+    JournalQuery,
+    JournalResult,
+    JournalStream,
+    NetdataLogQuery,
+    NetdataLogResult,
+    NetdataLogs,
+)
 from dst_server.mods.process import run_process
 from dst_server.rooms import (
     DEFAULT_QUADLET_DIR,
@@ -34,6 +45,7 @@ from dst_server.rooms import (
 )
 from dst_server.rpc import ClusterClient, rpc_runtime
 from dst_server.timeouts import (
+    DEFAULT_COMMAND_TIMEOUT,
     DEFAULT_LIFECYCLE_TIMEOUT,
     DEFAULT_STARTUP_TIMEOUT,
     positive_timeout,
@@ -46,6 +58,11 @@ from .schedule import (
 )
 
 logger = logging.getLogger(__name__)
+_SHARD_NAME = TypeAdapter(ShardName)
+_LOG_CLUSTER = "attributes.dst.cluster.name"
+_LOG_SHARD = "attributes.dst.shard.name"
+_JOURNAL_QUERY = JournalQuery()
+_JOURNAL_FOLLOW = JournalQuery(direction="forward", limit=0)
 
 
 def _preparation_options(
@@ -68,18 +85,22 @@ def _preparation_options(
     return tuple(result)
 
 
-class Host:
+class Host:  # ruff: ignore[too-many-public-methods]
     def __init__(
         self,
         cluster_root: Path = DEFAULT_ROOT,
         quadlet_dir: Path = DEFAULT_QUADLET_DIR,
         *,
         systemd: Any = None,
+        journal_logs: JournalLogs | None = None,
+        netdata_logs: NetdataLogs | None = None,
     ) -> None:
         self.cluster_root = cluster_root.absolute()
         self.quadlet_dir = quadlet_dir.absolute()
         self.rooms = RoomStore(self.cluster_root, self.quadlet_dir)
         self._systemd = systemd
+        self.journal_logs = journal_logs if journal_logs is not None else JournalLogs()
+        self.netdata_logs = netdata_logs if netdata_logs is not None else NetdataLogs()
         self._stack = AsyncExitStack()
 
     async def __aenter__(self) -> Self:
@@ -130,6 +151,84 @@ class Host:
             raise ValueError(msg)
         return unit
 
+    def _log_clusters(self, numbers: int | Sequence[int]) -> tuple[str, ...]:
+        selected = (numbers,) if isinstance(numbers, int) else numbers
+        if (
+            isinstance(selected, (str, bytes))
+            or not isinstance(selected, Sequence)
+            or not selected
+        ):
+            message = "log queries require at least one explicit room number"
+            raise ValueError(message)
+        return tuple(
+            dict.fromkeys(f"dst-{self.rooms.path(number).name}" for number in selected)
+        )
+
+    def log_units(
+        self, numbers: int | Sequence[int], *, shard: str | None = None
+    ) -> tuple[str, ...]:
+        """Select retained identities, including rooms and shards already removed."""
+        clusters = self._log_clusters(numbers)
+        if shard is not None:
+            name = _escape_unit_name(_SHARD_NAME.validate_python(shard, strict=True))
+            return tuple(f"{cluster}-{name}.service" for cluster in clusters)
+        # An exact unit keeps a new room's empty journal a valid query.
+        return tuple(
+            unit
+            for cluster in clusters
+            for unit in (f"{cluster}-pod.service", f"{cluster}-*.service")
+        )
+
+    async def journal(
+        self,
+        numbers: int | Sequence[int],
+        request: JournalQuery = _JOURNAL_QUERY,
+        *,
+        shard: str | None = None,
+        completion_timeout: float = DEFAULT_COMMAND_TIMEOUT,
+    ) -> JournalResult:
+        """Query retained room output without loading configuration or using RPC."""
+        return await self.journal_logs.query(
+            self.log_units(numbers, shard=shard),
+            request,
+            completion_timeout=completion_timeout,
+        )
+
+    @asynccontextmanager
+    async def follow_journal(
+        self,
+        numbers: int | Sequence[int],
+        request: JournalQuery = _JOURNAL_FOLLOW,
+        *,
+        shard: str | None = None,
+    ) -> AsyncIterator[JournalStream]:
+        """Follow in one owned process; unit globs resolve when reading starts."""
+        async with self.journal_logs.follow(
+            self.log_units(numbers, shard=shard), request
+        ) as stream:
+            yield stream
+
+    async def telemetry(
+        self,
+        numbers: int | Sequence[int],
+        request: NetdataLogQuery,
+        *,
+        shard: str | None = None,
+        completion_timeout: float = DEFAULT_COMMAND_TIMEOUT,
+    ) -> NetdataLogResult:
+        """Query a bounded OTel result across the room's retained service names."""
+        clusters = self._log_clusters(numbers)
+        if any(field in {_LOG_CLUSTER, _LOG_SHARD} for field, _ in request.filters):
+            message = "room and shard log filters are managed by Host.telemetry"
+            raise ValueError(message)
+        filters = tuple((_LOG_CLUSTER, cluster) for cluster in clusters)
+        if shard is not None:
+            filters += ((_LOG_SHARD, _SHARD_NAME.validate_python(shard, strict=True)),)
+        return await self.netdata_logs.query(
+            request.replace(filters=(*filters, *request.filters)),
+            completion_timeout=completion_timeout,
+        )
+
     @asynccontextmanager
     async def connect(self, number: int) -> AsyncIterator[ClusterClient]:
         async with await ClusterClient.connect(
@@ -167,12 +266,10 @@ class Host:
         return result
 
     async def diagnose(self, number: int) -> dict[str, Any]:
-        from .logs import logs
-
         result = await self.status(number)
         units = self.units(number)
         result["units"] = await self.systemd.list_units(units)
-        result["logs"] = [record async for record in logs(units, lines=50)]
+        result["logs"] = await self.journal(number, JournalQuery(limit=50))
         return result
 
     async def create(self, definition: Room) -> Room:

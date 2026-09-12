@@ -1,4 +1,3 @@
-import json
 import os
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
@@ -6,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import orjson
 import pytest
 from pydantic import SecretStr, ValidationError
 from pydantic.json_schema import JsonSchemaMode
@@ -73,7 +73,7 @@ def source_customize_contract(luajit: str) -> dict[str, object]:
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
-    return cast(dict[str, object], json.loads(result.stdout))
+    return cast(dict[str, object], orjson.loads(result.stdout))
 
 
 def schema_definition(
@@ -1867,7 +1867,7 @@ def test_world_json_preserves_nested_field_selection(include: bool) -> None:
         exclude=None if include else {"overrides": {"day"}},
     )
 
-    assert json.loads(encoded)["overrides"] == {
+    assert orjson.loads(encoded)["overrides"] == {
         "kind": "forest",
         "values": overrides.model_dump(
             mode="json",

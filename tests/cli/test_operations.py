@@ -1,17 +1,26 @@
 import asyncio
-import json
+import math
+import sys
 from collections.abc import Sequence
 from datetime import time
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
+import orjson
 import pytest
 from pydantic import SecretStr
+from rich.text import Text
 
 from dst_server.cli import main
 from dst_server.cli import operations as cli
-from dst_server.cli.common import Options, context, options
+from dst_server.cli.common import Options, context, emit, options
 from dst_server.host import Host, maintenance, schedule
+from dst_server.logs import (
+    JournalLogs,
+    JournalQuery,
+    JournalRecord,
+    JournalResult,
+)
 from dst_server.presets.lst import fleet_room
 from dst_server.rooms import CONTROL_FILE
 
@@ -61,7 +70,7 @@ def test_schedule_windows_are_validated_before_edit_and_allow_midnight(
         ])
         == 0
     )
-    result = json.loads(capsys.readouterr().out)
+    result = orjson.loads(capsys.readouterr().out)
     assert len(result) == 1
     assert result[0]["room"] == 0
     assert result[0]["ok"]
@@ -83,7 +92,7 @@ def test_pause_partial_failure_has_json_results_and_nonzero_exit(
     (host.rooms.path(1) / CONTROL_FILE).write_text("invalid JSON")
     previous = options.get()
     assert main(["--json", "schedule", "pause", "--room", "000-001"]) == 1
-    result = json.loads(capsys.readouterr().out)
+    result = orjson.loads(capsys.readouterr().out)
     assert set(result) == {"0", "1"}
     assert result["0"] == {"status": "paused"}
     assert result["1"]["status"] == "failed"
@@ -163,7 +172,7 @@ def test_detached_worker_command_reenters_same_cli_with_paths_and_timeout(
     )
     cli_systemd.start_transient.assert_awaited_once()
     unit, argv = cli_systemd.start_transient.call_args.args
-    assert json.loads(capsys.readouterr().out) == {
+    assert orjson.loads(capsys.readouterr().out) == {
         "task": unit,
         "status": "submitted",
         "rooms": {"0": {"status": "submitted"}, "1": {"status": "submitted"}},
@@ -226,6 +235,7 @@ def test_completion_outputs_actual_shell_script(
         ["schedule", "set"],
         ["maintenance", "restart"],
         ["maintenance", "status"],
+        ["maintenance", "logs"],
         ["annotations"],
     ],
 )
@@ -257,7 +267,7 @@ def test_detached_partial_failure_reports_submitted_task_and_fails_exit(
 ) -> None:
     (host.rooms.path(1) / CONTROL_FILE).write_text("invalid JSON")
     assert main(["--json", "maintenance", "restart", "--all", "--detach"]) == 1
-    result = json.loads(capsys.readouterr().out)
+    result = orjson.loads(capsys.readouterr().out)
     cli_systemd.start_transient.assert_awaited_once()
     assert result["task"] == cli_systemd.start_transient.call_args.args[0]
     assert result["rooms"]["0"]["status"] == "submitted"
@@ -276,7 +286,9 @@ def test_worker_retains_results_for_status_and_preserves_failure_exit(
     monkeypatch.setenv("DST_MAINTENANCE_TASK", unit)
     monkeypatch.setenv(
         "DST_MAINTENANCE_REVISIONS",
-        json.dumps({number: host.rooms.policy(number).revision for number in (0, 1)}),
+        orjson.dumps({
+            str(number): host.rooms.policy(number).revision for number in (0, 1)
+        }).decode(),
     )
     assert host.rooms.numbers() == (0, 1)
     restart = AsyncMock(
@@ -292,17 +304,17 @@ def test_worker_retains_results_for_status_and_preserves_failure_exit(
         else {"status": "restarted"},
         "1": {"status": "restarted"},
     }
-    assert json.loads(capsys.readouterr().out) == rooms
+    assert orjson.loads(capsys.readouterr().out) == rooms
     retained = {
         "task": unit,
         "status": "failed" if failed else "completed",
         "rooms": rooms,
     }
     path = host.cluster_root / ".dst-maintenance" / f"{unit}.json"
-    assert json.loads(path.read_text()) == retained
+    assert orjson.loads(path.read_text()) == retained
     cli_systemd.properties.side_effect = RuntimeError("NoSuchUnit")
     assert main(["--json", "maintenance", "status", unit]) == 0
-    assert json.loads(capsys.readouterr().out) == retained
+    assert orjson.loads(capsys.readouterr().out) == retained
     assert restart.await_count == 2
 
 
@@ -310,7 +322,7 @@ def test_explicit_selection_isolates_missing_room_from_healthy_room(
     host: Host, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert main(["--json", "schedule", "pause", "--room", "0,2"]) == 1
-    result = json.loads(capsys.readouterr().out)
+    result = orjson.loads(capsys.readouterr().out)
     assert result["0"]["status"] == "paused"
     assert schedule.read_control(host.rooms.path(0)).paused
     assert result["2"]["status"] == "failed"
@@ -360,3 +372,121 @@ def test_lifecycle_and_schedule_use_policy_without_parsing_dynamic_lua(
     assert path.read_text() == source
     cli_systemd.start.assert_awaited_once_with(host.unit(0))
     cli_systemd.stop.assert_awaited_once_with(host.unit(0))
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_maintenance_logs_use_local_reader_without_room_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    follow: bool,
+) -> None:
+    task = "dst-maintenance-" + "a" * 32 + ".service"
+    record = JournalRecord(
+        fields={
+            "__CURSOR": "next",
+            "__REALTIME_TIMESTAMP": "1789171200000000",
+            "MESSAGE": "maintenance completed",
+        }
+    )
+    page = JournalResult(
+        records=(record,),
+        next_cursor="next",
+        has_more=False,
+        diagnostics="reader diagnostic\n",
+        diagnostics_truncated=False,
+    )
+    query = AsyncMock(return_value=page)
+    stream = MagicMock()
+    stream.__aiter__.return_value = (record,)
+    stream.diagnostics = page.diagnostics
+    stream.diagnostics_truncated = False
+    live = MagicMock()
+    live.return_value.__aenter__.return_value = stream
+    monkeypatch.setattr(JournalLogs, "query", query)
+    monkeypatch.setattr(JournalLogs, "follow", live)
+    make_host = Mock(side_effect=AssertionError("logs must not open Host"))
+    monkeypatch.setattr(cli, "make_host", make_host)
+    assert (
+        main([
+            "--json",
+            "maintenance",
+            "logs",
+            task,
+            *(["--follow"] if follow else []),
+            "--lines",
+            "1",
+        ])
+        == 0
+    )
+    (live if follow else query).assert_called_once_with(
+        (task,), JournalQuery(limit=1, direction="forward" if follow else "backward")
+    )
+    output = capsys.readouterr()
+    assert orjson.loads(output.out) == record.model_dump(mode="json")
+    assert output.err == page.diagnostics
+    make_host.assert_not_called()
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_json_output_preserves_unicode_and_pydantic_nonfinite_values(
+    json_output: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    token = options.set(Options(json=json_output))
+    try:
+        emit({"nested": [math.nan, math.inf, -math.inf]})
+        assert orjson.loads(capsys.readouterr().out) == {"nested": [None, None, None]}
+        value = {"nested": ['玩家👩🏽‍💻\n\t"' * 100], "finite": 1.5}
+        emit(value)
+        output = capsys.readouterr().out
+        assert orjson.loads(output) == value
+        assert "玩家" in output
+        assert output.count("\n") > 1 if not json_output else output.count("\n") == 1
+    finally:
+        options.reset(token)
+
+
+@pytest.mark.parametrize("recycle", [False, True])
+@pytest.mark.parametrize(
+    ("terminal", "as_json"), [(False, False), (True, False), (True, True)]
+)
+def test_automation_results_use_one_line_outside_a_terminal(
+    host: Host,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    recycle: bool,
+    terminal: bool,
+    as_json: bool,
+) -> None:
+    monkeypatch.setenv("TERM", "xterm")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: terminal)
+    results = {
+        str(number): {"status": "skipped" if recycle else "unchanged"}
+        for number in range(140)
+    }
+    operation = AsyncMock(return_value=results)
+    monkeypatch.setattr(
+        "dst_server.host.recycling.run_recycle"
+        if recycle
+        else "dst_server.host.schedule.run_schedule",
+        operation,
+    )
+    assert (
+        main([
+            *(["--json"] if as_json else []),
+            *(["maintenance", "recycle"] if recycle else ["schedule", "run"]),
+        ])
+        == 0
+    )
+    operation.assert_awaited_once()
+    assert operation.await_args is not None
+    assert operation.await_args.args[0].cluster_root == host.cluster_root
+    output = capsys.readouterr()
+    text = output.out
+    if terminal and not as_json:
+        assert "\x1b[" in text
+        text = Text.from_ansi(text).plain
+    assert orjson.loads(text) == results
+    assert output.out.count("\n") == (422 if terminal and not as_json else 1)
+    assert output.err == ""

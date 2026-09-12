@@ -1,7 +1,7 @@
-import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 
+import orjson
 import pytest
 from luaparser import ast
 from luaparser.astnodes import Call, Function, LocalFunction, Name, String
@@ -270,7 +270,7 @@ def test_native_components_emit_valid_events(
     assert result.returncode == 0, result.stderr or result.stdout
     lines = result.stdout.splitlines()
     health = [
-        json.loads(line.split("|", 1)[1])
+        orjson.loads(line.split("|", 1)[1])
         for line in lines
         if line.startswith("NATIVE_HEALTH|")
     ]

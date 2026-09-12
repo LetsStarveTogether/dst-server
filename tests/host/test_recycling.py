@@ -1,12 +1,12 @@
 import asyncio
 import fcntl
-import json
 import os
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, call
 
+import orjson
 import pytest
 from pydantic import SecretStr
 from ulid import ULID
@@ -447,7 +447,7 @@ async def test_real_rpc_submits_under_lock_and_waits_without_holding_it(
     response = asyncio.get_running_loop().create_future()
 
     def call(*, request: bytes) -> asyncio.Future:
-        payload = json.loads(request)
+        payload = orjson.loads(request)
         assert payload["method"] == "regenerate"
         assert payload["arguments"] == {
             "expected_session_id": "forest_OLD",
@@ -498,7 +498,7 @@ async def test_batch_cancellation_stops_before_next_room(
     response = asyncio.get_running_loop().create_future()
 
     def submit(*, request: bytes) -> asyncio.Future:
-        assert json.loads(request)["method"] == "regenerate"
+        assert orjson.loads(request)["method"] == "regenerate"
         submitted.set()
         return response
 

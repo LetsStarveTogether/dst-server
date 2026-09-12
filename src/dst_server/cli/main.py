@@ -1,7 +1,9 @@
 """The packaged command-line entry point."""
 
 import asyncio
+import logging
 import os
+import sys
 from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
@@ -9,9 +11,11 @@ from typing import Annotated
 
 from cyclopts import App, Parameter
 from cyclopts.exceptions import CycloptsError
-from rich.console import Console
+from logbook import StreamHandler
+from logbook.compat import redirected_logging
 
 from .common import BatchFailure, Options, options
+from .output import diagnostic, format_log
 
 app = App(
     name="dst-server",
@@ -32,7 +36,7 @@ def _commands() -> None:
         "player": ("game", "Inspect players and manage permissions."),
         "world": ("game", "Inspect and operate game worlds."),
         "console": ("game", "Evaluate Lua through a game agent."),
-        "logs": ("game", "Read historical and live journal logs."),
+        "logs": ("logs", "Query retained journal and OpenTelemetry logs."),
         "rpc": ("game", "Discover and call game RPC methods."),
     }
     for name, (module, help_text) in commands.items():
@@ -56,7 +60,13 @@ async def _launch(
     ),
     json: bool = False,
 ) -> int:
-    token = options.set(Options(cluster_root.absolute(), quadlet_dir.absolute(), json))
+    token = options.set(
+        Options(
+            cluster_root.absolute(),
+            quadlet_dir.absolute(),
+            json or not sys.stdout.isatty(),
+        )
+    )
     try:
         result = await app.run_async(
             tokens or ("--help",), exit_on_error=False, print_error=False
@@ -69,26 +79,31 @@ async def _launch(
 def main(argv: Sequence[str] | None = None) -> int:
     if "room" not in app:
         _commands()
+    handler = StreamHandler(sys.stderr)
+    handler.formatter = format_log
     try:
-        return (
-            asyncio.run(
-                app.meta.run_async(argv, exit_on_error=False, print_error=False)
+        with (
+            handler.applicationbound(),
+            redirected_logging(set_root_logger_level=False),
+        ):
+            logging.root.setLevel(logging.INFO)
+            return (
+                asyncio.run(
+                    app.meta.run_async(argv, exit_on_error=False, print_error=False)
+                )
+                or 0
             )
-            or 0
-        )
     except BatchFailure:
         return 1
     except CycloptsError as error:
-        Console(stderr=True, highlight=False).print(str(error), markup=False)
+        diagnostic(str(error))
         return 2
     except KeyboardInterrupt:
         return 130
     except (Exception, asyncio.CancelledError) as error:
         if os.environ.get("DST_SERVER_DEBUG"):
             raise
-        Console(stderr=True, highlight=False).print(
-            str(error) or type(error).__name__, markup=False
-        )
+        diagnostic(str(error) or type(error).__name__)
         return 1
 
 

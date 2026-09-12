@@ -1,12 +1,14 @@
 import asyncio
-import json
 import os
 import re
 import select
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Self
+
+import orjson
 
 from dst_server.lua_codec import lua_string
 from dst_server.models.driver import DriverHealth
@@ -124,8 +126,9 @@ def feed_frame(
     reader.feed_data(b"\n".join((start, *lines, end, COMMAND_DONE, b"")))
 
 
-FAKE_SERVER = r"""#!/usr/bin/env python3
-import json
+FAKE_SERVER = (
+    f"#!{sys.executable}\n"
+    r"""import orjson
 import os
 import re
 import signal
@@ -179,7 +182,7 @@ for command in commands:
         if shard == "core-failure":
             results.write(
                 "DST_SERVER_RESULT|"
-                + json.dumps({"ok": False, "error": "lua_error"})
+                + orjson.dumps({"ok": False, "error": "lua_error"}).decode()
                 + "\n"
             )
             finish_frame(token)
@@ -197,7 +200,7 @@ for command in commands:
         }
         results.write(
             "DST_SERVER_RESULT|"
-            + json.dumps({"ok": True, "data": health})
+            + orjson.dumps({"ok": True, "data": health}).decode()
             + "\n"
         )
         finish_frame(token)
@@ -214,12 +217,12 @@ for command in commands:
                 "cycle": 2,
                 "data": {"name": "cycles", "value": 2},
             }
-            print("[00:00:01]: DST_OTEL|" + json.dumps(event), flush=True)
+            print("[00:00:01]: DST_OTEL|" + orjson.dumps(event).decode(), flush=True)
         continue
     if "get_players" in command:
         results.write(
             "DST_SERVER_RESULT|"
-            + json.dumps({"ok": True, "data": []})
+            + orjson.dumps({"ok": True, "data": []}).decode()
             + "\n"
         )
         finish_frame(token)
@@ -227,7 +230,7 @@ for command in commands:
     if "save" in command:
         results.write(
             "DST_SERVER_RESULT|"
-            + json.dumps({"ok": True, "data": True})
+            + orjson.dumps({"ok": True, "data": True}).decode()
             + "\n"
         )
         finish_frame(token)
@@ -257,17 +260,21 @@ for command in commands:
             "caused_by_action_sequence": None,
         },
     }
-    results.write("DST_OTEL|" + json.dumps(event) + "\n")
+    results.write("DST_OTEL|" + orjson.dumps(event).decode() + "\n")
     results.write('result:print("hello")\n')
     finish_frame(token)
 """
+)
 
 
 def structured_result(data: object) -> str:
-    return "unrelated print\nDST_SERVER_RESULT|" + json.dumps({
-        "ok": True,
-        "data": data,
-    })
+    return (
+        "unrelated print\nDST_SERVER_RESULT|"
+        + orjson.dumps({
+            "ok": True,
+            "data": data,
+        }).decode()
+    )
 
 
 class StubServer(Server):

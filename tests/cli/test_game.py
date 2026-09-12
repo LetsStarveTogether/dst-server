@@ -1,24 +1,36 @@
 import asyncio
 import io
-import json
+import sys
 from collections import defaultdict
 from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock
 
+import orjson
 import pytest
 from pydantic import SecretStr
+from rich.text import Text
 from ulid import ULID
 
 from dst_server import commands as c
 from dst_server.cli import game, main
+from dst_server.cli import logs as cli_logs
 from dst_server.errors import ErrorCode, ErrorInfo, IndeterminateError
 from dst_server.host import Host
-from dst_server.host import logs as host_logs
-from dst_server.host.logs import JournalRecord
+from dst_server.logs import (
+    JournalLogs,
+    JournalQuery,
+    JournalRecord,
+    JournalResult,
+    JournalStream,
+    NetdataLogQuery,
+    NetdataLogResult,
+    NetdataLogs,
+)
 from dst_server.models.cluster import ShardResult
 from dst_server.models.console import ConsoleError, ConsoleResult, ConsoleValue
 from dst_server.presets.lst import fleet_room
@@ -65,7 +77,7 @@ def test_rpc_call_parses_fields_and_reaches_selected_endpoint(
         ])
         == 0
     )
-    assert json.loads(capsys.readouterr().out) == [
+    assert orjson.loads(capsys.readouterr().out) == [
         {"room": 1, "ok": True, "result": True}
     ]
     client.shard.assert_called_once_with("cave")
@@ -130,13 +142,13 @@ def test_console_source_validates_modes_and_preserves_multiline(
 @pytest.mark.parametrize(
     ("arguments", "shard", "command"),
     [
+        (["announce", "hello everyone"], None, c.Announce(message="hello everyone")),
         (["world", "save", "--timeout", "45"], None, c.ClusterSave(timeout=45)),
         (
             ["world", "save", "--shard", "cave", "--timeout", "46"],
             "cave",
             c.Save(timeout=46),
         ),
-        (["announce", "hello everyone"], None, c.Announce(message="hello everyone")),
     ],
 )
 def test_game_command_executes_once_and_reports_json(
@@ -148,7 +160,7 @@ def test_game_command_executes_once_and_reports_json(
 ) -> None:
     client = rpc_clients[1]
     assert main(["--json", *arguments, "--room", "001"]) == 0
-    assert json.loads(capsys.readouterr().out) == [
+    assert orjson.loads(capsys.readouterr().out) == [
         {"room": 1, "ok": True, "result": None}
     ]
     target = client if shard is None else client.shard.return_value
@@ -182,7 +194,7 @@ def test_pause_preserves_partial_shard_results_and_other_room_success(
     )
     assert main(["--json", "world", action, "--room", "000,001"]) == 1
     output = capsys.readouterr()
-    failed, succeeded = json.loads(output.out)
+    failed, succeeded = orjson.loads(output.out)
     assert failed["room"] == 0
     assert failed["ok"] is False
     assert failed["error"] == f"{action} was not confirmed by shards: cave"
@@ -228,7 +240,7 @@ def test_single_shard_pause_requires_confirmation(
     assert main(["--json", "world", action, "--room", "000", "--shard", "cave"]) == int(
         not confirmed
     )
-    (record,) = json.loads(capsys.readouterr().out)
+    (record,) = orjson.loads(capsys.readouterr().out)
     assert record["ok"] is confirmed
     assert record["result"] is confirmed
     if not confirmed:
@@ -260,7 +272,7 @@ def test_raw_rpc_preserves_false_confirmation_as_return_value(
         ])
         == 0
     )
-    assert json.loads(capsys.readouterr().out) == [
+    assert orjson.loads(capsys.readouterr().out) == [
         {"room": 0, "ok": True, "result": False}
     ]
     target.call.assert_awaited_once_with("pause", {"paused": False}, timeout=None)
@@ -273,7 +285,7 @@ def test_player_mutations_follow_current_shard_and_refuse_migrating_player(
     client = rpc_clients[1]
     client.get_player.return_value = SimpleNamespace(shard="cave")
     assert main(["--json", "player", "kick", "KU_example", "--room", "001"]) == 0
-    assert json.loads(capsys.readouterr().out)[0]["ok"]
+    assert orjson.loads(capsys.readouterr().out)[0]["ok"]
     client.shard.assert_called_once_with("cave")
     client.shard.return_value.invoke.assert_awaited_once_with(
         c.Kick(userid="KU_example")
@@ -281,20 +293,25 @@ def test_player_mutations_follow_current_shard_and_refuse_migrating_player(
     client.status.assert_not_awaited()
     client.get_player.return_value = SimpleNamespace(shard=None)
     assert main(["--json", "player", "ban", "KU_example", "--room", "001"]) == 1
-    result = json.loads(capsys.readouterr().out)[0]
+    result = orjson.loads(capsys.readouterr().out)[0]
     assert not result["ok"]
     assert "migrating" in result["error"]
     assert client.shard.return_value.invoke.await_count == 1
     assert client.__aexit__.await_count == 2
 
 
-@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize(
+    ("terminal", "as_json"), [(True, False), (False, False), (True, True)]
+)
 def test_console_batch_preserves_output_errors_and_never_repeats_evaluation(
     rpc_clients: defaultdict[int, MagicMock],
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: bool,
     as_json: bool,
 ) -> None:
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: terminal)
     source = tmp_path / "input.lua"
     source.write_text('print("first line")\nreturn 42\n')
     rpc_clients[0].shard.return_value.evaluate.return_value = ConsoleResult(
@@ -322,8 +339,9 @@ def test_console_batch_preserves_output_errors_and_never_repeats_evaluation(
         == 1
     )
     output = capsys.readouterr()
-    if as_json:
-        records = json.loads(output.out)
+    if as_json or not terminal:
+        records = orjson.loads(output.out)
+        assert output.out.count("\n") == 1
         assert [record["room"] for record in records] == [0, 1]
         assert records[0]["ok"]
         assert records[0]["result"]["output"] == "first line\nsecond line\n"
@@ -353,7 +371,7 @@ def test_partial_failure_preserves_other_rooms_and_never_retries(
     if failed == 1:
         rpc_clients[failed].invoke.side_effect = IndeterminateError()
     assert main(["--json", "world", "save", "--room", f"000,{failed:03d}"]) == 1
-    records = json.loads(capsys.readouterr().out)
+    records = orjson.loads(capsys.readouterr().out)
     assert records[0] == {"room": 0, "ok": True, "result": None}
     assert records[1]["room"] == failed
     assert not records[1]["ok"]
@@ -381,7 +399,10 @@ def test_template_selection_excludes_other_rooms_and_mutations_require_targets(
         main(["--json", "announce", "hello", "--all", "--template", "pure_survival"])
         == 0
     )
-    assert [record["room"] for record in json.loads(capsys.readouterr().out)] == [0, 1]
+    assert [record["room"] for record in orjson.loads(capsys.readouterr().out)] == [
+        0,
+        1,
+    ]
     assert set(rpc_clients) == {0, 1}
     for client in rpc_clients.values():
         client.invoke.assert_awaited_once_with(c.Announce(message="hello"))
@@ -393,6 +414,7 @@ def test_interactive_console_continues_after_lua_error_and_eof(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     prompt = Mock()
     prompt.prompt_async = AsyncMock(side_effect=["broken()", "1+1", EOFError])
     monkeypatch.setattr("prompt_toolkit.PromptSession", lambda: prompt)
@@ -410,35 +432,45 @@ def test_interactive_console_continues_after_lua_error_and_eof(
     ]
     output = capsys.readouterr()
     # prompt_toolkit displays interactive output and errors in one terminal stream.
-    assert output.out + output.err == "runtime: bad\n2\n"
+    assert Text.from_ansi(output.out + output.err).plain == "runtime: bad\n2\n"
     rpc_clients[1].__aexit__.assert_awaited_once()
 
 
-@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("ending", ["prompt_eof", "journal_error", "journal_eof"])
 def test_interactive_follow_closes_prompt_and_journal_on_eof_or_log_failure(
     cli_host: Host,
     rpc_clients: defaultdict[int, MagicMock],
     monkeypatch: pytest.MonkeyPatch,
-    failure: bool,
+    ending: str,
 ) -> None:
     prompt_started, journal_started = asyncio.Event(), asyncio.Event()
     prompt_closed, journal_closed = asyncio.Event(), asyncio.Event()
 
-    async def journal(
-        units: tuple[str, ...], *, lines: int, follow: bool
-    ) -> AsyncIterator[None]:
-        assert units == (cli_host.shard_unit(1, "cave"),)
-        assert lines == 0
-        assert follow
+    async def records() -> AsyncIterator[None]:
         journal_started.set()
+        async with asyncio.timeout(2):
+            await prompt_started.wait()
+            if ending == "journal_error":
+                msg = "journal failed"
+                raise OSError(msg)
+            if ending == "journal_eof":
+                return
+            await asyncio.Event().wait()
+        yield
+
+    @asynccontextmanager
+    async def journal(
+        _: JournalLogs, units: Sequence[str], request: JournalQuery
+    ) -> AsyncIterator[MagicMock]:
+        assert units == (cli_host.shard_unit(1, "cave"),)
+        assert request.limit == 0
+        assert request.direction == "forward"
+        stream = MagicMock(spec=JournalStream)
+        stream.__aiter__.side_effect = records
+        stream.diagnostics = ""
+        stream.diagnostics_truncated = False
         try:
-            async with asyncio.timeout(2):
-                await prompt_started.wait()
-                if failure:
-                    msg = "journal failed"
-                    raise OSError(msg)
-                await asyncio.Event().wait()
-            yield
+            yield stream
         finally:
             journal_closed.set()
 
@@ -447,7 +479,7 @@ def test_interactive_follow_closes_prompt_and_journal_on_eof_or_log_failure(
         try:
             async with asyncio.timeout(2):
                 await journal_started.wait()
-                if failure:
+                if ending != "prompt_eof":
                     await asyncio.Event().wait()
         finally:
             prompt_closed.set()
@@ -455,7 +487,7 @@ def test_interactive_follow_closes_prompt_and_journal_on_eof_or_log_failure(
 
     prompt = Mock(prompt_async=AsyncMock(side_effect=read_prompt))
     monkeypatch.setattr("prompt_toolkit.PromptSession", lambda: prompt)
-    monkeypatch.setattr(game, "journal_logs", journal)
+    monkeypatch.setattr(JournalLogs, "follow", journal)
     assert main([
         "console",
         "--interactive",
@@ -464,7 +496,7 @@ def test_interactive_follow_closes_prompt_and_journal_on_eof_or_log_failure(
         "001",
         "--shard",
         "cave",
-    ]) == int(failure)
+    ]) == int(ending == "journal_error")
     assert prompt_closed.is_set()
     assert journal_closed.is_set()
     rpc_clients[1].__aexit__.assert_awaited_once()
@@ -497,20 +529,32 @@ def test_diagnostics_and_logs_work_when_room_policy_is_corrupted(
     (cli_host.rooms.path(1) / CONTROL_FILE).write_text("{")
     selected: list[tuple[str, ...]] = []
     record = JournalRecord(
-        cursor="test-cursor",
-        timestamp=datetime(2026, 9, 12, tzinfo=UTC),
-        unit="dst-001-cave.service",
-        message="game startup diagnostic",
+        fields={
+            "__CURSOR": "test-cursor",
+            "__REALTIME_TIMESTAMP": "1789171200000000",
+            "_SYSTEMD_UNIT": "dst-001-cave.service",
+            "MESSAGE": "game startup diagnostic",
+        }
+    )
+    page = JournalResult(
+        records=(record,),
+        next_cursor=record.cursor,
+        has_more=False,
+        diagnostics="",
+        diagnostics_truncated=False,
     )
 
     async def records(  # ruff: ignore[unused-async]
-        units: Sequence[str], **_: object
-    ) -> AsyncIterator[JournalRecord]:
+        _reader: JournalLogs,
+        units: Sequence[str],
+        request: JournalQuery,
+        **_: object,
+    ) -> JournalResult:
         selected.append(tuple(units))
-        yield record
+        assert request.direction == "backward"
+        return page
 
-    monkeypatch.setattr(host_logs, "logs", records)
-    monkeypatch.setattr(game, "journal_logs", records)
+    monkeypatch.setattr(JournalLogs, "query", records)
     arguments = (
         ["room", "diagnose", "001"]
         if operation == "diagnose"
@@ -519,18 +563,18 @@ def test_diagnostics_and_logs_work_when_room_policy_is_corrupted(
     if operation == "shard_logs":
         arguments.extend(("--shard", "cave"))
     assert main(["--json", *arguments]) == 0
-    output = json.loads(capsys.readouterr().out)
+    output = orjson.loads(capsys.readouterr().out)
     if operation == "diagnose":
         assert output[0]["ok"] is True
         result = output[0]["result"]
         assert result["configuration_error"] == "room configuration could not be loaded"
-        assert result["logs"] == [record.model_dump(mode="json")]
-        assert set(result["units"]) == set(selected[0])
+        assert result["logs"] == page.model_dump(mode="json")
+        assert set(result["units"]) == set(cli_host.units(1))
     else:
-        assert output == record.model_dump(mode="json")
+        assert output == page.model_dump(mode="json")
     expected = {"dst-001-cave.service"}
     if operation != "shard_logs":
-        expected.update(("dst-001-pod.service", "dst-001-forest.service"))
+        expected = {"dst-001-pod.service", "dst-001-*.service"}
     assert len(selected) == 1
     assert set(selected[0]) == expected
     assert not rpc_clients
@@ -554,7 +598,7 @@ def test_debug_commands_work_when_room_policy_is_corrupted(
         )
         arguments = ["console", "1+1", "--room", "001", "--shard", "cave"]
     assert main(["--json", *arguments]) == 0
-    (record,) = json.loads(capsys.readouterr().out)
+    (record,) = orjson.loads(capsys.readouterr().out)
     assert record["room"] == 1
     assert record["ok"] is True
     if operation == "rpc":
@@ -598,7 +642,7 @@ def test_rpc_subscriptions_all_start_and_one_failure_preserves_others(
         subscriptions.append(subscription)
     assert main(["--json", "rpc", "subscribe", "events", "--all"]) == 1
     assert active == set(range(1, 10))
-    assert json.loads(capsys.readouterr().out) == {
+    assert orjson.loads(capsys.readouterr().out) == {
         "room": "000",
         "ok": False,
         "error": "room offline",
@@ -607,3 +651,231 @@ def test_rpc_subscriptions_all_start_and_one_failure_preserves_others(
         subscription.__aexit__.assert_awaited_once()
     for client in rpc_clients.values():
         client.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("terminal", "as_json"), [(True, False), (False, False), (True, True)]
+)
+def test_journal_page_keeps_metadata_and_displays_human_records_oldest_first(
+    cli_host: Host,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    terminal: bool,
+    as_json: bool,
+) -> None:
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: terminal)
+    records = tuple(
+        JournalRecord(
+            fields={
+                "__CURSOR": f"cursor-{index}",
+                "__REALTIME_TIMESTAMP": str(1789171200000000 + index),
+                "_SYSTEMD_UNIT": "dst-299-retired.service",
+                "MESSAGE": f"message-{index}",
+            }
+        )
+        for index in (2, 1)
+    )
+    page = JournalResult(
+        records=records,
+        next_cursor="cursor-1",
+        has_more=True,
+        diagnostics="journal warning\n",
+        diagnostics_truncated=True,
+    )
+    query = AsyncMock(return_value=page)
+    monkeypatch.setattr(JournalLogs, "query", query)
+    assert (
+        main([
+            *(["--json"] if as_json else []),
+            "logs",
+            "--room",
+            "299",
+            "--shard",
+            "retired",
+            "--lines",
+            "2",
+            "--direction",
+            "backward",
+            "--since",
+            "-1h",
+            "--until",
+            "now",
+            "--namespace",
+            "games",
+        ])
+        == 0
+    )
+    assert not cli_host.rooms.path(299).exists()
+    units, request = query.call_args.args
+    assert units == ("dst-299-retired.service",)
+    assert request == JournalQuery(
+        limit=2,
+        direction="backward",
+        since="-1h",
+        until="now",
+        namespace="games",
+    )
+    output = capsys.readouterr()
+    if as_json or not terminal:
+        assert output.out.count("\n") == 1
+        assert orjson.loads(output.out) == page.model_dump(mode="json")
+    else:
+        assert output.out.index("message-1") < output.out.index("message-2")
+        assert "cursor-1" in output.err
+        assert "More records" in output.err
+    assert "journal warning" in output.err
+    assert "diagnostics were truncated" in output.err
+
+
+def test_journal_follow_emits_records_and_diagnostics_after_closing(
+    cli_host: Host,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    record = JournalRecord(
+        fields={
+            "__CURSOR": "next",
+            "__REALTIME_TIMESTAMP": "1789171200000000",
+            "_SYSTEMD_UNIT": "dst-299-retired.service",
+            "MESSAGE": "follow output",
+        }
+    )
+    stream = MagicMock(spec=JournalStream)
+    stream.__aiter__.return_value = iter((record,))
+    stream.diagnostics = ""
+    stream.diagnostics_truncated = False
+    closed = False
+
+    @asynccontextmanager
+    async def follow(
+        _: JournalLogs, units: Sequence[str], request: JournalQuery
+    ) -> AsyncIterator[MagicMock]:
+        nonlocal closed
+        assert units == ("dst-299-retired.service",)
+        assert request == JournalQuery(limit=0, direction="forward", cursor="previous")
+        try:
+            yield stream
+        finally:
+            closed = True
+            stream.diagnostics = "retained diagnostic\n"
+
+    monkeypatch.setattr(JournalLogs, "follow", follow)
+    assert (
+        main([
+            "--json",
+            "logs",
+            "--room",
+            "299",
+            "--shard",
+            "retired",
+            "--follow",
+            "--lines",
+            "0",
+            "--cursor",
+            "previous",
+        ])
+        == 0
+    )
+    assert closed
+    assert not cli_host.rooms.path(299).exists()
+    output = capsys.readouterr()
+    assert orjson.loads(output.out) == record.model_dump(mode="json")
+    assert output.err == "retained diagnostic\n"
+
+
+def test_journal_follow_rejects_backward_direction_before_opening_host(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    make_host = Mock(side_effect=AssertionError("invalid query must not open Host"))
+    monkeypatch.setattr(cli_logs, "make_host", make_host)
+    assert (
+        main([
+            "logs",
+            "--room",
+            "001",
+            "--follow",
+            "--direction",
+            "backward",
+        ])
+        == 1
+    )
+    assert "--follow requires --direction forward" in capsys.readouterr().err
+    make_host.assert_not_called()
+
+
+def test_telemetry_cli_queries_retired_room_without_assuming_a_service(
+    cli_host: Host,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    since, until = datetime(2026, 9, 12, tzinfo=UTC), datetime(2026, 9, 13, tzinfo=UTC)
+    result = NetdataLogResult(
+        records=(),
+        matched=0,
+        since=since,
+        until=until,
+        diagnostics="matched=0 returned=0\n",
+        diagnostics_truncated=False,
+    )
+    query = AsyncMock(return_value=result)
+    monkeypatch.setattr(NetdataLogs, "query", query)
+    assert (
+        main([
+            "--json",
+            "logs",
+            "telemetry",
+            "--room",
+            "299",
+            "--shard",
+            "retired",
+            "--since",
+            since.isoformat(),
+            "--until",
+            until.isoformat(),
+            "--limit",
+            "12",
+            "--filter",
+            "severity_text=ERROR",
+            "--query",
+            "exception",
+            "--field",
+            "body",
+        ])
+        == 0
+    )
+    request = query.call_args.args[0]
+    assert request == NetdataLogQuery(
+        since=since,
+        until=until,
+        limit=12,
+        query="exception",
+        fields=("body",),
+        filters=(
+            ("attributes.dst.cluster.name", "dst-299"),
+            ("attributes.dst.shard.name", "retired"),
+            ("severity_text", "ERROR"),
+        ),
+    )
+    assert not cli_host.rooms.path(299).exists()
+    output = capsys.readouterr()
+    assert orjson.loads(output.out) == result.model_dump(mode="json")
+    assert output.err == result.diagnostics
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--since", "2026-09-12T00:00:00"],
+        ["--since", "2026-09-12T00:00:00Z", "--filter", "bad"],
+        ["--since", "2026-09-12T00:00:00Z", "--service-namespace", "games"],
+    ],
+)
+def test_telemetry_cli_rejects_invalid_query_before_opening_host(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+) -> None:
+    make_host = Mock(side_effect=AssertionError("invalid query must not open Host"))
+    monkeypatch.setattr(cli_logs, "make_host", make_host)
+    assert main(["logs", "telemetry", "--room", "299", *arguments]) == 1
+    make_host.assert_not_called()

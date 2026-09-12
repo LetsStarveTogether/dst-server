@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import select
 import shlex
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 import logbook
+import orjson
 import pytest
 from pydantic import JsonValue, SecretStr
 from ulid import ULID
@@ -44,6 +44,7 @@ from dst_server.events import player
 from dst_server.events import server as server_events
 from dst_server.game.rpc import LuaRequestError
 from dst_server.klei_id import encode_klei_id
+from dst_server.logs import NetdataLogQuery, NetdataLogs
 from dst_server.lua_codec import lua_string
 from dst_server.models.cluster import (
     ClusterStatus,
@@ -52,7 +53,6 @@ from dst_server.models.cluster import (
     LifecycleRecord,
     ShardRuntimeStatus,
 )
-from dst_server.netdata import NetdataLogQuery, NetdataLogs
 from dst_server.presets.lst import NETDATA_ENVIRONMENT, fleet_room
 from dst_server.rooms import Room, RoomStore
 from dst_server.rpc import ClusterClient, Subscription, rpc_runtime
@@ -763,7 +763,7 @@ async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(
                 "--room",
                 "299",
             )
-            assert json.loads(output) == [
+            assert orjson.loads(output) == [
                 {
                     "room": 299,
                     "ok": True,
@@ -1514,7 +1514,7 @@ async def test_quadlet_publishes_each_shard_port(
             assert len(games) == 1
             assert f"-external_port {shard.external_port}" in games[0]
         _, pod = await run_command("podman", "pod", "inspect", system.pod_name)
-        bindings = json.loads(pod)[0]["InfraConfig"]["PortBindings"]
+        bindings = orjson.loads(pod)[0]["InfraConfig"]["PortBindings"]
         assert {
             (
                 int(value["HostPort"]),

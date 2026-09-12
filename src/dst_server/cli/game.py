@@ -2,13 +2,12 @@
 """Game operations and direct RPC access for the host CLI."""
 
 import asyncio
-import json
 import sys
 from collections.abc import Awaitable, Callable, Sequence
-from contextlib import aclosing
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import orjson
 from cyclopts import App, Parameter
 from pydantic import JsonValue
 
@@ -21,7 +20,7 @@ from dst_server.cli.common import (
     make_host,
     select_rooms,
 )
-from dst_server.host.logs import logs as journal_logs
+from dst_server.host import Host
 from dst_server.models.console import ConsoleResult
 from dst_server.rpc.client import ClusterClient, RemoteEndpoint, ShardClient
 from dst_server.timeouts import (
@@ -30,13 +29,15 @@ from dst_server.timeouts import (
     DEFAULT_SAVE_TIMEOUT,
 )
 
+from .logs import show_diagnostics
+from .output import diagnostic
+
 type AllRooms = Annotated[bool, Parameter(name="--all")]
 type Operation = Callable[[ClusterClient], Awaitable[Any]]
 
 player_app = App(name="player", help="Inspect players and manage permissions.")
 world_app = App(name="world", help="Inspect and operate game worlds.")
 console_app = App(name="console", help="Evaluate Lua through a game agent.")
-logs_app = App(name="logs", help="Read historical or live journal logs.")
 rpc_app = App(name="rpc", help="Discover and call the running server's RPC methods.")
 
 
@@ -437,9 +438,9 @@ def _show_console(result: ConsoleResult) -> None:
     for value in result.values:
         print(value.text)
     if result.error is not None:
-        print(f"{result.error.kind}: {result.error.message}", file=sys.stderr)
+        diagnostic(f"{result.error.kind}: {result.error.message}")
     if result.truncated:
-        print("Console output was truncated by the game agent.", file=sys.stderr)
+        diagnostic("Console output was truncated by the game agent.")
 
 
 def _show_console_rooms(results: Sequence[dict[str, Any]]) -> None:
@@ -449,7 +450,7 @@ def _show_console_rooms(results: Sequence[dict[str, Any]]) -> None:
         if isinstance(result, ConsoleResult):
             _show_console(result)
         elif not record["ok"]:
-            print(record["error"], file=sys.stderr)
+            diagnostic(record["error"])
 
 
 async def _console_session(target: ShardClient, timeout: float) -> None:
@@ -469,10 +470,11 @@ async def _console_session(target: ShardClient, timeout: float) -> None:
                 _show_console(await target.evaluate(source, timeout=timeout))
 
 
-async def _follow_logs(unit: str) -> None:
-    async with aclosing(journal_logs((unit,), lines=0, follow=True)) as records:
-        async for record in records:
+async def _follow_logs(host: Host, number: int, shard: str) -> None:
+    async with host.follow_journal(number, shard=shard) as stream:
+        async for record in stream:
             emit(record if context().json else record.message)
+    show_diagnostics(stream.diagnostics, stream.diagnostics_truncated)
 
 
 @console_app.default
@@ -520,59 +522,15 @@ async def console(
                 await _console_session(target, timeout)
                 return
             async with asyncio.TaskGroup() as tasks:
-                task = tasks.create_task(
-                    _follow_logs(host.shard_unit(number, target.name))
+                sessions = (
+                    tasks.create_task(_console_session(target, timeout)),
+                    tasks.create_task(_follow_logs(host, number, target.name)),
                 )
                 try:
-                    await _console_session(target, timeout)
+                    await asyncio.wait(sessions, return_when=asyncio.FIRST_COMPLETED)
                 finally:
-                    task.cancel()
-
-
-@logs_app.default
-async def logs(
-    *,
-    room: tuple[str, ...] = (),
-    all_rooms: AllRooms = False,
-    template: str | None = None,
-    shard: str | None = None,
-    lines: int = 100,
-    follow: bool = False,
-    since: str | None = None,
-    until: str | None = None,
-    after_cursor: str | None = None,
-) -> None:
-    """Read journal history, including stopped rooms and previous game runs."""
-    async with make_host() as host:
-        numbers = select_rooms(host, room, all_rooms=all_rooms, template=template)
-        units = tuple(
-            unit
-            for number in numbers
-            for unit in (
-                (host.shard_unit(number, shard),)
-                if shard is not None
-                else host.units(number)
-            )
-        )
-        async with aclosing(
-            journal_logs(
-                units,
-                lines=lines,
-                follow=follow,
-                since=since,
-                until=until,
-                after_cursor=after_cursor,
-            )
-        ) as records:
-            async for record in records:
-                emit(
-                    record
-                    if context().json
-                    else (
-                        f"{record.timestamp.isoformat()} {record.unit}: "
-                        f"{record.message}"
-                    )
-                )
+                    for task in sessions:
+                        task.cancel()
 
 
 def _endpoint(client: ClusterClient, shard: str | None) -> RemoteEndpoint:
@@ -629,7 +587,7 @@ def _arguments(file: Path | None, fields: tuple[str, ...]) -> dict[str, JsonValu
     if file is not None:
         text = _read_input(file)
         c.validate_json_structure(text.encode())
-        value = json.loads(text)
+        value = orjson.loads(text)
         if not isinstance(value, dict):
             msg = "RPC input must be a JSON object"
             raise ValueError(msg)
@@ -644,8 +602,8 @@ def _arguments(file: Path | None, fields: tuple[str, ...]) -> dict[str, JsonValu
             raise ValueError(msg)
         try:
             c.validate_json_structure(text.encode())
-            value = json.loads(text)
-        except json.JSONDecodeError:
+            value = orjson.loads(text)
+        except orjson.JSONDecodeError:
             value = text
         arguments[name] = value
     return arguments

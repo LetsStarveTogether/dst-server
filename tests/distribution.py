@@ -1,7 +1,6 @@
 """Run against an installed wheel with: python -I tests/distribution.py."""
 
 import io
-import json
 import os
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
@@ -10,6 +9,8 @@ from importlib.metadata import distribution
 from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+import orjson
 
 import dst_server
 from dst_server.cli import main
@@ -115,7 +116,7 @@ def check_cli(directory: Path) -> None:
     )
     run(*roots, "room", "edit", "299", "--set", "/recycle=true", module=True)
     assert (
-        json.loads(
+        orjson.loads(
             run(
                 *roots,
                 "room",

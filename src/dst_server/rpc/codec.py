@@ -1,11 +1,11 @@
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
+from pydantic import BaseModel, JsonValue, TypeAdapter
 
 from dst_server.commands import validate_json_structure
 from dst_server.errors import ErrorCode, ErrorInfo, IndeterminateError, RemoteError
+from dst_server.models.base import JSON_VALUE
 
-JSON_VALUE = TypeAdapter(JsonValue, config=ConfigDict(allow_inf_nan=False, strict=True))
 ERROR = TypeAdapter(ErrorInfo)
 
 

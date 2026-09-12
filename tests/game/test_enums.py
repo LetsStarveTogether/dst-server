@@ -1,7 +1,7 @@
-import json
 from enum import IntEnum, StrEnum
 from typing import Any
 
+import orjson
 import pytest
 from pydantic import JsonValue, TypeAdapter
 
@@ -11,7 +11,7 @@ from tests.helpers import run_lua
 
 
 def lua_json(source: str, luajit: str) -> Any:
-    return json.loads(run_lua(source, luajit, driver_path=False))
+    return orjson.loads(run_lua(source, luajit, driver_path=False))
 
 
 def test_game_enums_match_all_native_definitions(luajit: str) -> None:
@@ -114,9 +114,9 @@ def test_game_enum_scalars_round_trip_without_implicit_aliases(
     assert enum(value) is member
     assert enum[member.name] is member
     assert str(member) == str(value)
-    assert json.loads(json.dumps(member)) == value
-    assert json.loads(adapter.dump_json(member)) == value
-    assert adapter.validate_json(json.dumps(value), strict=True) is member
+    assert orjson.loads(orjson.dumps(member)) == value
+    assert orjson.loads(adapter.dump_json(member)) == value
+    assert adapter.validate_json(orjson.dumps(value), strict=True) is member
     assert TypeAdapter(JsonValue).validate_python(member) == value
     assert (
         lua_json(f"io.write(json.encode_compliant({lua_value(member)}))", luajit)

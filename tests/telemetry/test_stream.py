@@ -1,10 +1,10 @@
 import asyncio
-import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from itertools import permutations
 from pathlib import Path
 from unittest.mock import Mock, call
 
+import orjson
 import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -19,21 +19,23 @@ NATIVE_PREFIXES = ["", "[00:00:01]: ", "[125:59:59]: "]
 
 
 def event_line(nonce: str, sequence: int, **changes: object) -> str:
-    return PREFIX + json.dumps(
-        {
-            "v": 2,
-            "nonce": nonce,
-            "generation": 1,
-            "session_id": "SESSION",
-            "seq": sequence,
-            "event": "dst.world.state_changed",
-            "tick": 10,
-            "monotonic_ms": 20,
-            "cycle": 2,
-            "data": {"name": "cycles", "value": 2},
-        }
-        | changes,
-        ensure_ascii=False,
+    return (
+        PREFIX
+        + orjson.dumps(
+            {
+                "v": 2,
+                "nonce": nonce,
+                "generation": 1,
+                "session_id": "SESSION",
+                "seq": sequence,
+                "event": "dst.world.state_changed",
+                "tick": 10,
+                "monotonic_ms": 20,
+                "cycle": 2,
+                "data": {"name": "cycles", "value": 2},
+            }
+            | changes,
+        ).decode()
     )
 
 
@@ -161,8 +163,10 @@ async def test_mixed_validation_preserves_later_events(
         nonce,
         2,
         v=1 if kind == "schema" else 2,
-        session_id="\ud800" if kind == "surrogate" else "👩🏽‍💻e\u0301\u2028",
+        session_id="👩🏽‍💻e\u0301\u2028",
     )
+    if kind == "surrogate":
+        candidate = candidate.replace("👩🏽‍💻e\u0301\u2028", "\ud800")
     if size is not None:
         candidate += " " * (size - len(candidate.encode(errors="surrogatepass")))
     lines = [

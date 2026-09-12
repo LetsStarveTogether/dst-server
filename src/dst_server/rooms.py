@@ -1,6 +1,5 @@
 """Typed views of native room files and their small operational policy."""
 
-import json
 import re
 import secrets
 from collections.abc import Mapping, Sequence
@@ -9,6 +8,7 @@ from datetime import datetime, time
 from pathlib import Path
 from typing import Annotated, Any, Self
 
+import orjson
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -37,7 +37,7 @@ from dst_server.configuration.overrides import FrozenMapping
 from dst_server.deployment import DEFAULT_IMAGE, QuadletApplication, RoomPortAllocation
 from dst_server.deployment.application import CLUSTER_ENVIRONMENT, MAX_ROOM_SLOT
 from dst_server.deployment.models import EnvironmentName, IDMap, UnitToken, UnitValue
-from dst_server.models.base import RevalidatedFrozenModel
+from dst_server.models.base import JSON_VALUE, RevalidatedFrozenModel
 
 CONTROL_FILE = ".dst-control.json"
 DEFAULT_ROOT = Path("/srv/dst")
@@ -217,7 +217,8 @@ class Room(RevalidatedFrozenModel):
             _edit_pointer(data, defaults, pointer, value, unset=False)
         for pointer in unset:
             _edit_pointer(data, defaults, pointer, None, unset=True)
-        return type(self).model_validate_json(json.dumps(data))
+        JSON_VALUE.validate_python(data)
+        return type(self).model_validate_json(orjson.dumps(data))
 
 
 def _edit_pointer(  # ruff: ignore[complex-structure, too-many-branches]

@@ -1,5 +1,4 @@
 import asyncio
-import json
 import socket
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
@@ -8,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
+import orjson
 import pytest
 from ulid import ULID
 
@@ -278,8 +278,8 @@ def test_importing_a_package_does_not_initialize_its_subsystems(module: str) -> 
             sys.executable,
             "-c",
             (
-                "import importlib, json, sys; importlib.import_module(sys.argv[1]); "
-                "print(json.dumps(sorted(sys.modules)))"
+                "import importlib, orjson, sys; importlib.import_module(sys.argv[1]); "
+                "print(orjson.dumps(sorted(sys.modules)).decode())"
             ),
             module,
         ],
@@ -288,7 +288,7 @@ def test_importing_a_package_does_not_initialize_its_subsystems(module: str) -> 
         text=True,
         timeout=10,
     )
-    modules = json.loads(result.stdout)
+    modules = orjson.loads(result.stdout)
     assert not HEAVY_MODULES.intersection(name.split(".")[0] for name in modules)
     assert [name for name in modules if name.startswith("dst_server.")] == (
         ["dst_server.cluster"] if module.endswith(".cluster") else []
@@ -331,12 +331,12 @@ def test_installed_help_does_not_import_runtime_dependencies(
     report = tmp_path / "modules.json"
     program = """
 import atexit
-import json
+import orjson
 import runpy
 import sys
 from pathlib import Path
 entrypoint, report, *arguments = sys.argv[1:]
-atexit.register(lambda: Path(report).write_text(json.dumps(sorted(sys.modules))))
+atexit.register(lambda: Path(report).write_bytes(orjson.dumps(sorted(sys.modules))))
 sys.argv = [entrypoint, *arguments]
 runpy.run_path(entrypoint, run_name="__main__")
 """
@@ -348,7 +348,7 @@ runpy.run_path(entrypoint, run_name="__main__")
         timeout=10,
     )
     assert result.stderr == ""
-    modules = json.loads(report.read_text())
+    modules = orjson.loads(report.read_text())
     assert not {
         "capnp",
         "dbus_fast",

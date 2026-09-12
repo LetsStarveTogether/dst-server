@@ -1,6 +1,6 @@
 import asyncio
-import json
 
+import orjson
 import pytest
 
 from dst_server import commands as c
@@ -133,7 +133,7 @@ async def test_console_bounds_values_in_worst_case_json(lua_runtime: str) -> Non
     assert all(len(item.text) == 512 for item in result.values)
     assert result.output == "\0" * 2048
     assert result.truncated
-    assert len(json.dumps(result.model_dump(mode="json"))) < MAX_RESULT_LINE_BYTES
+    assert len(orjson.dumps(result.model_dump(mode="json"))) < MAX_RESULT_LINE_BYTES
 
 
 @pytest.mark.parametrize(

@@ -3,15 +3,16 @@
 
 import asyncio
 import dataclasses
-import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import orjson
 from pydantic import TypeAdapter
 from rich.console import Console
+from rich.highlighter import JSONHighlighter
 from rich.table import Table
 
 if TYPE_CHECKING:
@@ -94,9 +95,9 @@ def emit(value: Any) -> None:
         fallback=lambda item: TypeAdapter(type(item)).dump_python(item, mode="json"),
     )
     if context().json:
-        print(json.dumps(value, ensure_ascii=False, allow_nan=False))
+        print(orjson.dumps(value).decode())
         return
-    console = Console(highlight=False)
+    console = Console(highlight=False, markup=False)
     if (
         isinstance(value, list)
         and value
@@ -108,9 +109,12 @@ def emit(value: Any) -> None:
             table.add_row(*(str(row.get(key, "")) for key in keys))
         console.print(table)
     elif isinstance(value, str):
-        console.print(value, markup=False)
+        console.print(value)
     else:
-        console.print_json(json.dumps(value, ensure_ascii=False, allow_nan=False))
+        console.print(
+            JSONHighlighter()(orjson.dumps(value, option=orjson.OPT_INDENT_2).decode()),
+            soft_wrap=True,
+        )
 
 
 class BatchFailure(Exception):  # ruff: ignore[error-suffix-on-exception-name]

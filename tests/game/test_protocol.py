@@ -1,4 +1,3 @@
-import json
 import math
 import string
 import sys
@@ -6,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
+import orjson
 import pytest
 from pydantic import JsonValue
 
@@ -49,7 +49,7 @@ def response(body: str, luajit: str, *, setup: str = "") -> tuple[bytes, Any]:
     line = output[:-1]
     assert len(line) <= rpc.MAX_RESULT_LINE_BYTES
     assert all(byte >= 32 for byte in line), "RPC output must be a single JSON line"
-    envelope = json.loads(line[len(PREFIX) :].decode("utf-8"))
+    envelope = orjson.loads(line[len(PREFIX) :])
     rpc.JSON_RESPONSE.validate_json(line[len(PREFIX) :], strict=True)
     return line, envelope
 
@@ -293,8 +293,8 @@ def test_mod_queries_accept_native_metadata(
 def test_lua_value_round_trips_json_values(value: Any, luajit: str) -> None:
     _, envelope = response(f"return {lua_value(value)}", luajit)
     assert envelope == {"ok": True, "data": value}
-    assert json.dumps(envelope["data"], sort_keys=True) == json.dumps(
-        value, sort_keys=True
+    assert orjson.dumps(envelope["data"], option=orjson.OPT_SORT_KEYS) == orjson.dumps(
+        value, option=orjson.OPT_SORT_KEYS
     )
 
 
@@ -369,9 +369,9 @@ def test_wire_encoder_preserves_json_types(
         f'local wire=require("dst_server.wire");io.write(wire.encode({expression}))',
         luajit,
     )
-    assert json.dumps(json.loads(output.decode("utf-8")), sort_keys=True) == json.dumps(
-        expected, sort_keys=True
-    )
+    assert orjson.dumps(
+        orjson.loads(output), option=orjson.OPT_SORT_KEYS
+    ) == orjson.dumps(expected, option=orjson.OPT_SORT_KEYS)
 
 
 def test_wire_encoder_escapes_all_controls_in_values_and_keys(luajit: str) -> None:
@@ -382,7 +382,7 @@ def test_wire_encoder_escapes_all_controls_in_values_and_keys(luajit: str) -> No
         luajit,
     )
     assert all(byte >= 32 for byte in output)
-    assert json.loads(output.decode("utf-8")) == {TEXT: TEXT}
+    assert orjson.loads(output) == {TEXT: TEXT}
 
 
 def test_wire_does_not_delegate_to_native_json_codec(luajit: str) -> None:

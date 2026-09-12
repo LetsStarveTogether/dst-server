@@ -1,9 +1,9 @@
-import json
 import os
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
 from pathlib import Path
 
+import orjson
 import pytest
 
 MISSING = "ERROR! Failed to install app '343050' (Missing configuration)"
@@ -55,20 +55,20 @@ def test_steamcmd_install_retry(
     executable = (
         f"#!{sys.executable}\n"
         r"""
-import json
+import orjson
 import os
 import sys
 from pathlib import Path
 
 name = Path(sys.argv[0]).name
 calls = Path(os.environ["CALLS"])
-previous = [json.loads(line) for line in calls.read_text().splitlines()]
+previous = [orjson.loads(line) for line in calls.read_text().splitlines()]
 with calls.open("a") as stream:
-    stream.write(json.dumps([name, *sys.argv[1:]]) + "\n")
+    stream.write(orjson.dumps([name, *sys.argv[1:]]).decode() + "\n")
 if name != "steamcmd.sh":
     sys.exit(0)
 attempt = sum(call[0] == name for call in previous)
-outcomes = json.loads(os.environ["OUTCOMES"])
+outcomes = orjson.loads(os.environ["OUTCOMES"])
 status, output = outcomes[min(attempt, len(outcomes) - 1)]
 print(output, flush=True)
 sys.exit(status)
@@ -96,7 +96,7 @@ sys.exit(status)
             "BETA": "1",
             "GAME_VERSION": "747465",
             "CALLS": str(calls_path),
-            "OUTCOMES": json.dumps(outcomes),
+            "OUTCOMES": orjson.dumps(outcomes).decode(),
         },
         capture_output=True,
         text=True,
@@ -106,7 +106,7 @@ sys.exit(status)
 
     output = result.stdout + result.stderr
     assert result.returncode == returncode, output
-    calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+    calls = [orjson.loads(line) for line in calls_path.read_text().splitlines()]
     steam_calls = [call for call in calls if call[0] == "steamcmd.sh"]
     assert len(steam_calls) == len(outcomes), output
     assert tuple(int(call[1]) for call in calls if call[0] == "sleep") == delays

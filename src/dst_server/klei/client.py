@@ -5,6 +5,7 @@ from types import TracebackType
 from typing import Self, cast
 
 import httpx2
+import orjson
 from logbook import Logger
 from pydantic import SecretStr
 from selectolax.lexbor import LexborHTMLParser
@@ -182,7 +183,8 @@ class KleiClient:
         try:
             response = await self._client.post(
                 url,
-                json=payload,
+                content=orjson.dumps(payload),
+                headers={"Content-Type": "application/json"},
                 follow_redirects=False,
             )
             response.raise_for_status()

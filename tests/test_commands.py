@@ -103,3 +103,43 @@ def test_copied_requests_are_revalidated(timeout: object) -> None:
         commands.operation("shard", copied)
     with pytest.raises(ValidationError):
         commands.encode_request(copied)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"key":1,"key":2}',
+        rb'{"key":1,"\u006bey":2}',
+        rb'{"nested":[{"a\\\"}":1,"a\\\"}":2}]}',
+        b'{"":0,"":1}',
+    ],
+)
+def test_json_structure_rejects_duplicate_keys(payload: bytes) -> None:
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        commands.validate_json_structure(payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'[{"key":1},{"key":2}]',
+        b'{"key":{"key":1},"other":{"key":2}}',
+        rb'{"text":"{\"key\":1,\"key\":2}","literal":"NaN"}',
+        rb'{"\u006bey":1,"a\\\"}":2}',
+        b"[0,true,false,null,18446744073709551616]",
+    ],
+)
+def test_json_structure_accepts_distinct_keys_and_string_contents(
+    payload: bytes,
+) -> None:
+    commands.validate_json_structure(payload)
+
+
+@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_json_structure_rejects_nonfinite_constants(
+    constant: bytes, nested: bool
+) -> None:
+    payload = b'{"value":' + constant + b"}" if nested else constant
+    with pytest.raises(ValueError, match="invalid JSON constant"):
+        commands.validate_json_structure(payload)

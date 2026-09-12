@@ -1,8 +1,8 @@
-import json
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 from pathlib import Path
 from typing import cast
 
+import orjson
 import pytest
 from pydantic import SecretStr
 
@@ -245,14 +245,13 @@ def test_template_mod_options_and_worlds_execute_in_native_lua(
         expected_worlds[name] = values
     expected = tmp_path / "expected.json"
     expected.write_text(
-        json.dumps(
+        orjson.dumps(
             {
                 "mods": expected_mods,
                 "worlds": expected_worlds,
                 "downloads": [str(identifier) for identifier in sorted(downloads)],
             },
-            ensure_ascii=False,
-        ),
+        ).decode(),
         encoding="utf-8",
     )
     repository = Path(__file__).parents[2]

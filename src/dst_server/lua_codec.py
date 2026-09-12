@@ -1,8 +1,9 @@
-import json
+import math
 import re
 from collections.abc import Iterator
 from typing import Annotated, cast
 
+import orjson
 from luaparser import ast
 from luaparser.ast import SyntaxException
 from luaparser.astnodes import (
@@ -88,10 +89,12 @@ def _lua_value(value: JsonValue, seen: set[int]) -> str:
     if isinstance(value, str):
         return lua_string(value)
     if isinstance(value, (bool, int, float)):
-        if isinstance(value, int) and abs(value) > MAX_SAFE_LUA_INTEGER:
-            msg = "Lua integers must be within the exact IEEE 754 integer range"
+        if (isinstance(value, int) and abs(value) > MAX_SAFE_LUA_INTEGER) or (
+            isinstance(value, float) and not math.isfinite(value)
+        ):
+            msg = "Lua numbers must be finite; integers must be exact in IEEE 754"
             raise ValueError(msg)
-        return json.dumps(value, allow_nan=False)
+        return orjson.dumps(value).decode()
     if not isinstance(value, (list, dict)):
         msg = "Lua values must be JSON values"
         raise TypeError(msg)

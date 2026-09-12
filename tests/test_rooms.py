@@ -1,7 +1,7 @@
-import json
 from datetime import UTC, datetime, time
 from pathlib import Path
 
+import orjson
 import pytest
 from pydantic import SecretStr, ValidationError
 
@@ -45,7 +45,7 @@ def test_templates_round_trip_through_native_room_files(
     assert loaded.cluster.settings.cluster_key is not None
     assert loaded.cluster.token.get_secret_value() == "test-token"
     assert "test-token" not in loaded.model_dump_json()
-    policy = json.loads((store.path(299) / CONTROL_FILE).read_text())
+    policy = orjson.loads((store.path(299) / CONTROL_FILE).read_text())
     assert not {"cluster", "deployment", "token"}.intersection(policy)
     assert store.numbers() == (299,)
 

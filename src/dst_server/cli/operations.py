@@ -7,7 +7,6 @@ import os
 import re
 import sys
 from collections.abc import Mapping
-from contextlib import aclosing
 from datetime import time
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -42,29 +41,23 @@ type ExternalPort = Annotated[int | None, Parameter(validator=_port)]
 @agent_app.command
 async def prepare() -> None:
     """Prepare shared room files and download required mods."""
-    from logbook import StreamHandler
-
     from dst_server.cluster.service import prepare_shared
 
-    with StreamHandler(sys.stdout, format_string="{record.message}").applicationbound():
-        await prepare_shared()
+    await prepare_shared()
 
 
 async def _serve(shard: str | None, external_port: int | None) -> int:
-    from logbook import StreamHandler
-
     from dst_server.cluster import daemon
     from dst_server.telemetry import TelemetrySettings
 
     telemetry = TelemetrySettings.model_validate({
         "profile": os.environ.get("DST_SERVER_TELEMETRY_PROFILE", "critical")
     })
-    with StreamHandler(sys.stdout, format_string="{record.message}").applicationbound():
-        if shard is None:
-            return await daemon.master(telemetry=telemetry, external_port=external_port)
-        return await daemon.serve(
-            shard=shard, telemetry=telemetry, external_port=external_port
-        )
+    if shard is None:
+        return await daemon.master(telemetry=telemetry, external_port=external_port)
+    return await daemon.serve(
+        shard=shard, telemetry=telemetry, external_port=external_port
+    )
 
 
 @agent_app.command
@@ -282,12 +275,24 @@ async def maintenance_logs(
     task: str, *, follow: bool = False, lines: int = 100
 ) -> None:
     """Read retained maintenance task logs and optionally follow new records."""
-    from dst_server.host.logs import logs
     from dst_server.host.maintenance import task_unit
+    from dst_server.logs import JournalLogs, JournalQuery
 
-    async with aclosing(logs((task_unit(task),), follow=follow, lines=lines)) as stream:
-        async for record in stream:
-            emit(record)
+    from .logs import show_diagnostics, show_record
+
+    units = (task_unit(task),)
+    request = JournalQuery(limit=lines, direction="forward" if follow else "backward")
+    reader = JournalLogs()
+    if follow:
+        async with reader.follow(units, request) as stream:
+            async for record in stream:
+                show_record(record)
+        show_diagnostics(stream.diagnostics, stream.diagnostics_truncated)
+    else:
+        result = await reader.query(units, request)
+        for record in result.records:
+            show_record(record)
+        show_diagnostics(result.diagnostics, result.diagnostics_truncated)
 
 
 async def annotations(
@@ -310,7 +315,6 @@ async def annotations(
         else:
             msg = "cannot infer annotation mode; pass --mode"
             raise ValueError(msg)
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
     if mode == "components":
         content = await asyncio.to_thread(generate_components, input, max_workers)
         default_output = f"{input.name}_def.lua"

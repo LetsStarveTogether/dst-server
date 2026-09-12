@@ -106,7 +106,9 @@ dst-server world save --room 299
 Selections accept comma-separated numbers, inclusive ranges, `--template`, or explicit `--all` where supported.
 `room list` discovers three-digit room directories containing `cluster.ini`; operations require a target selection.
 Batch operations report each room independently and return a nonzero exit status if any room fails.
-`--json` emits JSON, including one object per record for continuous streams; diagnostics go to stderr.
+Non-terminal stdout defaults to compact single-line JSON; `--json` also selects it in a terminal.
+Continuous streams emit one JSON object per record.
+Logs and diagnostics go to stderr, with embedded newlines escaped in non-terminal output.
 `room edit --set` accepts JSON Pointer assignments with JSON values, and `--unset` removes an explicit setting.
 Game and deployment edits require a stopped room or `--restart`, which stops the services before writing.
 Schedule and management policy changes can be made while games run.
@@ -413,15 +415,69 @@ Lua execution remains a trusted administrative operation and does not imply save
 ```shell
 dst-server logs --room 299 --lines 100
 dst-server logs --room 299 --since yesterday --until now
-dst-server --json logs --room 299 --after-cursor 's=...'
+dst-server --json logs --room 299 --cursor 's=...' --direction forward
 dst-server logs --room 299 --follow
 ```
 
 Quadlet explicitly uses `LogDriver=journald`.
-Historical queries work while rooms are stopped and can include previous container runs and host boots.
+Historical queries work while rooms are stopped, their configuration is damaged, or their shards have been removed.
+Room and shard identities come from the fixed deployment names, including previous runs and retained host boots.
 Available history depends on journal retention.
 `--follow` reads history and then new records through one reader; the default history is 100 records.
-The async SDK exposes `dst_server.host.logs.logs()` and `JournalRecord`; close an interrupted iteration with `contextlib.aclosing`.
+Finite `--json` queries return a page with `records`, `next_cursor`, `has_more`, and bounded diagnostics.
+The default direction is `backward` (newest first); `forward` reads oldest first.
+Human-readable output displays each page chronologically; JSON preserves the requested direction.
+Use `next_cursor` with the same direction and filters to continue, replacing `since` with the cursor if it was set.
+`cursor` and `since` are mutually exclusive native starting positions.
+For bounded ranges, paginate forward and retain `until`.
+Clearing `since` on a backward query removes its lower bound.
+An unavailable cursor raises `JournalCursorError` instead of silently continuing at another record.
+No cursor can recover records already removed by retention.
+
+The SDK exposes `Host.journal()`, `Host.follow_journal()`, and `Host.telemetry()` for one room or a sequence of rooms.
+They do not load room files, contact systemd, or open Cluster RPC.
+`shard=` accepts the original shard directory name, including a deleted shard's name.
+`Host.log_units()` exposes the corresponding historical unit selection.
+Whole-room follow resolves unit patterns at startup; a shard created later requires a new subscription.
+An explicit shard selection can wait for that unit's first records.
+Use the native `JournalLogs` and `NetdataLogs` readers from `dst_server.logs` for custom unit names or service identities.
+
+```python
+import asyncio
+
+from dst_server.host import Host
+from dst_server.logs import JournalQuery
+
+
+async def main():
+    host = Host()
+    page = await host.journal(299, JournalQuery(limit=50))
+    print(page.model_dump_json())
+    if page.has_more:
+        older = await host.journal(299, JournalQuery(cursor=page.next_cursor, limit=50))
+        print(older.model_dump_json())
+
+    async with host.follow_journal(299, shard="forest") as stream:
+        async for record in stream:
+            print(record.message)
+            break
+    print(stream.diagnostics)
+
+
+asyncio.run(main())
+```
+
+SDK follow defaults to zero initial records and always reads forward.
+Set `JournalQuery(direction="forward", limit=100)` for initial history.
+With a cursor, follow reads all retained subsequent records; its initial-history limit does not discard backlog.
+An unavailable follow cursor is detected when the reader produces its first record or exits.
+Leaving the follow context closes and reaps its child process, including cancellation and exceptions.
+`JournalRecord.fields` preserves all original metadata, repeated values, and binary arrays.
+Its `message`, `unit`, `timestamp`, and `cursor` are derived views; decoding for display does not change the raw fields.
+Both readers default to 4 MiB per record and 64 MiB per finite response; constructor options adjust these limits.
+Follow has a per-record limit without a lifetime byte limit.
+Diagnostics retain their last 64 KiB and expose `diagnostics_truncated`.
+Warnings are retained even when a successful query returns no records.
 RPC subscriptions remain live-only; Netdata queries cover separately exported structured events.
 
 ### Schedules and Maintenance Tasks
@@ -1280,7 +1336,8 @@ It does not confirm Python validation or delivery.
 Python reads merged game stdout and stderr without source labels.
 FD 3 command input, FD 4 responses, and FD 5 lifecycle events stay separate.
 Matching markers in stdout do not complete commands, advance Sessions, or confirm saves.
-The standard CLI writes Agent logs through Logbook to container stdout.
+The standard CLI writes Agent logs through Logbook to container stderr.
+Each Python log record escapes embedded CR, LF, and NUL after formatting, including exception tracebacks.
 Ordinary Logbook records are not automatically exported through OTLP.
 Structured game events and allowlisted runtime diagnostics keep their explicit routing.
 When Podman uses its journald driver, conmon forwards this output to the journal.
@@ -1371,23 +1428,32 @@ Across hosts or when isolating untrusted containers, configure TLS, authenticati
 `NetdataLogs` runs `/usr/lib/netdata/plugins.d/otel-plugin` directly on the host, reading `/etc/netdata/otel.yaml`.
 The calling process needs access to the plugin, configuration, and storage; this interface is separate from Cluster RPC.
 
+```shell
+dst-server logs telemetry --room 299 --since 2026-09-12T00:00:00Z --limit 100
+dst-server --json logs telemetry --room 299 --since 2026-09-12T00:00:00Z --filter event_name=dst.player.shard_entered
+```
+
+Use repeated `--filter FIELD=VALUE` and `--field FIELD` options for matching and projection.
+OTel CLI times must include a timezone; source diagnostics are also written to stderr.
+
 ```python
 import asyncio
 from datetime import UTC, datetime, timedelta
 
-from dst_server.netdata import NetdataLogQuery, NetdataLogs
+from dst_server.host import Host
+from dst_server.logs import NetdataLogQuery
 
 
 async def main():
-    result = await NetdataLogs().query(
+    result = await Host().telemetry(
+        0,
         NetdataLogQuery(
             since=datetime.now(UTC) - timedelta(minutes=15),
-            filters=(("attributes.dst.cluster.name", "dst-000"),),
             limit=100,
-        )
+        ),
+        shard="forest",
     )
-    print(result.records)
-    print(result.diagnostics)
+    print(result.model_dump_json())
 
 
 asyncio.run(main())
@@ -1395,11 +1461,22 @@ asyncio.run(main())
 
 | Query setting | Semantics |
 | --- | --- |
-| `since` / `until` | Timezone-aware, normalized to whole UTC seconds; the end must follow the start |
-| `service_name` / `limit` | Defaults to `dst-server` / `200` |
-| `filters` / `query` / `fields` | Exact matches / search expression / returned fields; use `body.player.userid` to filter players |
+| `since` / `until` | Whole UTC seconds in `[since, until)`; omitted `until` is captured before queueing, including the current second |
+| `service_name` / `limit` | Defaults to no service restriction / `200`; Host scopes by stable room attributes |
+| `service_namespace` | Requires a service name; omitted or empty selects its empty namespace, not every namespace |
+| `filters` / `query` / `fields` | Exact matches / regex over `key=value` / returned fields; use `body.player.userid` for players |
 | Concurrency / timeout | Defaults to 1 / 120 seconds, including the wait for a concurrency slot; timeout cleans up the query process |
-| Results | Ordered key-value pairs preserve duplicate fields; `diagnostics` retains query warnings; returns only the newest limited records in the window, without cursor pagination |
+| Results | Newest limited records, reported `matched`, actual window, `truncated`, and bounded diagnostics; no cursor or follow |
+
+Repeated filter fields are ORed; different fields are ANDed.
+`Host.telemetry()` owns the room and shard attribute filters and rejects conflicting caller filters.
+It includes previous service names by default, without consulting current exporter configuration.
+Reusing a room number includes its previous worlds; use event, session, or attempt filters to narrow that history.
+`NetdataLogRecord.fields` preserves ordered duplicate fields; `values(key)` returns every value for a key.
+It does not reconstruct original OTel value types from Netdata's flattened fields.
+`matched` is a backend report, not a completeness guarantee; skipped files can still produce successful queries with warnings.
+When diagnostics were truncated and the summary is unavailable, `matched` and `truncated` are `None`.
+The offline CLI may miss active writes and cannot read offloaded files whose local copies have been removed.
 
 ### Telemetry Troubleshooting
 
@@ -1474,7 +1551,7 @@ The SDK separates data and formats from game processes, cluster coordination, an
 | [telemetry](src/dst_server/telemetry) | Collection and OpenTelemetry SDK export. |
 | [archive.py](src/dst_server/archive.py) | Save export, credential removal, 7z archives, and object storage uploads. |
 | [concurrency.py](src/dst_server/concurrency.py) / [timeouts.py](src/dst_server/timeouts.py) | Cancellation-safe cleanup and shared deadline handling. |
-| [klei](src/dst_server/klei) / [annotations](src/dst_server/annotations) / [netdata.py](src/dst_server/netdata.py) | External queries, Lua annotation generation, and historical log queries. |
+| [klei](src/dst_server/klei) / [annotations](src/dst_server/annotations) / [logs](src/dst_server/logs) | External queries, Lua annotation generation, and native historical log queries. |
 
 Controllers use shared request and model contracts and do not import RPC clients or wire schemas.
 The configuration and deployment models use Pydantic field declarations for validation and serialization.

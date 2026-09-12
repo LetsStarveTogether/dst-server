@@ -1,11 +1,11 @@
 # ruff: file-ignore[async-function-with-timeout]
 """Room configuration and deployment commands backed by the host SDK."""
 
-import json
 import os
 from pathlib import Path
 from typing import Annotated, Any
 
+import orjson
 from cyclopts import App, Parameter
 from pydantic import SecretStr
 
@@ -165,7 +165,7 @@ async def edit_rooms(
         if not separator:
             msg = "--set requires /json/pointer=JSON"
             raise ValueError(msg)
-        changes.append((pointer, json.loads(value)))
+        changes.append((pointer, orjson.loads(value)))
     if not (changes or unset_fields):
         msg = "provide a setting, --set, or --unset"
         raise ValueError(msg)
@@ -485,7 +485,7 @@ async def set_mod(
     restart: bool = False,
 ) -> None:
     """Replace a mod's configuration options with a JSON object."""
-    parsed = json.loads(options)
+    parsed = orjson.loads(options)
     if not isinstance(parsed, dict):
         msg = "mod options must be a JSON object"
         raise TypeError(msg)
