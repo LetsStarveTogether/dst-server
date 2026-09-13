@@ -136,7 +136,7 @@ async def test_complete_roster_starts_without_an_external_client(
     kills = calls.count("kill:Master") + calls.count("kill:Caves")
     assert not await instance.unregister(caves)
     assert not await instance.failed(caves)
-    with pytest.raises(RuntimeError, match="closed"):
+    with pytest.raises(DisconnectedError, match="closed"):
         await instance.register(caves)
     assert calls.count("kill:Master") + calls.count("kill:Caves") == kills
 
@@ -531,7 +531,7 @@ async def test_close_cancels_active_update_without_waiting_for_its_lock(
 
             release.set()
             result = (await asyncio.gather(updating, return_exceptions=True))[0]
-            assert isinstance(result, RuntimeError)
+            assert isinstance(result, DisconnectedError)
             assert "closed" in str(result)
     finally:
         async with asyncio.timeout(5):
@@ -555,21 +555,18 @@ async def test_public_operations_reject_while_close_is_stopping_agents(
         watchdog = asyncio.timeout(5)
         async with watchdog:
             await wait_for_event(master.stop_entered, closing)
-            with pytest.raises(RuntimeError, match="closed"):
-                await instance.start()
-            with pytest.raises(RuntimeError, match="closed"):
-                await instance.restart()
-            with pytest.raises(RuntimeError, match="closed"):
-                await instance.status()
-            with pytest.raises(RuntimeError, match="closed"):
-                await instance.read_configuration()
-            with pytest.raises(RuntimeError, match="closed"):
-                await shard.status()
-            with pytest.raises(RuntimeError, match="closed"):
-                await shard.start()
-            with pytest.raises(RuntimeError, match="closed"):
-                await shard.execute("return true")
-            with pytest.raises(RuntimeError, match="closed"):
+            for operation in (
+                instance.start,
+                instance.restart,
+                instance.status,
+                instance.read_configuration,
+                shard.status,
+                shard.start,
+                lambda: shard.execute("return true"),
+            ):
+                with pytest.raises(DisconnectedError, match="closed"):
+                    await operation()
+            with pytest.raises(DisconnectedError, match="closed"):
                 instance.subscribe("logs")
         assert not watchdog.expired()
     finally:

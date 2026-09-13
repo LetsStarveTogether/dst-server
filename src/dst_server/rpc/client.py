@@ -236,10 +236,11 @@ class ClusterClient(RemoteEndpoint, ClusterAPI):
             async with asyncio.timeout(timeout):
                 stream = await capnp.AsyncIoStream.create_unix_connection(fspath(path))
                 client = capnp.TwoPartyClient(stream)
-                response = (
-                    await client.bootstrap().cast_as(load_schema().Bootstrap).connect()
+                capability = await _read_call(
+                    client.bootstrap().cast_as(load_schema().Bootstrap).connect(),
+                    timeout,
                 )
-                return cls(stream, client, unwrap_outcome(response.result))
+                return cls(stream, client, capability)
         except BaseException:
             if client is not None:
                 client.close()

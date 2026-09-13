@@ -7,6 +7,7 @@ from logbook import Logger
 from ulid import ULID
 
 from dst_server.concurrency import cancel_tasks, complete
+from dst_server.errors import DisconnectedError
 from dst_server.models.cluster import ShardDesired, ShardPhase
 from dst_server.timeouts import operation_deadline
 
@@ -224,7 +225,7 @@ class ShardSupervisor:
     def _require_available(self) -> None:
         if self._close_task is not None or self._closed:
             msg = f"shard supervisor is unavailable: {self.shard}"
-            raise RuntimeError(msg)
+            raise DisconnectedError(msg)
 
     def _ensure_runner(self) -> None:
         if self._runner is None:

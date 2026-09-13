@@ -902,7 +902,7 @@ class ClusterController(ClusterAPI):
     def _require_open(self) -> None:
         if self._closed:
             msg = "cluster controller is closed"
-            raise RuntimeError(msg)
+            raise DisconnectedError(msg)
 
     @asynccontextmanager
     async def _public_operation(self) -> AsyncIterator[None]:

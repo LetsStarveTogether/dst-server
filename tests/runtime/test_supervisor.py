@@ -9,6 +9,7 @@ import logbook
 import pytest
 from ulid import ULID
 
+from dst_server.errors import DisconnectedError
 from dst_server.models.cluster import ShardDesired, ShardPhase
 from dst_server.runtime import Server
 from dst_server.runtime.supervisor import (
@@ -510,7 +511,7 @@ async def test_close_finishes_before_propagating_repeated_cancellation(
         closing.cancel()
         await asyncio.sleep(0)
         assert not closing.done()
-    with pytest.raises(RuntimeError, match="unavailable"):
+    with pytest.raises(DisconnectedError, match="unavailable"):
         await supervisor.start()
 
     gate.set()

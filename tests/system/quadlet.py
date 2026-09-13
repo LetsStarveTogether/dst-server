@@ -3,7 +3,7 @@ import os
 import shutil
 import socket
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, closing
+from contextlib import ExitStack, asynccontextmanager, closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,11 +15,12 @@ from ulid import ULID
 from dst_server.configuration.models import (
     ClusterConfig,
 )
-from dst_server.deployment import ContainerUnit, QuadletApplication, RoomPortAllocation
+from dst_server.deployment import QuadletApplication, RoomPortAllocation
 from dst_server.events import player
 from dst_server.logs import NetdataLogQuery, NetdataLogs
 from dst_server.lua_codec import lua_string
 from dst_server.models.cluster import (
+    ClusterStatus,
     GameEventRecord,
 )
 from dst_server.presets.lst import NETDATA_ENVIRONMENT, fleet_room
@@ -146,6 +147,14 @@ async def verify_watchdog_notifications(service: str) -> None:
                 await asyncio.sleep(1)
 
 
+@dataclass(frozen=True, slots=True)
+class RoomState:
+    status: ClusterStatus
+    pod_id: str
+    containers: dict[str, str]
+    restarts: dict[str, int]
+
+
 @dataclass(slots=True)
 class QuadletSystem:
     root: Path
@@ -177,7 +186,11 @@ class QuadletSystem:
         assert (cluster_dir / "cluster.ini").is_file()
         environment = NETDATA_ENVIRONMENT | {"DST_SERVER_TELEMETRY_PROFILE": "history"}
         if os.environ.get("DST_SERVER_NETDATA_TEST") != "1":
-            environment["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = "http://127.0.0.1:9"
+            environment.update(
+                OTEL_EXPORTER_OTLP_LOGS_ENDPOINT="http://127.0.0.1:9",
+                OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://127.0.0.1:9",
+                OTEL_EXPORTER_OTLP_TIMEOUT="1",
+            )
         application = QuadletApplication.for_cluster(
             cluster,
             cluster_dir,
@@ -187,19 +200,18 @@ class QuadletSystem:
             telemetry_environment=environment,
             volume_idmap=VOLUME_IDMAP,
         )
+        # Keep the real 60-second notification cadence; only shorten recovery.
+        application = application.replace(
+            master=application.master.replace(
+                restart_sec=1, watchdog_sec=WATCHDOG_TEST_TIMEOUT, pull="never"
+            ),
+            secondaries=tuple(
+                unit.replace(watchdog_sec=WATCHDOG_TEST_TIMEOUT, pull="never")
+                for unit in application.secondaries
+            ),
+        )
         quadlet_dir = root / "quadlet"
         application.save(quadlet_dir)
-        for unit in (application.master, *application.secondaries):
-            path = quadlet_dir / f"{unit.name}.container"
-            saved = ContainerUnit.load(path)
-            assert saved.notify is True
-            assert saved.watchdog_sec == 300
-            assert saved.kill_mode == "control-group"
-            assert saved.watchdog_signal == "SIGKILL"
-            # Keep the real 60-second notification cadence; only shorten recovery.
-            saved.replace(watchdog_sec=WATCHDOG_TEST_TIMEOUT, pull="never").save(
-                quadlet_dir
-            )
         return cls(root, cluster_dir, quadlet_dir, application)
 
     @property
@@ -282,6 +294,35 @@ class QuadletSystem:
             self.pod_name,
         )
         return value.strip()
+
+    async def state(self, client: ClusterClient) -> RoomState:
+        return RoomState(
+            status=await client.status(),
+            pod_id=await self.pod_id(),
+            containers={shard: await self.container_id(shard) for shard in SHARDS},
+            restarts={
+                service: int(
+                    (await service_properties(service, "NRestarts"))["NRestarts"]
+                )
+                for service in (self.master_service, *self.secondary_services)
+            },
+        )
+
+    @asynccontextmanager
+    async def track_processes(self) -> AsyncIterator[tuple[int, ...]]:
+        with ExitStack() as stack:
+            descriptors: list[int] = []
+            for shard in SHARDS:
+                _, processes = await run_command(
+                    "podman", "top", self.container_name(shard), "hpid"
+                )
+                pids = [int(line.strip()) for line in processes.splitlines()[1:]]
+                assert len(pids) >= 2, f"missing SDK or game process in {shard}"
+                for pid in pids:
+                    descriptor = os.pidfd_open(pid)
+                    stack.callback(os.close, descriptor)
+                    descriptors.append(descriptor)
+            yield tuple(descriptors)
 
     async def diagnostics(self) -> str:
         _, units = await run_command(

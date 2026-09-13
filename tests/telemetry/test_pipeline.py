@@ -30,14 +30,6 @@ ATTEMPT = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 INSTANCE = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
 
 
-@pytest.fixture(autouse=True)  # ruff: ignore[pytest-fixture-autouse]
-def environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in tuple(os.environ):
-        if name.startswith("OTEL_"):
-            monkeypatch.delenv(name)
-    monkeypatch.setattr(otel, "_globals_installed", True)
-
-
 def observed(*, generation: int = 1, sequence: int = 1) -> ObservedGameEvent:
     event = GAME_EVENT_ADAPTER.validate_python({
         "v": 2,

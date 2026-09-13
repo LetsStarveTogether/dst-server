@@ -26,15 +26,6 @@ from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2_grpc import (
 from dst_server.telemetry import otel
 
 
-@pytest.fixture(autouse=True)  # ruff: ignore[pytest-fixture-autouse]
-def environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in tuple(os.environ):
-        if name.startswith("OTEL_"):
-            monkeypatch.delenv(name)
-    monkeypatch.setattr(otel, "_globals_installed", True)
-    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "none")
-
-
 class Receiver(LogsServiceServicer, MetricsServiceServicer):
     def __init__(self) -> None:
         self.available = False
@@ -78,6 +69,7 @@ async def test_configured_exporter_resumes_and_exports_loss_metrics(
 ) -> None:
     service, endpoint = receiver
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "none")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", endpoint)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", endpoint)

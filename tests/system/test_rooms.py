@@ -3,6 +3,7 @@ import os
 import select
 from contextlib import closing, suppress
 from datetime import UTC, datetime
+from typing import Literal
 
 import orjson
 import pytest
@@ -16,8 +17,9 @@ from dst_server.errors import (
     DisconnectedError,
 )
 from dst_server.lua_codec import lua_string
+from dst_server.models.cluster import ClusterStatus, GameEventRecord, LogRecord
 from dst_server.rooms import RoomStore
-from dst_server.rpc import rpc_runtime
+from dst_server.rpc import ClusterClient, Subscription, rpc_runtime
 from tests.system.helpers import (
     GAME_EXECUTABLE,
     MASTER,
@@ -35,6 +37,7 @@ from tests.system.helpers import (
 )
 from tests.system.quadlet import (
     QuadletSystem,
+    RoomState,
     emit_player_event,
     netdata_player_fields,
     service_properties,
@@ -42,6 +45,45 @@ from tests.system.quadlet import (
 )
 
 pytestmark = pytest.mark.system
+
+
+def assert_recreated_shards(
+    before: RoomState, after: RoomState, process_fds: tuple[int, ...]
+) -> None:
+    assert after.status.epoch != before.status.epoch
+    assert after.status.phase == "running"
+    assert not after.status.missing_shards
+    assert {shard.name for shard in after.status.shards} == set(SHARDS)
+    assert all(select.select([fd], [], [], 0)[0] for fd in process_fds)
+    for shard in SHARDS:
+        previous = shard_status(before.status, shard)
+        current = shard_status(after.status, shard)
+        assert current.ready
+        assert current.agent_incarnation is not None
+        assert current.agent_incarnation != previous.agent_incarnation
+        assert current.game_attempt is not None
+        assert current.game_attempt != previous.game_attempt
+        assert after.containers[shard] != before.containers[shard]
+
+
+async def verify_room_streams(
+    client: ClusterClient,
+    status: ClusterStatus,
+    logs: Subscription[LogRecord],
+    events: Subscription[GameEventRecord],
+) -> None:
+    for shard in SHARDS:
+        marker = f"DST_RECOVERED_{ULID()}"
+        await client.shard(shard).execute_json(
+            "TheWorld:DoTaskInTime(0,function()"
+            f"print({lua_string(marker)}) end);return true"
+        )
+        record = await next_matching(
+            logs, lambda record, marker=marker: marker in record.line
+        )
+        assert record.shard == shard
+        assert record.game_attempt == shard_status(status, shard).game_attempt
+        await emit_player_event(client, events, shard)
 
 
 async def test_quadlet_waits_for_all_agents_and_keeps_watchdog_alive(
@@ -102,7 +144,9 @@ async def test_quadlet_publishes_each_shard_port(
             assert len(games) == 1
             assert f"-external_port {shard.external_port}" in games[0]
         _, pod = await run_command("podman", "pod", "inspect", system.pod_name)
-        bindings = orjson.loads(pod)[0]["InfraConfig"]["PortBindings"]
+        configuration = orjson.loads(pod)[0]
+        assert configuration["SharedNamespaces"] == ["net"]
+        bindings = configuration["InfraConfig"]["PortBindings"]
         assert {
             (
                 int(value["HostPort"]),
@@ -204,29 +248,20 @@ async def test_quadlet_delivers_logs_to_rpc_and_journal_and_player_events(
         assert (await client.status()).phase == "running"
 
 
+@pytest.mark.parametrize("fault", ["game", "container", "watchdog"])
 @pytest.mark.parametrize("failed_shard", SHARDS)
-async def test_one_game_crash_restarts_the_whole_room(
-    quadlet_system: QuadletSystem, failed_shard: str
+async def test_quadlet_recovers_the_whole_room_after_failure(
+    quadlet_system: QuadletSystem,
+    failed_shard: str,
+    fault: Literal["game", "container", "watchdog"],
 ) -> None:
     system = quadlet_system
-    process_fds: list[int] = []
-    try:
-        async with system.running() as client:
-            before = await client.status()
-            container_ids = {
-                shard: await system.container_id(shard) for shard in SHARDS
-            }
-            pod_id = await system.pod_id()
-            restarts = await service_properties(system.master_service, "NRestarts")
-            for shard in SHARDS:
-                _, processes = await run_command(
-                    "podman", "top", system.container_name(shard), "hpid"
-                )
-                process_fds.extend(
-                    os.pidfd_open(int(pid.strip()))
-                    for pid in processes.splitlines()[1:]
-                )
-            target = shard_status(before, failed_shard)
+    async with system.running() as client, system.track_processes() as process_fds:
+        before = await system.state(client)
+        failed_service = f"{system.container_name(failed_shard)}.service"
+        failed_since = f"@{int(datetime.now(UTC).timestamp())}"
+        if fault == "game":
+            target = shard_status(before.status, failed_shard)
             assert target.pid is not None
             await run_command(
                 "podman",
@@ -236,37 +271,50 @@ async def test_one_game_crash_restarts_the_whole_room(
                 "-KILL",
                 str(target.pid),
             )
-            replacement, recovered = await wait_for_client(
-                system.socket_path,
-                lambda value: value.epoch != before.epoch and value.phase == "running",
+        else:
+            await run_command(
+                "podman",
+                "kill",
+                "--signal",
+                "STOP" if fault == "watchdog" else "KILL",
+                system.container_name(failed_shard),
             )
-            with closing(replacement):
-                with pytest.raises(DisconnectedError):
-                    await client.status()
-                assert all(select.select([fd], [], [], 0)[0] for fd in process_fds)
-                assert await system.pod_id() == pod_id
-                for shard in SHARDS:
-                    previous, current = (
-                        shard_status(before, shard),
-                        shard_status(recovered, shard),
-                    )
-                    assert current.ready
-                    assert current.agent_incarnation != previous.agent_incarnation
-                    assert current.game_attempt != previous.game_attempt
-                    assert await system.container_id(shard) != container_ids[shard]
-                assert await service_properties(system.master_service, "NRestarts") == {
-                    "NRestarts": str(int(restarts["NRestarts"]) + 1)
-                }
-                for service in system.secondary_services:
-                    assert await service_properties(service, "NRestarts") == {
-                        "NRestarts": "0"
-                    }
-                await wait_for_game_shards(replacement, len(SHARDS))
-                async with await replacement.subscribe("events") as events:
-                    await emit_player_event(replacement, events, failed_shard)
-    finally:
-        for fd in process_fds:
-            os.close(fd)
+        replacement, _ = await wait_for_client(
+            system.socket_path,
+            lambda value: value.epoch != before.status.epoch and startup_phase(value),
+        )
+        with closing(replacement):
+            with pytest.raises(DisconnectedError):
+                await client.status()
+            after = await system.state(replacement)
+            assert_recreated_shards(before, after, process_fds)
+            assert after.pod_id == before.pod_id
+            assert after.restarts == before.restarts | {
+                system.master_service: before.restarts[system.master_service] + 1
+            }
+            assert all(
+                after.restarts[service] == 0 for service in system.secondary_services
+            )
+            await wait_for_game_shards(replacement, len(SHARDS))
+            async with (
+                await replacement.subscribe("logs") as logs,
+                await replacement.subscribe("events") as events,
+            ):
+                await verify_room_streams(replacement, after.status, logs, events)
+        if fault == "watchdog":
+            _, journal = await run_command(
+                "journalctl",
+                "--unit",
+                failed_service,
+                "--since",
+                failed_since,
+                "--output=cat",
+                "--no-pager",
+            )
+            assert "Watchdog timeout" in journal
+            assert "left-over" not in journal
+            assert "remains running" not in journal
+            assert "stop-post' timed out" not in journal
 
 
 async def test_planned_mod_update_keeps_management_and_restarts_both_games(
@@ -280,26 +328,31 @@ async def test_planned_mod_update_keeps_management_and_restarts_both_games(
         .load(int(system.cluster_dir.name))
         .cluster.shards.values()
     )
-    async with system.running() as client:
-        before = await client.status()
-        containers = {shard: await system.container_id(shard) for shard in SHARDS}
-        restarts = await service_properties(system.master_service, "NRestarts")
-        await client.update_mods(restart=True, notice=None)
-        current = await client.status()
-        assert current.phase == "running"
-        assert current.epoch == before.epoch
-        assert not current.mod_update.pending
-        assert await service_properties(system.master_service, "NRestarts") == restarts
+    async with (
+        system.running() as client,
+        await client.subscribe("logs") as logs,
+        await client.subscribe("events") as events,
+    ):
+        before = await system.state(client)
+        await verify_room_streams(client, before.status, logs, events)
+        await client.update_mods(restart=True, notice=None, timeout=STARTUP_TIMEOUT)
+        after = await system.state(client)
+        assert after.status.phase == "running"
+        assert after.status.epoch == before.status.epoch
+        assert not after.status.mod_update.pending
+        assert after.pod_id == before.pod_id
+        assert after.containers == before.containers
+        assert after.restarts == before.restarts
         for shard in SHARDS:
             previous, updated = (
-                shard_status(before, shard),
-                shard_status(current, shard),
+                shard_status(before.status, shard),
+                shard_status(after.status, shard),
             )
             assert updated.ready
             assert updated.game_attempt != previous.game_attempt
             assert updated.agent_incarnation == previous.agent_incarnation
-            assert await system.container_id(shard) == containers[shard]
         await wait_for_game_shards(client, len(SHARDS))
+        await verify_room_streams(client, after.status, logs, events)
 
 
 async def test_explicit_game_stop_stays_stopped_with_management_available(
@@ -326,121 +379,32 @@ async def test_explicit_game_stop_stays_stopped_with_management_available(
         } == containers
 
 
-async def test_quadlet_watchdog_reaps_frozen_agent_and_recovers_the_room(
-    quadlet_system: QuadletSystem,
-) -> None:
-    system = quadlet_system
-    process_fds: list[int] = []
-    async with system.running() as client:
-        before = await client.status()
-        container_ids = {shard: await system.container_id(shard) for shard in SHARDS}
-        pod_id = await system.pod_id()
-        cave_service = f"{system.container_name('cave')}.service"
-        properties = await service_properties(system.master_service, "NRestarts")
-        restarts = int(properties["NRestarts"])
-        _, processes = await run_command(
-            "podman", "top", system.container_name("cave"), "hpid"
-        )
-        try:
-            process_fds.extend(
-                os.pidfd_open(int(process.strip()))
-                for process in processes.splitlines()[1:]
-            )
-            assert len(process_fds) >= 2
-            frozen_since = f"@{int(datetime.now(UTC).timestamp())}"
-            await run_command(
-                "podman", "kill", "--signal", "STOP", system.container_name("cave")
-            )
-            replacement, current = await wait_for_client(
-                system.socket_path,
-                lambda value: value.epoch != before.epoch and value.phase == "running",
-            )
-            with closing(replacement):
-                assert all(select.select([fd], [], [], 0)[0] for fd in process_fds)
-                for shard in SHARDS:
-                    assert await system.container_id(shard) != container_ids[shard]
-                    assert (
-                        shard_status(current, shard).agent_incarnation
-                        != shard_status(before, shard).agent_incarnation
-                    )
-                assert await system.pod_id() == pod_id
-                properties = await service_properties(
-                    system.master_service, "NRestarts"
-                )
-                assert int(properties["NRestarts"]) == restarts + 1
-                assert await service_properties(cave_service, "NRestarts") == {
-                    "NRestarts": "0"
-                }
-                await wait_for_game_shards(replacement, len(SHARDS))
-                async with await replacement.subscribe("events") as events:
-                    await emit_player_event(replacement, events, "cave")
-        finally:
-            for fd in process_fds:
-                os.close(fd)
-        _, journal = await run_command(
-            "journalctl",
-            "--unit",
-            cave_service,
-            "--since",
-            frozen_since,
-            "--output=cat",
-            "--no-pager",
-        )
-        assert "Watchdog timeout" in journal
-        assert "left-over" not in journal
-        assert "remains running" not in journal
-        assert "stop-post' timed out" not in journal
-
-
-async def test_quadlet_master_container_crash_recreates_shards_in_existing_pod(
-    quadlet_system: QuadletSystem,
-) -> None:
-    system = quadlet_system
-    async with system.running() as client:
-        before = await client.status()
-        container_ids = {shard: await system.container_id(shard) for shard in SHARDS}
-        pod_id = await system.pod_id()
-        await run_command(
-            "podman", "kill", "--signal", "KILL", system.container_name(MASTER)
-        )
-        async with asyncio.timeout(STARTUP_TIMEOUT):
-            while True:
-                try:
-                    await client.status()
-                except DisconnectedError:
-                    break
-                await asyncio.sleep(0.5)
-        replacement, current = await wait_for_client(
-            system.socket_path, lambda value: value.phase == "running"
-        )
-        with closing(replacement):
-            await wait_for_game_shards(replacement, len(SHARDS))
-            assert current.epoch != before.epoch
-            assert await system.pod_id() == pod_id
-            for shard in SHARDS:
-                assert await system.container_id(shard) != container_ids[shard]
-
-
 async def test_quadlet_pod_restart_recreates_all_shards(
     quadlet_system: QuadletSystem,
 ) -> None:
     system = quadlet_system
-    async with system.running() as client:
-        before = await client.status()
-        pod_id = await system.pod_id()
-        container_ids = {shard: await system.container_id(shard) for shard in SHARDS}
+    async with system.running() as client, system.track_processes() as process_fds:
+        before = await system.state(client)
         await run_command(
             "systemctl", "restart", system.pod_service, seconds=STARTUP_TIMEOUT
         )
         replacement, _ = await wait_for_client(
             system.socket_path,
-            lambda value: value.epoch != before.epoch and value.phase == "running",
+            lambda value: value.epoch != before.status.epoch and startup_phase(value),
         )
         with closing(replacement):
-            assert await system.pod_id() != pod_id
-            for shard in SHARDS:
-                assert await system.container_id(shard) != container_ids[shard]
+            with pytest.raises(DisconnectedError):
+                await client.status()
+            after = await system.state(replacement)
+            assert_recreated_shards(before, after, process_fds)
+            assert after.pod_id != before.pod_id
+            assert after.restarts == before.restarts
             await wait_for_game_shards(replacement, len(SHARDS))
+            async with (
+                await replacement.subscribe("logs") as logs,
+                await replacement.subscribe("events") as events,
+            ):
+                await verify_room_streams(replacement, after.status, logs, events)
 
 
 async def test_quadlet_pod_stop_delivers_stopping_and_reaps_all_containers(

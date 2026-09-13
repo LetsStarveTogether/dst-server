@@ -254,9 +254,13 @@ async def test_raw_call_uses_server_metadata_for_locally_unknown_methods(
 
 @pytest.mark.parametrize(
     ("method", "expected"),
-    [("status", DisconnectedError), ("start", IndeterminateError)],
+    [
+        ("connect", DisconnectedError),
+        ("status", DisconnectedError),
+        ("start", IndeterminateError),
+    ],
 )
-async def test_disconnect_classifies_queries_and_mutations(
+async def test_disconnect_classifies_connection_queries_and_mutations(
     tmp_path: Path,
     method: str,
     expected: type[BaseException],
@@ -274,6 +278,9 @@ async def test_disconnect_classifies_queries_and_mutations(
 
     class Bootstrap(schema.Bootstrap.Server):
         async def connect(self, _context: Any) -> None:
+            if method == "connect":
+                entered.set()
+                await release.wait()
             _context.results.result = success(Cluster())
 
     path = tmp_path / "cluster.sock"
@@ -282,8 +289,12 @@ async def test_disconnect_classifies_queries_and_mutations(
         rpc_runtime(),
         filesystem_rpc_server(path, Bootstrap) as server,
     ):
-        client = await ClusterClient.connect(path)
-        pending = asyncio.create_task(getattr(client, method)())
+        client = None
+        if method == "connect":
+            pending = asyncio.create_task(ClusterClient.connect(path))
+        else:
+            client = await ClusterClient.connect(path)
+            pending = asyncio.create_task(getattr(client, method)())
         try:
             await wait_for_event(entered, pending)
             for connection, stream in tuple(server.connections):
@@ -293,10 +304,13 @@ async def test_disconnect_classifies_queries_and_mutations(
                 await asyncio.wait_for(asyncio.shield(pending), timeout=1)
         finally:
             release.set()
-            client.close()
+            if client is not None:
+                client.close()
             pending.cancel()
             async with asyncio.timeout(5):
                 await asyncio.gather(pending, return_exceptions=True)
+
+    assert not server.connections
 
 
 async def test_server_shutdown_bounds_capability_cleanup(

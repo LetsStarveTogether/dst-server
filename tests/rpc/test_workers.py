@@ -125,8 +125,12 @@ async def open_registry(name: str) -> tuple[Any, Any, Any, Any]:
     )
 
 
-async def test_registry_capability_and_disconnect_lifecycle() -> None:
+@pytest.mark.parametrize("close_registry", [False, True])
+async def test_registry_capability_and_disconnect_lifecycle(
+    close_registry: bool,
+) -> None:
     controller = RegistryController()
+    registry_server = WorkerRegistryServant(controller)
     target = FakeShard()
     servant = AgentServant(target)
     name = f"dst-registry-{ULID()}"
@@ -134,7 +138,7 @@ async def test_registry_capability_and_disconnect_lifecycle() -> None:
         async with (
             asyncio.timeout(5),
             rpc_runtime(),
-            abstract_rpc_server(lambda: WorkerRegistryServant(controller), name),
+            abstract_rpc_server(lambda: registry_server, name),
         ):
             stream, client, registry, disconnected = await open_registry(name)
             try:
@@ -161,6 +165,11 @@ async def test_registry_capability_and_disconnect_lifecycle() -> None:
                 finally:
                     forwarded.close()
                 unwrap_outcome((await registry.failed()).result)
+                if close_registry:
+                    await registry_server.aclose()
+                    with pytest.raises(RemoteError) as unavailable:
+                        unwrap_outcome((await registry.register(agent=servant)).result)
+                    assert unavailable.value.error.code is ErrorCode.UNAVAILABLE
             finally:
                 client.close()
                 stream.close()
@@ -172,8 +181,12 @@ async def test_registry_capability_and_disconnect_lifecycle() -> None:
     assert not target.logs._subscriptions
 
 
-async def test_disconnect_during_registration_rolls_back_capability() -> None:
+@pytest.mark.parametrize("close_transport", [False, True])
+async def test_disconnect_during_registration_rolls_back_capability(
+    close_transport: bool,
+) -> None:
     controller = RegistryController(blocked=True)
+    registry_server = WorkerRegistryServant(controller)
     target = FakeShard()
     servant = AgentServant(target)
     name = f"dst-registry-race-{ULID()}"
@@ -181,18 +194,26 @@ async def test_disconnect_during_registration_rolls_back_capability() -> None:
         async with (
             asyncio.timeout(5),
             rpc_runtime(),
-            abstract_rpc_server(lambda: WorkerRegistryServant(controller), name),
+            abstract_rpc_server(lambda: registry_server, name),
         ):
             stream, client, registry, disconnected = await open_registry(name)
             pending = asyncio.ensure_future(registry.register(agent=servant))
             try:
                 await wait_for_event(controller.registration_entered, pending)
-                client.close()
-                stream.close()
-                await disconnected
+                if close_transport:
+                    client.close()
+                    stream.close()
+                    await disconnected
+                else:
+                    await registry_server.aclose()
                 controller.registration_release.set()
-                with pytest.raises(capnp.KjException):
-                    await pending
+                if close_transport:
+                    with pytest.raises(capnp.KjException):
+                        await pending
+                else:
+                    with pytest.raises(RemoteError) as unavailable:
+                        unwrap_outcome((await pending).result)
+                    assert unavailable.value.error.code is ErrorCode.UNAVAILABLE
                 await wait_for_event(controller.unregistered)
             finally:
                 controller.registration_release.set()

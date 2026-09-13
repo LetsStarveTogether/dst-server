@@ -200,6 +200,8 @@ class QuadletApplication(RevalidatedFrozenModel):
             pod_name=_podman_name(base),
             userns=userns,
             exit_policy="continue",
+            # Recreating a shard container must also discard its Steam IPC locks.
+            podman_args="--share=net",
             publish_ports=publish_ports,
             wanted_by=(DEFAULT_TARGET,),
         )

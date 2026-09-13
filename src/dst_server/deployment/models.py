@@ -238,6 +238,9 @@ class PodUnit(QuadletUnit):
     exit_policy: Annotated[
         Literal["stop", "continue"], UnitField("Pod", "ExitPolicy")
     ] = "stop"
+    podman_args: Annotated[
+        Literal["--share=net"] | None, UnitField("Pod", "PodmanArgs")
+    ] = None
     networks: Annotated[
         tuple[UnitToken, ...], UnitField("Pod", "Network", "networks")
     ] = ()

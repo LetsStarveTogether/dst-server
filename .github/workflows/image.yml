@@ -221,7 +221,7 @@ jobs:
         run: |
           podman save "$DST_SERVER_IMAGE" | sudo podman load
           sudo --preserve-env=DST_SERVER_IMAGE \
-            "$(command -v uv)" run --no-sync -- pytest tests/system -m system
+            "$(command -v uv)" run --no-sync -- pytest tests/system -m system -vv --durations=20
 
       - name: Push to registry
         if: ${{ matrix.build }}

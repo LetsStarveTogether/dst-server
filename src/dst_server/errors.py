@@ -121,7 +121,7 @@ def error_info(error: BaseException) -> ErrorInfo:  # ruff: ignore[complex-struc
         case IndeterminateCommandError():
             code, message = ErrorCode.INDETERMINATE, "operation is indeterminate"
         case DisconnectedError():
-            code, message = ErrorCode.UNAVAILABLE, "shard agent is unavailable"
+            code, message = ErrorCode.UNAVAILABLE, "endpoint is unavailable"
         case RuntimeError() if not isinstance(error, ControllerOperationError):
             code, message = ErrorCode.INVALID_STATE, "operation is invalid now"
         case _:

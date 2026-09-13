@@ -162,20 +162,23 @@ async def test_telemetry_relays_report_failure_before_process_readiness(
     relay: ShardAgent,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    server = event_server(relay, observation(str(ULID())))
-    monkeypatch.setattr(agent_module, "Server", Mock(return_value=server))
-    monkeypatch.setattr(relay, "_drain_lifecycle", AsyncMock())
+    server = relay._new_server()
     monkeypatch.setattr(
-        relay,
-        "_drain_game_events",
+        server,
+        "read_game_event",
         AsyncMock(side_effect=OSError("event stream failed")),
     )
-    assert relay._new_server() is server
+    assert server.child is None
     assert len(relay._attempt_tasks) == 2
-    await asyncio.gather(*relay._attempt_tasks, return_exceptions=True)
-    async with asyncio.timeout(1):
-        with pytest.raises(RuntimeError, match="dst-game-event-relay-forest: OSError"):
-            await relay.wait_fatal()
+    try:
+        async with asyncio.timeout(1):
+            with pytest.raises(
+                RuntimeError, match="dst-game-event-relay-forest: OSError"
+            ):
+                await relay.wait_fatal()
+    finally:
+        await server.finish()
+        await relay._stopped(server)
 
 
 async def test_finished_process_does_not_hide_event_stream_failure(

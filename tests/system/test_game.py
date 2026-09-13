@@ -1,6 +1,5 @@
 import asyncio
 import sys
-from collections import deque
 from contextlib import closing, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,18 +12,16 @@ import pytest
 from dst_server import commands as c
 from dst_server.archive import export_cluster
 from dst_server.errors import (
+    DisconnectedError,
     IndeterminateCommandError,
 )
 from dst_server.events import player
 from dst_server.game.rpc import LuaRequestError
 from dst_server.klei_id import encode_klei_id
 from dst_server.lua_codec import lua_string
-from dst_server.models.cluster import (
-    GameEventRecord,
-    LifecycleRecord,
-)
+from dst_server.models.cluster import GameEventRecord
 from dst_server.rooms import Room, RoomStore
-from dst_server.rpc import ClusterClient, Subscription, rpc_runtime
+from dst_server.rpc import rpc_runtime
 from tests.system.helpers import (
     GAME_EXECUTABLE,
     IMAGE,
@@ -34,10 +31,8 @@ from tests.system.helpers import (
     VOLUME_IDMAP,
     check_console_contract,
     copy_image_bundle,
-    make_server,
+    managed_server,
     read_player,
-    reap_server,
-    remove_container,
     replace_bundle_script,
     run_command,
     running_server,
@@ -180,9 +175,18 @@ async def test_player_activity_needs_no_files_and_resets_with_process(
         assert last_active_at >= timestamp
         assert not marker.exists()
         assert await master.invoke(c.Snapshots()) == snapshots
-        await controller.restart()
+        attempts = {
+            shard: (await agent.runtime_status()).game_attempt
+            for shard, agent in agents.items()
+        }
+        assert all(attempt is not None for attempt in attempts.values())
+        await controller.restart(timeout=STARTUP_TIMEOUT)
         for shard, agent in agents.items():
             assert (await agent.invoke(c.Runtime())).session_id == sessions[shard]
+            status = await agent.runtime_status()
+            assert status.game_attempt is not None
+            assert status.game_attempt != attempts[shard]
+            assert status.last_active_at is None
         assert not marker.exists()
         await controller.regenerate(
             expected_session_id=sessions[MASTER],
@@ -192,6 +196,7 @@ async def test_player_activity_needs_no_files_and_resets_with_process(
         for shard, agent in agents.items():
             session = (await agent.invoke(c.Runtime())).session_id
             assert session != sessions[shard]
+            assert (await agent.runtime_status()).last_active_at is None
             assert not (
                 tmp_path / "cluster" / shard / "save/session" / session / ".last_login"
             ).exists()
@@ -245,18 +250,34 @@ async def test_snapshot_restore_preserves_both_shards_and_player_saves(
             )
         missing = await controller.save()
         latest = await controller.save()
+        for agent in agents.values():
+            assert (
+                await agent.invoke(
+                    c.ExecuteJson(
+                        source="DST_SNAPSHOT_PLAYER.components.health:SetCurrentHealth(29);"
+                        "local clock=TheWorld.net.components.clock;"
+                        "local data=clock:OnSave();data.cycles=29;clock:OnLoad(data);"
+                        "return DST_SNAPSHOT_PLAYER.components.health.currenthealth"
+                    )
+                )
+                == 29
+            )
+            # OnLoad updates clock netvars before the next tick updates world state.
+            async with asyncio.timeout(OPERATION_TIMEOUT):
+                while (await agent.invoke(c.World())).day != 30:  # ruff: ignore[async-busy-wait]
+                    await asyncio.sleep(0.1)
         assert target.snapshot is not None
         assert later_same_day.snapshot is not None
         assert missing.snapshot is not None
         assert latest.snapshot is not None
-        assert latest.snapshot > missing.snapshot > later_same_day.snapshot
-        assert later_same_day.snapshot > target.snapshot
-        for shard in agents:
-            for path in (tmp_path / "cluster" / shard / "save").rglob(
-                f"{missing.snapshot:010d}*"
-            ):
-                if path.is_file():
-                    path.unlink()
+        assert (
+            latest.snapshot
+            > missing.snapshot
+            > later_same_day.snapshot
+            > target.snapshot
+        )
+        for path in (tmp_path / "cluster").glob(f"*/save/**/{missing.snapshot:010d}*"):
+            path.unlink()
         page = await controller.list_snapshots(limit=1)
         assert page.has_more
         assert page.snapshots[0].snapshot_id == latest.snapshot
@@ -294,7 +315,6 @@ async def test_snapshot_restore_preserves_both_shards_and_player_saves(
             "count": later_same_day.snapshot,
             "latest": latest.snapshot,
         }[operation]
-        expected_day = 20 if operation == "latest" else 10
         health = {
             "day": health,
             "count": {"forest": 41, "cave": 42},
@@ -304,7 +324,9 @@ async def test_snapshot_restore_preserves_both_shards_and_player_saves(
             runtime = await agent.invoke(c.Runtime())
             assert runtime.session_id == sessions[shard]
             assert runtime.snapshot == expected_snapshot + 1
-            assert (await agent.invoke(c.World())).day == expected_day
+            assert (await agent.invoke(c.World())).day == (
+                20 if operation == "latest" else 10
+            )
             saved_player = await read_player(agent.server, users[shard])
             assert saved_player["health"] == health[shard]
             assert saved_player["inventory"] == [
@@ -326,8 +348,6 @@ async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(
     cluster = rooms.path(299)
     assert (cluster / "cluster.ini").is_file()
     assert (cluster / MASTER / "server.ini").is_file()
-    client: ClusterClient | None = None
-    lifecycle: Subscription[LifecycleRecord] | None = None
     try:  # ruff: ignore[too-many-statements-in-try-clause]
         await run_command(
             "podman",
@@ -350,71 +370,71 @@ async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(
                 cluster / ".dst-server.sock",
                 startup_phase,
             )
-            assert [(shard.name, shard.ready) for shard in status.shards] == [
-                (MASTER, True)
-            ]
-            await check_console_contract(client)
-            assert not (cluster / "console").exists()
-            _, output = await run_command(
-                sys.executable,
-                "-m",
-                "dst_server",
-                "--cluster-root",
-                str(tmp_path),
-                "--json",
-                "console",
-                "1 + 2",
-                "--room",
-                "299",
-            )
-            assert orjson.loads(output) == [
-                {
-                    "room": 299,
-                    "ok": True,
-                    "result": {
-                        "output": "",
-                        "values": [{"type": "number", "text": "3"}],
-                        "error": None,
-                        "truncated": False,
-                    },
-                }
-            ]
-            _, process_status = await run_command(
-                "podman", "exec", container_name, "cat", "/proc/1/status"
-            )
-            for field in ("Uid:", "Gid:"):
-                identity = next(
-                    line
-                    for line in process_status.splitlines()
-                    if line.startswith(field)
+            async with client:
+                assert [(shard.name, shard.ready) for shard in status.shards] == [
+                    (MASTER, True)
+                ]
+                await check_console_contract(client)
+                assert not (cluster / "console").exists()
+                _, output = await run_command(
+                    sys.executable,
+                    "-m",
+                    "dst_server",
+                    "--cluster-root",
+                    str(tmp_path),
+                    "--json",
+                    "console",
+                    "1 + 2",
+                    "--room",
+                    "299",
                 )
-                assert identity.split()[1:] == ["1000"] * 4
-            socket_metadata = (cluster / ".dst-server.sock").stat()
-            assert (socket_metadata.st_uid, socket_metadata.st_gid) == (0, 0)
-            _, processes = await run_command("podman", "top", container_name, "args")
-            assert GAME_EXECUTABLE in processes
-            lifecycle = await client.subscribe("lifecycle")
-            stopping = asyncio.create_task(
-                wait_for_stopping(lifecycle, frozenset({MASTER}))
-            )
-            try:
-                await run_command(
-                    "podman",
-                    "stop",
-                    "--time",
-                    "40",
-                    container_name,
-                    seconds=OPERATION_TIMEOUT,
+                assert orjson.loads(output) == [
+                    {
+                        "room": 299,
+                        "ok": True,
+                        "result": {
+                            "output": "",
+                            "values": [{"type": "number", "text": "3"}],
+                            "error": None,
+                            "truncated": False,
+                        },
+                    }
+                ]
+                _, process_status = await run_command(
+                    "podman", "exec", container_name, "cat", "/proc/1/status"
                 )
-                assert await stopping == {MASTER}
-            finally:
-                stopping.cancel()
-                await asyncio.gather(stopping, return_exceptions=True)
-            with suppress(Exception):
-                await lifecycle.close()
-            lifecycle = None
-            client.close()
-            client = None
+                for field in ("Uid:", "Gid:"):
+                    identity = next(
+                        line
+                        for line in process_status.splitlines()
+                        if line.startswith(field)
+                    )
+                    assert identity.split()[1:] == ["1000"] * 4
+                socket_metadata = (cluster / ".dst-server.sock").stat()
+                assert (socket_metadata.st_uid, socket_metadata.st_gid) == (0, 0)
+                _, processes = await run_command(
+                    "podman", "top", container_name, "args"
+                )
+                assert GAME_EXECUTABLE in processes
+                lifecycle = await client.subscribe("lifecycle")
+                stopping = asyncio.create_task(
+                    wait_for_stopping(lifecycle, frozenset({MASTER}))
+                )
+                try:
+                    await run_command(
+                        "podman",
+                        "stop",
+                        "--time",
+                        "40",
+                        container_name,
+                        seconds=OPERATION_TIMEOUT,
+                    )
+                    assert await stopping == {MASTER}
+                finally:
+                    stopping.cancel()
+                    await asyncio.gather(stopping, return_exceptions=True)
+                    with suppress(DisconnectedError):
+                        await lifecycle.close()
         _, exit_code = await run_command(
             "podman",
             "inspect",
@@ -423,25 +443,18 @@ async def test_image_entrypoint_runs_single_shard_and_handles_sigterm(
         )
         assert exit_code.strip() == "0"
     except BaseException as error:
-        _, output = await run_command("podman", "logs", container_name, check=False)
+        _, output = await run_command(
+            "podman", "logs", "--tail", "200", container_name, check=False
+        )
         error.add_note("recent container logs:\n" + output)
         raise
-    finally:
-        if lifecycle is not None:
-            with suppress(Exception):
-                await lifecycle.close()
-        if client is not None:
-            client.close()
 
 
 async def test_sdk_real_game_core_contract(
     tmp_path: Path,
-    container_name: str,
 ) -> None:
     cluster = write_cluster(tmp_path, configured=True)
-    logs: deque[str] = deque(maxlen=200)
-    server = make_server(tmp_path, cluster, container_name, log_handler=logs.append)
-    try:  # ruff: ignore[too-many-statements-in-try-clause]
+    async with managed_server(tmp_path, cluster) as server:
         await server.start(startup_timeout=STARTUP_TIMEOUT)
         async with asyncio.timeout(OPERATION_TIMEOUT):
             assert server.driver_health.telemetry_status == "active"
@@ -494,11 +507,6 @@ async def test_sdk_real_game_core_contract(
             assert server.driver_health.generation > generation
             assert server.returncode is None
         await server.stop(grace_period=OPERATION_TIMEOUT)
-    except BaseException as error:
-        error.add_note("recent game logs:\n" + "\n".join(logs))
-        raise
-    finally:
-        await reap_server(server, container_name)
 
 
 async def test_native_callbacks_publish_sdk_events(tmp_path: Path) -> None:
@@ -604,12 +612,9 @@ async def test_native_callbacks_publish_sdk_events(tmp_path: Path) -> None:
 
 async def test_real_game_driver_restarts_with_unchanged_session_id(
     tmp_path: Path,
-    container_name: str,
 ) -> None:
     cluster = write_cluster(tmp_path)
-    logs: deque[str] = deque(maxlen=200)
-    server = make_server(tmp_path, cluster, container_name, log_handler=logs.append)
-    try:  # ruff: ignore[too-many-statements-in-try-clause]
+    async with managed_server(tmp_path, cluster) as server:
         await server.start(startup_timeout=STARTUP_TIMEOUT)
         session_id = server.session_id
         generation = server.driver_health.generation
@@ -632,19 +637,12 @@ async def test_real_game_driver_restarts_with_unchanged_session_id(
             assert (await server.game.invoke(c.Room())).is_dedicated is True
             assert server.returncode is None
         await server.stop(grace_period=OPERATION_TIMEOUT)
-    except BaseException as error:
-        error.add_note("recent game logs:\n" + "\n".join(logs))
-        raise
-    finally:
-        await reap_server(server, container_name)
 
 
 @pytest.mark.parametrize("fault", ["telemetry", "core"])
-async def test_real_game_driver_degrades_safely(  # ruff: ignore[too-many-statements]
+async def test_real_game_driver_degrades_safely(
     tmp_path: Path,
-    container_name: str,
     fault: Literal["telemetry", "core"],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cluster = write_cluster(tmp_path)
     bundle = tmp_path / f"{fault}-failure-scripts.zip"
@@ -667,33 +665,14 @@ async def test_real_game_driver_degrades_safely(  # ruff: ignore[too-many-statem
     else:
         modified = b'error("injected core driver failure", 0)\n'
     replace_bundle_script(bundle, script, modified)
-    logs: deque[str] = deque(maxlen=200)
-    server = make_server(
-        tmp_path,
-        cluster,
-        container_name,
-        bundle,
-        log_handler=logs.append,
-    )
-    try:  # ruff: ignore[too-many-statements-in-try-clause]
-        if fault == "core":
-            kill = server.kill
-
-            async def kill_container() -> int:
-                # The Podman wrapper's game owns the inherited output FDs.
-                await remove_container(container_name)
-                return await kill()
-
-            monkeypatch.setattr(server, "kill", kill_container)
+    if fault == "core":
+        async with managed_server(tmp_path, cluster, bundle) as server:
             with pytest.raises(RuntimeError, match="installation_failed"):
                 await server.start(startup_timeout=STARTUP_TIMEOUT)
             assert server.driver_error == "installation_failed"
             assert server.returncode is not None
-            await reap_server(server, container_name)
-            replace_bundle_script(bundle, script, original)
-            server = make_server(
-                tmp_path, cluster, container_name, bundle, log_handler=logs.append
-            )
+        replace_bundle_script(bundle, script, original)
+    async with managed_server(tmp_path, cluster, bundle) as server:
         await server.start(startup_timeout=STARTUP_TIMEOUT)
         async with asyncio.timeout(OPERATION_TIMEOUT):
             health = server.driver_health
@@ -712,8 +691,3 @@ async def test_real_game_driver_degrades_safely(  # ruff: ignore[too-many-statem
             await server.save(completion_timeout=OPERATION_TIMEOUT)
             assert server.returncode is None
         await server.stop(grace_period=OPERATION_TIMEOUT)
-    except BaseException as error:
-        error.add_note("recent game logs:\n" + "\n".join(logs))
-        raise
-    finally:
-        await reap_server(server, container_name)

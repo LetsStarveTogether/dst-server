@@ -208,7 +208,10 @@ class WorkerRegistryServant(Responder, schema.WorkerRegistry.Server):
     async def register(self, agent: Any, _context: Any) -> None:
         async def register() -> None:
             async with self._register_lock:
-                if self._closed or self.remote is not None:
+                if self._closed:
+                    msg = "registry connection is closed"
+                    raise DisconnectedError(msg)
+                if self.remote is not None:
                     msg = "registry connection already registered an agent"
                     raise RuntimeError(msg)
                 remote = RemoteAgent(agent)
@@ -231,7 +234,7 @@ class WorkerRegistryServant(Responder, schema.WorkerRegistry.Server):
     def _accept_remote(self, remote: RemoteAgent) -> None:
         if self._closed:
             msg = "registry connection closed during registration"
-            raise RuntimeError(msg)
+            raise DisconnectedError(msg)
         remote.start_pumps()
         self.remote = remote
 

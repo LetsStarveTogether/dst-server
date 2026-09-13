@@ -43,6 +43,7 @@ def test_default_deployment_is_a_typed_pod_application() -> None:
 
     assert len(application.secondaries) == 1
     assert application.pod.networks == ()
+    assert application.pod.podman_args == "--share=net"
     assert not tuple(quadlet.glob("*.network"))
     master = application.master
     secondary = application.secondaries[0]

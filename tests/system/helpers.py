@@ -5,7 +5,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, cast, override
 from zipfile import ZipFile
 
 from pydantic import JsonValue, SecretStr
@@ -25,7 +25,8 @@ from dst_server.configuration.presets import FOREST_CAVES
 from dst_server.configuration.store import ConfigurationStore
 from dst_server.configuration.world import ForestOverrides
 from dst_server.errors import (
-    DisconnectedError,
+    ErrorCode,
+    RemoteError,
 )
 from dst_server.events import server as server_events
 from dst_server.lua_codec import lua_string
@@ -97,6 +98,24 @@ async def remove_container(name: str) -> None:
         "--ignore",
         name,
     )
+
+
+class _ContainerServer(Server):
+    def __init__(
+        self,
+        config: ServerConfig,
+        container_name: str,
+        *,
+        log_handler: Callable[[str], None] | None = None,
+    ) -> None:
+        super().__init__(config, log_handler=log_handler)
+        self.container_name = container_name
+
+    @override
+    async def kill(self) -> int:
+        # The container, not the Podman client, owns the game's output FDs.
+        await remove_container(self.container_name)
+        return await super().kill()
 
 
 def single_shard_configuration(
@@ -176,7 +195,7 @@ def make_server(
         encoding="utf-8",
     )
     wrapper.chmod(0o755)
-    return Server(
+    return _ContainerServer(
         ServerConfig(
             shard=shard,
             executable=wrapper,
@@ -188,37 +207,37 @@ def make_server(
             telemetry=TelemetrySettings(profile="history"),
             monitor_parent_process=False,
         ),
+        container_name,
         log_handler=log_handler,
     )
 
 
 async def reap_server(server: Server, container_name: str) -> None:
-    if server.child is None or server.closed:
-        return
     async with asyncio.timeout(CLEANUP_TIMEOUT):
         await remove_container(container_name)
-        await server.wait()
+        if server.child is not None and not server.closed:
+            await server.wait()
 
 
 async def read_player(server: Server, userid: str) -> dict[str, JsonValue]:
-    await server.game.invoke(
-        c.ExecuteJson(
-            source="DST_EXPORT_READ=nil;"
-            "local file=TheNet:GetUserSessionFile("
-            f"TheWorld.meta.session_identifier,{lua_string(userid)});"
-            "assert(file~=nil,'player session file missing');"
-            "TheNet:DeserializeUserSession(file,function(success,str)"
-            "assert(success and str~=nil,'player session unreadable');"
-            "local data,prefab=ParseUserSessionData(str);"
-            "assert(data~=nil and prefab~='','invalid player save');"
-            "DST_EXPORT_READ={file=file,prefab=prefab,x=data.x,z=data.z,"
-            "health=data.data.health.health,"
-            "hunger=data.data.hunger and data.data.hunger.hunger,"
-            "inventory=data.data.inventory.items}"
-            "end);return true"
-        )
-    )
     async with asyncio.timeout(OPERATION_TIMEOUT):
+        await server.game.invoke(
+            c.ExecuteJson(
+                source="DST_EXPORT_READ=nil;"
+                "local file=TheNet:GetUserSessionFile("
+                f"TheWorld.meta.session_identifier,{lua_string(userid)});"
+                "assert(file~=nil,'player session file missing');"
+                "TheNet:DeserializeUserSession(file,function(success,str)"
+                "assert(success and str~=nil,'player session unreadable');"
+                "local data,prefab=ParseUserSessionData(str);"
+                "assert(data~=nil and prefab~='','invalid player save');"
+                "DST_EXPORT_READ={file=file,prefab=prefab,x=data.x,z=data.z,"
+                "health=data.data.health.health,"
+                "hunger=data.data.hunger and data.data.hunger.hunger,"
+                "inventory=data.data.inventory.items}"
+                "end);return true"
+            )
+        )
         while True:
             value = await server.game.invoke(
                 c.ExecuteJson(source="return DST_EXPORT_READ")
@@ -229,32 +248,40 @@ async def read_player(server: Server, userid: str) -> dict[str, JsonValue]:
 
 
 async def shutdown_without_save(server: Server) -> None:
-    await server.game.invoke(
-        c.ExecuteJson(
-            source=(
-                "TheWorld:DoStaticTaskInTime(0,function() c_shutdown(false) end);"
-                "return true"
+    async with asyncio.timeout(OPERATION_TIMEOUT):
+        await server.game.invoke(
+            c.ExecuteJson(
+                source=(
+                    "TheWorld:DoStaticTaskInTime(0,function() c_shutdown(false) end);"
+                    "return true"
+                )
             )
         )
-    )
-    async with asyncio.timeout(OPERATION_TIMEOUT):
         assert await server.wait() == 0
 
 
 @asynccontextmanager
-async def running_server(root: Path, cluster: Path) -> AsyncIterator[Server]:
-    name = f"dst-export-{str(ULID()).lower()}"
+async def managed_server(
+    root: Path, cluster: Path, script_bundle: Path | None = None
+) -> AsyncIterator[Server]:
+    name = f"dst-sdk-test-{str(ULID()).lower()}"
     logs: deque[str] = deque(maxlen=100)
-    server = make_server(root, cluster, name, log_handler=logs.append)
+    server = make_server(root, cluster, name, script_bundle, log_handler=logs.append)
     try:
-        await server.start(startup_timeout=STARTUP_TIMEOUT)
         yield server
-        await shutdown_without_save(server)
     except BaseException as error:
         error.add_note("recent game logs:\n" + "\n".join(logs))
         raise
     finally:
         await reap_server(server, name)
+
+
+@asynccontextmanager
+async def running_server(root: Path, cluster: Path) -> AsyncIterator[Server]:
+    async with managed_server(root, cluster) as server:
+        await server.start(startup_timeout=STARTUP_TIMEOUT)
+        yield server  # ruff: ignore[fallible-context-manager]
+        await shutdown_without_save(server)
 
 
 @asynccontextmanager
@@ -281,7 +308,7 @@ async def running_sharded_cluster(
     }
     pod = f"dst-snapshot-{str(ULID()).lower()}"
     agents: dict[str, ShardAgent] = {}
-    try:
+    try:  # ruff: ignore[too-many-statements-in-try-clause]
         await run_command(
             "podman",
             "pod",
@@ -314,9 +341,16 @@ async def running_sharded_cluster(
             agents[shard] = agent
             await agent.activate()
             await controller.register(cast("AgentEndpoint", agent))
-        await controller.wait_idle()
+        async with asyncio.timeout(STARTUP_TIMEOUT):
+            await controller.wait_idle()
         assert (await controller.status()).phase == "running"
         yield controller, agents
+    except BaseException:
+        # Release container-owned output FDs before awaiting cancelled SDK tasks.
+        await run_command(
+            "podman", "pod", "rm", "--force", "--time", "0", "--ignore", pod
+        )
+        raise
     finally:
         try:
             await controller.aclose()
@@ -446,7 +480,10 @@ async def wait_for_client(
             try:
                 client = await ClusterClient.connect(socket_path)
                 status = await client.status()
-            except FileNotFoundError, ConnectionError, DisconnectedError:
+            except RemoteError as error:
+                if error.error.code is not ErrorCode.UNAVAILABLE:
+                    raise
+            except FileNotFoundError, ConnectionError, TimeoutError:
                 pass
             else:
                 if predicate(status):

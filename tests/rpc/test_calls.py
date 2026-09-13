@@ -12,6 +12,7 @@ from ulid import ULID
 
 from dst_server import commands as c
 from dst_server.errors import (
+    DisconnectedError,
     ErrorCode,
     IndeterminateCommandError,
     IndeterminateError,
@@ -283,11 +284,40 @@ async def test_mutating_workflow_rejects_busy_controller(
         await controller.aclose()
 
 
+async def test_closing_controller_reports_unavailable_over_live_rpc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as (
+        controller,
+        master,
+        _,
+        _,
+        _,
+    ):
+        master.stop_entered = asyncio.Event()
+        master.stop_release = asyncio.Event()
+        async with connected(tmp_path, controller) as client:
+            shard = client.shard("Master")
+            await shard.status()
+            closing = asyncio.create_task(controller.aclose())
+            try:
+                await wait_for_event(master.stop_entered, closing)
+                for endpoint in (client, shard):
+                    with pytest.raises(RemoteError) as failure:
+                        await endpoint.status()
+                    assert failure.value.error.code is ErrorCode.UNAVAILABLE
+                    assert failure.value.error.message == "endpoint is unavailable"
+            finally:
+                master.stop_release.set()
+                await closing
+
+
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
         (ValueError("secret"), ErrorCode.INVALID_ARGUMENT),
         (RuntimeError("secret"), ErrorCode.INVALID_STATE),
+        (DisconnectedError("secret"), ErrorCode.UNAVAILABLE),
         (KeyError("secret"), ErrorCode.NOT_FOUND),
         (OSError("secret"), ErrorCode.INTERNAL),
         (IndeterminateCommandError("secret"), ErrorCode.INDETERMINATE),

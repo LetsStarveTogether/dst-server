@@ -249,6 +249,7 @@ def test_pod_userns_rejects_unsafe_values(userns: str) -> None:
                 pod_name="room%n",
                 userns="keep-id:uid=1000,gid=1000",
                 exit_policy="continue",
+                podman_args="--share=net",
                 networks=("dst-server.network", "bridge"),
                 publish_ports=(
                     PortMapping(host=30000, container=10999),
@@ -620,6 +621,8 @@ def test_application_builds_master_secondary_lifecycle(
 
     assert application.pod.pod_name == application.pod.name == "dst-007"
     assert application.pod.userns is None
+    assert application.pod.podman_args == "--share=net"
+    assert "PodmanArgs=--share=net\n" in application.pod.render()
     assert all(volume.idmap is None for volume in application.master.volumes)
     assert application.master.container_name == application.master.name
     assert secondary.container_name == secondary.name

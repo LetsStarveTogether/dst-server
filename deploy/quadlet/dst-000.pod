@@ -4,6 +4,7 @@ Description=Don't Starve Together dst-000
 [Pod]
 PodName=dst-000
 ExitPolicy=continue
+PodmanArgs=--share=net
 PublishPort=30000:10999/udp
 PublishPort=30001:27016/udp
 PublishPort=30002:11000/udp
