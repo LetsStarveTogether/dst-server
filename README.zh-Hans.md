@@ -768,6 +768,7 @@ Supervisor 对每次启动或重启请求只尝试一次。
 | 达到启动限制 | 排除原因后，执行 `room start` 或 `room restart` 清除限制。 |
 
 分片服务并行启停；游戏启动由 Agent 注册协调。
+整房间启动会等待所有分片的命令接口可用，并确认游戏连接完整。
 停服先发送 TERM，再由 Quadlet 等待容器退出并清理。
 恢复后，客户端需重新连接 RPC 并订阅。
 
@@ -820,6 +821,7 @@ Lua 每次 VM 启动都读取，包括重置和回档。
 - 请求已提交、原生 Done 和其他自动存档都不能确认本次保存。
 - 空服可能覆盖前一个快照，编号不一定增长。
 
+重新生成须确认各分片的世界 ID 都已改变。
 原生重置和回档在同一游戏进程内创建新 Lua 代次。
 bootstrap 通过 `TheSim:GetNumLaunches()` 和单行 `DST_DRIVER|` 记录追踪代次，不由 FD 5 Session 通知控制。
 
@@ -843,14 +845,16 @@ bootstrap 通过 `TheSim:GetNumLaunches()` 和单行 `DST_DRIVER|` 记录追踪�
 | 游戏正常停止 | 120 秒，强制退出与输出清理另计。 |
 | RPC 连接与握手 | 60 秒。 |
 
-集群保存和重载在取得操作锁并确认就绪后开始计时，嵌套步骤共享同一个截止时间。
+集群操作共用一个截止时间，包含就绪检查、转发和完成确认。
+操作占用房间锁期间，其他变更请求会被拒绝。
 重载预算包含全部分片确认和新 driver 就绪；按天回档还包含快照选择与结果核验。
 
 RPC 预算见 [commands.py](src/dst_server/commands.py)：`Start`、`Restart`、`UpdateMods` 为三小时，`Stop`、`Kill` 为 120 秒。
 服务端额外允许 30 秒，客户端总共额外允许 60 秒。
-此期限包含等锁、预检、转发和响应，可能早于工作流预算到期。
+额外时间用于将操作结果送回客户端。
 
-RPC 内部超时会将未确认变更标记为 `indeterminate`；订阅 `next()` 使用长轮询。
+RPC 保留操作返回的错误；传输超时会将未确认变更标记为 `indeterminate`。
+订阅 `next()` 使用长轮询。
 Quadlet 的容器与 systemd 停止预算分别为 360 秒、420 秒。
 默认值见 [timeouts.py](src/dst_server/timeouts.py)。
 
@@ -1137,6 +1141,10 @@ Agent 拒绝路径逃逸、符号链接、无效元数据和查询期间的 sess
 加载器接受 UTF-8 Lua 字面量、原生文本文件头和末尾 NUL。
 忽略 Mod 在 `clock` / `seasons` 中新增的字段，拒绝其他未知字段、错误类型和动态表达式。
 不解释 Mod 自定义日历。
+
+`cluster.reset()` 与 `cluster.rollback(0)` 加载最新保存的存档。
+`cluster.rollback(1)` 加载它的前一份存档；次数按存档列表计算，不受距上次保存的时间影响。
+回档开始前，所有分片都必须有选中的存档。
 
 `await cluster.rollback_to_day(day, timeout=900)` 核对 session、协调全服回档，并返回选中的 `Snapshot`。
 选择当天所有分片都有完整匹配存档的**最早一份**，跳过天数未知的记录。

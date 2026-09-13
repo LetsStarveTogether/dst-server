@@ -57,7 +57,7 @@ def ready_sessions(status: ClusterStatus) -> dict[str, str]:
     return sessions if status.master in sessions else {}
 
 
-async def recycle(  # ruff: ignore[complex-structure]
+async def recycle(
     host: Host,
     client: ClusterClient,
     directory: Path,
@@ -103,11 +103,6 @@ async def recycle(  # ruff: ignore[complex-structure]
                 or now - last_active <= idle_limit(day)
             ):
                 return False
-        connected = await client.shard(status.master).connected_shards()
-        if len(connected) != len(sessions) or not all(
-            shard.ready for shard in connected
-        ):
-            return False
         if not await online(host, number):
             return False
         async with room_lock(directory):
@@ -135,13 +130,6 @@ async def recycle(  # ruff: ignore[complex-structure]
             await cancel_tasks(pending)
     if pending is not None:
         current = ready_sessions(await client.status())
-        if current.keys() != sessions.keys() or any(
-            current[shard] == session for shard, session in sessions.items()
-        ):
-            msg = (
-                f"{number:03d}: regeneration did not confirm new worlds on every shard"
-            )
-            raise RuntimeError(msg)
         async with room_lock(directory):
             control = read_control(directory)
             write_control(

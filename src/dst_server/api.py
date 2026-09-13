@@ -177,11 +177,13 @@ class ClusterAPI(_LifecycleAPI):
             await self.invoke(c.Announce(**Repeat.model_validate(plan).model_dump()))
 
     async def reset(self, *, timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
+        """Reload the latest saved snapshot on every shard."""
         return await self.invoke(c.Reset(timeout=timeout))
 
     async def rollback(
         self, count: int = 1, *, timeout: float = DEFAULT_RELOAD_TIMEOUT
     ) -> None:
+        """Load `count` snapshots before the latest save; zero reloads that save."""
         return await self.invoke(c.Rollback(count=count, timeout=timeout))
 
     async def regenerate(

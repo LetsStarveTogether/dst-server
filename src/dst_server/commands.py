@@ -456,16 +456,6 @@ class WaitSaved(Request[SavedEvent]):
     timeout: Timeout = DEFAULT_SAVE_TIMEOUT
 
 
-class GenerationMarker(Request[ObservationCursor]):
-    method = "generation_marker"
-
-
-class WaitGeneration(Request[int]):
-    method = "wait_generation"
-    cursor: ObservationCursor
-    timeout: Timeout = DEFAULT_RELOAD_TIMEOUT
-
-
 @dataclass(frozen=True, slots=True)
 class Operation:
     request: type[Request[Any]]
@@ -553,8 +543,6 @@ OPERATIONS = (
     Operation(Activate, None, True, _AGENT),
     Operation(SaveMarker, ObservationCursor, False, _AGENT),
     Operation(WaitSaved, SavedEvent, False, _AGENT),
-    Operation(GenerationMarker, ObservationCursor, False, _AGENT),
-    Operation(WaitGeneration, int, False, _AGENT),
 )
 _OPERATIONS = {
     (scope, spec.request.method): spec for spec in OPERATIONS for scope in spec.scopes

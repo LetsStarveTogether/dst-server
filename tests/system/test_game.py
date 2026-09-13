@@ -197,8 +197,10 @@ async def test_player_activity_needs_no_files_and_resets_with_process(
             ).exists()
 
 
-async def test_rollback_to_day_restores_both_shards_and_player_saves(
+@pytest.mark.parametrize("operation", ["day", "count", "latest"])
+async def test_snapshot_restore_preserves_both_shards_and_player_saves(
     tmp_path: Path,
+    operation: str,
 ) -> None:
     users = {"forest": "KU_1234567_", "cave": "KU_7654321_"}
     health = {"forest": 63, "cave": 74}
@@ -281,11 +283,28 @@ async def test_rollback_to_day_restores_both_shards_and_player_saves(
                 "return original(self,session,count) end;return true"
             )
         )
-        restored = await controller.rollback_to_day(10)
-        assert restored.snapshot_id == target.snapshot
+        if operation == "day":
+            assert (await controller.rollback_to_day(10)).snapshot_id == target.snapshot
+        elif operation == "count":
+            await controller.rollback(1)
+        else:
+            await controller.reset()
+        expected_snapshot = {
+            "day": target.snapshot,
+            "count": later_same_day.snapshot,
+            "latest": latest.snapshot,
+        }[operation]
+        expected_day = 20 if operation == "latest" else 10
+        health = {
+            "day": health,
+            "count": {"forest": 41, "cave": 42},
+            "latest": {"forest": 17, "cave": 17},
+        }[operation]
         for shard, agent in agents.items():
-            assert (await agent.invoke(c.Runtime())).session_id == sessions[shard]
-            assert (await agent.invoke(c.World())).day == 10
+            runtime = await agent.invoke(c.Runtime())
+            assert runtime.session_id == sessions[shard]
+            assert runtime.snapshot == expected_snapshot + 1
+            assert (await agent.invoke(c.World())).day == expected_day
             saved_player = await read_player(agent.server, users[shard])
             assert saved_player["health"] == health[shard]
             assert saved_player["inventory"] == [

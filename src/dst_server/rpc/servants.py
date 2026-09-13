@@ -18,9 +18,9 @@ from dst_server.cluster.subscriptions import Subscription as LocalSubscription
 from dst_server.errors import (
     ErrorCode,
     ErrorInfo,
+    IndeterminateError,
     SubscriptionOverflowError,
     error_info,
-    indeterminate_cause,
     indeterminate_info,
 )
 from dst_server.timeouts import (
@@ -155,10 +155,7 @@ class Responder:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            encoded_error = _operation_error(method, error)
-            if mutation and indeterminate_cause(error):
-                encoded_error = indeterminate_info(encoded_error)
-            context.results.result = failure(encoded_error)
+            context.results.result = failure(_operation_error(method, error))
             return
         try:
             context.results.result = success(encode_result(value))
@@ -244,8 +241,14 @@ class EndpointMethods(Responder):
             _context.release_params()
 
         async def invoke() -> object:
-            async with asyncio.timeout(command.timeout + RPC_TIMEOUT_MARGIN):
-                return await self.target.invoke(command)
+            watchdog = asyncio.timeout(command.timeout + RPC_TIMEOUT_MARGIN)
+            try:
+                async with watchdog:
+                    return await self.target.invoke(command)
+            except TimeoutError:
+                if spec.mutation and watchdog.expired():
+                    raise IndeterminateError from None
+                raise
 
         await self._respond(
             _context,

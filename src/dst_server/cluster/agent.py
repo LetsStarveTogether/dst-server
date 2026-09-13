@@ -12,7 +12,7 @@ from dst_server import commands as c
 from dst_server.concurrency import cancel_tasks, complete
 from dst_server.configuration.files import Shard
 from dst_server.errors import IndeterminateError
-from dst_server.events.server import SavedEvent, SessionEvent
+from dst_server.events.server import Event, SavedEvent
 from dst_server.models.cluster import (
     GameEventRecord,
     LifecycleRecord,
@@ -27,7 +27,6 @@ from dst_server.runtime.supervisor import ShardSupervisor, ShardSupervisorStatus
 from dst_server.telemetry import TelemetrySettings
 from dst_server.telemetry.recorder import Recorder
 from dst_server.timeouts import (
-    DEFAULT_RELOAD_TIMEOUT,
     DEFAULT_SAVE_TIMEOUT,
     positive_timeout,
     timeout_scope,
@@ -71,7 +70,7 @@ class ShardAgent:
         self._log_sequence = 0
         self._lifecycle_sequence = 0
         self._game_sequence = 0
-        self._generation_sequence = 0
+        self._save_sequence = 0
         self._saved: deque[tuple[int, str, SavedEvent]] = deque(
             maxlen=SAVED_EVENT_HISTORY,
         )
@@ -133,7 +132,7 @@ class ShardAgent:
             outdated_mods=server.outdated_mods if server is not None else (),
             pid=process.pid if live else None,
             session_id=server.session_id if server is not None else None,
-            ready=bool(server is not None and live and server.lifecycle.ready),
+            ready=bool(live and driver_health is not None),
             returncode=status.returncode,
             driver_health=driver_health,
             driver_error=server.driver_error if server is not None else None,
@@ -190,7 +189,7 @@ class ShardAgent:
     async def kill(self) -> ShardSupervisorStatus:
         return await self.supervisor.kill()
 
-    async def invoke[T](self, command: c.Request[T]) -> T:  # ruff: ignore[complex-structure]
+    async def invoke[T](self, command: c.Request[T]) -> T:
         operation = c.operation("agent", command)
         async with timeout_scope(command.timeout):
             match command:
@@ -222,10 +221,6 @@ class ShardAgent:
                     result = await self.save_marker()
                 case c.WaitSaved(cursor=cursor, snapshot=snapshot):
                     result = await self.wait_saved(cursor, snapshot, command.timeout)
-                case c.GenerationMarker():
-                    result = await self.generation_marker()
-                case c.WaitGeneration(cursor=cursor):
-                    result = await self.wait_generation(cursor, command.timeout)
                 case _:
                     result = await self.server.game.invoke(command)
         return operation.response.validate_python(result, strict=True)
@@ -283,7 +278,7 @@ class ShardAgent:
     async def save_marker(self) -> ObservationCursor:
         return ObservationCursor(
             attempt=ULID.from_str(self.server.game_events.nonce),
-            sequence=self._lifecycle_sequence,
+            sequence=self._save_sequence,
         )
 
     async def wait_saved(
@@ -292,7 +287,7 @@ class ShardAgent:
         snapshot: int | None,
         completion_timeout: float = DEFAULT_SAVE_TIMEOUT,
     ) -> SavedEvent:
-        if cursor.sequence > self._lifecycle_sequence:
+        if cursor.sequence > self._save_sequence:
             msg = "future save cursor"
             raise ValueError(msg)
         attempt = str(cursor.attempt)
@@ -317,30 +312,6 @@ class ShardAgent:
                     return match
                 self._require_attempt(attempt)
                 await self._event_changed.wait()
-
-    async def generation_marker(self) -> ObservationCursor:
-        return ObservationCursor(
-            attempt=ULID.from_str(self.server.game_events.nonce),
-            sequence=self._generation_sequence,
-        )
-
-    async def wait_generation(
-        self,
-        cursor: ObservationCursor,
-        completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
-    ) -> int:
-        if cursor.sequence > self._generation_sequence:
-            msg = "future generation cursor"
-            raise ValueError(msg)
-        attempt = str(cursor.attempt)
-        async with timeout_scope(positive_timeout(completion_timeout)):
-            async with self._event_changed:
-                while self._generation_sequence <= cursor.sequence:
-                    self._require_attempt(attempt)
-                    await self._event_changed.wait()
-            server = self._require_attempt(attempt)
-            await server.driver.wait_ready()
-        return self._generation_sequence
 
     async def wait_fatal(self) -> None:
         await self._fatal.wait()
@@ -405,6 +376,7 @@ class ShardAgent:
         )
         server = Server(self.config, recorder=recorder)
         server.log_handler = lambda line: self._log(server, line)
+        server.lifecycle_handler = lambda event: self._observe_saved(server, event)
         lifecycle = asyncio.create_task(
             self._drain_lifecycle(server),
             name=f"dst-lifecycle-relay-{self.shard.name}",
@@ -502,6 +474,16 @@ class ShardAgent:
         self._fatal_error = RuntimeError(message)
         self._fatal.set()
 
+    async def _observe_saved(self, server: Server, event: Event) -> None:
+        if not isinstance(event, SavedEvent):
+            return
+        async with self._event_changed:
+            self._save_sequence += 1
+            if len(self._saved) == SAVED_EVENT_HISTORY:
+                self._saved_floor = self._saved[0][0]
+            self._saved.append((self._save_sequence, server.game_events.nonce, event))
+            self._event_changed.notify_all()
+
     async def _drain_lifecycle(self, server: Server) -> None:
         attempt = ULID.from_str(server.game_events.nonce)
         while (observed := await server.read_lifecycle_event()) is not None:
@@ -517,14 +499,6 @@ class ShardAgent:
                     event=event,
                 )
             )
-            async with self._event_changed:
-                if isinstance(event, SavedEvent):
-                    if len(self._saved) == SAVED_EVENT_HISTORY:
-                        self._saved_floor = self._saved[0][0]
-                    self._saved.append((sequence, str(attempt), event))
-                if isinstance(event, SessionEvent):
-                    self._generation_sequence += 1
-                self._event_changed.notify_all()
             del observed, event
 
     async def _drain_game_events(self, server: Server) -> None:

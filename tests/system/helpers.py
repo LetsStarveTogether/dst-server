@@ -314,7 +314,8 @@ async def running_sharded_cluster(
             agents[shard] = agent
             await agent.activate()
             await controller.register(cast("AgentEndpoint", agent))
-        await controller.start()
+        await controller.wait_idle()
+        assert (await controller.status()).phase == "running"
         yield controller, agents
     finally:
         try:

@@ -73,16 +73,6 @@ class SubscriptionOverflowError(OverflowError):
     pass
 
 
-def indeterminate_cause(error: BaseException) -> bool:
-    if isinstance(error, TimeoutError | IndeterminateCommandError):
-        return True
-    if isinstance(error, RemoteError):
-        return error.error.code in {ErrorCode.TIMEOUT, ErrorCode.INDETERMINATE}
-    return isinstance(error, BaseExceptionGroup) and any(
-        indeterminate_cause(nested) for nested in error.exceptions
-    )
-
-
 def indeterminate_info(error: ErrorInfo) -> ErrorInfo:
     return ErrorInfo(
         ErrorCode.INDETERMINATE,
@@ -96,9 +86,13 @@ def error_info(error: BaseException) -> ErrorInfo:  # ruff: ignore[complex-struc
     if isinstance(error, RemoteError):
         return error.error
     error_id = getattr(error, "error_id", None) or ULID()
-    if isinstance(error, BaseExceptionGroup) and indeterminate_cause(error):
-        return ErrorInfo(
-            ErrorCode.INDETERMINATE, error_id, "operation is indeterminate"
+    if isinstance(error, BaseExceptionGroup):
+        results = [error_info(nested) for nested in error.exceptions]
+        return next(
+            (result for result in results if result.code is ErrorCode.INDETERMINATE),
+            results[0]
+            if len({result.code for result in results}) == 1
+            else ErrorInfo(ErrorCode.INTERNAL, error_id, "internal operation error"),
         )
     fields = (
         tuple(

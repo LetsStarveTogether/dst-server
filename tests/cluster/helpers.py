@@ -36,6 +36,14 @@ from dst_server.models.cluster import (
     ShardPhase,
     ShardRuntimeStatus,
 )
+from dst_server.models.driver import DriverHealth
+from dst_server.models.server import ShardStatus
+from dst_server.models.snapshot import (
+    Snapshot,
+    SnapshotCatalog,
+    SnapshotClock,
+    WorldSnapshotMetadata,
+)
 
 
 def configuration() -> ClusterConfig:
@@ -178,9 +186,9 @@ class EndpointStub:
         self.save_cursor = ObservationCursor(
             attempt=self.attempt, sequence=10 if master else 20
         )
-        self.generation_cursor = ObservationCursor(
-            attempt=self.attempt, sequence=30 if master else 40
-        )
+        self.generation = 1
+        self.peers: tuple[EndpointStub, ...] = (self,)
+        self.connected_ids: tuple[str, ...] = ("Master", "Caves")
         self.runtime = Runtime(
             session_id=name,
             snapshot=91,
@@ -211,6 +219,17 @@ class EndpointStub:
             outdated_mods=self.outdated_mods if self.pid is not None else (),
             pid=self.pid,
             ready=self.ready,
+            driver_health=DriverHealth(
+                protocol=2,
+                generation=self.generation,
+                telemetry_status="active",
+                last_error=None,
+                events_emitted=0,
+                errors=0,
+            )
+            if self.ready
+            else None,
+            session_id=self.runtime.session_id,
             telemetry_profile="critical",
         )
 
@@ -220,7 +239,8 @@ class EndpointStub:
     async def invoke[T](self, command: c.Request[T]) -> T:
         c.operation("agent", command)
         self.requests.append(command)
-        self.calls.append(f"{command.method.replace('_', '-')}:{self.name}")
+        if not isinstance(command, c.Runtime | c.ConnectedShards):
+            self.calls.append(f"{command.method.replace('_', '-')}:{self.name}")
         result = (
             await handler(command)
             if (handler := self.handlers.get(type(command))) is not None
@@ -252,13 +272,56 @@ class EndpointStub:
             case c.SaveMarker():
                 return self.save_cursor
             case c.Save():
-                return SavedEvent(path="session/7", snapshot=7)
+                snapshot = self.runtime.snapshot
+                for peer in self.peers:
+                    peer.runtime = peer.runtime.replace(snapshot=snapshot + 1)
+                return SavedEvent(
+                    path=f"session/{self.runtime.session_id}/{snapshot:010d}",
+                    snapshot=snapshot,
+                )
             case c.WaitSaved(snapshot=snapshot):
-                return SavedEvent(path=f"{self.name}/{snapshot}", snapshot=snapshot)
-            case c.GenerationMarker():
-                return self.generation_cursor
-            case c.WaitGeneration(cursor=cursor):
-                return cursor.sequence + 1
+                return SavedEvent(
+                    path=f"session/{self.runtime.session_id}/{snapshot:010d}",
+                    snapshot=snapshot,
+                )
+            case c.ConnectedShards():
+                return tuple(
+                    ShardStatus(
+                        id=name,
+                        name=name,
+                        is_current=name == self.name,
+                        ready=True,
+                        tags=(),
+                    )
+                    for name in self.connected_ids
+                )
+            case c.Snapshots(limit=limit, before=before):
+                snapshots = tuple(
+                    Snapshot(
+                        snapshot_id=number,
+                        world_file=f"session/{self.runtime.session_id}/{number:010d}",
+                        metadata=WorldSnapshotMetadata(
+                            clock=SnapshotClock(cycles=self.world.day - 1)
+                        ),
+                    )
+                    for number in range(self.runtime.snapshot - 1, 0, -1)
+                    if before is None or number < before
+                )
+                return SnapshotCatalog(
+                    session_id=self.runtime.session_id,
+                    snapshots=snapshots[:limit],
+                    has_more=len(snapshots) > limit,
+                )
+            case c.RollbackToSnapshot(snapshot_id=number):
+                for peer in self.peers:
+                    peer.generation += 1
+                    peer.runtime = peer.runtime.replace(snapshot=number + 1)
+            case c.Regenerate():
+                for peer in self.peers:
+                    peer.generation += 1
+                    peer.runtime = peer.runtime.replace(
+                        session_id=peer.runtime.session_id + "-new"
+                    )
             case c.Pause(paused=paused):
                 return paused
             case c.ListPlayers():
@@ -275,14 +338,7 @@ class EndpointStub:
                 return self.runtime
             case c.World():
                 return self.world
-            case (
-                c.Activate()
-                | c.Announce()
-                | c.Reset()
-                | c.Rollback()
-                | c.Regenerate()
-                | c.RollbackToSnapshot()
-            ):
+            case c.Activate() | c.Announce() | c.Reset() | c.Rollback():
                 return None
             case _:
                 raise AssertionError(command)
@@ -308,6 +364,7 @@ async def controller(
     )
     master = EndpointStub("Master", True, calls)
     caves = EndpointStub("Caves", False, calls)
+    master.peers = caves.peers = (master, caves)
     try:
         await instance.register(master)
         assert not prepare.await_count

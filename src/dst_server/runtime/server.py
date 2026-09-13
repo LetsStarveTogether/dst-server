@@ -1,7 +1,7 @@
 import asyncio
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from time import time_ns
 from typing import Self
@@ -75,6 +75,9 @@ class Server:  # ruff:ignore[too-many-public-methods]
     ) -> None:
         self.config = config
         self.log_handler = log_handler
+        self.lifecycle_handler: (
+            Callable[[server_events.Event], Awaitable[None]] | None
+        ) = None
         self.child: asyncio.subprocess.Process | None = None
         self.console: Console | None = None
         self.read_transports: tuple[asyncio.ReadTransport, ...] = ()
@@ -415,6 +418,8 @@ class Server:  # ruff:ignore[too-many-public-methods]
     async def _observe_lifecycle(
         self, event: server_events.Event, observed_timestamp_ns: int
     ) -> None:
+        if self.lifecycle_handler is not None:
+            await self.lifecycle_handler(event)
         body = lifecycle_body(event)
         if body is not None:
             await self._observe_operational(

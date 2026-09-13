@@ -29,6 +29,7 @@ from dst_server.rpc.servants import (
 )
 from dst_server.rpc.transport import filesystem_rpc_server
 from tests.cluster.helpers import controller as make_controller
+from tests.cluster.helpers import managed_controller
 from tests.helpers import wait_for_event
 from tests.rpc.helpers import FakeController, connected
 
@@ -191,17 +192,28 @@ async def test_unknown_shard_is_reported(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("mutation", "expected"),
-    [(False, ErrorCode.TIMEOUT), (True, ErrorCode.INDETERMINATE)],
+    ("mutation", "watchdog", "expected"),
+    [
+        (False, False, ErrorCode.TIMEOUT),
+        (True, False, ErrorCode.TIMEOUT),
+        (False, True, ErrorCode.TIMEOUT),
+        (True, True, ErrorCode.INDETERMINATE),
+    ],
 )
-async def test_server_deadlines_distinguish_queries_and_mutations(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: bool, expected: ErrorCode
+async def test_server_watchdog_preserves_handler_timeout_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: bool,
+    watchdog: bool,
+    expected: ErrorCode,
 ) -> None:
     monkeypatch.setattr(servant_module, "RPC_TIMEOUT_MARGIN", 0.01)
     controller = FakeController()
 
     async def slow(_: c.Request[Any]) -> None:
-        await asyncio.sleep(1)
+        if watchdog:
+            await asyncio.Event().wait()
+        raise TimeoutError
 
     controller.hook = slow
     async with connected(tmp_path, controller) as client:
@@ -211,6 +223,35 @@ async def test_server_deadlines_distinguish_queries_and_mutations(
         with pytest.raises(RemoteError) as failure:
             await client.invoke(command)
         assert failure.value.error.code is expected
+
+
+@pytest.mark.parametrize(
+    ("submitted", "expected"),
+    [(False, ErrorCode.TIMEOUT), (True, ErrorCode.INDETERMINATE)],
+)
+async def test_controller_regeneration_timeouts_preserve_submission_stage_over_rpc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    submitted: bool,
+    expected: ErrorCode,
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        controller, master, caves, _, _ = room
+        if submitted:
+
+            async def regenerate(command: c.Regenerate) -> None:
+                await master.dispatch(command)
+                caves.ready = False
+
+            master.handlers[c.Regenerate] = regenerate
+        else:
+            master.connected_ids = ("Master",)
+        async with connected(tmp_path, controller) as client:
+            with pytest.raises(RemoteError) as failure:
+                await client.regenerate(timeout=0.05)
+            assert failure.value.error.code is expected
+        count = sum(isinstance(request, c.Regenerate) for request in master.requests)
+        assert count == (1 if submitted else 0)
 
 
 @pytest.mark.parametrize("command_type", [c.ClusterSave, c.Reset])
@@ -250,16 +291,34 @@ async def test_mutating_workflow_rejects_busy_controller(
         (KeyError("secret"), ErrorCode.NOT_FOUND),
         (OSError("secret"), ErrorCode.INTERNAL),
         (IndeterminateCommandError("secret"), ErrorCode.INDETERMINATE),
+        (
+            ExceptionGroup(
+                "secret",
+                [TimeoutError("secret"), ExceptionGroup("secret", [TimeoutError()])],
+            ),
+            ErrorCode.TIMEOUT,
+        ),
+        (
+            ExceptionGroup(
+                "secret", [TimeoutError("secret"), IndeterminateCommandError("secret")]
+            ),
+            ErrorCode.INDETERMINATE,
+        ),
+        (
+            ExceptionGroup("secret", [TimeoutError("secret"), ValueError("secret")]),
+            ErrorCode.INTERNAL,
+        ),
     ],
 )
+@pytest.mark.parametrize("mutation", [False, True])
 async def test_remote_errors_are_typed_and_do_not_expose_exception_messages(
-    tmp_path: Path, error: Exception, expected: ErrorCode
+    tmp_path: Path, error: Exception, expected: ErrorCode, mutation: bool
 ) -> None:
     controller = FakeController()
     controller.hook = AsyncMock(side_effect=error)
     async with connected(tmp_path, controller) as client:
         with pytest.raises(RemoteError) as failure:
-            await client.status()
+            await client.invoke(c.Start() if mutation else c.ClusterStatusQuery())
         assert failure.value.error.code is expected
         assert "secret" not in str(failure.value)
 

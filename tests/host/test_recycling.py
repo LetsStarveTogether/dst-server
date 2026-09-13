@@ -60,9 +60,6 @@ def room(
     client.status = AsyncMock(side_effect=[status, ready_status("NEW")])
     client.list_players = AsyncMock(return_value=())
     client.shard.return_value.world = AsyncMock(return_value=Mock(day=8))
-    client.shard.return_value.connected_shards = AsyncMock(
-        return_value=(Mock(ready=True), Mock(ready=True))
-    )
     client.regenerate = AsyncMock()
     connection = AsyncMock()
     connection.__aenter__.return_value = client
@@ -190,13 +187,17 @@ async def test_dry_run_does_not_write_or_regenerate(
     client.regenerate.assert_not_awaited()
 
 
-async def test_regeneration_must_confirm_every_new_world(
+async def test_unconfirmed_regeneration_does_not_update_activity(
     room: tuple[Mock, Mock, ClusterStatus], tmp_path: Path
 ) -> None:
-    host, client, status = room
-    client.status.side_effect = [status, status]
-    with pytest.raises(RuntimeError, match="every shard"):
+    from dst_server.errors import IndeterminateError
+
+    host, client, _ = room
+    previous = read_control(tmp_path).activity
+    client.regenerate.side_effect = IndeterminateError()
+    with pytest.raises(IndeterminateError):
         await worker.recycle(host, client, tmp_path, 0)
+    assert read_control(tmp_path).activity == previous
 
 
 async def test_busy_host_lock_skips_timer_run(

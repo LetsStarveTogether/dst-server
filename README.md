@@ -791,6 +791,7 @@ Requested stops, restarts, and Mod maintenance are expected exits.
 | Start limit reached | Fix the cause, then run `room start` or `room restart` to clear it. |
 
 Shard services start and stop in parallel; Agent registration coordinates game startup.
+Cluster startup waits for every shard's command interface and game connection.
 Shutdown sends TERM before Quadlet waits for and removes the containers.
 Clients must reconnect RPC and subscriptions after recovery.
 
@@ -845,6 +846,7 @@ Wait for success before stopping, restarting, or [exporting](#exports-and-r2-upl
 - Submission, native Done, and unrelated autosaves do not confirm this save.
 - Empty servers may overwrite the preceding snapshot without increasing its number.
 
+Regeneration succeeds only after every shard has a new world ID.
 Native resets and rollbacks start a new Lua generation within the same game process.
 The bootstrap tracks it through `TheSim:GetNumLaunches()` and single-line `DST_DRIVER|` records.
 FD 5 Session notifications do not control generations.
@@ -872,17 +874,18 @@ See the [driver](src/dst_server/runtime/driver.py) and [save completion](src/dst
 | Graceful game stop | 120 seconds; forced exit and output cleanup have separate budgets. |
 | RPC connection and handshake | 60 seconds. |
 
-Cluster save and reload timers start after acquiring the operation lock and confirming readiness.
-Nested steps share one deadline.
+Cluster operations use one deadline for readiness checks, forwarding, and confirmation.
+Concurrent mutations are rejected while an operation holds the room lock.
 The reload budget includes confirmation from every shard and new driver readiness.
 Rollback by day also includes snapshot selection and result verification.
 
 RPC budgets are declared in [commands.py](src/dst_server/commands.py).
 `Start`, `Restart`, and `UpdateMods` allow three hours; `Stop` and `Kill` allow 120 seconds.
 The server adds 30 seconds around the workflow; the client adds 60 seconds in total.
-These deadlines include lock waits, preflight, forwarding, and responses, so they can expire before the workflow budget.
+The extra time allows the operation result to reach the client.
 
-An internal RPC timeout leaves an unconfirmed mutation `indeterminate`; subscription `next()` uses long polling.
+RPC preserves the operation's error; a transport timeout leaves an unconfirmed mutation `indeterminate`.
+Subscription `next()` uses long polling.
 Quadlet allows 360 seconds for container stops and 420 seconds for systemd stops.
 See [timeouts.py](src/dst_server/timeouts.py) for defaults.
 
@@ -1173,6 +1176,10 @@ For standalone reads, [models.snapshot](src/dst_server/models/snapshot.py) provi
 Loaders accept UTF-8 Lua literals, native text headers, and trailing NULs.
 They ignore extra Mod fields in `clock` / `seasons`, but reject other unknown fields, wrong types, and dynamic expressions.
 They do not interpret Mod calendars.
+
+`cluster.reset()` and `cluster.rollback(0)` load the latest saved snapshot.
+`cluster.rollback(1)` loads the preceding save; the count follows the saved snapshot list, independent of elapsed time.
+All shards must have the selected snapshot before rollback begins.
 
 `await cluster.rollback_to_day(day, timeout=900)` verifies sessions, rolls back all shards, and returns the chosen `Snapshot`.
 It selects the **earliest** snapshot that day with a complete match on every shard; unknown days are excluded.

@@ -71,6 +71,8 @@ async def relay_lifecycle(
     server: SimpleNamespace,
     *events: Event,
 ) -> None:
+    for event in events:
+        await agent._observe_saved(cast("Server", server), event)
     server.read_lifecycle_event = AsyncMock(
         side_effect=(
             *(
@@ -393,13 +395,12 @@ async def test_activate_is_idempotent_and_guards_start_and_restart(
     supervisor.restart.assert_awaited_once()
 
 
-async def test_markers_filter_the_current_attempt_and_publish_lifecycle(
+async def test_save_marker_confirms_and_publishes_lifecycle(
     agent: ShardAgent,
     running_server: SimpleNamespace,
 ) -> None:
     attach(agent, running_server)
     lifecycle = agent.lifecycle.subscribe()
-    generation_marker = await agent.generation_marker()
     save_marker = await agent.save_marker()
     saved = SavedEvent(path="session/9", snapshot=9)
 
@@ -410,7 +411,6 @@ async def test_markers_filter_the_current_attempt_and_publish_lifecycle(
         saved,
     )
 
-    assert await agent.wait_generation(generation_marker, 1) == 1
     assert await agent.wait_saved(save_marker, 9, 1) == saved
     records = await lifecycle.next(2)
     assert [record.event for record in records] == [
@@ -418,7 +418,6 @@ async def test_markers_filter_the_current_attempt_and_publish_lifecycle(
         saved,
     ]
     assert [record.observed_timestamp_ns for record in records] == [1, 2]
-    running_server.driver.wait_ready.assert_awaited_once()
 
 
 async def test_unknown_markers_and_snapshot_mismatch_are_rejected(
@@ -432,8 +431,6 @@ async def test_unknown_markers_and_snapshot_mismatch_are_rejected(
     )
     with pytest.raises(ValueError, match="future save cursor"):
         await agent.wait_saved(future, None, 1)
-    with pytest.raises(ValueError, match="future generation cursor"):
-        await agent.wait_generation(future, 1)
 
     marker = await agent.save_marker()
     saved = SavedEvent(path="session/8", snapshot=8)
@@ -442,26 +439,6 @@ async def test_unknown_markers_and_snapshot_mismatch_are_rejected(
     with pytest.raises(TimeoutError):
         await agent.wait_saved(marker, 9, 0.01)
     assert await agent.wait_saved(marker, None, 1) == saved
-
-
-async def test_cursors_do_not_require_a_marker_lookup_history(
-    agent: ShardAgent,
-    running_server: SimpleNamespace,
-) -> None:
-    attach(agent, running_server)
-    oldest_save = await agent.save_marker()
-    oldest_generation = await agent.generation_marker()
-    assert oldest_save.attempt == ULID.from_str(running_server.game_events.nonce)
-    assert oldest_save.sequence == 0
-
-    for sequence in range(65):
-        await relay_lifecycle(
-            agent, running_server, SessionEvent(session_id=f"SESSION-{sequence}")
-        )
-    saved = SavedEvent(path="session/9", snapshot=9)
-    await relay_lifecycle(agent, running_server, saved)
-    assert await agent.wait_saved(oldest_save, None, 1) == saved
-    assert await agent.wait_generation(oldest_generation, 1) == 65
 
 
 @pytest.mark.parametrize("count", [63, 64, 65])
@@ -487,45 +464,26 @@ async def test_save_cursor_detects_lost_confirmations(
         assert (await agent.wait_saved(cursor, None, 1)).snapshot == 1
 
 
-@pytest.mark.parametrize("kind", ["save", "generation"])
-async def test_wait_marker_fails_when_its_attempt_exits(
+@pytest.mark.parametrize("replacement_saved", [False, True])
+async def test_save_cursor_rejects_stopped_or_replaced_attempt(
     agent: ShardAgent,
     running_server: SimpleNamespace,
-    kind: str,
+    replacement_saved: bool,
 ) -> None:
     attach(agent, running_server)
-    if kind == "save":
-        marker = await agent.save_marker()
+    marker = await agent.save_marker()
+    if replacement_saved:
+        replacement = SimpleNamespace(
+            game_events=SimpleNamespace(nonce=str(ULID())), returncode=None
+        )
+        attach(agent, replacement)
+        await relay_lifecycle(
+            agent, replacement, SavedEvent(path="session/NEW/9", snapshot=9)
+        )
     else:
-        marker = await agent.generation_marker()
-    running_server.returncode = 0
-    waiter = (
-        agent.wait_saved(marker, None, 1)
-        if kind == "save"
-        else agent.wait_generation(marker, 1)
-    )
-
+        running_server.returncode = 0
     with pytest.raises(RuntimeError, match="attempt changed"):
-        await waiter
-
-
-async def test_generation_timeout_includes_driver_readiness(
-    agent: ShardAgent,
-    running_server: SimpleNamespace,
-) -> None:
-    attach(agent, running_server)
-    marker = await agent.generation_marker()
-    await relay_lifecycle(
-        agent,
-        running_server,
-        SessionEvent(session_id="SESSION"),
-    )
-    running_server.driver.wait_ready = AsyncMock(side_effect=asyncio.Event().wait)
-
-    with pytest.raises(TimeoutError):
-        await agent.wait_generation(marker, 0.01)
-
-    running_server.driver.wait_ready.assert_awaited_once()
+        await agent.wait_saved(marker, 9, 1)
 
 
 async def test_failure_is_queued_and_public_status_is_sanitized(
@@ -736,3 +694,55 @@ async def test_close_failure_still_flushes_and_retry_is_idempotent(
     await agent.aclose()
     await agent.aclose()
     assert supervisor.aclose.await_count == 2
+
+
+async def test_readiness_tracks_the_current_driver_not_a_past_session(
+    agent: ShardAgent,
+) -> None:
+    from dst_server.models.driver import DriverHealth
+
+    server = Server(agent.config)
+    server.child = cast(
+        "asyncio.subprocess.Process", SimpleNamespace(pid=123, returncode=None)
+    )
+    attach(agent, server)
+    server.lifecycle.handle(SessionEvent(session_id="SESSION"))
+    try:
+        assert not (await agent.runtime_status()).ready
+        server.driver.ready(
+            DriverHealth(
+                protocol=2,
+                generation=1,
+                telemetry_status="active",
+                last_error=None,
+                events_emitted=0,
+                errors=0,
+            )
+        )
+        assert (await agent.runtime_status()).ready
+        server.driver.starting(2)
+        assert server.lifecycle.ready
+        assert not (await agent.runtime_status()).ready
+    finally:
+        server.child = None
+        await server.finish()
+
+
+async def test_save_confirmation_survives_notification_queue_overflow(
+    agent: ShardAgent,
+) -> None:
+    server = agent._new_server()
+    attach(agent, server)
+    marker = await agent.save_marker()
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"DST_Saved|session/ABC/3\n" + b"unknown\n" * 65)
+    reader.feed_eof()
+    try:
+        await server._pump_lifecycle(reader)
+        assert server.lifecycle.dropped > 0
+        assert (await agent.wait_saved(marker, 3, 0.1)).snapshot == 3
+        while not server.lifecycle.queue.empty():
+            assert not isinstance(server.lifecycle.queue.get_nowait().event, SavedEvent)
+    finally:
+        await server.finish()
+        await agent._stopped(server)
