@@ -118,7 +118,7 @@ TEMPLATES = (
 def test_room_plan_exactly_covers_the_requested_fleet() -> None:
     expanded = [number for numbers, _, _, _ in ROOMS for number in numbers]
 
-    assert tuple(expanded) == ROOM_NUMBERS == (*range(100), *range(200, 216))
+    assert tuple(expanded) == ROOM_NUMBERS == (*range(100), *range(200, 220))
     assert len(set(expanded)) == len(expanded)
     assert tuple((numbers, kind) for numbers, kind, _, _ in ROOMS) == (
         (range(30), RoomType.PURE_SURVIVAL),
@@ -131,6 +131,8 @@ def test_room_plan_exactly_covers_the_requested_fleet() -> None:
         (range(207, 210), RoomType.FORGE),
         (range(210, 213), RoomType.ISLAND_ADVENTURE),
         (range(213, 216), RoomType.HAMLET),
+        (range(216, 218), RoomType.LIGHTS_OUT_SURVIVAL),
+        (range(218, 220), RoomType.LIGHTS_OUT_ENDLESS),
     )
     assert len(RoomType) == 12
 
@@ -159,12 +161,12 @@ def test_room_schedules_cover_the_requested_groups_and_complete_names() -> None:
                 f"LST-{number:03d}-{room(number)[1]}{suffix}{message}"
             )
     assert sorted(seen) == list(range(100))
-    for number in range(200, 216):
+    for number in range(200, 220):
         assert room_schedule(number) is None
         assert room_name(number) == f"LST-{number:03d}-{room(number)[1]}{promotion}"
 
 
-@pytest.mark.parametrize("number", [-1, 100, 199, 216, 299, True, "7"])
+@pytest.mark.parametrize("number", [-1, 100, 199, 220, 299, True, "7"])
 def test_schedule_and_name_reject_invalid_room_numbers(number: object) -> None:
     error = TypeError if isinstance(number, (bool, str)) else ValueError
     for function in (room_schedule, room_name):
@@ -195,8 +197,8 @@ def test_template_settings_worlds_and_shard_roles(
         "max_players": {
             RoomType.AFK: 64,
             RoomType.LIGHTS_OUT_ENDLESS: 6,
-            RoomType.ISLAND_ADVENTURE: 4,
-            RoomType.HAMLET: 4,
+            RoomType.ISLAND_ADVENTURE: 6,
+            RoomType.HAMLET: 6,
             RoomType.FORGE: 6,
         }.get(kind, 9),
         "master_port": 10888,
@@ -480,7 +482,7 @@ def test_world_templates_keep_only_real_overrides() -> None:
     assert world.overrides.model_dump(exclude_unset=True)["has_ocean"] is True
 
 
-@pytest.mark.parametrize("number", [-1, 100, 199, 216, 299])
+@pytest.mark.parametrize("number", [-1, 100, 199, 220, 299])
 def test_room_number_is_bounded(number: int) -> None:
     with pytest.raises(ValueError, match="room number must be an integer"):
         build(number, token=TOKEN, cluster_key=CLUSTER_KEY)
@@ -695,8 +697,8 @@ def test_room_store_writes_the_complete_fleet(tmp_path: Path) -> None:
     assert {path.name for path in cluster_root.iterdir()} == {
         f"{number:03d}" for number in ROOM_NUMBERS
     }
-    assert len(tuple(quadlet_dir.glob("*.pod"))) == 116
-    assert len(tuple(quadlet_dir.glob("*.container"))) == 219
+    assert len(tuple(quadlet_dir.glob("*.pod"))) == 120
+    assert len(tuple(quadlet_dir.glob("*.container"))) == 227
     assert len(tuple(cluster_root.rglob("leveldataoverride.lua"))) == 4
     assert not tuple(quadlet_dir.glob("*.network"))
     assert not tuple(cluster_root.rglob(".dst-room.json"))
@@ -755,9 +757,9 @@ def test_room_store_writes_the_complete_fleet(tmp_path: Path) -> None:
             assert unit.environment.get("DST_SERVER_TELEMETRY_PROFILE") == (
                 "history" if history else None
             )
-    assert len(ports) == len(set(ports)) == 438
+    assert len(ports) == len(set(ports)) == 454
     assert min(ports) == 30000
-    assert max(ports) == 32151
+    assert max(ports) == 32193
 
 
 def test_room_store_uses_distinct_persistent_cluster_keys(tmp_path: Path) -> None:

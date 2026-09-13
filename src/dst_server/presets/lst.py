@@ -78,8 +78,8 @@ _TEMPLATE_DEFAULTS = {
     RoomType.AFK: ("挂皮肤", 64),
     RoomType.LIGHTS_OUT_SURVIVAL: ("永夜生存", 9),
     RoomType.LIGHTS_OUT_ENDLESS: ("永夜无尽", 6),
-    RoomType.ISLAND_ADVENTURE: ("岛屿冒险", 4),
-    RoomType.HAMLET: ("云霄国度", 4),
+    RoomType.ISLAND_ADVENTURE: ("岛屿冒险", 6),
+    RoomType.HAMLET: ("云霄国度", 6),
     RoomType.ADVENTURE: ("冒险", 9),
     RoomType.GORGE: ("暴食", 9),
     RoomType.FORGE: ("熔炉", 6),
@@ -98,6 +98,8 @@ ROOMS = tuple(
         (range(207, 210), RoomType.FORGE),
         (range(210, 213), RoomType.ISLAND_ADVENTURE),
         (range(213, 216), RoomType.HAMLET),
+        (range(216, 218), RoomType.LIGHTS_OUT_SURVIVAL),
+        (range(218, 220), RoomType.LIGHTS_OUT_ENDLESS),
     )
 )
 ROOM_NUMBERS = tuple(number for numbers, _, _, _ in ROOMS for number in numbers)
@@ -116,7 +118,7 @@ def room(number: int) -> tuple[RoomType, str, int]:
     for numbers, kind, label, max_players in ROOMS:
         if number in numbers:
             return kind, label, max_players
-    msg = "LST room number must be an integer in 000-099 or 200-215"
+    msg = "LST room number must be an integer in 000-099 or 200-219"
     raise ValueError(msg)
 
 

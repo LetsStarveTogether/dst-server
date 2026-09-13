@@ -936,7 +936,7 @@ def test_application_save_regenerates_sdk_owned_base_units(
     assert not pod.read_text().startswith("#")
 
 
-def test_application_rejects_legacy_commands_until_explicit_migration(
+def test_application_rejects_legacy_commands(
     tmp_path: Path, application: QuadletApplication
 ) -> None:
     application.save(tmp_path)

@@ -1,5 +1,5 @@
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import orjson
 import pytest
@@ -335,19 +335,19 @@ def test_deployment_generates_selected_rooms_with_explicit_token_and_mapping(
             "deployment",
             "lst",
             "--room",
-            "0,215",
+            "0,219",
             "--token-file",
             str(token_file),
             *mapping_options,
         ])
         == 0
     )
-    assert cli_host.rooms.numbers() == (0, 215)
+    assert cli_host.rooms.numbers() == (0, 219)
     assert {path.name for path in cli_host.quadlet_dir.glob("*.pod")} == {
         "dst-000.pod",
-        "dst-215.pod",
+        "dst-219.pod",
     }
-    for number in (0, 215):
+    for number in (0, 219):
         application = QuadletApplication.load(
             cli_host.quadlet_dir, name=f"dst-{number:03d}"
         )
@@ -385,14 +385,14 @@ def test_deployment_uses_environment_token_and_requested_image(cli_host: Host) -
 
 def test_deployment_all_uses_only_the_new_fleet_numbers(cli_host: Host) -> None:
     assert main(["deployment", "lst", "--all"]) == 0
-    assert cli_host.rooms.numbers() == (*range(100), *range(200, 216))
+    assert cli_host.rooms.numbers() == (*range(100), *range(200, 220))
 
 
 def test_deployment_rejects_an_unassigned_number_before_writing(
     cli_host: Host, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert main(["deployment", "lst", "--room", "0,100"]) == 1
-    assert "000-099 or 200-215" in capsys.readouterr().err
+    assert "000-099 or 200-219" in capsys.readouterr().err
     assert not cli_host.cluster_root.exists()
     assert not cli_host.quadlet_dir.exists()
 
@@ -462,15 +462,3 @@ def test_configuration_commands_require_explicit_stop_and_start(
 
     assert main(["room", "start", "0", "--no-wait"]) == 0
     cli_systemd.start.assert_awaited()
-
-
-@pytest.mark.parametrize("apply", [False, True])
-def test_deployment_migration_defaults_to_preview(
-    cli_host: Host, monkeypatch: pytest.MonkeyPatch, apply: bool
-) -> None:
-    migration = AsyncMock(return_value={"status": "migrated" if apply else "preview"})
-    monkeypatch.setattr("dst_server.host.migration.migrate", migration)
-    assert main(["deployment", "migrate", *(["--apply"] if apply else [])]) == 0
-    assert migration.await_args is not None
-    assert migration.await_args.args[0].cluster_root == cli_host.cluster_root
-    assert migration.await_args.kwargs == {"apply": apply}

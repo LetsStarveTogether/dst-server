@@ -123,7 +123,7 @@ dst-server world save --room 299
 
 ### LST Fleet Layout
 
-The LST deployment preset contains 116 rooms: `000–099` and `200–215`.
+The LST deployment preset contains 120 rooms: `000–099` and `200–219`.
 
 ```shell
 dst-server deployment lst --room 000,030,209 \
@@ -145,14 +145,16 @@ Daily windows use host local time: 白饭 10:00–18:00, 晚宴 18:00–00:00, a
 
 All special rooms are always open:
 
-| Room numbers | Gameplay |
-| --- | --- |
-| `200–204` | AFK skin drops |
-| `205` | Adventure |
-| `206` | Gorge |
-| `207–209` | Forge |
-| `210–212` | Island Adventure |
-| `213–215` | Hamlet |
+| Room numbers | Gameplay | Max players |
+| --- | --- | --- |
+| `200–204` | AFK skin drops | 64 |
+| `205` | Adventure | 9 |
+| `206` | Gorge | 9 |
+| `207–209` | Forge | 6 |
+| `210–212` | Island Adventure | 6 |
+| `213–215` | Hamlet | 6 |
+| `216–217` | Lights-out survival | 9 |
+| `218–219` | Lights-out endless | 6 |
 
 Generic templates support any slot in `000–299`, including `lights_out_survival` and `lights_out_endless`.
 Existing rooms are read from native files and never inherit template changes automatically.
@@ -238,7 +240,7 @@ Multi-shard deployments must meet these requirements at runtime:
 | Port allocation | Rule |
 | --- | --- |
 | Host range | `30000–32999`, with one ten-port slot per room. |
-| Room slots | Any template supports `000–299`; the LST fleet preset covers `000–099` and `200–215`. |
+| Room slots | Any template supports `000–299`; the LST fleet preset covers `000–099` and `200–219`. |
 | Shard count | Up to four shards per room; only UDP ports actually used are published. |
 | Player connections | `-external_port` advertises the mapped host port; the container still listens on the internal port from `server.ini`. |
 
@@ -1445,7 +1447,7 @@ Put manual changes in a `.container.d/*.conf` drop-in, then reload and restart r
 Host-shell `export` does not override the container environment.
 
 `deployment lst` sets both endpoints, including SDK queue/export metrics.
-Rooms `000–099` use `history`; `200–215` use `critical`.
+Rooms `000–099` and `216–219` use `history`; `200–215` use `critical`.
 Without Netdata, use `room edit --set` to set both fields to `"none"`:
 
 - `/deployment/environment/OTEL_LOGS_EXPORTER`

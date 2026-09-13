@@ -335,7 +335,7 @@ async def deploy_lst(
     volume_idmap: str | None = None,
     userns: str | None = None,
 ) -> None:
-    """Create selected LST rooms (000-099, 200-215), without overwriting."""
+    """Create selected LST rooms (000-099, 200-219), without overwriting."""
     if all_rooms and room:
         msg = "choose --room or --all, not both"
         raise ValueError(msg)
@@ -363,15 +363,6 @@ async def install_automation() -> None:
     """Install the packaged scheduling and maintenance systemd units."""
     async with make_host() as host:
         emit(await host.install_automation())
-
-
-@deployment_app.command(name="migrate")
-async def migrate_deployment(*, apply: bool = False) -> None:
-    """Preview legacy SDK cleanup; --apply requires the entire fleet stopped."""
-    from dst_server.host.migration import migrate
-
-    async with make_host() as host:
-        emit(await migrate(host, apply=apply))
 
 
 @mod_app.command(name="list")

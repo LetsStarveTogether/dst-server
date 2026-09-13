@@ -90,12 +90,6 @@ class Systemd:
         rows = await manager.call_list_units_by_names(list(names))
         return {row[0]: UnitStatus(row[0], *row[2:5], *row[7:10]) for row in rows}
 
-    async def list_patterns(self, patterns: Sequence[str]) -> dict[str, UnitStatus]:
-        """Find loaded units, including legacy detached maintenance services."""
-        manager = await self._manager()
-        rows = await manager.call_list_units_by_patterns([], list(patterns))
-        return {row[0]: UnitStatus(row[0], *row[2:5], *row[7:10]) for row in rows}
-
     async def start(self, unit: str) -> str:
         manager = await self._manager()
         return await manager.call_start_unit(unit, "replace")

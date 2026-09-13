@@ -254,18 +254,3 @@ async def test_reset_failed_is_explicit_per_unit(
     systemd, manager, _ = adapter
     await systemd.reset_failed(UNIT)
     manager.call_reset_failed_unit.assert_awaited_once_with(UNIT)
-
-
-async def test_list_patterns_finds_legacy_tasks(
-    adapter: tuple[Systemd, MagicMock, MagicMock],
-) -> None:
-    systemd, manager, _ = adapter
-    manager.call_list_units_by_patterns = AsyncMock(
-        return_value=[unit_row(UNIT, "active")]
-    )
-    assert (await systemd.list_patterns(("dst-maintenance-*.service",)))[
-        UNIT
-    ].active == "active"
-    manager.call_list_units_by_patterns.assert_awaited_once_with(
-        [], ["dst-maintenance-*.service"]
-    )
