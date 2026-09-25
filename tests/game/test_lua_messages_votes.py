@@ -8,12 +8,7 @@ from dst_server.events.messages import (
     DiceRolledEvent,
     SkinReceivedEvent,
 )
-from dst_server.events.vote import (
-    VoteCastEvent,
-    VoteClosedEvent,
-    VoteResultEvent,
-    VoteStartedEvent,
-)
+from dst_server.events.vote import VoteResultEvent, VoteUpdatedEvent
 from dst_server.events.world import TelemetryErrorEvent
 from tests.lua.helpers import run_lua_process
 
@@ -94,15 +89,22 @@ def test_vote_event_capture(
     if scenario == "secondary":
         assert events == []
         return
-    assert isinstance(events[0], VoteStartedEvent)
-    assert events[0].data.vote_id == "01ARZ3NDEKTSV4RRFFQ69G5FAV:4:1"
+    assert isinstance(events[0], VoteUpdatedEvent)
     assert events[0].data.command == ("mod_test" if scenario == "custom" else "kick")
-    assert len(events[0].data.options) == (3 if scenario == "custom" else 2)
     assert events[0].data.target_userid == "KU_TARGET"
-    assert [
-        event.data.userid for event in events if isinstance(event, VoteCastEvent)
-    ] == ["KU_A", "KU_B"]
-    assert sum(isinstance(event, VoteClosedEvent) for event in events) == 1
+    updates = [event.data for event in events if isinstance(event, VoteUpdatedEvent)]
+    assert len(updates) == 6
+    assert updates[0] == updates[1]
+    assert [voter.userid for voter in updates[0].voters] == ["KU_A", "KU_B"]
+    assert [voter.selection for voter in updates[0].voters] == [7, 7]
+    selection = 3 if scenario == "custom" else 1
+    assert [voter.selection for voter in updates[2].voters] == [selection, 7]
+    assert updates[2] == updates[3]
+    assert [voter.selection for voter in updates[4].voters] == [selection, selection]
+    assert updates[-1].command_hash == 0
+    assert updates[-1].command is None
+    assert updates[-1].countdown == 0
+    assert updates[-1].voters == ()
     results = [event for event in events if isinstance(event, VoteResultEvent)]
     if scenario in {"cancelled", "error", "capture_error"}:
         assert results == []
@@ -123,11 +125,3 @@ def test_vote_event_capture(
     if diagnostics:
         assert diagnostics[0].data.stage == "vote.result"
         assert diagnostics[0].data.message == "callback_failed"
-    assert all(
-        isinstance(
-            event, (VoteStartedEvent, VoteCastEvent, VoteClosedEvent, VoteResultEvent)
-        )
-        and event.data.vote_id == events[0].data.vote_id
-        for event in events
-        if not isinstance(event, TelemetryErrorEvent)
-    )

@@ -74,7 +74,7 @@ end
 local function install(profile)
     local driver = require("dst_server")
     local health = driver.install(options(profile))
-    assert(health.protocol == 2)
+    assert(health.protocol == 3)
     assert(health.telemetry_status == (profile == "off" and "disabled" or "active"))
     assert(health.errors == 0 and health.events_emitted == 0 and health.last_error == json.null)
     return driver
@@ -230,7 +230,7 @@ function scenarios.active()
     local driver = install()
     TheWorld.watchers.cycles(TheWorld, 2)
     local event = records()[1]
-    assert(event.v == 2 and event.generation == 7 and event.seq == 1)
+    assert(event.v == 3 and event.generation == 7 and event.seq == 1)
     assert(event.session_id == "SESSION")
     TheWorld.meta.session_identifier = "NEXT_SESSION"
     TheWorld.watchers.cycles(TheWorld, 3)
@@ -263,7 +263,7 @@ function scenarios.empty_actions()
     local configuration = options()
     configuration.actions = {}
     local health = require("dst_server").install(configuration)
-    assert(health.protocol == 2 and health.telemetry_status == "active")
+    assert(health.protocol == 3 and health.telemetry_status == "active")
 end
 
 function scenarios.finite_positions()
@@ -289,7 +289,7 @@ function scenarios.large_loot()
     assert(driver.health().errors == 0, "byte limit replaces arbitrary item count loss")
 end
 
-function scenarios.native_action_scope()
+function scenarios.native_action_results()
     install()
     local current = action("CHOP", function() work(); return true, "worked" end)
     current:AddSuccessAction(work)
@@ -299,33 +299,8 @@ function scenarios.native_action_scope()
     work()
     local work_events = records("dst.player.finished_work")
     assert(#work_events == 3)
-    assert(work_events[1].data.caused_by_action_sequence == 1)
-    assert(work_events[2].data.caused_by_action_sequence == 1)
-    assert(work_events[3].data.caused_by_action_sequence == nil)
     local completed = records("dst.player.action")[1]
-    assert(completed.data.success and completed.data.error == nil)
-end
-
-function scenarios.nested_action_scope()
-    install()
-    local nested = action("MINE", function() work(); return true end)
-    local untracked = action("WALKTO", function() work(); return true end)
-    local outer = action("CHOP", function()
-        work()
-        nested:Do()
-        work()
-        untracked:Do()
-        work()
-        return true
-    end)
-    outer:Do()
-    work()
-    local expected = { 1, 2, 1, false, 1, false }
-    local observed = records("dst.player.finished_work")
-    assert(#observed == #expected)
-    for index, event in ipairs(observed) do
-        assert((event.data.caused_by_action_sequence or false) == expected[index], tostring(index))
-    end
+    assert(completed.data.success and completed.data.action_id == "CHOP")
 end
 
 function scenarios.native_action_failures()
@@ -342,14 +317,10 @@ function scenarios.native_action_failures()
     assert(not ok and error_value == failure)
     work()
     local events = records("dst.player.action")
-    assert(#events == 3)
-    assert(not events[1].data.success and events[1].data.error == nil)
-    assert(events[2].data.reason == "OUT_OF_REACH" and events[2].data.error == nil)
-    assert(not events[3].data.success and events[3].data.error == "lua_error")
-    local worked = records("dst.player.finished_work")
-    assert(worked[1].data.caused_by_action_sequence == 2)
-    assert(worked[2].data.caused_by_action_sequence == 3)
-    assert(worked[3].data.caused_by_action_sequence == nil)
+    assert(#events == 2)
+    assert(not events[1].data.success)
+    assert(not events[2].data.success and events[2].data.reason == "OUT_OF_REACH")
+    assert(#records("dst.player.finished_work") == 3)
     assert(driver.health().errors == 0, "game failure is not instrumentation failure")
     assert_safe()
 end
@@ -366,45 +337,80 @@ function scenarios.action_truthiness()
     end
 end
 
-function scenarios.action_traceback()
-    install()
-    local failure = { token = "SECRET_TOKEN private chat" }
-    local explode = assert(loadstring("return function(value) error(value, 0) end", "@original-action-body"))()
-    local crashed = action("CHOP", function() explode(failure) end)
-    local ok, observed = pcall(crashed.Do, crashed)
-    assert(not ok and observed == failure)
-    assert(string.find(table.concat(outputs, "\n"), "original-action-body", 1, true))
-    assert(require("dst_server.state").current_action == nil)
-    assert_safe()
-
-    debug.traceback = function() error("traceback unavailable") end
-    ok, observed = pcall(crashed.Do, crashed)
-    assert(not ok and observed == failure, "diagnostic failure must preserve the game error")
-    assert(require("dst_server.state").current_action == nil)
-end
-
-function scenarios.combat_causality()
+function scenarios.important_deaths()
     install()
     local victim = entity("wendy", 4, "KU_WENDY")
-    require("dst_server.player_events").attach(victim)
-    victim.bufferedaction = { _dst_action_seq = 99 }
     local summon = entity("abigail", 5)
     summon.components.follower = setmetatable({ leader = player }, {
         __index = require("components/follower"),
     })
-    local current = action("CHOP", function()
-        victim:PushEvent("attacked", { attacker = player, damage = 1 })
-        TheWorld:PushEvent("entity_death", { inst = target, afflicter = summon })
-        TheWorld:PushEvent("entity_death", { inst = target, afflicter = player })
-        return true
-    end)
-    current:Do()
-    local hit = records("dst.player.combat_received")[1]
-    assert(hit.data.caused_by_action_sequence == 1)
+    TheWorld:PushEvent("entity_death", { inst = target })
+    assert(#records("dst.entity.death") == 0, "unrelated ordinary deaths are not captured")
+    TheWorld:PushEvent("entity_death", { inst = target, afflicter = player })
+    TheWorld:PushEvent("entity_death", { inst = target, afflicter = summon })
+    -- Attribution reads the native follower each time, with no cached ownership.
+    summon.components.follower.leader = nil
+    TheWorld:PushEvent("entity_death", { inst = target, afflicter = summon })
+    TheWorld:PushEvent("entity_death", { inst = victim, afflicter = summon })
+    local boss = entity("deerclops", 6)
+    boss.HasTag = function(_, tag) return tag == "epic" end
+    TheWorld:PushEvent("entity_death", { inst = boss, afflicter = player })
     local deaths = records("dst.entity.death")
+    assert(#deaths == 4)
+    assert(deaths[1].data.victim.prefab == target.prefab)
     assert(deaths[1].data.attributed_player.userid == "KU_TEST")
-    assert(deaths[1].data.caused_by_action_sequence == nil)
-    assert(deaths[2].data.caused_by_action_sequence == 1)
+    assert(deaths[2].data.afflicter.prefab == "abigail")
+    assert(deaths[2].data.attributed_player.userid == "KU_TEST")
+    assert(deaths[3].data.victim.userid == "KU_WENDY")
+    assert(deaths[3].data.attributed_player == nil)
+    assert(deaths[4].data.victim.prefab == "deerclops")
+end
+
+function scenarios.explosive_deaths()
+    local driver = install("critical")
+    local Explosive = require("components/explosive")
+    TUNING = { EXPLOSIVE_MAX_WORKABLE_INVENTORYITEMS = 5 }
+    local bomb = entity("bomb_lunarplant", 4)
+    bomb.GetPosition = function() return { x = 1, y = 0, z = 2 } end
+    bomb.Remove = function(self) self.removed = true end
+    -- Throwing removes the item from inventory before the native explosion.
+    bomb.components.inventoryitem = { GetGrandOwner = function() return nil end }
+    local explosive = Explosive(bomb)
+    bomb.components.explosive = explosive
+    explosive.skip_camera_flash = true
+    local victim = entity("hound", 5)
+    victim.IsInLimbo = function() return false end
+    local dead = false
+    victim.components.health = { IsDead = function() return dead end }
+    local hits = 0
+    victim.components.combat = {
+        CanBeAttacked = function() return true end,
+        GetAttacked = function(_, afflicter)
+            hits = hits + 1
+            dead = true
+            assert(afflicter == bomb, "native explosions use the item as afflicter")
+            TheWorld:PushEvent("entity_death", { inst = victim, afflicter = afflicter })
+        end,
+    }
+    for _, owner in ipairs({ player, entity("pigman", 6) }) do
+        for _, setter in ipairs({ "SetAttacker", "SetPvpAttacker" }) do
+            explosive:SetAttacker(nil)
+            explosive:SetPvpAttacker(nil)
+            explosive[setter](explosive, owner)
+            dead = false
+            explosive:OnBurnt(victim)
+            assert(bomb.removed)
+        end
+    end
+    assert(hits == 4)
+    local deaths = records("dst.entity.death")
+    assert(#deaths == 2, "only explosions attributed to players are recorded")
+    for _, death in ipairs(deaths) do
+        assert(death.data.victim.prefab == "hound")
+        assert(death.data.afflicter.prefab == "bomb_lunarplant")
+        assert(death.data.attributed_player.userid == player.userid)
+    end
+    assert(driver.health().errors == 0)
 end
 
 function scenarios.wrapper_results()
@@ -425,7 +431,6 @@ function scenarios.wrapper_results()
     assert(result.n == 3 and result[1] == nil and result[2] == "result" and result[3] == nil)
     local ok, observed = pcall(current.Do, current, nil, "raise", nil)
     assert(not ok and observed == failure and calls == 2)
-    assert(require("dst_server.state").current_action == nil)
 end
 
 function scenarios.diagnostics()
@@ -450,6 +455,7 @@ function scenarios.capture_failure()
     local driver = install()
     local calls = 0
     local current = action("CHOP", function() calls = calls + 1; return true, "ok" end)
+    local original = current.GetDynamicActionPoint
     current.GetDynamicActionPoint = function() error("SECRET_TOKEN private chat", 0) end
     local ok, result = current:Do()
     assert(ok and result == "ok" and calls == 1)
@@ -457,7 +463,24 @@ function scenarios.capture_failure()
     assert(health.errors == 1 and health.telemetry_status == "degraded")
     assert(health.last_error.stage == "action.capture")
     assert(#records("dst.player.action") == 0 and #records("dst.telemetry.error") == 1)
+    current.GetDynamicActionPoint = original
+    assert(current:Do() and calls == 2)
+    assert(driver.health().telemetry_status == "active" and driver.health().errors == 1)
+    assert(driver.health().last_error == health.last_error and next(driver.health().faults) == nil)
     assert_safe()
+end
+
+function scenarios.shard_capture_failure()
+    local driver = install()
+    local results = require("dst_server.telemetry").pack(Shard_UpdateWorldState("2", 1, {}, nil, "Caves"))
+    assert(results.n == 5 and results[1] == "2" and results[4] == nil and results[5] == "Caves")
+    local failed = driver.health()
+    assert(failed.telemetry_status == "degraded" and failed.last_error.stage == "shard.update")
+    assert(Shard_UpdateWorldState("2", 1, "cave", nil, "Caves") == "2")
+    local recovered = driver.health()
+    assert(recovered.telemetry_status == "active" and recovered.revision > failed.revision)
+    assert(recovered.errors == 1 and recovered.last_error == failed.last_error and next(recovered.faults) == nil)
+    assert(#records("dst.shard.connection_changed") == 1)
 end
 
 function scenarios.encoding_failure()
@@ -588,7 +611,7 @@ end
 function scenarios.partial_failure()
     TheWorld.ListenForEvent = function() error("SECRET_TOKEN private chat", 0) end
     local health = require("dst_server").install(options())
-    assert(health.protocol == 2 and health.telemetry_status == "degraded")
+    assert(health.protocol == 3 and health.telemetry_status == "degraded")
     assert(health.last_error.message == "installation_failed")
     assert(health.errors == 2 and health.last_error.stage == "world.install")
     assert(Shard_UpdateWorldState("2", nil, "", nil, "Caves") == "2")

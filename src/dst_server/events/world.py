@@ -2,7 +2,8 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from dst_server.lua_codec import NonNegativeSafeLuaInteger, PositiveSafeLuaInteger
+from dst_server.lua_codec import NonNegativeSafeLuaInteger
+from dst_server.models import Position
 from dst_server.models.base import (
     FrozenModel,
     Identifier,
@@ -19,7 +20,6 @@ class EntityDeathData(FrozenModel):
     afflicter: EntityRef | None
     attributed_player: EntityRef | None
     corpsing: bool
-    caused_by_action_sequence: PositiveSafeLuaInteger | None
 
 
 class CycleState(FrozenModel):
@@ -69,6 +69,26 @@ class RiftUnlockedData(FrozenModel):
 class RiftChangedData(FrozenModel):
     rift: EntityRef
     active: bool
+
+
+class MapDeliveryStartedData(FrozenModel):
+    item: EntityRef
+    actor: EntityRef | None
+    origin: Position | None
+    destination: Position | None
+
+
+class VaultTrialProgressData(FrozenModel):
+    trial: EntityRef
+    trigger: Literal["socket", "activator", "loaded"]
+    sockets: Annotated[int, Field(ge=0, le=4)]
+    sparks: Annotated[int, Field(ge=0, le=4)]
+
+
+class VaultTrialGuardsDefeatedData(FrozenModel):
+    trial: EntityRef
+    last_guard: EntityRef
+    bonus_loot: Literal[True]
 
 
 class ModOutdatedData(FrozenModel):
@@ -127,3 +147,15 @@ class RiftUnlockedEvent(EventRecord[RiftUnlockedData]):
 
 class RiftChangedEvent(EventRecord[RiftChangedData]):
     event: Literal["dst.world.rift_changed"]
+
+
+class MapDeliveryStartedEvent(EventRecord[MapDeliveryStartedData]):
+    event: Literal["dst.world.map_delivery_started"]
+
+
+class VaultTrialProgressEvent(EventRecord[VaultTrialProgressData]):
+    event: Literal["dst.world.vault_trial_progress"]
+
+
+class VaultTrialGuardsDefeatedEvent(EventRecord[VaultTrialGuardsDefeatedData]):
+    event: Literal["dst.world.vault_trial_guards_defeated"]

@@ -25,12 +25,8 @@ class PlayerData(FrozenModel):
     player: EntityRef
 
 
-class CausedData(PlayerData):
-    caused_by_action_sequence: PositiveSafeLuaInteger | None
-
-
 class EventRecord[DataT](FrozenModel):
-    v: Literal[2]
+    v: Literal[3]
     nonce: Annotated[
         str,
         Field(pattern=r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"),

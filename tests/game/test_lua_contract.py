@@ -5,7 +5,8 @@ import pytest
 
 from dst_server import commands as c
 from dst_server.events import GAME_EVENT_ADAPTER
-from dst_server.game.rpc import SAVE_RESPONSE, response_adapter
+from dst_server.events.player import CombatBlockedEvent, CombatHitEvent, UnequippedEvent
+from dst_server.game.rpc import response_adapter
 from tests.lua.helpers import run_lua_process
 
 PREFIX = "DST_OTEL|"
@@ -50,11 +51,42 @@ def test_all_real_lua_event_producers_match_python_contract(
         for definition in definitions
         if "event" in definition.get("properties", {})
     }
-    assert {event.event for event in events} == schema_events - {"dst.telemetry.error"}
     assert [event.seq for event in events] == list(range(1, len(events) + 1))
     assert all(event.nonce == "01ARZ3NDEKTSV4RRFFQ69G5FAV" for event in events)
-    assert all(event.v == 2 and event.generation == 1 for event in events)
+    assert all(event.v == 3 and event.generation == 1 for event in events)
     assert all(event.session_id == "SESSION" for event in events)
+    hits = [event.data for event in events if isinstance(event, CombatHitEvent)]
+    assert [hit.from_doattack for hit in hits] == [None, False, True, True]
+    assert hits[-1] == hits[-2]
+    assert hits[0].target.prefab == "hound"
+    assert hits[0].damage_resolved == 10
+    assert [(damage.kind, damage.value) for damage in hits[0].special_damage] == [
+        ("planar", 1.25),
+        ("shadow", 2),
+    ]
+    blocked = [event.data for event in events if isinstance(event, CombatBlockedEvent)]
+    assert blocked[-1].attacker is None
+    assert blocked[-1].damage is None
+    assert blocked[-1].special_damage == ()
+    unequipped = next(
+        event.data for event in events if isinstance(event, UnequippedEvent)
+    )
+    assert unequipped.slot == "hands"
+    assert unequipped.slip
+    root = Path(__file__).parents[2]
+    for script, argument in (
+        ("input_events_spec.lua", "critical"),
+        ("gameplay_events_spec.lua", "critical"),
+        ("mode_votes_spec.lua", "forge"),
+    ):
+        output = run_lua_process(
+            luajit, root / "tests/lua" / script, root, native_scripts, argument
+        )
+        events.extend(
+            GAME_EVENT_ADAPTER.validate_json(line, strict=True)
+            for line in output.splitlines()
+        )
+    assert {event.event for event in events} == schema_events
 
 
 def test_native_announcement_repetition(native_scripts: Path, luajit: str) -> None:
@@ -80,12 +112,31 @@ def rpc_data(native_scripts: Path, luajit: str) -> dict[str, Any]:
 def test_registered_lua_queries(rpc_data: dict[str, Any]) -> None:
     data = rpc_data
     assert data["health"] == {
-        "protocol": 2,
+        "protocol": 3,
         "generation": 1,
         "telemetry_status": "disabled",
         "last_error": None,
         "events_emitted": 0,
         "errors": 0,
+        "revision": 1,
+        "faults": {},
+        "capabilities": {
+            name: ("active" if name == "players" else "disabled")
+            for name in (
+                "players",
+                "shards",
+                "world",
+                "messages",
+                "actions",
+                "votes",
+                "gorge_voter",
+                "lobbyvote",
+                "player_commands",
+                "appearance",
+                "map_deliveries",
+                "vault_trials",
+            )
+        },
     }
     assert data["room"]["name"] == "Test Room"
     assert data["room"]["player_count"] == 2

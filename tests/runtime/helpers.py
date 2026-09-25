@@ -95,7 +95,7 @@ class StubServer(Server):
     async def initialize(self) -> Self:
         self.driver.ready(
             DriverHealth(
-                protocol=2,
+                protocol=3,
                 generation=0,
                 telemetry_status="disabled",
                 last_error=None,

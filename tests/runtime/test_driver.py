@@ -24,19 +24,25 @@ from tests.runtime.helpers import (
 
 
 def diagnostic(count: int) -> dict[str, str | int]:
-    return {"stage": "callback", "message": "callback_failed", "count": count}
+    return {
+        "stage": "callback",
+        "message": "callback_failed",
+        "count": count,
+        "revision": count,
+    }
 
 
 def health(
     events_emitted: int, *, generation: int = 0, errors: int = 0
 ) -> DriverHealth:
     return DriverHealth.model_validate({
-        "protocol": 2,
+        "protocol": 3,
         "generation": generation,
         "telemetry_status": "degraded" if errors else "active",
         "last_error": diagnostic(errors) if errors else None,
         "events_emitted": events_emitted,
         "errors": errors,
+        "revision": errors,
     })
 
 
@@ -44,7 +50,7 @@ def event(
     generation: int = 0, seq: int = 1, *, error_count: int | None = None
 ) -> GameEvent:
     return GAME_EVENT_ADAPTER.validate_python({
-        "v": 2,
+        "v": 3,
         "nonce": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         "generation": generation,
         "session_id": "TEST",
@@ -319,6 +325,7 @@ def test_diagnostics_preserve_inactive_telemetry_status(
     assert driver.health == snapshot.replace(
         events_emitted=2,
         errors=2,
+        revision=2,
         last_error=diagnostic(2),
     )
 
@@ -436,3 +443,16 @@ def test_driver_action_sequences_preserve_generation_and_health(  # ruff: ignore
             assert after[3].errors >= before[3].errors
         if driver.closed or action == "failed":
             assert not driver.is_ready(driver.generation)
+
+
+def test_recovered_health_clears_current_failure_but_preserves_history() -> None:
+    driver = Driver()
+    driver.ready(health(0))
+    driver.observe_event(event(seq=1, error_count=1))
+    recovered = health(2, errors=1).replace(revision=2, telemetry_status="active")
+    driver.observe_health(0, recovered)
+    assert driver.health == recovered
+    driver.observe_health(0, health(1, errors=1))
+    assert driver.health == recovered
+    driver.observe_event(event(seq=1, error_count=1))
+    assert driver.health == recovered

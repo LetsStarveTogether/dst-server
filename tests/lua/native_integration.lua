@@ -23,7 +23,7 @@ tree.components.workable:WorkedBy(actor, 1)
 local grass = SpawnPrefab("grass")
 grass.components.pickable:Pick(actor)
 local action = BufferedAction(actor, nil, {
-    id = "CHOP", fn = function() return true, "preserved" end,
+    id = "ACTIVATE", fn = function() return true, "preserved" end,
 })
 local ok, reason = action:Do()
 assert(ok and reason == "preserved")

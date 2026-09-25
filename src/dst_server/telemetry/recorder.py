@@ -138,7 +138,8 @@ class Recorder:
         values: dict[str, AttributeValue] = self.base_attributes | dict(
             attributes or {}
         )
-        values.setdefault("log.record.uid", str(ULID()))
+        if "log.record.uid" not in values:
+            values["log.record.uid"] = str(ULID())
         # Retain the same identity and source time before any bounded subscriber
         # or SDK exporter queue can discard this observation.
         try:

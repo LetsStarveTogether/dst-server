@@ -24,20 +24,20 @@ local function attach_lifecycle(player)
         })
     end)
     -- Sink and void requests can be rejected; newstate follows state entry.
-    listen(player, "newstate", function(_, data)
+    local capture_incident = telemetry.guard("player.incident", function(kind)
+        telemetry.emit("dst.player.incident", {
+            player = values.entity_ref(player), kind = kind,
+        })
+    end)
+    player:ListenForEvent("newstate", function(_, data)
         local kind = incidents[data.statename]
-        if kind ~= nil then
-            telemetry.emit("dst.player.incident", {
-                player = values.entity_ref(player),
-                kind = kind,
-            })
-        end
+        if kind ~= nil then capture_incident(kind) end
     end)
 end
 
 local function attach_combat(player)
     listen(player, "onhitother", function(_, data)
-        local event = values.combat_data(player, data, player)
+        local event = values.combat_data(player, data)
         event.target = values.entity_ref(data.target)
         event.damage_resolved = values.optional_json_number(data.damageresolved)
         event.redirected = values.entity_ref(data.redirected)
@@ -45,7 +45,7 @@ local function attach_combat(player)
     end)
     listen(player, "attacked", function(_, data)
         data = data or {}
-        local event = values.combat_data(player, data, data.attacker)
+        local event = values.combat_data(player, data)
         event.attacker = values.entity_ref(data.attacker)
         event.damage_resolved = values.optional_json_number(data.damageresolved)
         event.original_damage = values.optional_json_number(data.original_damage)
@@ -54,7 +54,7 @@ local function attach_combat(player)
     end)
     listen(player, "blocked", function(_, data)
         data = data or {}
-        local event = values.combat_data(player, data, data.attacker)
+        local event = values.combat_data(player, data)
         event.attacker = values.entity_ref(data.attacker)
         event.original_damage = values.optional_json_number(data.original_damage)
         telemetry.emit("dst.player.combat_blocked", event)

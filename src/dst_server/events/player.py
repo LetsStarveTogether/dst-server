@@ -2,7 +2,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from dst_server.lua_codec import NonNegativeSafeLuaInteger, PositiveSafeLuaInteger
+from dst_server.lua_codec import NonNegativeSafeLuaInteger
 from dst_server.models import Position
 from dst_server.models.base import (
     FiniteFloat,
@@ -10,7 +10,7 @@ from dst_server.models.base import (
     Identifier,
 )
 
-from .base import CausedData, EntityRef, EventRecord, ItemRef, PlayerData
+from .base import EntityRef, EventRecord, ItemRef, PlayerData
 
 type EventText = Annotated[str, Field(max_length=256)]
 
@@ -23,6 +23,29 @@ class ChatData(FrozenModel):
     whisper: bool
     emote: bool
     player: EntityRef | None
+
+
+class PlayerRequestData(FrozenModel):
+    userid: Identifier
+    player: EntityRef | None
+
+
+class EmoteRequestedData(PlayerRequestData):
+    emote: Identifier
+
+
+class AppearanceData(FrozenModel):
+    prefab: Identifier
+    skin_base: Identifier | None
+    clothing_body: Identifier | None
+    clothing_hand: Identifier | None
+    clothing_legs: Identifier | None
+    clothing_feet: Identifier | None
+
+
+class AppearanceRequestedData(PlayerRequestData):
+    requested: AppearanceData
+    validated: AppearanceData
 
 
 class DisconnectedData(PlayerData):
@@ -46,10 +69,8 @@ class RevivedData(GhostedData):
 
 class ActionData(FrozenModel):
     action_id: Identifier
-    action_sequence: PositiveSafeLuaInteger
     success: bool
     reason: EventText | None
-    error: Literal["lua_error"] | None
     actor: EntityRef
     target: EntityRef | None
     initial_target_owner: EntityRef | None
@@ -69,7 +90,6 @@ class CombatData(PlayerData):
     weapon: EntityRef | None
     stimuli: Identifier | None
     special_damage: tuple[SpecialDamage, ...]
-    caused_by_action_sequence: PositiveSafeLuaInteger | None
     from_doattack: bool | None
 
 
@@ -91,48 +111,48 @@ class CombatBlockedData(CombatData):
     original_damage: FiniteFloat | None
 
 
-class CraftedData(CausedData):
+class CraftedData(PlayerData):
     item: ItemRef
     recipe: Identifier
     kind: Literal["item", "structure"]
     skin: Identifier | None
 
 
-class AteData(CausedData):
+class AteData(PlayerData):
     food: ItemRef
     feeder: EntityRef | None
 
 
-class PickedData(CausedData):
+class PickedData(PlayerData):
     source: EntityRef
     loot: tuple[ItemRef, ...]
 
 
-class HarvestedData(CausedData):
+class HarvestedData(PlayerData):
     source: EntityRef
 
 
-class FinishedWorkData(CausedData):
+class FinishedWorkData(PlayerData):
     target: EntityRef
     action_id: Identifier | None
 
 
-class DeployedData(CausedData):
+class DeployedData(PlayerData):
     prefab: Identifier
 
 
-class EquippedData(CausedData):
+class EquippedData(PlayerData):
     item: ItemRef
     slot: Identifier
 
 
-class UnequippedData(CausedData):
+class UnequippedData(PlayerData):
     item: ItemRef | None
     slot: Identifier
     slip: bool
 
 
-class DroppedData(CausedData):
+class DroppedData(PlayerData):
     item: ItemRef
 
 
@@ -162,12 +182,12 @@ class IncidentData(PlayerData):
     kind: Literal["sink", "fall_in_void"]
 
 
-class FishedData(CausedData):
+class FishedData(PlayerData):
     fish: ItemRef
     method: Literal["inland", "ocean"]
 
 
-class PlantedData(CausedData):
+class PlantedData(PlayerData):
     position: Position
 
 
@@ -186,6 +206,18 @@ class ShardEnteredEvent(EventRecord[PlayerData]):
 
 class ChatEvent(EventRecord[ChatData]):
     event: Literal["dst.player.chat"]
+
+
+class EmoteRequestedEvent(EventRecord[EmoteRequestedData]):
+    event: Literal["dst.player.emote_requested"]
+
+
+class RescueRequestedEvent(EventRecord[PlayerRequestData]):
+    event: Literal["dst.player.rescue_requested"]
+
+
+class AppearanceRequestedEvent(EventRecord[AppearanceRequestedData]):
+    event: Literal["dst.player.appearance_requested"]
 
 
 class PlayerLoadedEvent(EventRecord[PlayerData]):

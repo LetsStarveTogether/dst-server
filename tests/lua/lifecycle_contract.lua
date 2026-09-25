@@ -97,10 +97,9 @@ local emit = require("dst_server.telemetry").emit
 require("dst_server.telemetry").emit = function() error("capture failed") end
 OnSimUnpaused()
 assert(unpaused == 2 and #outputs == 10)
+assert(require("dst_server.state").faults["world.onsimunpaused"] == "callback_failed")
 require("dst_server.telemetry").emit = emit
+OnSimUnpaused()
+assert(require("dst_server.state").faults["world.onsimunpaused"] == nil)
+outputs[#outputs] = nil
 for _, line in ipairs(outputs) do print(line) end
-
-local values = require("dst_server.values")
-for _, data in ipairs({ {}, { from_doattack = false }, { from_doattack = true } }) do
-    print("COMBAT|" .. json.encode(values.combat_data(player, data, player)))
-end

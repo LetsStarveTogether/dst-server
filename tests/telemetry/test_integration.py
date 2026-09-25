@@ -39,7 +39,7 @@ def observation(attempt: str, *, generation: int = 1) -> ObservedGameEvent:
     return ObservedGameEvent(
         record=GAME_EVENT_ADAPTER.validate_python(
             {
-                "v": 2,
+                "v": 3,
                 "nonce": attempt,
                 "generation": generation,
                 "session_id": "ORIGINAL_SESSION",

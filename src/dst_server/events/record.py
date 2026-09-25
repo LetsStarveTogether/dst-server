@@ -16,6 +16,7 @@ from .messages import (
 )
 from .player import (
     ActionEvent,
+    AppearanceRequestedEvent,
     AteEvent,
     ChatEvent,
     CombatBlockedEvent,
@@ -26,6 +27,7 @@ from .player import (
     DeployedEvent,
     DisconnectedEvent,
     DroppedEvent,
+    EmoteRequestedEvent,
     EquippedEvent,
     FinishedWorkEvent,
     FishedEvent,
@@ -37,6 +39,7 @@ from .player import (
     PickedEvent,
     PlantedEvent,
     PlayerLoadedEvent,
+    RescueRequestedEvent,
     RevivedEvent,
     ShardEnteredEvent,
     ShardLeftEvent,
@@ -44,9 +47,10 @@ from .player import (
     SpawnedEvent,
     UnequippedEvent,
 )
-from .vote import VoteCastEvent, VoteClosedEvent, VoteResultEvent, VoteStartedEvent
+from .vote import VoteClosedEvent, VoteResultEvent, VoteSubmittedEvent, VoteUpdatedEvent
 from .world import (
     EntityDeathEvent,
+    MapDeliveryStartedEvent,
     ModOutdatedEvent,
     PauseChangedEvent,
     RiftChangedEvent,
@@ -55,6 +59,8 @@ from .world import (
     ShardConnectionChangedEvent,
     StateChangedEvent,
     TelemetryErrorEvent,
+    VaultTrialGuardsDefeatedEvent,
+    VaultTrialProgressEvent,
 )
 
 type GameEvent = Annotated[
@@ -63,12 +69,15 @@ type GameEvent = Annotated[
     | ClientDisconnectedEvent
     | PresenceEvent
     | ChatEvent
+    | EmoteRequestedEvent
+    | RescueRequestedEvent
+    | AppearanceRequestedEvent
     | AnnouncementEvent
     | DiceRolledEvent
     | SkinReceivedEvent
     | SystemMessageEvent
-    | VoteStartedEvent
-    | VoteCastEvent
+    | VoteUpdatedEvent
+    | VoteSubmittedEvent
     | VoteClosedEvent
     | VoteResultEvent
     | PauseChangedEvent
@@ -104,6 +113,9 @@ type GameEvent = Annotated[
     | HoundWarningEvent
     | RiftUnlockedEvent
     | RiftChangedEvent
+    | MapDeliveryStartedEvent
+    | VaultTrialProgressEvent
+    | VaultTrialGuardsDefeatedEvent
     | TelemetryErrorEvent
     | ModOutdatedEvent,
     Field(discriminator="event"),

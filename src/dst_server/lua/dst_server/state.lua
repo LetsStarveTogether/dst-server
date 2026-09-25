@@ -1,5 +1,6 @@
 return {
-    protocol = 2,
+    protocol = 3,
+    sim_paused = false,
     prefix = "DST_OTEL|",
     max_line_bytes = 64 * 1024,
     installed = false,
@@ -9,9 +10,11 @@ return {
     nonce = nil,
     generation = nil,
     sequence = 0,
-    action_sequence = 0,
-    current_action = nil,
     errors = 0,
+    outdated_mods = {},
+    health_revision = 0,
+    faults = {},
+    capabilities = {},
     action_allowlist = {},
     players = setmetatable({}, { __mode = "k" }),
 }

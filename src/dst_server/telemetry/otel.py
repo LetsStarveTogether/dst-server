@@ -94,7 +94,8 @@ class Pipeline:
         if self._logger is None:
             return
         values = dict(attributes or {})
-        values.setdefault("log.record.uid", str(ULID()))
+        if "log.record.uid" not in values:
+            values["log.record.uid"] = str(ULID())
         severity_text = severity_text.upper()
         try:
             severity_number = SeverityNumber[severity_text]

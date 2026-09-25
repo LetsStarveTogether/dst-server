@@ -344,7 +344,7 @@ async def test_mod_condition_is_visible_without_subscription_and_resets_per_atte
     next_server = Server(agent.config)
     attach(agent, server)
     record = ModOutdatedEvent(
-        v=2,
+        v=3,
         nonce=server.game_events.nonce,
         generation=1,
         session_id="SESSION",
@@ -466,7 +466,7 @@ async def test_relays_release_consumed_records_while_idle(
         pending = [ObservedLifecycleEvent(value, 1)]
     else:
         value = StateChangedEvent(
-            v=2,
+            v=3,
             nonce=running_server.game_events.nonce,
             generation=1,
             session_id=None,
@@ -656,7 +656,7 @@ async def test_readiness_tracks_the_current_driver_not_a_past_session(
         assert not (await agent.runtime_status()).ready
         server.driver.ready(
             DriverHealth(
-                protocol=2,
+                protocol=3,
                 generation=1,
                 telemetry_status="active",
                 last_error=None,

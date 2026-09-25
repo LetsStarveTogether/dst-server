@@ -215,7 +215,7 @@ class EndpointStub:
             pid=self.pid,
             ready=self.ready,
             driver_health=DriverHealth(
-                protocol=2,
+                protocol=3,
                 generation=self.generation,
                 telemetry_status="active",
                 last_error=None,

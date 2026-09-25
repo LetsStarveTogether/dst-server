@@ -71,7 +71,7 @@ class Driver:
             return
         # Events may arrive before the world publishes driver readiness.
         health = self._health or DriverHealth(
-            protocol=2,
+            protocol=3,
             generation=record.generation,
             telemetry_status="active",
             last_error=None,
@@ -79,16 +79,21 @@ class Driver:
             errors=0,
         )
         health = health.replace(events_emitted=max(health.events_emitted, record.seq))
-        if record.event == "dst.telemetry.error" and record.data.count >= health.errors:
-            health = health.replace(
-                telemetry_status=(
-                    "degraded"
-                    if health.telemetry_status == "active"
-                    else health.telemetry_status
-                ),
-                last_error=record.data,
-                errors=record.data.count,
-            )
+        if record.event == "dst.telemetry.error":
+            if record.data.count >= health.errors:
+                health = health.replace(
+                    last_error=record.data,
+                    errors=record.data.count,
+                )
+            if record.data.revision >= health.revision:
+                health = health.replace(
+                    telemetry_status=(
+                        "degraded"
+                        if health.telemetry_status == "active"
+                        else health.telemetry_status
+                    ),
+                    revision=record.data.revision,
+                )
         self._health = health
 
     def observe_health(self, generation: int, health: DriverHealth) -> None:
@@ -99,18 +104,19 @@ class Driver:
         previous = self._health
         if previous is None:
             return health
-        if previous.errors > health.errors:
-            health = health.replace(
-                telemetry_status=(
-                    "degraded"
-                    if health.telemetry_status == "active"
-                    else health.telemetry_status
-                ),
-                last_error=previous.last_error,
-                errors=previous.errors,
-            )
+        if health.revision < previous.revision:
+            if self.installed_generation is None and health.telemetry_status in {
+                "disabled",
+                "failed",
+            }:
+                return previous.replace(telemetry_status=health.telemetry_status)
+            return previous
         return health.replace(
-            events_emitted=max(previous.events_emitted, health.events_emitted)
+            errors=max(previous.errors, health.errors),
+            last_error=previous.last_error
+            if previous.errors > health.errors
+            else health.last_error,
+            events_emitted=max(previous.events_emitted, health.events_emitted),
         )
 
     def close(self) -> None:

@@ -29,7 +29,15 @@ Networking_RollAnnouncement = function(...) return ... end
 OnSimPaused = function(...) return ... end
 OnSimUnpaused = function(...) return ... end
 MAX_VOTE_OPTIONS = 4
-package.loaded.usercommands = { FinishVote = function() end }
+local rescue = {serverfn = function() error("rescue must be replaced during network initialization") end}
+local rescues = 0
+GetCommonEmotes = function() return {} end
+EMOTE_ITEMS = {}
+UserToPlayer = function() return nil end
+package.loaded.usercommands = {
+    FinishVote = function() end,
+    GetCommandFromName = function(name) assert(name == "rescue"); return rescue end,
+}
 Shard_UpdateWorldState = function(...) return ... end
 AllPlayers, Ents = {}, {}
 local native_failure = {}
@@ -131,7 +139,11 @@ else
         TheWorld.meta = { session_identifier = "SESSION" }
         assert(TheWorld.listeners.master_worldvoterupdate == nil, "network not yet created")
         TheWorld.net = { components = { worldvoter = { OnUpdate = function() end } } }
-        if scenario == "votes_install_failure" then TheWorld.net.components.worldvoter = nil end
+        -- Reforged replaces /rescue while creating the world network.
+        rescue.serverfn = function() rescues = rescues + 1; return "rescued" end
+        if scenario == "commands_install_failure" then rescue.serverfn = nil end
+        if scenario == "commands_unsupported" then GetCommonEmotes = nil end
+        if scenario == "votes_install_failure" then package.loaded.usercommands.FinishVote = nil end
         if scenario == "publication_failure" then
             require("dst_server").health = function() return { oversized = string.rep("x", 64 * 1024) } end
         end
@@ -154,13 +166,27 @@ else
         assert(result.health.generation == 7 and result.error == nil)
         local expected = scenario == "off" and "disabled" or scenario == "optional_failure" and "degraded" or "active"
         if scenario == "connections_install_failure" or scenario == "connections_start_failure" then expected = "degraded" end
-        if scenario == "votes_install_failure" then expected = "degraded" end
+        if scenario == "votes_install_failure" or scenario == "commands_install_failure" then expected = "degraded" end
         assert(result.health.telemetry_status == expected)
         if expected == "degraded" then
             assert(component.installed and result.health.errors == 1)
             assert(result.health.last_error.stage == (scenario == "connections_install_failure"
                 and "connections.install" or scenario == "optional_failure" and "world.install"
+                or scenario == "commands_install_failure" and "player_commands.install"
                 or scenario == "votes_install_failure" and "votes.install" or "connections.start"))
+        end
+        local command_status = scenario == "off" and "disabled"
+            or scenario == "commands_install_failure" and "failed"
+            or scenario == "commands_unsupported" and "unsupported" or "active"
+        assert(result.health.capabilities.player_commands == command_status)
+        if scenario ~= "commands_install_failure" then
+            local before = #outputs
+            assert(rescue.serverfn({}, {userid = "KU_RESCUE"}) == "rescued" and rescues == 1)
+            assert(#outputs == before + (command_status == "active" and 1 or 0), "capture the final command exactly once")
+            if command_status == "active" then
+                local event = json.decode(outputs[#outputs]:sub(10))
+                assert(event.event == "dst.player.rescue_requested" and event.data.userid == "KU_RESCUE")
+            end
         end
         local votes_installed = scenario ~= "off" and scenario ~= "votes_install_failure"
         assert((TheWorld.listeners.master_worldvoterupdate ~= nil) == votes_installed)

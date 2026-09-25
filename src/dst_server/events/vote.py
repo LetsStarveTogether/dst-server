@@ -1,35 +1,47 @@
 from typing import Literal
 
-from dst_server.lua_codec import NonNegativeSafeLuaInteger, PositiveSafeLuaInteger
+from dst_server.lua_codec import NonNegativeSafeLuaInteger
 from dst_server.models.base import FrozenModel, Identifier
 
 from .base import EventRecord
 
 
 class VoteData(FrozenModel):
-    # Scoped to the originating driver nonce and generation, not a cluster-wide counter.
-    vote_id: Identifier
+    source: Literal["worldvoter", "gorge_voter", "lobbyvote"]
 
 
-class VoteStartedData(VoteData):
+class VoteSelection(FrozenModel):
+    userid: Identifier
+    selection: NonNegativeSafeLuaInteger
+
+
+class VoteUpdatedData(VoteData):
     command: str | None
     command_hash: NonNegativeSafeLuaInteger
     starter_userid: Identifier | None
     target_userid: Identifier | None
-    timeout: PositiveSafeLuaInteger
-    options: tuple[str, ...]
+    countdown: NonNegativeSafeLuaInteger
+    voters: tuple[VoteSelection, ...]
 
 
-class VoteCastData(VoteData):
+class VoteSubmittedData(VoteData):
+    command: str
     userid: Identifier
-    selection: PositiveSafeLuaInteger
+    target_userid: Identifier | None
+    selection: NonNegativeSafeLuaInteger | Identifier
+
+
+class VoteClosedData(VoteData):
+    command: str
+    starter_userid: Identifier | None
+    target_userid: Identifier | None
 
 
 class VoteResultData(VoteData):
     command: str
     target_userid: Identifier | None
     passed: bool
-    selection: PositiveSafeLuaInteger | None
+    selection: NonNegativeSafeLuaInteger | Identifier | None
     count: NonNegativeSafeLuaInteger | None
     total: NonNegativeSafeLuaInteger
     total_voted: NonNegativeSafeLuaInteger
@@ -37,15 +49,15 @@ class VoteResultData(VoteData):
     options: tuple[NonNegativeSafeLuaInteger, ...]
 
 
-class VoteStartedEvent(EventRecord[VoteStartedData]):
-    event: Literal["dst.vote.started"]
+class VoteUpdatedEvent(EventRecord[VoteUpdatedData]):
+    event: Literal["dst.vote.updated"]
 
 
-class VoteCastEvent(EventRecord[VoteCastData]):
-    event: Literal["dst.vote.cast"]
+class VoteSubmittedEvent(EventRecord[VoteSubmittedData]):
+    event: Literal["dst.vote.submitted"]
 
 
-class VoteClosedEvent(EventRecord[VoteData]):
+class VoteClosedEvent(EventRecord[VoteClosedData]):
     event: Literal["dst.vote.closed"]
 
 

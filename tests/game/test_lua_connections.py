@@ -21,6 +21,7 @@ from tests.lua.helpers import run_lua_process
         "optional_failure",
         "snapshot_failure",
         "invalid_authentication",
+        "authentication_output_failure",
     ],
 )
 def test_connection_events_and_periodic_presence(
@@ -68,11 +69,12 @@ def test_connection_events_and_periodic_presence(
         if scenario == "off"
         else "failed"
         if scenario == "optional_failure"
-        else "degraded"
-        if scenario in {"snapshot_failure", "invalid_authentication"}
         else "active"
     )
     assert periodic.data.health.telemetry_status == expected_status
     assert periodic.data.health.errors == (
-        0 if expected_status in {"active", "disabled"} else 1
+        1
+        if scenario
+        in {"optional_failure", "snapshot_failure", "authentication_output_failure"}
+        else 0
     )

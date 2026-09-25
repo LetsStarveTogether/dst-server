@@ -347,7 +347,7 @@ async def test_mixed_byte_stream_preserves_log_and_event_boundaries(
         b"DST_OTEL|"
         + orjson.dumps(
             {
-                "v": 2,
+                "v": 3,
                 "nonce": server.game_events.nonce,
                 "generation": 1,
                 "session_id": name,

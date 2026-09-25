@@ -800,6 +800,7 @@ FD 4 EOF 或写入失败会关闭控制通道；单条响应格式错误只使�
 ### 受管理的原生脚本包
 
 镜像在安装 SDK 后构建并校验 `data/databundles/scripts.zip`。
+宿主机 SDK、Agent 镜像与 Lua bundle 需一并升级；当前 driver 协议版本为 3。
 独立安装也需在 `Server.start()` 前准备脚本包，输入必须是同一游戏版本已有的 `scripts.zip`。
 SDK 不下载原生脚本，也不从游戏源码子模块构建原包。
 
@@ -1360,8 +1361,13 @@ SDK 使用 `TelemetrySettings(profile=..., actions=...)`，通过 `ServerConfig.
 | Profile | 采集内容 |
 | --- | --- |
 | `off` | 保留本地活动观察、原生 Mod 过期检测和管理 RPC |
-| `critical` | 玩家聊天、公告、皮肤、骰子、投票、进入、离开、出生、死亡复活、迁移、落水与坠落；重要实体死亡、分片连接、Boss、裂隙、世界状态和暂停 |
-| `history` | 增加战斗、物品、玩家状态、技能、猎犬预警、钓鱼、种植和允许列表中的 Action 结果 |
+| `critical` | 玩家聊天、表情与求救请求、出生外观、公告、皮肤、骰子、投票、进入、离开、出生、死亡复活、迁移、落水与坠落；重要实体死亡、分片连接、Boss、裂隙、世界状态、暂停、地图派送和地窖试炼 |
+| `history` | 增加战斗命中、受击、格挡、装备切换、猎犬预警、建造、采集、进食、物品操作、玩家状态、技能、钓鱼、种植和允许列表中的 Action 结果 |
+
+游戏事件采集直接读取原生通知与当前游戏状态，不维护动作因果链、投票会话或派送进度，也不向存档写入采集状态。
+战斗、装备切换和猎犬预警直接记录每次原生通知，包括重复通知。
+`history` 默认 Action 包含攻击、砍挖、拾取、烹饪、添燃料、施肥等操作，记录当次输入和返回结果。
+采集不包装逐帧更新；落水/坠落仍监听玩家状态切换，先按状态名过滤，再构造记录。
 
 #### 登录与活动
 
@@ -1378,17 +1384,31 @@ SDK 使用 `TelemetrySettings(profile=..., actions=...)`，通过 `ServerConfig.
   不同分片的观察记录不按正文去重。
 - 公告保留原生类型和正文；系统消息、皮肤、骰子另有独立事件。
   皮肤通知只有姓名，没有账号 ID。
-- 投票记录主分片的 `started`、`cast`、`closed`、`result`。
-  `closed` 发生在结果计算前，不代表取消；管理员公告不构成投票。
-- 死亡记录覆盖玩家、`epic` 实体及可归因于玩家的死亡。
-  复活区分 `ghost`、`corpse`、`charlie`；战斗来源 `from_doattack` 未知时保留 `null`。
+- `emote_requested` 和 `rescue_requested` 记录游戏执行表情、求救命令时的请求，不表示动画或脱困已经成功。
+  `appearance_requested` 保留请求及游戏校验后的角色、皮肤和服装，不额外保存游戏。
+- `dst.world.map_delivery_started` 记录成功发起的地图派送，包含实体、发起者和起终点。
+  抵达、停止及读档续送由游戏管理，不额外跟踪。
+- `dst.world.vault_trial_progress` 记录地窖试炼的插槽、火花进度及观察来源。
+  `vault_trial_guards_defeated` 记录原生逻辑确认守卫清除并启用额外掉落，不表示玩家已经领取奖励。
+  试炼采集在该实体创建时安装，进度直接读取游戏组件；不监听所有实体的生成。
+- 标准投票的 `dst.vote.updated` 保留主分片每次原生通知中的命令、倒计时和选票快照，包括重复通知和待投票值。
+  `dst.vote.result` 独立记录原生结果函数的返回结果，不生成关联 ID，也不推断取消原因。
+  Gorge 和 Forge 的 `dst.vote.submitted` 记录原生逻辑接受处理的投票请求；Forge 另记录 `closed`，不推断通过或取消。
+- 死亡记录覆盖玩家、`epic` 实体及可归因于玩家的普通生物死亡。
+  伤害来源及物品持有者、随从主人直接读取事件发生时的游戏状态。
+  复活区分 `ghost`、`corpse`、`charlie`。
+  战斗字段使用原生通知提供的值，未知伤害或攻击来源标志保留 `null`。
 - 暂停事件区分服务器标志（`domain=server`）和模拟状态变化（`domain=simulation`）。
   世界状态名称接受 Mod 标识符，世界生成配置保持独立约束。
 - 事故记录实际落水或坠落；进食包括普通食物和 Wortox 灵魂。
 
 `history` 的默认 Action 列表见 [遥测配置](src/dst_server/telemetry/config.py)；`actions=()` 仅关闭 Action 包装。
+Action 记录一次原生调用的输入和返回值；原生异常继续由底层日志记录。
+协议序号、采集健康和防止重复安装所需的运行状态仍保留，不承担游戏状态恢复。
 Profile 不关闭 Python 诊断、Metrics 或 Traces，也不删除历史。
 可选采集模块失败时报告阶段，其余模块继续运行。
+回调和事件输出成功时只清除各自当前故障，历史错误计数保留。
+健康版本防止迟到的旧诊断覆盖较新的恢复状态。
 
 ### OTLP 配置
 
@@ -1614,7 +1634,7 @@ asyncio.run(main())
 | --- | --- |
 | `driver_health.telemetry_status=disabled` | Profile 为 `off`，需要游戏事件时修改配置并重启 |
 | `active` | Hook 已安装，继续检查 SDK 导出日志和接收端 |
-| `degraded` / `failed` | 回调曾出错 / 安装失败；检查 `last_error`、`errors`，同一 Lua module state 不自动重试安装 |
+| `degraded` / `failed` | 检查当前 `faults` 和 `capabilities`；恢复后 `last_error`、`errors` 保留历史，同一 Lua module state 不自动重试安装 |
 | `telemetry_invalid` / `telemetry_dropped` / `telemetry_gaps` 增长 | 检查 schema、nonce、源序号缺口、队列饱和与关闭状态，结合本地事件日志比对 OTLP |
 | SDK 导出报错或接收端缺失记录 | 检查 endpoint、接收端、TLS、凭据和 SDK 日志；失败记录不会保留等待恢复 |
 | 启用导出后 Agent 启动失败 | 检查 OTLP 依赖和 SDK 配置 |

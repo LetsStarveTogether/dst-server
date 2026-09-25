@@ -28,7 +28,7 @@ def event_line(nonce: str, sequence: int, **changes: object) -> str:
         PREFIX
         + orjson.dumps(
             {
-                "v": 2,
+                "v": 3,
                 "nonce": nonce,
                 "generation": 1,
                 "session_id": "SESSION",
@@ -311,7 +311,7 @@ async def test_mixed_validation_preserves_later_events(
     candidate = event_line(
         nonce,
         2,
-        v=1 if kind == "schema" else 2,
+        v=1 if kind == "schema" else 3,
         session_id="👩🏽‍💻e\u0301\u2028",
     )
     if kind == "surrogate":
@@ -483,10 +483,8 @@ async def test_closed_stream_accounts_for_late_events() -> None:
             "dst.player.action",
             {
                 "action_id": "CHOP",
-                "action_sequence": 1,
                 "success": True,
                 "reason": None,
-                "error": None,
                 "actor": PLAYER,
                 "target": None,
                 "initial_target_owner": None,
@@ -742,7 +740,7 @@ async def test_presence_corrects_player_entities_and_independent_connections() -
                 "players": [],
                 "max_players": 9,
                 "health": {
-                    "protocol": 2,
+                    "protocol": 3,
                     "generation": 1,
                     "telemetry_status": "active",
                     "last_error": None,
@@ -823,7 +821,7 @@ async def test_server_refreshes_presence_before_consumption_and_resets_on_new_wo
     server = Server(ServerConfig(shard="forest"))
     events = server.game_events
     health = DriverHealth(
-        protocol=2,
+        protocol=3,
         generation=1,
         telemetry_status="active",
         last_error=None,

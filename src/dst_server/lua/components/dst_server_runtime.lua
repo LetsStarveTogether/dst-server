@@ -17,11 +17,14 @@ function Runtime:Initialize()
     end
     if self.installed and self.post_initialized and not self.reported then
         self.reported = true
-        -- The world network (and its voter) is created after the world prefab.
-        if require("dst_server.state").requested_profile ~= "off" and not pcall(function()
-            require("dst_server.vote_events").install()
-        end) then
-            telemetry.report("votes.install", "installation_failed")
+        -- Network initialization creates voters and lets modes replace player commands.
+        if require("dst_server.state").requested_profile ~= "off" then
+            telemetry.install("player_commands", function()
+                return require("dst_server.input_events").install_commands()
+            end)
+            if not pcall(function() require("dst_server.vote_events").install() end) then
+                telemetry.report("votes.install", "installation_failed")
+            end
         end
         local ok, task = pcall(function()
             return require("dst_server.connections").start(self.inst)

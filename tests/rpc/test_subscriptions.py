@@ -47,7 +47,7 @@ async def test_subscription_kinds_reach_cluster_and_shard_clients(
         "events": GameEventRecord(
             **fields,
             event=ModOutdatedEvent(
-                v=2,
+                v=3,
                 nonce=str(log.game_attempt),
                 generation=1,
                 session_id="world",

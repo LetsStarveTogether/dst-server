@@ -25,6 +25,8 @@ from ulid import ULID
 from dst_server.events import GAME_EVENT_ADAPTER, ObservedGameEvent
 from dst_server.telemetry import otel
 from dst_server.telemetry.recorder import Recorder
+from dst_server.telemetry.stream import EventStream
+from tests.lua.helpers import run_lua_process
 
 ATTEMPT = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 INSTANCE = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
@@ -32,7 +34,7 @@ INSTANCE = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
 
 def observed(*, generation: int = 1, sequence: int = 1) -> ObservedGameEvent:
     event = GAME_EVENT_ADAPTER.validate_python({
-        "v": 2,
+        "v": 3,
         "nonce": ATTEMPT,
         "generation": generation,
         "session_id": "original-session",
@@ -109,6 +111,38 @@ async def test_game_logs_keep_source_identity_and_generation() -> None:
     assert second.log_record.attributes["log.record.uid"] == f"{ATTEMPT}:2:1"
 
 
+@pytest.mark.parametrize(
+    "script", ["input_events_spec.lua", "gameplay_events_spec.lua"]
+)
+async def test_native_gameplay_records_reach_otel(
+    native_scripts: Path, luajit: str, script: str
+) -> None:
+    root = Path(__file__).parents[2]
+    lines = run_lua_process(
+        luajit, root / "tests/lua" / script, root, native_scripts, "critical"
+    ).splitlines()
+    exporter = InMemoryLogRecordExporter()
+    pipeline = make_pipeline(exporter)
+    stream = EventStream(Recorder("dst-000", "forest", pipeline=pipeline))
+    stream.nonce = ATTEMPT
+    try:
+        for timestamp, line in enumerate(lines, 1):
+            assert await stream.accept(b"DST_OTEL|" + line, timestamp)
+        assert stream.invalid == stream.gaps == stream.dropped == 0
+    finally:
+        await pipeline.shutdown()
+    exported = exporter.get_finished_logs()
+    assert len(exported) == len(lines)
+    for source, target in zip(lines, exported, strict=True):
+        event = GAME_EVENT_ADAPTER.validate_json(source, strict=True)
+        assert target.log_record.event_name == event.event
+        assert target.log_record.body == event.data.model_dump(mode="json")
+        assert target.log_record.attributes is not None
+        assert target.log_record.attributes["log.record.uid"] == (
+            f"{event.nonce}:{event.generation}:{event.seq}"
+        )
+
+
 async def test_instrumentation_failure_has_error_severity() -> None:
     exporter = InMemoryLogRecordExporter()
     pipeline = make_pipeline(exporter)
@@ -119,7 +153,7 @@ async def test_instrumentation_failure_has_error_severity() -> None:
         | {
             "event": "dst.telemetry.error",
             "data": {
-                "stage": "player.combat_hit",
+                "stage": "player.crafted",
                 "message": "callback_failed",
                 "count": 2,
             },

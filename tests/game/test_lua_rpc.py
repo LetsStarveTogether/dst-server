@@ -126,7 +126,7 @@ def test_lua_rpc_save_only_acknowledges_native_request(
 @pytest.mark.parametrize(
     ("changes", "error"),
     [
-        ({"v": 2}, "invalid_request"),
+        ({"v": 3}, "invalid_request"),
         ({"nonce": IDENTIFIER}, "invalid_request"),
         ({"id": "SECRET_TOKEN private chat"}, "invalid_request"),
         ({"generation": True}, "invalid_request"),

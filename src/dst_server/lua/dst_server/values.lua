@@ -1,4 +1,3 @@
-local state = require("dst_server.state")
 local values = {}
 
 local function finite(value)
@@ -131,8 +130,8 @@ function values.special_damage(source)
                 result[#result + 1] = { kind = kind, value = value }
             end
         end
-        table.sort(result, function(a, b) return a.kind < b.kind end)
     end
+    table.sort(result, function(a, b) return a.kind < b.kind end)
     return result
 end
 
@@ -157,30 +156,25 @@ function values.player_for(inst)
     if leader ~= nil and leader.userid ~= nil and leader:HasTag("player") then
         return leader
     end
+    local explosive = inst.components ~= nil and inst.components.explosive or nil
+    local attacker = explosive ~= nil and (explosive.attacker or explosive.pvpattacker) or nil
+    if attacker ~= nil and attacker.userid ~= nil and attacker:HasTag("player") then
+        return attacker
+    end
     return nil
 end
 
-function values.current_action_sequence(actor)
-    local action = state.current_action
-    return action ~= nil and actor ~= nil and action.actor == actor and action.sequence or json.null
-end
-
 function values.player_data(player)
-    return {
-        player = values.entity_ref(player),
-        caused_by_action_sequence = values.current_action_sequence(player),
-    }
+    return { player = values.entity_ref(player) }
 end
 
-function values.combat_data(player, data, actor)
-    data = data or {}
+function values.combat_data(player, data)
     return {
         player = values.entity_ref(player),
         damage = values.optional_json_number(data.damage),
         weapon = values.entity_ref(data.weapon),
         stimuli = values.text(data.stimuli, 128),
         special_damage = values.special_damage(data.spdamage),
-        caused_by_action_sequence = values.current_action_sequence(actor),
         from_doattack = data.from_doattack == nil and json.null or data.from_doattack,
     }
 end

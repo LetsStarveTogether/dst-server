@@ -18,7 +18,7 @@ async def test_driver_records_bypass_game_event_queue(prefix: str) -> None:
         {
             "nonce": stream.nonce,
             "health": {
-                "protocol": 2,
+                "protocol": 3,
                 "generation": 2,
                 "telemetry_status": "disabled",
                 "last_error": None,

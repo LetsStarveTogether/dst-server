@@ -53,23 +53,18 @@ function world_events.install_world()
         telemetry.emit("dst.player.spawned", { player = reference })
     end))
     TheWorld:ListenForEvent("entity_death", telemetry.guard("world.entity_death", function(_, data)
-        local attributed = values.player_for(data.afflicter)
         local victim = data.inst
-        if victim ~= nil and (
-            victim.userid ~= nil
-            or victim:HasTag("player")
-            or victim:HasTag("epic")
-            or attributed ~= nil
-        ) then
-            telemetry.emit("dst.entity.death", {
-                victim = values.entity_ref(victim),
-                cause = values.text(data.cause, 256),
-                afflicter = values.entity_ref(data.afflicter),
-                attributed_player = values.entity_ref(attributed),
-                corpsing = data.corpsing == true,
-                caused_by_action_sequence = values.current_action_sequence(data.afflicter),
-            })
-        end
+        if victim == nil then return end
+        local attributed = values.player_for(data.afflicter)
+        if victim.userid == nil and not victim:HasTag("player")
+            and not victim:HasTag("epic") and attributed == nil then return end
+        telemetry.emit("dst.entity.death", {
+            victim = values.entity_ref(victim),
+            cause = values.text(data.cause, 256),
+            afflicter = values.entity_ref(data.afflicter),
+            attributed_player = values.entity_ref(attributed),
+            corpsing = data.corpsing == true,
+        })
     end))
     TheWorld:ListenForEvent("master_shardbossdefeated", telemetry.guard("world.master_shardbossdefeated", function(_, data)
         telemetry.emit("dst.world.shard_boss_defeated", {
@@ -134,24 +129,17 @@ function world_events.install_shard()
         error("Shard_UpdateWorldState is unavailable")
     end
     local original = Shard_UpdateWorldState
+    local capture = telemetry.guard("shard.update", function(world_id, shard_state, tags, _, shard_name)
+        telemetry.emit("dst.shard.connection_changed", {
+            shard_id = tostring(world_id),
+            name = tostring(shard_name or ""),
+            ready = shard_state == REMOTESHARDSTATE.READY,
+            tags = values.tags(tags),
+        })
+    end)
     Shard_UpdateWorldState = function(...)
-        if not state.telemetry_active then
-            return original(...)
-        end
-
-        local world_id, shard_state, tags, _, shard_name = ...
         local results = telemetry.pack(original(...))
-        local emitted = pcall(function()
-            telemetry.emit("dst.shard.connection_changed", {
-                shard_id = tostring(world_id),
-                name = tostring(shard_name or ""),
-                ready = shard_state == REMOTESHARDSTATE.READY,
-                tags = values.tags(tags),
-            })
-        end)
-        if not emitted then
-            telemetry.report("shard.update", "callback_failed")
-        end
+        capture(...)
         return telemetry.unpack(results)
     end
 end

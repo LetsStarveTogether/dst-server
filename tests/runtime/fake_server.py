@@ -54,7 +54,7 @@ if shard != "driver-eof":
     else:
         failed = shard == "telemetry-failure"
         health = {
-            "protocol": 2,
+            "protocol": 3,
             "generation": generation,
             "telemetry_status": "failed" if failed else "active",
             "last_error": {
@@ -70,7 +70,7 @@ if shard != "driver-eof":
         driver_record({"health": health})
         if not failed:
             event = {
-                "v": 2,
+                "v": 3,
                 "nonce": nonce,
                 "generation": generation,
                 "session_id": "TEST",
@@ -114,7 +114,7 @@ for command in commands:
     else:
         print("command received", flush=True)
         event = {
-            "v": 2,
+            "v": 3,
             "nonce": nonce,
             "generation": generation,
             "session_id": "TEST",
@@ -134,7 +134,6 @@ for command in commands:
                 "afflicter": None,
                 "attributed_player": None,
                 "corpsing": False,
-                "caused_by_action_sequence": None,
             },
         }
         print("DST_OTEL|" + orjson.dumps(event).decode(), flush=True)

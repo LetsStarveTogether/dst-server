@@ -57,6 +57,8 @@ def run_bootstrap(
         "installation_failure",
         "optional_failure",
         "votes_install_failure",
+        "commands_install_failure",
+        "commands_unsupported",
         "connections_install_failure",
         "connections_start_failure",
         "publication_failure",

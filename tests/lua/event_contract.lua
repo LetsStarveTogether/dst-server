@@ -49,7 +49,11 @@ TheWorld = {
     meta = { session_identifier = "SESSION" },
     state = { cycles = 2 },
     ListenForEvent = function(_, name, callback)
-        world_listeners[name] = callback
+        local previous = world_listeners[name]
+        world_listeners[name] = function(...)
+            if previous then previous(...) end
+            callback(...)
+        end
     end,
     WatchWorldState = function(_, name, callback)
         world_watchers[name] = callback
@@ -109,7 +113,7 @@ package.loaded.usercommands = {
     FinishVote = function(_, params) params.voteselection = 1; params.votecount = 1; return true end,
 }
 TheWorld.net = { components = { worldvoter = { OnUpdate = function()
-    world_listeners.master_worldvoterupdate(TheWorld, { countdown = 0 })
+    world_listeners.master_worldvoterupdate(TheWorld, { countdown = 0, commandid = 0, starteruserid = "", targetuserid = "" })
     require("usercommands").FinishVote("kick", { user = "KU_TARGET" }, {
         total = 1, total_voted = 1, total_not_voted = 0, options = { 1, 0 },
     })
@@ -218,6 +222,13 @@ local combat = {
 player_listeners.onhitother(player, combat)
 player_listeners.attacked(player, combat)
 player_listeners.blocked(player, combat)
+-- Absent, false and true native flags remain distinct, including repeated observations.
+combat.from_doattack = false
+player_listeners.onhitother(player, combat)
+combat.from_doattack = true
+player_listeners.onhitother(player, combat)
+player_listeners.onhitother(player, combat)
+player_listeners.blocked(player)
 
 for _, name in ipairs({
     "startstarving",
@@ -260,4 +271,4 @@ player_listeners.unequip(player, { item = spear, eslot = "hands", slip = true })
 player_listeners.dropitem(player, { item = spear })
 
 health = driver.health()
-assert(health.events_emitted == 77 and health.errors == 0)
+assert(health.events_emitted == 81 and health.errors == 0)

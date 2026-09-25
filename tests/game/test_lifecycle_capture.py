@@ -4,7 +4,7 @@ import orjson
 import pytest
 from pydantic import ValidationError
 
-from dst_server.events.player import CombatData, RevivedEvent
+from dst_server.events.player import RevivedEvent
 from dst_server.events.world import PauseChangedEvent, StateChangedEvent
 from dst_server.runtime.operational import classify_log
 from tests.lua.helpers import run_lua_process
@@ -76,12 +76,6 @@ def test_revival_and_pause_capture(
     ]
     assert records[9]["event"] == "dst.telemetry.error"
     assert records[9]["data"]["message"] == "callback_failed"
-    combat = [
-        CombatData.model_validate_json(line.removeprefix("COMBAT|"), strict=True)
-        for line in lines
-        if line.startswith("COMBAT|")
-    ]
-    assert [data.from_doattack for data in combat] == [None, False, True]
 
 
 @pytest.mark.parametrize(
@@ -126,7 +120,7 @@ def test_native_pause_text_does_not_duplicate_events_or_parse_chat(line: str) ->
 )
 def test_mod_world_state_values_remain_open(name: str) -> None:
     event = {
-        "v": 2,
+        "v": 3,
         "nonce": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         "generation": 1,
         "session_id": "SESSION",

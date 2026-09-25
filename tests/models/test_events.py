@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from dst_server.events import GAME_EVENT_ADAPTER, player, server, world
+from dst_server.events import GAME_EVENT_ADAPTER, server, world
 from dst_server.lua_codec import MAX_SAFE_LUA_INTEGER
 from dst_server.models.driver import DRIVER_RECORD_ADAPTER
 
@@ -10,7 +10,7 @@ NONCE = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
 def test_game_event_schema_is_strict() -> None:
     data = {
-        "v": 2,
+        "v": 3,
         "generation": 1,
         "session_id": "SESSION",
         "nonce": NONCE,
@@ -48,7 +48,7 @@ def test_game_event_schema_is_strict() -> None:
 def test_coordinate_migration_without_portal_is_valid() -> None:
     event = GAME_EVENT_ADAPTER.validate_python(
         {
-            "v": 2,
+            "v": 3,
             "generation": 1,
             "session_id": "SESSION",
             "nonce": NONCE,
@@ -77,51 +77,9 @@ def test_coordinate_migration_without_portal_is_valid() -> None:
     assert event.data.destination.z == 4
 
 
-def test_combat_hit_without_resolved_damage_is_valid() -> None:
-    event = GAME_EVENT_ADAPTER.validate_json(
-        """{
-            "v": 2,
-            "generation": 1,
-            "session_id": "SESSION",
-            "nonce": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            "seq": 1,
-            "event": "dst.player.combat_hit",
-            "tick": 10,
-            "monotonic_ms": 20,
-            "cycle": 2,
-            "data": {
-                "player": {
-                    "prefab": "wilson",
-                    "guid": 42,
-                    "userid": "KU_TEST",
-                    "position": null
-                },
-                "damage": 0,
-                "weapon": null,
-                "stimuli": null,
-                "special_damage": [],
-                "from_doattack": null,
-                "caused_by_action_sequence": null,
-                "target": {
-                    "prefab": "hound",
-                    "guid": 43,
-                    "userid": null,
-                    "position": null
-                },
-                "damage_resolved": null,
-                "redirected": null
-            }
-        }""",
-        strict=True,
-    )
-
-    assert isinstance(event, player.CombatHitEvent)
-    assert event.data.damage_resolved is None
-
-
 def telemetry_error(**changes: object) -> dict[str, object]:
     return {
-        "v": 2,
+        "v": 3,
         "nonce": NONCE,
         "generation": 1,
         "session_id": "SESSION",
@@ -141,7 +99,7 @@ def telemetry_error(**changes: object) -> dict[str, object]:
 def test_telemetry_diagnostic_has_a_safe_strict_contract() -> None:
     event = GAME_EVENT_ADAPTER.validate_python(telemetry_error(), strict=True)
 
-    assert event.v == 2
+    assert event.v == 3
     assert event.generation == 1
     assert event.session_id == "SESSION"
     assert event.data.message == "callback_failed"
@@ -175,7 +133,7 @@ def test_native_integer_limits_cover_payloads_and_driver_health() -> None:
             DRIVER_RECORD_ADAPTER.validate_python({
                 "nonce": NONCE,
                 "health": {
-                    "protocol": 2,
+                    "protocol": 3,
                     "generation": 1,
                     "telemetry_status": "active",
                     "last_error": None,

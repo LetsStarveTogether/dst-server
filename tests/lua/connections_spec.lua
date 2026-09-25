@@ -75,7 +75,22 @@ assert(#initial.data.players == 2 and initial.data.players[1].guid == 20)
 
 if scenario == "invalid_authentication" then
     TheWorld:PushEvent("ms_clientauthenticationcomplete", {})
-    assert(json.decode(outputs[#outputs]:sub(10)).event == "dst.telemetry.error")
+    assert(json.decode(outputs[#outputs]:sub(10)).event == "dst.server.presence")
+end
+if scenario == "authentication_output_failure" then
+    local wire = require("dst_server.wire")
+    local encode = wire.encode
+    wire.encode = function(value, limit)
+        if value.event == "dst.client.authenticated" then error("encoding failed", 0) end
+        return encode(value, limit)
+    end
+    TheWorld:PushEvent("ms_clientauthenticationcomplete", {userid = "KU_LOBBY"})
+    local failed = require("dst_server").health()
+    assert(failed.telemetry_status == "degraded")
+    assert(failed.faults["emit.dst.client.authenticated"] == "encoding_failed")
+    TheWorld:PushEvent("ms_clientauthenticationcomplete", {})
+    assert(require("dst_server").health().revision == failed.revision, "successful callbacks cannot clear failed output")
+    wire.encode = encode
 end
 clients[#clients + 1] = {userid = "KU_LOBBY"}
 TheWorld:PushEvent("ms_clientauthenticationcomplete", {userid = "KU_LOBBY"})

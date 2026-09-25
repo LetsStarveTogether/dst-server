@@ -615,14 +615,13 @@ async def test_native_callbacks_publish_sdk_events(tmp_path: Path) -> None:
             "dst.server.pause_changed",
             "dst.player.combat_received",
             "dst.player.combat_hit",
+            "dst.player.equipped",
             "dst.player.unequipped",
             "dst.player.finished_work",
             "dst.player.picked",
             "dst.player.action",
             "dst.player.incident",
-            "dst.vote.started",
-            "dst.vote.cast",
-            "dst.vote.closed",
+            "dst.vote.updated",
             "dst.vote.result",
         } <= events
         assert "dst.telemetry.error" not in events
@@ -656,15 +655,22 @@ async def test_native_callbacks_publish_sdk_events(tmp_path: Path) -> None:
         )
         assert chat["message"] == "你好\n世界"
         assert chat["player"]["userid"] == "KU_NATIVE"
-        votes = [
+        updates = [
             record["data"]
             for record in records
-            if record["event"].startswith("dst.vote.")
+            if record["event"] == "dst.vote.updated"
         ]
-        assert len(votes) == 5
-        assert all(vote["vote_id"] == votes[0]["vote_id"] for vote in votes)
-        assert votes[-1]["passed"] is True
-        assert votes[-1]["total_voted"] == 2
+        assert any(
+            {voter["userid"] for voter in update["voters"] if voter["selection"] == 1}
+            == {"KU_NATIVE", "KU_ATTACKER"}
+            for update in updates
+        )
+        results = [
+            record["data"] for record in records if record["event"] == "dst.vote.result"
+        ]
+        assert len(results) == 1
+        assert results[0]["passed"] is True
+        assert results[0]["total_voted"] == 2
 
 
 async def test_real_game_driver_restarts_with_unchanged_session_id(

@@ -826,6 +826,7 @@ Critical observation failures can terminate the Agent and trigger container reco
 ### Managed Native Script Bundle
 
 The image builds and verifies `data/databundles/scripts.zip` after installing the SDK.
+Upgrade the host SDK, Agent image and Lua bundle together; the current driver protocol is version 3.
 Standalone installations must prepare it before `Server.start()` using `scripts.zip` from the same game version.
 The SDK does not download native scripts or build them from the game-source submodule.
 
@@ -1401,8 +1402,16 @@ The SDK uses `TelemetrySettings(profile=..., actions=...)`, passed through `Serv
 | Profile | Collected data |
 | --- | --- |
 | `off` | Local activity observation and native Mod-update detection; management RPC remains available |
-| `critical` | Player chat, announcements, skins, dice, votes, joins, departures, spawns, deaths, revivals, migration, drowning, and falls; significant entity deaths, shard connections, bosses, rifts, world state, and pauses |
-| `history` | Adds combat, items, player state, skills, hound warnings, fishing, planting, and allowlisted Action results |
+| `critical` | Player chat, emote and rescue requests, spawn appearance, announcements, skins, dice, votes, joins, departures, spawns, deaths, revivals, migration, drowning, and falls; significant entity deaths, shard connections, bosses, rifts, world state, pauses, map deliveries, and vault trials |
+| `history` | Adds combat hits, damage received, blocking, equipment changes, hound warnings, crafting, gathering, eating, item operations, player state, skills, fishing, planting, and allowlisted Action results |
+
+Game event collectors read native notifications and current game state.
+They maintain no action causality, vote sessions, or delivery progress, and write no collector state to saves.
+Combat, equipment changes, and hound warnings record each native notification, including repeats.
+Default `history` Actions include attacks, tool work, pickup, cooking, fueling, and fertilizing.
+Each Action records its inputs and return values.
+Collectors do not wrap frame updates.
+Drowning/falling still observes player state transitions, filtering by state name before building a record.
 
 #### Login and Activity
 
@@ -1421,17 +1430,38 @@ The SDK uses `TelemetrySettings(profile=..., actions=...)`, passed through `Serv
   Observations from different shards are not deduplicated by message text.
 - Announcements retain their native kind and rendered text; system messages, skins, and dice have separate events.
   Skin notifications identify a name, not an account ID.
-- Voting records master-shard `started`, `cast`, `closed`, and `result` events.
-  `closed` precedes result calculation and does not mean cancelled; administrator announcements do not create votes.
-- Deaths cover players, `epic` entities, and deaths attributable to players.
-  Revivals distinguish `ghost`, `corpse`, and `charlie`; unknown combat `from_doattack` stays `null`.
+- `emote_requested` and `rescue_requested` record requests when the game executes each command.
+  They do not claim a completed animation or rescue.
+  `appearance_requested` retains the requested and game-validated character, skin, and clothing without an extra game save.
+- `dst.world.map_delivery_started` records successful dispatches with the entity, sender, origin, and destination.
+  Arrival, stopping, and save restoration remain native game behavior without additional tracking.
+- `dst.world.vault_trial_progress` records socket and spark progress with its observation source.
+  `vault_trial_guards_defeated` records when native guard clearance enables bonus loot.
+  It does not claim that a player collected the loot.
+  Trial capture attaches at trial creation and reads native components without listening for all entity spawns.
+- Standard voting emits `dst.vote.updated` for each native master-shard notification: command, countdown, and ballots.
+  Repeats and pending ballot values are retained.
+  `dst.vote.result` independently records the native result function's return.
+  No correlation IDs or cancellation reasons are inferred.
+  Gorge and Forge emit `dst.vote.submitted` for vote requests accepted for native processing.
+  Forge also emits `closed` without inferring success or cancellation.
+- Deaths cover players, `epic` entities, and ordinary creatures whose deaths are attributable to players.
+  Causes, item owners, and follower leaders are read from game state at the time of the event.
+  Revivals distinguish `ghost`, `corpse`, and `charlie`.
+  Combat fields preserve native values; unknown damage or attack-origin flags remain `null`.
 - Pause events distinguish server flags (`domain=server`) from simulation transitions (`domain=simulation`).
   World-state names accept Mod identifiers; world-generation configuration remains separately constrained.
 - Incidents record actual drowning/falling; eating includes food and Wortox souls.
 
 See [telemetry configuration](src/dst_server/telemetry/config.py) for the default `history` Action list; `actions=()` disables only Action wrappers.
+Action records contain inputs and return values from one native call.
+Native exceptions continue to appear in underlying logs.
+Protocol sequences, collector health, and installation bookkeeping remain runtime state.
+They have no responsibility for game-state restoration.
 Profiles do not disable Python diagnostics, Metrics, or Traces, or delete history.
 Optional collector failures report their stage and leave healthy collectors running.
+Successful callbacks and event output clear only their own current faults; historical error counts remain.
+Health revisions prevent delayed diagnostics from overwriting a newer recovered state.
 
 ### OTLP Configuration
 
@@ -1670,7 +1700,7 @@ Offline queries may miss active writes and cannot read offloaded files without l
 | --- | --- |
 | `driver_health.telemetry_status=disabled` | The profile is `off`; change configuration and restart if game events are needed |
 | `active` | Hooks are installed; check the SDK export logs and receiver next |
-| `degraded` / `failed` | A callback errored / installation failed; inspect `last_error` and `errors`; installation is not retried within the same Lua module state |
+| `degraded` / `failed` | Inspect current `faults` and `capabilities`; `last_error` and `errors` retain history after recovery. Installation is not retried within the same Lua module state |
 | Rising `telemetry_invalid` / `telemetry_dropped` / `telemetry_gaps` | Check schema, nonce, input sequence gaps, queue saturation, and shutdown; use local event logs to compare with OTLP |
 | SDK export errors or missing receiver records | Check the endpoint, receiver, TLS, credentials, and SDK logs; failed records are not retained for recovery |
 | Agent startup failure after enabling export | Check OTLP dependencies and SDK configuration |

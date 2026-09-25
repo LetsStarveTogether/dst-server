@@ -40,31 +40,55 @@ function telemetry.report(stage, message)
     end
     if not messages[message] then message = "callback_failed" end
     state.errors = state.errors + 1
-    local diagnostic = { stage = stage, message = message, count = state.errors }
+    state.health_revision = state.health_revision + 1
+    state.faults[stage] = message
+    local diagnostic = { stage = stage, message = message, count = state.errors, revision = state.health_revision }
     state.last_error = diagnostic
     if pcall(write, "dst.telemetry.error", diagnostic) then return end
 
     -- A diagnostic must survive failure of the codec or game clocks, without recursion.
     local fallback = string.format(
-        '{"v":2,"nonce":"%s","generation":%.0f,"session_id":null,"seq":%.0f,'
+        '{"v":3,"nonce":"%s","generation":%.0f,"session_id":null,"seq":%.0f,'
         .. '"event":"dst.telemetry.error","tick":0,"monotonic_ms":0,"cycle":null,'
-        .. '"data":{"stage":"%s","message":"%s","count":%.0f}}',
-        state.nonce, state.generation, state.sequence + 1, stage, message, state.errors
+        .. '"data":{"stage":"%s","message":"%s","count":%.0f,"revision":%.0f}}',
+        state.nonce, state.generation, state.sequence + 1, stage, message, state.errors, state.health_revision
     )
     pcall(publish, fallback)
 end
 
+function telemetry.recover(stage)
+    if state.faults[stage] ~= nil then
+        state.faults[stage] = nil
+        state.health_revision = state.health_revision + 1
+    end
+end
+
+function telemetry.install(name, callback)
+    local ok, supported = pcall(callback)
+    state.capabilities[name] = not ok and "failed" or supported == false and "unsupported" or "active"
+    state.health_revision = state.health_revision + 1
+    if not ok then telemetry.report(name .. ".install", "installation_failed") end
+    return ok and supported ~= false
+end
+
 function telemetry.emit(event_name, data)
+    local stage = "emit." .. event_name
     local ok, failure = pcall(write, event_name, data)
-    if not ok then
-        telemetry.report(event_name, failure == "response_too_large" and "event_too_large" or "encoding_failed")
+    if ok then
+        telemetry.recover(stage)
+    else
+        telemetry.report(stage, failure == "response_too_large" and "event_too_large" or "encoding_failed")
     end
 end
 
 function telemetry.guard(stage, callback, always)
     return function(...)
         if not state.telemetry_active and not always then return end
-        if not pcall(callback, ...) then
+        local results = telemetry.pack(pcall(callback, ...))
+        if results[1] then
+            telemetry.recover(stage)
+            return telemetry.unpack(results, 2)
+        else
             telemetry.report(stage, "callback_failed")
         end
     end

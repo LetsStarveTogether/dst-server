@@ -512,7 +512,7 @@ async def test_game_client_sends_typed_method_and_arguments(operation: str) -> N
         commands.append((method, arguments))
         data = (
             {
-                "protocol": 2,
+                "protocol": 3,
                 "generation": 3,
                 "telemetry_status": "active",
                 "last_error": None,

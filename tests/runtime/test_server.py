@@ -27,7 +27,7 @@ async def native_ready(server: Server, generation: int) -> None:
         DriverReady(
             nonce=server.game_events.nonce,
             health=DriverHealth(
-                protocol=2,
+                protocol=3,
                 generation=generation,
                 telemetry_status="active",
                 last_error=None,

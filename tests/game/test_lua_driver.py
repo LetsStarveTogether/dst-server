@@ -28,15 +28,15 @@ from tests.lua.helpers import run_lua_process
         "critical",
         "finite_positions",
         "large_loot",
-        "native_action_scope",
-        "nested_action_scope",
+        "native_action_results",
         "native_action_failures",
         "action_truthiness",
-        "action_traceback",
-        "combat_causality",
+        "important_deaths",
+        "explosive_deaths",
         "wrapper_results",
         "diagnostics",
         "capture_failure",
+        "shard_capture_failure",
         "encoding_failure",
         "diagnostic_failure",
         "oversized_event",
@@ -57,5 +57,5 @@ def test_lua_driver(native_scripts: Path, scenario: str, lua_runtime: str) -> No
     for line in lines:
         assert line.startswith("DST_OTEL|")
         record = GAME_EVENT_ADAPTER.validate_json(line.removeprefix("DST_OTEL|"))
-        assert record.v == 2
+        assert record.v == 3
         assert record.generation == 7
