@@ -234,7 +234,7 @@ class EndpointStub:
     async def invoke[T](self, command: c.Request[T]) -> T:
         c.operation("agent", command)
         self.requests.append(command)
-        if not isinstance(command, c.Runtime | c.ConnectedShards):
+        if not isinstance(command, c.Runtime | c.ConnectedShards | c.Presence):
             self.calls.append(f"{command.method.replace('_', '-')}:{self.name}")
         result = (
             await handler(command)
@@ -269,8 +269,45 @@ class EndpointStub:
                 self.phase, self.ready, self.pid = ShardPhase.STOPPED, False, None
             case c.Execute(source=source):
                 return f"{self.name}:{source}"
-            case c.SaveMarker():
-                return self.save_cursor
+            case c.Room():
+                from dst_server.models import Room
+
+                return Room.model_validate({
+                    "name": "test",
+                    "description": "",
+                    "max_players": 6,
+                    "player_count": 0,
+                    "game_mode": "survival",
+                    "is_paused": False,
+                    "playstyle": None,
+                    "pvp": False,
+                    "has_password": False,
+                    "is_dedicated": True,
+                    "is_online": True,
+                    "lan_only": False,
+                    "friends_only": False,
+                    "mods_enabled": False,
+                    "clan_id": "",
+                    "clan_only": False,
+                    "shard_id": self.name,
+                    "is_master_shard": self.master,
+                })
+            case c.Presence():
+                from dst_server.models.driver import Presence
+
+                return Presence(
+                    observation=str(self.attempt),
+                    session_id=self.runtime.session_id,
+                    client_count=0,
+                    player_count=0,
+                    max_players=6,
+                    reliable=True,
+                    idle_seconds=0,
+                    observed_seconds=0,
+                    outdated_mods=self.outdated_mods,
+                )
+            case c.Health():
+                return (await self.runtime_status()).driver_health
             case c.Save():
                 snapshot = self.runtime.snapshot
                 for peer in self.peers:

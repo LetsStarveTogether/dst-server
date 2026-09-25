@@ -70,6 +70,7 @@ class ShardAgent:
         self._fatal_error: BaseException | None = None
         self._fatal = asyncio.Event()
         self._failure_id: ULID | None = None
+        self._stopped_status: ShardRuntimeStatus | None = None
         self.failures: asyncio.Queue[ShardSupervisorStatus] = asyncio.Queue(maxsize=1)
         self.supervisor = ShardSupervisor(
             shard.name,
@@ -101,6 +102,17 @@ class ShardAgent:
     async def runtime_status(self) -> ShardRuntimeStatus:
         status = self.supervisor.status
         server = self.supervisor.server
+        error_id = self._failure_id or status.error_id
+        if server is None and self._stopped_status is not None:
+            return self._stopped_status.replace(
+                desired=status.desired,
+                phase=status.phase,
+                ready=False,
+                pid=None,
+                returncode=status.returncode,
+                error_id=error_id,
+                error="DST shard failed" if error_id is not None else None,
+            )
         process = server.child if server is not None else None
         live = process is not None and process.returncode is None
         try:
@@ -126,6 +138,16 @@ class ShardAgent:
             last_active_at=server.game_events.last_active_at
             if server is not None
             else None,
+            activity_observation=(
+                f"{server.game_events.nonce}:{server.game_events.generation}"
+                if server is not None and server.game_events.generation is not None
+                else None
+            ),
+            activity_reliable=(
+                server is not None
+                and server.input_error is None
+                and server.game_events.activity_reliable
+            ),
             telemetry_profile=self.config.telemetry.profile,
             telemetry_invalid=server.telemetry_invalid if server is not None else 0,
             telemetry_dropped=server.telemetry_dropped if server is not None else 0,
@@ -147,8 +169,8 @@ class ShardAgent:
             player_count=server.recorder.player_count if server is not None else 0,
             client_count=server.recorder.client_count if server is not None else 0,
             external_port=self.external_port,
-            error_id=self._failure_id,
-            error="DST shard failed" if self._failure_id is not None else None,
+            error_id=error_id,
+            error="DST shard failed" if error_id is not None else None,
         )
 
     async def activate(self) -> None:
@@ -377,8 +399,7 @@ class ShardAgent:
         tasks, self._attempt_tasks = self._attempt_tasks, ()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        async with self._event_changed:
-            self._event_changed.notify_all()
+        self._stopped_status = await self.runtime_status()
 
     async def _failed(self, status: ShardSupervisorStatus) -> None:
         self._failure_id = status.error_id

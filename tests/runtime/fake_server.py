@@ -99,7 +99,18 @@ for command in commands:
     if method == "list_players":
         data = []
     elif method == "save":
-        data = {"snapshot": "session/TEST/0000000001"}
+        data = True
+    elif method == "presence":
+        data = {
+            "observation": f"{nonce}:{generation}",
+            "session_id": "TEST",
+            "client_count": 0,
+            "player_count": 0,
+            "max_players": 6,
+            "reliable": True,
+            "idle_seconds": 0.0,
+            "observed_seconds": 0.0,
+        }
     else:
         print("command received", flush=True)
         event = {

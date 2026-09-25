@@ -29,7 +29,7 @@ from dst_server.models import (
 )
 from dst_server.models.base import Identifier
 from dst_server.models.console import ConsoleResult
-from dst_server.models.driver import DriverHealth
+from dst_server.models.driver import DriverHealth, Presence
 from dst_server.models.snapshot import SnapshotCatalog
 from dst_server.timeouts import DEFAULT_RELOAD_TIMEOUT
 from tests.game.helpers import make_game
@@ -42,6 +42,8 @@ type Invocation = Callable[[GameClient], Awaitable[object]]
 
 
 ROUTES = [
+    (lambda game: game.invoke(c.Save()), "save", {}, bool),
+    (lambda game: game.invoke(c.Presence()), "presence", {}, Presence),
     (lambda game: game.invoke(c.Health()), "health", {}, DriverHealth),
     (lambda game: game.invoke(c.Room()), "room", {}, Room),
     (lambda game: game.invoke(c.World()), "world", {}, World),

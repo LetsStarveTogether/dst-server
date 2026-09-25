@@ -19,7 +19,7 @@ from dst_server.events.player import (
     ShardEnteredEvent,
     ShardLeftEvent,
 )
-from dst_server.events.world import ModOutdatedEvent
+from dst_server.events.world import ModOutdatedEvent, TelemetryErrorEvent
 from dst_server.json_codec import validate_json_structure
 from dst_server.models.driver import DRIVER_RECORD_ADAPTER, DriverFailed, DriverRecord
 from dst_server.models.telemetry import TelemetryProfile
@@ -32,6 +32,35 @@ PREFIX = "DST_OTEL|"
 LINE_PREFIX = re.compile(
     rb"(?:\[[0-9]{2,}:[0-5][0-9]:[0-5][0-9]\]: )?(DST_OTEL|DST_DRIVER)\|"
 )
+ACTIVITY_STAGES = {
+    "clocks.install",
+    "connections.install",
+    "connections.start",
+    "players.install",
+    "world.install",
+    "presence.snapshot",
+    "world.ms_playerjoined",
+    "world.ms_playerleft",
+    "player.ms_skilltreeinitialized",
+    "dst.server.presence",
+    "dst.client.authenticated",
+    "dst.client.disconnected",
+    "dst.player.loaded",
+    "dst.player.shard_entered",
+    "dst.player.shard_left",
+}
+
+
+def _activity_fault(event: GameEvent) -> bool:
+    if isinstance(event, TelemetryErrorEvent):
+        stages = [event.data.stage]
+    elif isinstance(event, PresenceEvent):
+        stages = list(event.data.health.faults)
+        if event.data.health.last_error is not None:
+            stages.append(event.data.health.last_error.stage)
+    else:
+        return False
+    return any(stage.removeprefix("emit.") in ACTIVITY_STAGES for stage in stages)
 
 
 class EventStream:
@@ -60,6 +89,7 @@ class EventStream:
         self.last_event_timestamp_ns: int | None = None
         self.last_presence_timestamp_ns: int | None = None
         self.last_active_at: datetime | None = None
+        self._activity_error = False
         self._players: dict[int, str] = {}
         self._clients: set[str] = set()
         self._closed = False
@@ -76,6 +106,15 @@ class EventStream:
         self._clients.clear()
         self.recorder.set_player_count(0)
         self.recorder.set_client_count(0)
+
+    @property
+    def activity_reliable(self) -> bool:
+        return (
+            self.last_presence_timestamp_ns is not None
+            and not self._activity_error
+            and not self.invalid
+            and not self.gaps
+        )
 
     async def read(self) -> ObservedGameEvent | None:
         try:
@@ -192,6 +231,7 @@ class EventStream:
 
     def _observe(self, observed: ObservedGameEvent) -> None:
         event = observed.record
+        self._activity_error |= _activity_fault(event)
         was_occupied = bool(self._players or self._clients)
         if isinstance(event, ModOutdatedEvent):
             self.outdated_mods.add(event.data.name)

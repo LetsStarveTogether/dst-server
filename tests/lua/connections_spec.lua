@@ -3,6 +3,8 @@ dofile(root .. "/tests/lua/setup.lua")(root, scripts)
 local state = require("dst_server.state")
 local connections = require("dst_server.connections")
 local outputs = {}
+OnSimPaused = function() end
+OnSimUnpaused = function() end
 nolineprint = function(line) outputs[#outputs + 1] = line end
 GetTick = function() return 10 end
 local now = 20
@@ -88,6 +90,12 @@ task.callback() -- Static scheduler continues while game simulation is paused.
 local periodic = json.decode(outputs[#outputs]:sub(10))
 assert(periodic.data.reason == "periodic" and #periodic.data.players == 0)
 assert(periodic.data.clients[1] == "KU_A")
+clients = {}
+local presence = connections.presence()
+assert(presence.idle_seconds == 0 and presence.observed_seconds == 60)
+now = now + 30000
+presence = connections.presence()
+assert(math.abs(presence.idle_seconds - 30) < 1e-9 and presence.observed_seconds == 90)
 for _, line in ipairs(outputs) do
     assert(not line:find("[\r\n%z]") and #line <= 64 * 1024)
     assert(not line:find("PRIVATE_NAME", 1, true))

@@ -72,6 +72,11 @@ function driver.install(options)
     local telemetry = require("dst_server.telemetry")
     Networking_ModOutOfDateAnnouncement = function(...)
         local mod = ...
+        if type(mod) == "string" then
+            local found = false
+            for _, name in ipairs(state.outdated_mods) do if name == mod then found = true end end
+            if not found then state.outdated_mods[#state.outdated_mods + 1] = mod end
+        end
         -- This is required control state, including when optional telemetry is off.
         -- Capture first so announcement failures cannot hide the native detection.
         pcall(telemetry.emit, "dst.mod.outdated", { name = mod })
@@ -103,6 +108,7 @@ function driver.install(options)
 end
 
 methods.health = driver.health
+methods.presence = function() return require("dst_server.connections").presence() end
 
 function driver.call(name, args)
     if not state.installed then

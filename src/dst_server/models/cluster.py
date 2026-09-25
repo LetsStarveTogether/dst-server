@@ -62,6 +62,8 @@ class ShardRuntimeStatus(FrozenModel):
     telemetry_last_event_ns: NonNegativeInt | None = None
     telemetry_last_presence_ns: NonNegativeInt | None = None
     last_active_at: AwareDatetime | None = None
+    activity_observation: str | None = None
+    activity_reliable: bool = False
     player_count: NonNegativeInt = 0
     client_count: NonNegativeInt = 0
     external_port: Annotated[int, Field(ge=1024, le=65535)] | None = None

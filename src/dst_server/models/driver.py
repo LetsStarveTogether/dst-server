@@ -4,7 +4,7 @@ from pydantic import Field, TypeAdapter
 
 from dst_server.lua_codec import NonNegativeSafeLuaInteger, PositiveSafeLuaInteger
 
-from .base import FrozenModel
+from .base import FrozenModel, Identifier, NonNegativeFloat
 
 
 class DriverDiagnostic(FrozenModel):
@@ -48,3 +48,15 @@ class DriverFailed(FrozenModel):
 
 type DriverRecord = DriverStarting | DriverReady | DriverFailed
 DRIVER_RECORD_ADAPTER = TypeAdapter(DriverRecord)
+
+
+class Presence(FrozenModel):
+    observation: Identifier
+    session_id: Identifier
+    client_count: NonNegativeSafeLuaInteger
+    player_count: NonNegativeSafeLuaInteger
+    max_players: NonNegativeSafeLuaInteger
+    reliable: bool
+    idle_seconds: NonNegativeFloat
+    observed_seconds: NonNegativeFloat
+    outdated_mods: tuple[str, ...] = ()

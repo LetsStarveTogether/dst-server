@@ -76,6 +76,89 @@ async def test_mod_condition_survives_full_consumer_queue(
     assert events.dropped == 2
 
 
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "diagnostic",
+        "health_fault",
+        "optional_action",
+        "optional_vote",
+        "gap",
+        "invalid",
+    ],
+)
+async def test_final_activity_proof_survives_export_loss_but_not_observation_loss(
+    monkeypatch: pytest.MonkeyPatch, fault: str | None
+) -> None:
+    monkeypatch.setattr(stream, "QUEUE_SIZE", 1)
+    events = EventStream(Recorder("cluster", "shard"))
+    health: dict[str, object] = {
+        "protocol": 3,
+        "generation": 1,
+        "telemetry_status": "active",
+        "last_error": None,
+        "events_emitted": 0,
+        "errors": 0,
+    }
+    data = {
+        "reason": "startup",
+        "clients": [],
+        "players": [],
+        "max_players": 6,
+        "health": health,
+    }
+    await events.accept(
+        event_line(events.nonce, 1, event="dst.server.presence", data=data), 1
+    )
+    assert events.activity_reliable
+    if fault in {"diagnostic", "optional_action", "optional_vote"}:
+        diagnostic = {
+            "stage": {
+                "diagnostic": "emit.dst.client.authenticated",
+                "optional_action": "action.capture",
+                "optional_vote": "vote.result",
+            }[fault],
+            "message": "encoding_failed",
+            "count": 1,
+        }
+        await events.accept(
+            event_line(
+                events.nonce,
+                2,
+                event="dst.telemetry.error",
+                data=diagnostic,
+            ),
+            2,
+        )
+        health.update(errors=1, last_error=diagnostic)
+        await events.accept(
+            event_line(events.nonce, 3, event="dst.server.presence", data=data), 3
+        )
+    elif fault == "invalid":
+        await events.accept("DST_OTEL|invalid", 2)
+    elif fault == "health_fault":
+        health.update(faults={"presence.snapshot": "callback_failed"})
+        await events.accept(
+            event_line(events.nonce, 2, event="dst.server.presence", data=data), 2
+        )
+    await events.accept(
+        event_line(events.nonce, 4 if fault == "gap" else events.sequence + 1), 3
+    )
+    expected = fault in {None, "optional_action", "optional_vote"}
+    assert events.activity_reliable is expected
+    health.update(generation=2, errors=0, last_error=None, faults={})
+    await events.accept(
+        event_line(
+            events.nonce, 1, generation=2, event="dst.server.presence", data=data
+        ),
+        4,
+    )
+    events.close()
+    assert events.dropped > 0
+    assert events.activity_reliable is expected
+
+
 async def test_only_valid_current_attempt_mod_reports_change_condition() -> None:
     events = EventStream(Recorder("cluster", "shard"))
     for nonce, data in (

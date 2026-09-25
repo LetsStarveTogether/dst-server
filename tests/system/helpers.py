@@ -287,6 +287,8 @@ async def running_server(root: Path, cluster: Path) -> AsyncIterator[Server]:
 @asynccontextmanager
 async def running_sharded_cluster(
     root: Path,
+    *,
+    pause_when_empty: bool = False,
 ) -> AsyncIterator[tuple[ClusterController, dict[str, ShardAgent]]]:
     cluster = root / "cluster"
     FOREST_CAVES.build(
@@ -296,7 +298,7 @@ async def running_sharded_cluster(
             cluster_name=str(ULID()),
             offline_cluster=True,
             lan_only_cluster=True,
-            pause_when_empty=False,
+            pause_when_empty=pause_when_empty,
             max_snapshots=20,
         ),
     ).save(cluster)

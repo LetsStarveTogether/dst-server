@@ -303,6 +303,35 @@ async def test_runtime_status_uses_supervisor_phase(
     assert (await agent.runtime_status()).phase is phase
 
 
+async def test_stopped_status_retains_drained_activity_and_reports_stop_error(
+    agent: ShardAgent,
+) -> None:
+    from datetime import UTC, datetime
+
+    from dst_server.telemetry.stream import EventStream
+
+    server = Server(agent.config)
+    manager = attach(agent, server)
+    assert isinstance(server.game_events, EventStream)
+    server.game_events.start_generation(1)
+    server.game_events.last_presence_timestamp_ns = 1
+    server.game_events.last_active_at = datetime.now(UTC)
+    await server.finish()
+    await agent._stopped(server)
+    manager.server = None
+    manager.status = replace(
+        manager.status, phase=ShardPhase.STOPPED, returncode=-9, error_id=ULID()
+    )
+    status = await agent.runtime_status()
+    assert not status.ready
+    assert status.pid is None
+    assert status.returncode == -9
+    assert status.error_id is not None
+    assert status.activity_reliable
+    assert status.activity_observation == f"{server.game_events.nonce}:1"
+    assert status.last_active_at == server.game_events.last_active_at
+
+
 @pytest.mark.parametrize("profile", ["off", "critical", "history"])
 async def test_mod_condition_is_visible_without_subscription_and_resets_per_attempt(
     agent: ShardAgent,

@@ -8,7 +8,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from dst_server.activity import ActivityCheckpoint
+from dst_server import commands as c
+from dst_server.activity import observe
 from dst_server.concurrency import cancel_tasks
 from dst_server.models.cluster import ClusterStatus
 from dst_server.rooms import read_control, write_control
@@ -57,7 +58,7 @@ def ready_sessions(status: ClusterStatus) -> dict[str, str]:
     return sessions if status.master in sessions else {}
 
 
-async def recycle(
+async def recycle(  # ruff: ignore[complex-structure]
     host: Host,
     client: ClusterClient,
     directory: Path,
@@ -69,7 +70,23 @@ async def recycle(
     sessions = ready_sessions(status)
     if not sessions:
         return False
-    occupied = bool(await client.list_players())
+    presence = dict(
+        zip(
+            sessions,
+            await asyncio.gather(
+                *(client.shard(name).invoke(c.Presence()) for name in sessions)
+            ),
+            strict=True,
+        )
+    )
+    if any(
+        not value.reliable or value.session_id != sessions[name]
+        for name, value in presence.items()
+    ):
+        return False
+    occupied = any(
+        value.client_count or value.player_count for value in presence.values()
+    )
     day = (await client.shard(status.master).world()).day
     now = datetime.now().astimezone()
     pending = None
@@ -77,21 +94,8 @@ async def recycle(
         async with room_lock(directory):
             control = read_control(directory)
             previous = control.activity
-            # ponytail: no event journal; an abrupt exit can lose activity since
-            # the previous host tick. Missing/new worlds get a full grace period.
-            last_active = (
-                previous.last_active_at
-                if previous is not None and previous.sessions == sessions
-                else now
-            )
-            last_active = max(
-                last_active,
-                *(shard.last_active_at or last_active for shard in status.shards),
-                now if occupied else last_active,
-            )
-            checkpoint = ActivityCheckpoint(
-                sessions=sessions, last_active_at=last_active.astimezone(UTC)
-            )
+            checkpoint = observe(previous, presence, now)
+            last_active = checkpoint.last_active_at
             if not dry_run and checkpoint != previous:
                 write_control(
                     directory, control.model_copy(update={"activity": checkpoint})
@@ -106,7 +110,10 @@ async def recycle(
         if not await online(host, number):
             return False
         async with room_lock(directory):
-            if not _enabled(read_control(directory), datetime.now().astimezone()):
+            control = read_control(directory)
+            if not _enabled(control, datetime.now().astimezone()):
+                return False
+            if control.activity != checkpoint and not dry_run:
                 return False
             logger.info(
                 "%03d: %s day=%s last_active=%s",
@@ -116,7 +123,17 @@ async def recycle(
                 last_active.isoformat(),
             )
             if not dry_run:
-                # Submit while locked; generation itself never holds the host lock.
+                write_control(
+                    directory,
+                    control.model_copy(
+                        update={
+                            "activity": checkpoint.replace(
+                                last_active_at=datetime.now(UTC)
+                            )
+                        }
+                    ),
+                )
+                # Renew the idle window before dispatch, including an unknown outcome.
                 pending = asyncio.create_task(
                     client.regenerate(
                         expected_session_id=sessions[status.master], require_empty=True
@@ -129,20 +146,7 @@ async def recycle(
         if pending is not None:
             await cancel_tasks(pending)
     if pending is not None:
-        current = ready_sessions(await client.status())
-        async with room_lock(directory):
-            control = read_control(directory)
-            write_control(
-                directory,
-                control.model_copy(
-                    update={
-                        "activity": ActivityCheckpoint(
-                            sessions=current, last_active_at=datetime.now(UTC)
-                        )
-                    }
-                ),
-            )
-        logger.info("%03d: regeneration complete", number)
+        logger.info("%03d: regeneration submitted", number)
     return True
 
 
@@ -161,7 +165,7 @@ async def run_recycle(
                         host, client, host.rooms.path(number), number, dry_run=dry_run
                     )
             status = (
-                ("would-regenerate" if dry_run else "regenerated")
+                ("would-regenerate" if dry_run else "submitted")
                 if changed
                 else "skipped"
             )

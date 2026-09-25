@@ -217,13 +217,14 @@ Startup reads these files, prepares Mods, and creates missing permission lists a
   Removing a shard keeps its other files and saves for reuse.
 - Configuration and shard directories cannot be symlinks.
 
-**Activity** stays in Agent memory independently of telemetry.
-The recycling timer saves shard session IDs and `last_active_at` under `activity` in `.dst-control.json`.
-Without this file, a room has no schedule or automatic recycling.
+**Activity** is observed inside each game independently of optional telemetry.
+The recycling timer queries every shard.
+It saves world IDs, observation identities, `last_active_at` and clean-shutdown continuity under `activity` in `.dst-control.json`.
+Without this file, a room defaults to all-day opening with automatic recycling disabled.
 
-Retention includes stopped time, regardless of how the service stopped.
-An abrupt exit can lose activity since the last timer check.
-Missing checkpoints or changed worlds receive a full new retention period.
+Unreachable shards or unreliable observations prevent automatic recycling.
+Missing checkpoints, changed worlds or interrupted observations receive a full new retention period.
+A verified clean scheduled shutdown preserves idle time across the closure; a failed query alone does not reset the clock.
 
 ### Shards and Ports
 
@@ -671,6 +672,9 @@ The recycling thresholds are based on the world's current game day:
 A reset requires elapsed time beyond the limit, all shards ready, and no players present.
 Rooms are checked independently; busy rooms are skipped.
 World identity and the empty-room condition are checked again before resetting.
+Closed time counts toward inactivity after a verified clean scheduled shutdown; resets run only during opening hours.
+Submitting a reset renews the idle window before dispatch, including when the response is lost.
+Recycling does not track reset completion or immediately retry an uncertain result.
 
 ## Runtime
 
@@ -1016,7 +1020,7 @@ Arbitrary Lua values are represented as bounded text; use `execute_json()` when 
 | `cluster` lifecycle | `status()`, `start()`, `stop()`, `restart()`, `kill()`, `update_mods()`. |
 | `cluster` configuration and world | `read_configuration()`, `save()`, `pause()`, `reset()`, `rollback()`, `rollback_to_day()`, `regenerate()`, `list_snapshots()`. |
 | `cluster` players and administration | `list_players()`, `get_player()`, `announce()`, `whitelist()`, `unwhitelist()`, `is_whitelisted()`, `execute_all()`. |
-| `cluster.shard(name)` | Shard lifecycle, `status()`, `room()`, `world()`, `runtime()`, `health()`, `mods()`, `connected_shards()`, `save()`, `list_snapshots()`, `regenerate_shard()`. |
+| `cluster.shard(name)` | Shard lifecycle, `status()`, `room()`, `world()`, `runtime()`, `health()`, `mods()`, `connected_shards()`, `presence()`, `list_snapshots()`, `regenerate_shard()`. |
 | `shard.players` | Player and inventory queries, kicks, bans, unbans, admin status, vitals, teleportation, shard migration, and adding or removing items. |
 | `cluster` / `shard` subscriptions | `subscribe("logs")`, `subscribe("lifecycle")`, `subscribe("events")`; manage subscriptions with `async with`, then call `await subscription.next()`. |
 | `shard.evaluate(lua)` | Evaluate expressions or statements once; return print output, typed textual values, and errors as `ConsoleResult`. |
@@ -1042,7 +1046,12 @@ async def inspect_game(game: GameClient) -> None:
     print(world, day, players)
 ```
 
-`GameClient.request_save()` only requests the native save; use `Server.save()` or a cluster/shard `save()` to wait for confirmation.
+`GameClient.invoke(Save())` is an internal native request; the public `cluster.save()` likewise returns after acknowledgement.
+`shard.presence()` reports connections, players, inactivity and observation identity independently of optional telemetry.
+Recycling requires reliable observations from every shard; gaps and world changes receive a full grace period.
+Verified clean scheduled closures preserve idle time.
+Protocol version 3 separates current capabilities and faults from historical error counts.
+Vote capture supports standard, Gorge and Forge components without changing native vote behavior.
 
 ### Emoji and Emote Enums
 

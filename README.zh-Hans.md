@@ -214,12 +214,13 @@ cluster/
   停用后保留其他文件与存档，便于再次使用。
 - 配置和分片目录不能使用符号链接。
 
-**活动记录**由 Agent 保存在内存中，不依赖遥测。
-回收 timer 将分片世界 ID 和 `last_active_at` 写入 `.dst-control.json` 的 `activity`。
-缺少该文件时，不执行定时启停和自动回收。
+**活动记录**由各游戏进程独立观测，不依赖可选遥测。
+回收 timer 查询所有分片，将世界 ID、观测标识、`last_active_at` 和正常关闭的连续性依据写入 `.dst-control.json` 的 `activity`。
+缺少该文件时，默认全天开放，不自动回收。
 
-保留期计入停服时间，不区分正常或异常停机。
-突然退出可能丢失上次 timer 检查后的活动；记录缺失或世界改变时，重新给足一轮保留期。
+分片不可达或观测不可靠时，停止自动回收。
+记录缺失、世界改变或观测中断时，重新给足一轮保留期。
+确认正常的定时关房保留闲置计时，闭馆时间也计入；单次查询失败不会直接清零计时。
 
 ### 分片与端口
 
@@ -650,6 +651,9 @@ dst-server maintenance restart --room 299 --delay 8m --estimated-duration 10m
 
 只有经过时间超过阈值、全部分片就绪且当前无人，才允许重置。
 各房间独立检查，忙碌房间跳过；重置前再次核对世界身份与空房条件。
+确认正常的定时关房计入闲置时间，重置只在开放时段执行。
+提交重置前重新开始闲置计时，回复丢失时也不立即重发。
+自动回收不追踪重置是否完成，也不增加待确认或人工解除状态。
 
 ## 运行机制
 
@@ -983,7 +987,7 @@ async def inspect_console(shard: ShardClient) -> None:
 | `cluster` 生命周期 | `status()`、`start()`、`stop()`、`restart()`、`kill()`、`update_mods()`。 |
 | `cluster` 配置与世界 | `read_configuration()`、`save()`、`pause()`、`reset()`、`rollback()`、`rollback_to_day()`、`regenerate()`、`list_snapshots()`。 |
 | `cluster` 玩家与管理 | `list_players()`、`get_player()`、`announce()`、`whitelist()`、`unwhitelist()`、`is_whitelisted()`、`execute_all()`。 |
-| `cluster.shard(name)` | 分片生命周期、`status()`、`room()`、`world()`、`runtime()`、`health()`、`mods()`、`connected_shards()`、`save()`、`list_snapshots()`、`regenerate_shard()`。 |
+| `cluster.shard(name)` | 分片生命周期、`status()`、`room()`、`world()`、`runtime()`、`health()`、`mods()`、`connected_shards()`、`presence()`、`list_snapshots()`、`regenerate_shard()`。 |
 | `shard.players` | 查询人物与库存、踢出、封禁、解封、管理员状态、生命状态、传送、跨分片迁移、物品增减。 |
 | `cluster` / `shard` 订阅 | `subscribe("logs")`、`subscribe("lifecycle")`、`subscribe("events")`；通过 `async with` 管理订阅，再 `await subscription.next()`。 |
 | `shard.evaluate(lua)` | 对表达式或语句执行一次，以 `ConsoleResult` 返回 print 输出、带类型的文本值和错误。 |
@@ -1009,7 +1013,11 @@ async def inspect_game(game: GameClient) -> None:
     print(world, day, players)
 ```
 
-`GameClient.request_save()` 仅提交原生保存请求；需要等待确认时使用 `Server.save()` 或集群/分片的 `save()`。
+`GameClient.invoke(Save())` 是内部原生请求；公开的 `cluster.save()` 同样在受理后返回。
+`shard.presence()` 返回独立于可选遥测的连接数、玩家数、活动间隔和观测标识。
+闲置回收要求全部分片观测可靠；观测中断或世界变化后重新给予完整宽限期，确认正常的定时关闭延续闲置计时。
+协议版本为 3；健康状态区分当前能力、当前故障与历史错误计数。
+投票采集按实际组件支持标准、暴食和熔炉模式，不改变游戏投票行为。
 
 ### 表情与动作枚举
 

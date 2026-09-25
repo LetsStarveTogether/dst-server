@@ -11,6 +11,7 @@ from logbook import Logger
 from ulid import ULID
 
 from dst_server import commands as c
+from dst_server.activity import ActivityCheckpoint, observe
 from dst_server.announcements import MOD_UPDATE_NOTICE, Countdown
 from dst_server.api import ClusterAPI, ShardAPI
 from dst_server.concurrency import cancel_tasks, complete
@@ -30,6 +31,7 @@ from dst_server.errors import (
 )
 from dst_server.events.world import ModOutdatedEvent
 from dst_server.game.rpc import LuaRequestError
+from dst_server.host.locking import room_lock
 from dst_server.models import Player, Runtime
 from dst_server.models.cluster import (
     ClusterPhase,
@@ -46,6 +48,7 @@ from dst_server.models.cluster import (
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog
 from dst_server.mods import ModUpdateError
 from dst_server.mods.maintenance import ModMaintenance
+from dst_server.rooms import read_control, write_control
 from dst_server.timeouts import (
     DEFAULT_COMMAND_TIMEOUT,
     DEFAULT_CONNECT_TIMEOUT,
@@ -669,6 +672,16 @@ class ClusterController(ClusterAPI):
         require_empty: bool | None = None,
         completion_timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
+        if require_empty:
+            observations = await self._gather(
+                self._ordered_agents, lambda agent: agent.invoke(c.Presence())
+            )
+            if any(
+                not value.reliable or value.client_count or value.player_count
+                for value in observations.values()
+            ):
+                msg = "world regeneration requires reliably empty shards"
+                raise RuntimeError(msg)
         await self._reload(
             lambda master: master.invoke(
                 c.Regenerate(
@@ -782,6 +795,90 @@ class ClusterController(ClusterAPI):
             self._record_error("cluster shutdown failed", error)
             raise error
         self._shutdown_complete = True
+        if not forced and not self._fatal.is_set():
+            try:
+                await self._checkpoint_activity()
+            except Exception:
+                logger.exception("could not preserve room activity after shutdown")
+
+    async def _checkpoint_activity(self) -> None:
+        async with room_lock(self.cluster_path):
+            control = read_control(self.cluster_path)
+            previous = control.activity
+            if not (
+                control.recycle
+                and control.schedule
+                and not control.paused
+                and previous is not None
+                and self._complete
+            ):
+                return
+            statuses = await self._gather(
+                tuple(self._agents.values()), lambda agent: agent.runtime_status()
+            )
+            if set(statuses) != set(previous.sessions) or any(
+                status.returncode != 0
+                or status.pid is not None
+                or status.error_id is not None
+                or not status.activity_reliable
+                or status.session_id != previous.sessions[name]
+                or status.activity_observation is None
+                or not previous.observations.get(name, "").startswith(
+                    f"{status.activity_observation}:"
+                )
+                for name, status in statuses.items()
+            ):
+                return
+            checkpoint = previous.replace(
+                clean_shutdown=True,
+                last_active_at=max(
+                    previous.last_active_at,
+                    *(
+                        status.last_active_at or previous.last_active_at
+                        for status in statuses.values()
+                    ),
+                ),
+            )
+            write_control(
+                self.cluster_path, control.model_copy(update={"activity": checkpoint})
+            )
+
+    async def _consume_activity(self) -> ActivityCheckpoint | None:
+        async with room_lock(self.cluster_path, wait=True):
+            control = read_control(self.cluster_path)
+            previous = control.activity
+            if previous is None or not previous.clean_shutdown:
+                return None
+            # Consume before launching games: a crash must not reuse this bridge.
+            write_control(
+                self.cluster_path,
+                control.model_copy(
+                    update={"activity": previous.replace(clean_shutdown=False)}
+                ),
+            )
+            return previous if control.recycle and not control.paused else None
+
+    async def _resume_activity(self, previous: ActivityCheckpoint) -> None:
+        try:
+            presence = await self._gather(
+                self._ordered_agents, lambda agent: agent.invoke(c.Presence())
+            )
+            if any(not value.reliable for value in presence.values()):
+                return
+            async with room_lock(self.cluster_path):
+                control = read_control(self.cluster_path)
+                write_control(
+                    self.cluster_path,
+                    control.model_copy(
+                        update={
+                            "activity": observe(
+                                previous, presence, datetime.now(UTC), resume=True
+                            )
+                        }
+                    ),
+                )
+        except Exception:
+            logger.exception("could not resume room activity after startup")
 
     @property
     def _complete(self) -> bool:
@@ -1506,7 +1603,10 @@ class ClusterController(ClusterAPI):
         operation_deadline.set(None)
         try:
             async with self._serialized(), timeout_scope(DEFAULT_LIFECYCLE_TIMEOUT):
+                previous = await self._consume_activity()
                 await self._start_desired()
+                if previous is not None:
+                    await self._resume_activity(previous)
         except asyncio.CancelledError:
             raise
         except ModUpdateError as error:
@@ -1528,8 +1628,8 @@ class ClusterController(ClusterAPI):
                 current = asyncio.current_task()
                 if current is not None and current.cancelling():
                     raise
-            except Exception as error:
-                self._record_error("MOD state observation failed", error)
+            except Exception:
+                logger.exception("MOD state observation failed; retrying next cycle")
 
     async def _maintain_mods(self) -> None:
         if self._lock.locked() or self._loading:
@@ -1543,6 +1643,17 @@ class ClusterController(ClusterAPI):
                     *(self._endpoint_status(agent) for agent in self._ordered_agents)
                 )
             )
+            if all(status.phase == "running" and status.ready for status in statuses):
+                observations = await self._gather(
+                    self._ordered_agents,
+                    lambda agent: agent.invoke(c.Presence(timeout=5)),
+                )
+                statuses = tuple(
+                    status.replace(
+                        outdated_mods=observations[status.name].outdated_mods
+                    )
+                    for status in statuses
+                )
             now = asyncio.get_running_loop().time()
             maintenance.observe(statuses)
             if (

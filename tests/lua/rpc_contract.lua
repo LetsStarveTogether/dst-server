@@ -5,6 +5,7 @@ package.path = lua_root .. "/?.lua;" .. native_root .. "/?.lua;" .. package.path
 
 json = require("json")
 local observed = { world_events = {} }
+GetTimeReal = function() return 1000 end
 local blacklist = {
     { userid = "KU_BLOCKED", netid = "Steam_BLOCKED" },
     { userid = "", netid = "Steam_ONLY" },
@@ -293,6 +294,7 @@ driver.install({ nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV", generation = 1, profile =
 
 local calls = {
     { "health", {} },
+    { "presence", {} },
     { "room", {} },
     { "world", {} },
     { "runtime", {} },

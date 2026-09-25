@@ -35,6 +35,7 @@ from dst_server.models.cluster import (
 )
 from dst_server.models.console import ConsoleResult
 from dst_server.models.driver import DriverHealth
+from dst_server.models.driver import Presence as PresenceInfo
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog
 from dst_server.timeouts import (
     DEFAULT_COMMAND_TIMEOUT,
@@ -443,8 +444,8 @@ class Drain(Request[None]):
     timeout: Timeout = DEFAULT_STOP_TIMEOUT
 
 
-class SaveMarker(Request[ObservationCursor]):
-    method = "save_marker"
+class Presence(Request[PresenceInfo]):
+    method = "presence"
 
 
 class Activate(Request[None]):
@@ -509,6 +510,7 @@ OPERATIONS = (
     Operation(RollbackToDay, Snapshot, True, _CLUSTER),
     Operation(RollbackToSnapshot, None, True, _AGENT, game="reload"),
     Operation(Health, DriverHealth, False, _SHARD, game="request"),
+    Operation(Presence, PresenceInfo, False, _SHARD, game="request"),
     Operation(Room, RoomInfo, False, _SHARD, game="request"),
     Operation(World, WorldInfo, False, _SHARD, game="request"),
     Operation(Runtime, RuntimeInfo, False, _SHARD, game="request"),

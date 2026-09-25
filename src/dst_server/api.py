@@ -21,7 +21,7 @@ from dst_server.models.cluster import (
     ShardRuntimeStatus,
 )
 from dst_server.models.console import ConsoleResult
-from dst_server.models.driver import DriverHealth
+from dst_server.models.driver import DriverHealth, Presence
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog
 from dst_server.timeouts import (
     DEFAULT_COMMAND_TIMEOUT,
@@ -90,8 +90,8 @@ class ShardAPI(_LifecycleAPI):
     ) -> ConsoleResult:
         return await self.invoke(c.Evaluate(source=source, timeout=timeout))
 
-    async def save(self, *, timeout: float = DEFAULT_SAVE_TIMEOUT) -> SavedEvent:
-        return await self.invoke(c.Save(timeout=timeout))
+    async def presence(self) -> Presence:
+        return await self.invoke(c.Presence())
 
     async def health(self) -> DriverHealth:
         return await self.invoke(c.Health())

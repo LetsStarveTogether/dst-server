@@ -40,6 +40,7 @@ end
 OnSimPaused = function() end
 OnSimUnpaused = function() TheWorld:PushEvent("ms_simunpaused") end
 world_events.install_world()
+require("dst_server.connections").install(TheWorld)
 
 player:PushEvent("ms_respawnedfromghost")
 player:PushEvent("ms_respawnedfromghost", { corpse = true, reviver = player })
