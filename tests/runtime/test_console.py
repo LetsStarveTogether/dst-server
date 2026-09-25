@@ -1,18 +1,22 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Any, cast
+from unittest.mock import AsyncMock, Mock
 
 import orjson
 import pytest
 from pydantic import JsonValue
 from ulid import ULID
 
+from dst_server import commands as c
 from dst_server.errors import IndeterminateCommandError
-from dst_server.game.rpc import MAX_RESULT_LINE_BYTES, RPC_PREFIX
+from dst_server.game.rpc import MAX_RESULT_LINE_BYTES, RPC_PREFIX, LuaRequestError
 from dst_server.runtime.console import MAX_PENDING, Console, StaleGenerationError
 from dst_server.runtime.request import RequestState, track_request
 from dst_server.telemetry.recorder import Recorder
+from tests.game.helpers import make_game
 from tests.runtime.helpers import (
     COMMAND_DONE,
     StubWriter,
@@ -156,11 +160,12 @@ async def test_accepted_command_printing_busy_is_not_retried() -> None:
     "corruption",
     ["json", "duplicate", "nonce", "id", "generation", "oversize", "missing"],
 )
+@pytest.mark.parametrize("method", ["health", "custom_query"])
 async def test_invalid_response_fails_one_request_and_next_request_recovers(
-    corruption: str,
+    corruption: str, method: str
 ) -> None:
     async with make_console() as (console, writer, reader):
-        task = asyncio.create_task(console.execute("health", {}, 0))
+        task = asyncio.create_task(console.execute(method, {}, 0))
         request = await next_request(writer)
         reply = packet(request, result={"ok": True, "data": 1})
         if corruption == "json":
@@ -231,18 +236,21 @@ async def test_queued_timeout_does_not_write_or_cancel_current_reader() -> None:
 
 
 @pytest.mark.parametrize("ending", ["eof", "close"])
-async def test_stream_shutdown_wakes_requests_and_reaps_reader(ending: str) -> None:
+@pytest.mark.parametrize("method", ["save", "health"])
+async def test_stream_shutdown_wakes_requests_and_reaps_reader(
+    ending: str, method: str
+) -> None:
     async with make_console() as (console, writer, reader):
-        task = asyncio.create_task(console.execute("save", {}, 0))
+        task = asyncio.create_task(console.execute(method, {}, 0))
         await next_request(writer)
         if ending == "eof":
             reader.feed_eof()
         else:
             await console.close()
-        with pytest.raises(EOFError):
+        with pytest.raises(IndeterminateCommandError if method == "save" else EOFError):
             await task
         with pytest.raises(EOFError):
-            await console.execute("health", {}, 0)
+            await console.execute(method, {}, 0)
         assert console.closed
         assert console.reader_task.done()
 
@@ -288,38 +296,83 @@ async def test_unread_input_blocks_new_writes_after_caller_timeout() -> None:
         assert len(writer.commands) == 2
 
 
-async def test_save_result_follows_native_done_and_retains_its_request_id() -> None:
+@pytest.mark.parametrize("command", [c.Save(), c.RegenerateShard(), c.Health()])
+@pytest.mark.parametrize("result", ["missing", "rejected"])
+async def test_native_result_certainty_reaches_game_client(
+    command: c.Request[Any], result: str
+) -> None:
     async with make_console() as (console, writer, reader):
-        task = asyncio.create_task(console.execute("save", {}, 0))
+        game, _ = make_game()
+        game.execute_ready = partial(console.execute, generation=0)
+
+        async def reload(
+            method: str, arguments: dict[str, JsonValue], completion_timeout: float
+        ) -> bytes:
+            return await console.execute(
+                method, arguments, 0, completion_timeout=completion_timeout
+            )
+
+        game.execute_reload = reload
+        task = asyncio.create_task(game.invoke(command))
         request = await next_request(writer)
-        reader.feed_data(packet(request, accepted=True) + COMMAND_DONE + b"\n")
-        await asyncio.sleep(0)
-        assert not task.done()
-        feed_response(
-            reader, request, {"snapshot": "session/TEST/1"}, accepted=False, done=False
+        reply = (
+            packet(request, result={"ok": False, "error": "rejected"})
+            if result == "rejected"
+            else b""
         )
-        assert await task == structured_result({"snapshot": "session/TEST/1"})
+        reader.feed_data(packet(request, accepted=True) + reply + COMMAND_DONE + b"\n")
+        expected = (
+            LuaRequestError
+            if result == "rejected"
+            else IndeterminateCommandError
+            if c.operation("agent", command).mutation
+            else RuntimeError
+        )
+        with pytest.raises(expected) as caught:
+            await task
+        assert type(caught.value) is expected
         assert not console.pending
 
 
-async def test_late_save_result_does_not_retire_the_next_native_frame() -> None:
+async def test_result_after_finished_frame_does_not_retire_the_next_request() -> None:
     async with make_console() as (console, writer, reader):
-        task = asyncio.create_task(
-            console.execute("save", {}, 0, completion_timeout=0.02)
-        )
+        task = asyncio.create_task(console.execute("evaluate", {}, 0))
         old = await next_request(writer)
         reader.feed_data(packet(old, accepted=True) + COMMAND_DONE + b"\n")
-        with pytest.raises(TimeoutError):
+        with pytest.raises(IndeterminateCommandError):
             await task
         second = asyncio.create_task(console.execute("health", {}, 0))
         request = await next_request(writer)
-        feed_response(
-            reader, old, {"snapshot": "session/TEST/1"}, accepted=False, done=False
-        )
+        feed_response(reader, old, True, accepted=False, done=False)
         feed_response(reader, request, 42)
         assert await second == structured_result(42)
         assert len(writer.commands) == 2
         assert not console.pending
+
+
+@pytest.mark.parametrize("stage", ["write", "drain"])
+async def test_mutation_write_failure_preserves_dispatch_certainty(
+    stage: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with make_console() as (console, writer, _):
+        failure = BrokenPipeError("closed input")
+        monkeypatch.setattr(
+            writer,
+            stage,
+            Mock(side_effect=failure)
+            if stage == "write"
+            else AsyncMock(side_effect=failure),
+        )
+        state = RequestState()
+        with (
+            track_request(state),
+            pytest.raises(
+                BrokenPipeError if stage == "write" else IndeterminateCommandError
+            ),
+        ):
+            await console.execute("save", {}, 0)
+        assert state.sent is (stage == "drain")
+        assert len(writer.commands) == (stage == "drain")
 
 
 async def test_request_at_atomic_pipe_limit_is_sent_whole() -> None:

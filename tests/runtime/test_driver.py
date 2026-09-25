@@ -66,11 +66,9 @@ def event(
 
 
 async def test_waiters_follow_current_generation_without_install_commands() -> None:
-    server = await StubServer([
-        structured_result({"snapshot": "session/TEST/0000000001"})
-    ]).initialize()
+    server = await StubServer([structured_result(True)]).initialize()
     server.driver.starting(1)
-    request = asyncio.create_task(server.game.request_save())
+    request = asyncio.create_task(server.game.invoke(c.Save()))
     cancelled = asyncio.create_task(server.driver.wait_ready())
     try:
         await asyncio.sleep(0)
@@ -200,12 +198,12 @@ async def test_timed_out_console_recovers_after_native_world_change() -> None:
         assert server.driver_health == health(1, generation=1)
         assert writer.commands == before
         assert not server.console.closed
-        saving = asyncio.create_task(server.game.request_save())
+        saving = asyncio.create_task(server.game.invoke(c.Save()))
         try:
             request = await next_request(writer)
             assert request["generation"] == 1
             assert request["id"] != timed_out["id"]
-            feed_response(reader, request, {"snapshot": "session/TEST/0000000001"})
+            feed_response(reader, request, True)
             await asyncio.wait_for(saving, 1)
             assert len(writer.commands) == len(before) + 1
         finally:

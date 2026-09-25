@@ -16,7 +16,7 @@ RPC_ADAPTERS = {
     )
     for spec in c.OPERATIONS
     if spec.game
-} | {"save": SAVE_RESPONSE}
+}
 
 
 def run_lua_contract(native_scripts: Path, script: str, luajit: str) -> list[str]:

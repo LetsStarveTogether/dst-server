@@ -23,6 +23,7 @@ class Failure(Envelope):
         "invalid_request",
         "not_ready",
         "stale_generation",
+        "rejected",
         "lua_error",
         "invalid_json_value",
         "invalid_utf8",
@@ -37,13 +38,6 @@ type ResponseAdapter[DataT] = TypeAdapter[Success[DataT] | Failure]
 @cache
 def response_adapter(result_type: Any) -> ResponseAdapter[Any]:
     return TypeAdapter(Success[result_type] | Failure)
-
-
-class SavedSnapshot(Envelope):
-    snapshot: Annotated[str, Field(min_length=1, max_length=4096)]
-
-
-SAVE_RESPONSE = response_adapter(SavedSnapshot)
 
 
 class LuaRequestError(RuntimeError):

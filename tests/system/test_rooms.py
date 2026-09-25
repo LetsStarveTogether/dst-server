@@ -185,7 +185,7 @@ async def test_quadlet_native_configuration_preserves_game_writes_and_stopped_ed
             "TheWorld.topology.overrides.day='onlynight';return true"
         )
         saved = await client.save()
-        assert {name for name, _ in saved.shards} == set(SHARDS)
+        assert saved is None
         world = rooms.load(number).cluster.shards[MASTER].world
         assert world is not None
         assert isinstance(world.overrides, ForestOverrides)

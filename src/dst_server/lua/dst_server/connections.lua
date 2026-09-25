@@ -3,6 +3,25 @@ local values = require("dst_server.values")
 local connections = {}
 
 function connections.install(inst)
+    for name, paused in pairs({ OnSimPaused = true, OnSimUnpaused = false }) do
+        local original = _G[name]
+        assert(type(original) == "function", name .. " is unavailable")
+        local emit_pause = telemetry.guard("world." .. string.lower(name), function()
+            telemetry.emit("dst.server.pause_changed", { domain = "simulation", paused = paused })
+        end)
+        _G[name] = function(...)
+            state.sim_paused = paused
+            local results = telemetry.pack(original(...))
+            emit_pause()
+            return telemetry.unpack(results)
+        end
+    end
+    activity()
+    observed_since = last_active
+    reliable = true
+    for _, name in ipairs({ "ms_playerjoined", "ms_playerleft" }) do
+        inst:ListenForEvent(name, activity)
+    end
     for native, event in pairs({
         ms_clientauthenticationcomplete = "dst.client.authenticated",
         ms_clientdisconnected = "dst.client.disconnected",

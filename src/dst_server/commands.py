@@ -14,7 +14,6 @@ from dst_server.announcements import (
     Countdown,
 )
 from dst_server.configuration.models import ClusterConfig
-from dst_server.events.server import SavedEvent
 from dst_server.json_codec import validate_json_structure
 from dst_server.models import Inventory as PlayerInventory
 from dst_server.models import Mod, Player, ShardStatus
@@ -29,10 +28,8 @@ from dst_server.models.base import (
     RevalidatedFrozenModel,
 )
 from dst_server.models.cluster import (
-    ClusterSaveResult,
     ClusterStatus,
     LocatedPlayer,
-    ObservationCursor,
     ShardResult,
     ShardRuntimeStatus,
 )
@@ -161,15 +158,15 @@ class Announce(Request[None]):
     interval: Timeout = DEFAULT_INTERVAL
 
 
-class Save(Request[SavedEvent]):
-    """Save this shard and wait for its save event."""
+class Save(Request[None]):
+    """Submit one native coordinated save request on the master shard."""
 
     method = "save"
     timeout: Timeout = DEFAULT_SAVE_TIMEOUT
 
 
-class ClusterSave(Request[ClusterSaveResult]):
-    """Save every shard and return their save results."""
+class ClusterSave(Request[None]):
+    """Submit a native coordinated save; return when accepted."""
 
     method = "save"
     timeout: Timeout = DEFAULT_SAVE_TIMEOUT
@@ -441,19 +438,17 @@ class Unwhitelist(_PlayerRequest[bool]):
     method = "unwhitelist"
 
 
-class Activate(Request[None]):
-    method = "activate"
+class Drain(Request[None]):
+    method = "drain"
+    timeout: Timeout = DEFAULT_STOP_TIMEOUT
 
 
 class SaveMarker(Request[ObservationCursor]):
     method = "save_marker"
 
 
-class WaitSaved(Request[SavedEvent]):
-    method = "wait_saved"
-    cursor: ObservationCursor
-    snapshot: Natural | None = None
-    timeout: Timeout = DEFAULT_SAVE_TIMEOUT
+class Activate(Request[None]):
+    method = "activate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,6 +487,7 @@ OPERATIONS = (
     Operation(ClusterStatusQuery, ClusterStatus, False, _CLUSTER),
     Operation(Start, None, True, _ALL),
     Operation(Stop, None, True, _ALL),
+    Operation(Drain, None, True, _AGENT),
     Operation(Restart, None, True, _ALL),
     Operation(Kill, None, True, _ALL),
     Operation(UpdateMods, None, True, _CLUSTER),
@@ -501,8 +497,8 @@ OPERATIONS = (
     Operation(Evaluate, ConsoleResult, True, _SHARD, game="request"),
     Operation(ExecuteAll, tuple[ShardResult[str], ...], True, _CLUSTER),
     Operation(Announce, None, True, _MASTER, game="request"),
-    Operation(Save, SavedEvent, True, _SHARD),
-    Operation(ClusterSave, ClusterSaveResult, True, _CLUSTER),
+    Operation(Save, None, True, _AGENT, game="request"),
+    Operation(ClusterSave, None, True, _CLUSTER),
     Operation(Pause, bool, True, _SHARD, game="request"),
     Operation(ClusterPause, tuple[ShardResult[bool], ...], True, _CLUSTER),
     Operation(Reset, None, True, _MASTER, game="reload"),
@@ -541,8 +537,6 @@ OPERATIONS = (
     Operation(Whitelist, bool, True, _MASTER, game="request"),
     Operation(Unwhitelist, bool, True, _MASTER, game="request"),
     Operation(Activate, None, True, _AGENT),
-    Operation(SaveMarker, ObservationCursor, False, _AGENT),
-    Operation(WaitSaved, SavedEvent, False, _AGENT),
 )
 _OPERATIONS = {
     (scope, spec.request.method): spec for spec in OPERATIONS for scope in spec.scopes

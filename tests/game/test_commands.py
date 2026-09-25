@@ -12,8 +12,6 @@ async def test_game_boundary_rejects_lifecycle_and_copied_invalid_commands() -> 
     game, executed = make_game()
     with pytest.raises(ValueError, match="game"):
         await game.invoke(c.Start())
-    with pytest.raises(ValueError, match="game"):
-        await game.invoke(c.Save())
     with pytest.raises(ValueError, match="count"):
         await game.invoke(
             c.Give(userid="KU_TEST", item="twigs").model_copy(update={"count": 65})
@@ -55,7 +53,7 @@ async def test_save_with_unconfirmed_native_ack_is_indeterminate(
 ) -> None:
     game, executed = make_game(response)
     with pytest.raises(IndeterminateCommandError, match="could not be confirmed"):
-        await game.request_save()
+        await game.invoke(c.Save())
     assert len(executed) == 1
 
 
@@ -68,84 +66,26 @@ async def test_arbitrary_lua_error_is_indeterminate_after_execution() -> None:
     assert len(executed) == 1
 
 
-@pytest.mark.parametrize(
-    "scenario",
-    ["saved", "unchanged", "rewound", "session", "world", "secondary", "error"],
-)
-def test_native_save_requires_its_own_completion(
+@pytest.mark.parametrize("scenario", ["running", "paused", "secondary"])
+def test_save_uses_native_request_and_rejects_pause_before_writing(
     native_scripts: Path,
-    scenario: str,
     lua_runtime: str,
+    scenario: str,
 ) -> None:
     run_lua(
-        f'local scenario="{scenario}";'
-        """
+        f"""
         local commands = require("dst_server.commands")
-        local wire = require("dst_server.wire")
-        local invoked, completed, failed, response, coordinated = 0, nil, nil, nil, nil
-        local snapshot, queried = 27, false
-        TheWorld = {
-            ismastershard = scenario ~= "secondary",
-            meta = {session_identifier = "SESSION"},
-            PushEvent = function(_, name, data)
-                assert(name == "master_autosaverupdate")
-                coordinated = data.snapshot
-            end,
-        }
-        TheNet = {
-            GetCurrentSnapshot = function() return snapshot end,
-            GetWorldSessionFile = function()
-                queried = true
-                error("save must not select a snapshot for loading")
-            end,
-        }
-        ShardGameIndex = {SaveCurrent = function(_, callback)
-            invoked = invoked + 1
-            completed = callback
-            if scenario == "error" then error("unknown partial mutation") end
-        end}
-        local function callback(data, failure) response, failed = data, failure end
-        local initial = json.decode(wire.response(function()
-            commands.save({}, callback)
-            return true
-        end))
-        if scenario == "secondary" then
-            assert(initial.ok == false and invoked == 0 and coordinated == nil)
-            return
-        end
-        assert(invoked == 1 and coordinated == 27)
-        assert(response == nil)
-        if scenario == "error" then
-            assert(initial.ok == false and initial.error == "indeterminate")
-        else
-            assert(initial.ok == true)
-        end
-        local rejected = json.decode(wire.response(function()
-            commands.save({}, callback)
-        end))
-        assert(rejected.ok == false and invoked == 1)
-        if scenario == "world" then TheWorld = {} end
-        if scenario == "session" then TheWorld.meta.session_identifier = "OTHER" end
-        snapshot = scenario == "unchanged" and 27 or scenario == "rewound" and 26 or 28
-        completed()
-        assert(not queried)
-        if scenario == "unchanged" or scenario == "rewound"
-            or scenario == "session" or scenario == "world" then
-            assert(response == nil and failed == "indeterminate")
-        else
-            assert(failed == nil and response.snapshot == "session/SESSION/0000000027")
-        end
-        if scenario == "saved" then
-            response = nil
-            commands.save({}, callback)
-            assert(invoked == 2 and coordinated == 28 and response == nil)
-            snapshot = 29
-            completed()
-            assert(not queried and failed == nil)
-            assert(response.snapshot == "session/SESSION/0000000028")
-            assert(TheNet:GetCurrentSnapshot() == 29)
-        end
-        """,
+        local scenario = "{scenario}"
+        local writes = 0
+        TheWorld = {{ismastershard = scenario ~= "secondary"}}
+        TheNet = {{IsServerPaused = function() return scenario == "paused" end}}
+        c_save = function() writes = writes + 1 end
+        ShardGameIndex = {{SaveCurrent = function()
+            error("must use native coordination") end}}
+        local ok = pcall(commands.save)
+        assert(ok == (scenario == "running"))
+        assert(writes == (scenario == "running" and 1 or 0))
+    """,
         lua_runtime,
         native_scripts,
     )

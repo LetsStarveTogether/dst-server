@@ -14,16 +14,14 @@ from dst_server import commands as c
 from dst_server.cluster import agent as agent_module
 from dst_server.cluster.agent import ShardAgent
 from dst_server.configuration.files import Shard
-from dst_server.errors import IndeterminateError
 from dst_server.events import ObservedGameEvent
-from dst_server.events.server import Event, SavedEvent, SessionEvent, UnknownEvent
+from dst_server.events.server import SavedEvent, SessionEvent, UnknownEvent
 from dst_server.events.world import (
     CycleState,
     ModOutdatedData,
     ModOutdatedEvent,
     StateChangedEvent,
 )
-from dst_server.models.cluster import ObservationCursor
 from dst_server.models.snapshot import Snapshot, SnapshotCatalog, WorldSnapshotMetadata
 from dst_server.models.telemetry import TelemetryProfile
 from dst_server.runtime import Server, ServerConfig
@@ -64,25 +62,6 @@ def attach(
     )
     agent.supervisor = cast("ShardSupervisor", supervisor)
     return supervisor
-
-
-async def relay_lifecycle(
-    agent: ShardAgent,
-    server: SimpleNamespace,
-    *events: Event,
-) -> None:
-    for event in events:
-        await agent._observe_saved(cast("Server", server), event)
-    server.read_lifecycle_event = AsyncMock(
-        side_effect=(
-            *(
-                ObservedLifecycleEvent(event, index)
-                for index, event in enumerate(events, 1)
-            ),
-            None,
-        )
-    )
-    await agent._drain_lifecycle(cast("Server", server))
 
 
 async def raise_error(error: Exception) -> None:
@@ -395,95 +374,32 @@ async def test_activate_is_idempotent_and_guards_start_and_restart(
     supervisor.restart.assert_awaited_once()
 
 
-async def test_save_marker_confirms_and_publishes_lifecycle(
+async def test_native_save_event_is_published_with_lifecycle(
     agent: ShardAgent,
     running_server: SimpleNamespace,
 ) -> None:
     attach(agent, running_server)
     lifecycle = agent.lifecycle.subscribe()
-    save_marker = await agent.save_marker()
     saved = SavedEvent(path="session/9", snapshot=9)
 
-    await relay_lifecycle(
-        agent,
-        running_server,
-        SessionEvent(session_id="SESSION"),
-        saved,
+    events = (SessionEvent(session_id="SESSION"), saved)
+    running_server.read_lifecycle_event = AsyncMock(
+        side_effect=(
+            *(
+                ObservedLifecycleEvent(event, index)
+                for index, event in enumerate(events, 1)
+            ),
+            None,
+        )
     )
+    await agent._drain_lifecycle(cast("Server", running_server))
 
-    assert await agent.wait_saved(save_marker, 9, 1) == saved
     records = await lifecycle.next(2)
     assert [record.event for record in records] == [
         SessionEvent(session_id="SESSION"),
         saved,
     ]
     assert [record.observed_timestamp_ns for record in records] == [1, 2]
-
-
-async def test_unknown_markers_and_snapshot_mismatch_are_rejected(
-    agent: ShardAgent,
-    running_server: SimpleNamespace,
-) -> None:
-    attach(agent, running_server)
-
-    future = ObservationCursor(
-        attempt=ULID.from_str(running_server.game_events.nonce), sequence=1
-    )
-    with pytest.raises(ValueError, match="future save cursor"):
-        await agent.wait_saved(future, None, 1)
-
-    marker = await agent.save_marker()
-    saved = SavedEvent(path="session/8", snapshot=8)
-    await relay_lifecycle(agent, running_server, saved)
-
-    with pytest.raises(TimeoutError):
-        await agent.wait_saved(marker, 9, 0.01)
-    assert await agent.wait_saved(marker, None, 1) == saved
-
-
-@pytest.mark.parametrize("count", [63, 64, 65])
-async def test_save_cursor_detects_lost_confirmations(
-    agent: ShardAgent,
-    running_server: SimpleNamespace,
-    count: int,
-) -> None:
-    attach(agent, running_server)
-    cursor = await agent.save_marker()
-    await relay_lifecycle(
-        agent,
-        running_server,
-        *(
-            SavedEvent(path=f"session/{number}", snapshot=number)
-            for number in range(1, count + 1)
-        ),
-    )
-    if count > 64:
-        with pytest.raises(IndeterminateError):
-            await agent.wait_saved(cursor, None, 1)
-    else:
-        assert (await agent.wait_saved(cursor, None, 1)).snapshot == 1
-
-
-@pytest.mark.parametrize("replacement_saved", [False, True])
-async def test_save_cursor_rejects_stopped_or_replaced_attempt(
-    agent: ShardAgent,
-    running_server: SimpleNamespace,
-    replacement_saved: bool,
-) -> None:
-    attach(agent, running_server)
-    marker = await agent.save_marker()
-    if replacement_saved:
-        replacement = SimpleNamespace(
-            game_events=SimpleNamespace(nonce=str(ULID())), returncode=None
-        )
-        attach(agent, replacement)
-        await relay_lifecycle(
-            agent, replacement, SavedEvent(path="session/NEW/9", snapshot=9)
-        )
-    else:
-        running_server.returncode = 0
-    with pytest.raises(RuntimeError, match="attempt changed"):
-        await agent.wait_saved(marker, 9, 1)
 
 
 async def test_failure_is_queued_and_public_status_is_sanitized(
@@ -726,23 +642,3 @@ async def test_readiness_tracks_the_current_driver_not_a_past_session(
     finally:
         server.child = None
         await server.finish()
-
-
-async def test_save_confirmation_survives_notification_queue_overflow(
-    agent: ShardAgent,
-) -> None:
-    server = agent._new_server()
-    attach(agent, server)
-    marker = await agent.save_marker()
-    reader = asyncio.StreamReader()
-    reader.feed_data(b"DST_Saved|session/ABC/3\n" + b"unknown\n" * 65)
-    reader.feed_eof()
-    try:
-        await server._pump_lifecycle(reader)
-        assert server.lifecycle.dropped > 0
-        assert (await agent.wait_saved(marker, 3, 0.1)).snapshot == 3
-        while not server.lifecycle.queue.empty():
-            assert not isinstance(server.lifecycle.queue.get_nowait().event, SavedEvent)
-    finally:
-        await server.finish()
-        await agent._stopped(server)

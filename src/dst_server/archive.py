@@ -87,7 +87,7 @@ def export_cluster(  # ruff: ignore[complex-structure]
     room_id: str | None = None,
     encode_user_path: bool = True,
 ) -> Iterator[ClusterArchive]:
-    """Yield an auto-closing archive stream for a saved, quiescent cluster."""
+    """Archive a quiescent cluster, best effort; scan errors may omit saves."""
     from py7zr import FILTER_ZSTD, SevenZipFile
 
     directory = Path(directory).absolute()

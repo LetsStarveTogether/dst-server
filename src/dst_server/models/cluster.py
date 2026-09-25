@@ -7,7 +7,6 @@ from pydantic import AwareDatetime, Field
 from dst_server.errors import ErrorInfo
 from dst_server.events import GameEvent
 from dst_server.events.server import Event as LifecycleEvent
-from dst_server.events.server import SavedEvent
 
 from .base import FrozenModel, NonNegativeInt, ULIDValue
 from .driver import DriverHealth
@@ -96,11 +95,6 @@ class LocatedPlayer(FrozenModel):
     player: Player
 
 
-class ObservationCursor(FrozenModel):
-    attempt: ULIDValue
-    sequence: NonNegativeInt
-
-
 class LogRecord(FrozenModel):
     shard: Annotated[str, Field(min_length=1)]
     game_attempt: ULIDValue
@@ -130,9 +124,3 @@ class ShardResult[T]:
     shard: str
     value: T | None = None
     error: ErrorInfo | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ClusterSaveResult:
-    snapshot: int | None
-    shards: tuple[tuple[str, SavedEvent], ...]

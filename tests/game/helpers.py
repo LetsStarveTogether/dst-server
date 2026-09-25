@@ -19,22 +19,15 @@ def make_game(
         method: str,
         arguments: dict[str, JsonValue],
         completion_timeout: float,
-    ) -> tuple[bytes, int, float]:
+    ) -> bytes:
         del completion_timeout
         commands.append((method, arguments))
-        return response, 0, float("inf")
-
-    async def wait_reload(  # ruff:ignore[unused-async]
-        generation: int,
-        deadline: float,
-    ) -> None:
-        del generation, deadline
+        return response
 
     game = GameClient(
         shard="Master",
         execute_ready=execute,
         execute_reload=execute_reload,
-        wait_reload=wait_reload,
         recorder=Recorder("cluster", "Master"),
         session_id=lambda: "SESSION",
     )

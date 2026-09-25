@@ -236,6 +236,7 @@ ROUTES = [
 ]
 
 VOID_METHODS = {
+    "save",
     "announce",
     "reset",
     "regenerate",
@@ -301,23 +302,10 @@ async def test_public_api_routes_typed_requests(
     assert game.recorder.player_count == expected_player_count
 
 
-async def test_save_returns_only_the_correlated_snapshot_path() -> None:
-    game, commands = make_game(
-        structured_result({"snapshot": "session/SESSION/0000000027"})
-    )
-    saved = await game.request_save()
-    assert saved.snapshot == 27
-    assert saved.path == "session/SESSION/0000000027"
+async def test_save_requests_native_coordination_without_claiming_completion() -> None:
+    game, commands = make_game(structured_result(True))
+    assert await game.invoke(c.Save()) is None
     assert commands == [("save", {})]
-
-
-@pytest.mark.parametrize(
-    "path", ["", "session/SESSION/unknown", "session/SESSION/9007199254740992"]
-)
-async def test_save_rejects_missing_or_invalid_snapshot_number(path: str) -> None:
-    game, _ = make_game(structured_result({"snapshot": path}))
-    with pytest.raises(IndeterminateCommandError):
-        await game.request_save()
 
 
 async def test_request_passes_untrusted_text_as_data() -> None:
@@ -420,8 +408,8 @@ async def test_snapshot_page_bounds(arguments: dict[str, int], message: str) -> 
     assert commands == []
 
 
-async def test_indeterminate_lua_mutation_does_not_wait_for_reload(
-    native_scripts: Path, lua_runtime: str, monkeypatch: pytest.MonkeyPatch
+async def test_indeterminate_lua_mutation_is_not_repeated(
+    native_scripts: Path, lua_runtime: str
 ) -> None:
     output = run_lua(
         'local wire=require("dst_server.wire");'
@@ -429,14 +417,12 @@ async def test_indeterminate_lua_mutation_does_not_wait_for_reload(
         lua_runtime,
         native_scripts,
     )
-    game, _ = make_game(output)
-    wait = AsyncMock()
-    monkeypatch.setattr(game, "wait_reload", wait)
+    game, commands = make_game(output)
 
     with pytest.raises(IndeterminateCommandError, match="may have been applied"):
         await game.invoke(c.Rollback())
 
-    wait.assert_not_awaited()
+    assert commands == [("rollback", {"count": 1})]
 
 
 async def test_partial_native_mutation_is_indeterminate(
@@ -485,17 +471,10 @@ async def test_readonly_lua_failure_remains_determinate() -> None:
         await game.invoke(c.World())
 
 
-async def test_reload_wait_failure_is_indeterminate(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    game, _ = make_game(structured_result(True))
-    wait = AsyncMock(side_effect=EOFError("event stream closed"))
-    monkeypatch.setattr(game, "wait_reload", wait)
-
-    with pytest.raises(IndeterminateCommandError, match="could not be confirmed"):
-        await game.invoke(c.Rollback())
-
-    wait.assert_awaited_once()
+async def test_reload_returns_after_native_acknowledgement() -> None:
+    game, commands = make_game(structured_result(True))
+    assert await game.invoke(c.Rollback()) is None
+    assert commands == [("rollback", {"count": 1})]
 
 
 @pytest.mark.parametrize(
@@ -505,7 +484,6 @@ async def test_regeneration_rechecks_world_and_players_at_execution(
     native_scripts: Path,
     scenario: str,
     lua_runtime: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = run_lua(
         f'local scenario="{scenario}";'
@@ -537,9 +515,7 @@ async def test_regeneration_rechecks_world_and_players_at_execution(
         lua_runtime,
         native_scripts,
     )
-    game, _ = make_game(output)
-    wait = AsyncMock()
-    monkeypatch.setattr(game, "wait_reload", wait)
+    game, commands = make_game(output)
     command = (
         c.Regenerate()
         if scenario == "manual"
@@ -548,12 +524,11 @@ async def test_regeneration_rechecks_world_and_players_at_execution(
         )
     )
     if scenario in {"session_changed", "player_joined"}:
-        with pytest.raises(IndeterminateCommandError, match="could not be confirmed"):
+        with pytest.raises(LuaRequestError, match="rejected"):
             await game.invoke(command)
-        wait.assert_not_awaited()
     else:
-        await game.invoke(command)
-        wait.assert_awaited_once()
+        assert await game.invoke(command) is None
+    assert len(commands) == 1
 
 
 @pytest.mark.parametrize(
@@ -576,7 +551,6 @@ async def test_native_snapshot_rollback_checks_target_and_partial_mutation(
     native_scripts: Path,
     scenario: str,
     lua_runtime: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = run_lua(
         f'local scenario="{scenario}";'
@@ -646,19 +620,22 @@ async def test_native_snapshot_rollback_checks_target_and_partial_mutation(
         lua_runtime,
         native_scripts,
     )
-    game, _ = make_game(output)
-    wait = AsyncMock()
-    monkeypatch.setattr(game, "wait_reload", wait)
+    game, commands = make_game(output)
 
     if scenario in {"success", "gapped", "older"}:
-        await game.invoke(c.RollbackToSnapshot(session_id="SESSION", snapshot_id=3))
-        wait.assert_awaited_once()
-    else:
-        partial = scenario in {"truncate", "noop", "reset"}
-        message = "may have been applied" if partial else "could not be confirmed"
-        with pytest.raises(IndeterminateCommandError, match=message):
+        assert (
             await game.invoke(c.RollbackToSnapshot(session_id="SESSION", snapshot_id=3))
-        wait.assert_not_awaited()
+            is None
+        )
+    elif scenario in {"truncate", "noop", "reset"}:
+        with pytest.raises(IndeterminateCommandError, match="may have been applied"):
+            await game.invoke(c.RollbackToSnapshot(session_id="SESSION", snapshot_id=3))
+    else:
+        with pytest.raises(LuaRequestError, match="rejected"):
+            await game.invoke(c.RollbackToSnapshot(session_id="SESSION", snapshot_id=3))
+    assert commands == [
+        ("rollback_to_snapshot", {"session_id": "SESSION", "snapshot_id": 3})
+    ]
 
 
 @pytest.mark.parametrize(

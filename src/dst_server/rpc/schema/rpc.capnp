@@ -41,4 +41,5 @@ interface Bootstrap {
 interface WorkerRegistry {
   register @0 (agent :Agent) -> (result :Outcome(Unit));
   failed @1 () -> (result :Outcome(Unit));
+  draining @2 () -> (result :Outcome(Unit));
 }

@@ -1,7 +1,7 @@
 local values = require("dst_server.values")
+local wire = require("dst_server.wire")
 local commands = {}
 local MAX_GIVE_ITEMS = 64
-local save_pending = false
 
 function commands.announce(args)
     local message = values.required_string(args, "message")
@@ -18,37 +18,13 @@ function commands.announce(args)
     return true
 end
 
-function commands.save(args, callback)
-    if TheWorld == nil or not TheWorld.ismastershard then
-        error("coordinated saves require the master shard")
+function commands.save()
+    if TheWorld == nil or not TheWorld.ismastershard
+        or require("dst_server.state").sim_paused or TheNet:IsServerPaused() then
+        wire.reject()
     end
-    if save_pending then error("a native save is still pending") end
-    assert(type(callback) == "function", "save requires a completion callback")
-    local world = TheWorld
-    local session = values.required_string(world.meta, "session_identifier")
-    local snapshot = TheNet:GetCurrentSnapshot()
-    save_pending = true
-    local ok = pcall(function()
-        -- Preserve the native autosaver's snapshot coordination with other shards.
-        TheWorld:PushEvent("master_autosaverupdate", { snapshot = snapshot })
-        ShardGameIndex:SaveCurrent(function()
-            local confirmed, path = pcall(function()
-                assert(TheWorld == world and world.meta.session_identifier == session
-                    and TheNet:GetCurrentSnapshot() > snapshot)
-                -- GetWorldSessionFile selects the saved snapshot and rewinds the counter.
-                return string.format("session/%s/%010d", session, snapshot)
-            end)
-            save_pending = false
-            if not confirmed then
-                callback(nil, "indeterminate")
-                return
-            end
-            callback({ snapshot = path })
-        end)
-    end)
-    -- A failed native call can already have changed disk or other shards.
-    -- Keep the guard until its callback or the next world if completion is unknown.
-    if not ok then require("dst_server.wire").indeterminate() end
+    c_save()
+    return true
 end
 
 function commands.pause(args)
@@ -66,12 +42,12 @@ function commands.regenerate(args)
     if args.expected_session_id ~= nil then
         local expected = values.required_string(args, "expected_session_id")
         if TheWorld == nil or TheWorld.meta == nil or TheWorld.meta.session_identifier ~= expected then
-            error("world regeneration requires the expected session")
+            wire.reject()
         end
     end
     if args.require_empty ~= nil and values.required_boolean(args, "require_empty")
         and #GetPlayerClientTable() > 0 then
-        error("world regeneration requires an empty room")
+        wire.reject()
     end
     c_regenerateworld()
     return true
@@ -92,7 +68,7 @@ function commands.rollback_to_snapshot(args)
     local snapshot_id = values.required_integer(args, "snapshot_id", 1)
     if TheWorld == nil or not TheWorld.ismastershard or TheWorld.meta == nil
         or TheWorld.meta.session_identifier ~= session_id then
-        error("snapshot rollback requires the current master session")
+        wire.reject()
     end
 
     local target
@@ -106,14 +82,14 @@ function commands.rollback_to_snapshot(args)
             end
         end
         if target == nil and not has_more then
-            error("snapshot is no longer available")
+            wire.reject()
         end
         fetch = fetch * 2
     end
 
     local current_snapshot = TheNet:GetCurrentSnapshot()
     if current_snapshot <= snapshot_id then
-        error("snapshot must precede the current snapshot")
+        wire.reject()
     end
 
     local ok = pcall(function()
@@ -124,7 +100,7 @@ function commands.rollback_to_snapshot(args)
         end
         WorldRollbackFromSim(0)
     end)
-    if not ok then require("dst_server.wire").indeterminate() end
+    if not ok then wire.indeterminate() end
     return true
 end
 

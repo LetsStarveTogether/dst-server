@@ -13,10 +13,8 @@ from dst_server.announcements import (
     Repeat,
 )
 from dst_server.configuration.models import ClusterConfig
-from dst_server.events.server import SavedEvent
 from dst_server.models import Inventory, Mod, Player, Room, Runtime, ShardStatus, World
 from dst_server.models.cluster import (
-    ClusterSaveResult,
     ClusterStatus,
     LocatedPlayer,
     ShardResult,
@@ -119,6 +117,7 @@ class ShardAPI(_LifecycleAPI):
     async def regenerate_shard(
         self, *, preserve_settings: bool = True, timeout: float = DEFAULT_RELOAD_TIMEOUT
     ) -> None:
+        """Submit native shard regeneration; return after acknowledgement."""
         return await self.invoke(
             c.RegenerateShard(preserve_settings=preserve_settings, timeout=timeout)
         )
@@ -147,7 +146,8 @@ class ClusterAPI(_LifecycleAPI):
     ) -> tuple[ShardResult[str], ...]:
         return await self.invoke(c.ExecuteAll(source=source, timeout=timeout))
 
-    async def save(self, *, timeout: float = DEFAULT_SAVE_TIMEOUT) -> ClusterSaveResult:
+    async def save(self, *, timeout: float = DEFAULT_SAVE_TIMEOUT) -> None:
+        """Submit one native coordinated save; return after acknowledgement."""
         return await self.invoke(c.ClusterSave(timeout=timeout))
 
     async def pause(self, paused: bool) -> tuple[ShardResult[bool], ...]:
@@ -156,6 +156,7 @@ class ClusterAPI(_LifecycleAPI):
     async def rollback_to_day(
         self, day: int, *, timeout: float = DEFAULT_RELOAD_TIMEOUT
     ) -> Snapshot:
+        """Submit rollback; return the selected snapshot before loading completes."""
         return await self.invoke(c.RollbackToDay(day=day, timeout=timeout))
 
     async def list_players(self) -> tuple[LocatedPlayer, ...]:
@@ -177,13 +178,16 @@ class ClusterAPI(_LifecycleAPI):
             await self.invoke(c.Announce(**Repeat.model_validate(plan).model_dump()))
 
     async def reset(self, *, timeout: float = DEFAULT_RELOAD_TIMEOUT) -> None:
-        """Reload the latest saved snapshot on every shard."""
+        """Submit reloading the latest snapshot; return after acknowledgement."""
         return await self.invoke(c.Reset(timeout=timeout))
 
     async def rollback(
         self, count: int = 1, *, timeout: float = DEFAULT_RELOAD_TIMEOUT
     ) -> None:
-        """Load `count` snapshots before the latest save; zero reloads that save."""
+        """Submit rollback by `count` snapshots; zero reloads the latest save.
+
+        Return after native acknowledgement, before world loading completes.
+        """
         return await self.invoke(c.Rollback(count=count, timeout=timeout))
 
     async def regenerate(
@@ -193,6 +197,7 @@ class ClusterAPI(_LifecycleAPI):
         require_empty: bool | None = None,
         timeout: float = DEFAULT_RELOAD_TIMEOUT,
     ) -> None:
+        """Submit native world regeneration; return after acknowledgement."""
         return await self.invoke(
             c.Regenerate(
                 expected_session_id=expected_session_id,

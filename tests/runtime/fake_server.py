@@ -37,6 +37,7 @@ events.write("DST_SessionId|TEST\n")
 def stop(signum: int, frame: FrameType | None) -> None:
     del signum, frame
     events.write("DST_Shutdown\nDST_Saved|session/TEST/1\nDST_Stopping\n")
+    sys.exit(0)
 
 
 signal.signal(signal.SIGTERM, stop)

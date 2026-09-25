@@ -29,7 +29,6 @@ from dst_server.errors import (
     PlayerLocationConflictError,
     RemoteError,
 )
-from dst_server.events.server import SavedEvent
 from dst_server.game.rpc import LuaRequestError
 from dst_server.models.cluster import (
     LogRecord,
@@ -142,7 +141,7 @@ async def test_complete_roster_starts_without_an_external_client(
 
 
 @pytest.mark.parametrize("operation", ["start", "restart"])
-async def test_cluster_start_updates_mods_after_stopping_all_games(
+async def test_cluster_start_and_restart_reuse_prepared_mods(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
@@ -157,14 +156,14 @@ async def test_cluster_start_updates_mods_after_stopping_all_games(
         prepare.side_effect = update
         if operation == "start":
             await instance.stop()
-            assert (await instance.status()).prepared is False
+            assert (await instance.status()).prepared is True
             await instance.start()
         else:
             await instance.restart()
-        assert prepare.await_count == 2
+        assert prepare.await_count == 1
         assert (await instance.status()).phase == "running"
         await instance.start()
-        assert prepare.await_count == 2
+        assert prepare.await_count == 1
 
 
 async def test_manual_mod_update_is_reused_by_start_and_shard_restart(
@@ -200,34 +199,26 @@ async def test_failed_mod_update_is_retried_before_start(
 
 
 @pytest.mark.parametrize("stage", ["stop", "update"])
-async def test_restart_does_not_start_games_after_stop_or_update_failure(
+async def test_restart_continues_only_after_games_exit_and_mods_prepare(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stage: str,
 ) -> None:
-    instance, master, caves, prepare, calls = await controller(tmp_path, monkeypatch)
-    calls.clear()
-    if stage == "stop":
-        caves.handlers[c.Stop] = AsyncMock(side_effect=RuntimeError("stop failed"))
-    else:
-        prepare.side_effect = ModUpdateError("mod update failed")
-    try:
-        with pytest.raises(
-            ControllerOperationError if stage == "stop" else ModUpdateError
-        ):
-            await instance.restart()
-        assert not any(call.startswith(("start:", "restart:")) for call in calls)
-        assert prepare.await_count == (1 if stage == "stop" else 2)
-        assert master.phase == caves.phase == "stopped"
-        assert (await instance.status()).phase in {"failed", "starting"}
-        caves.handlers.pop(c.Stop, None)
-        prepare.side_effect = None
-        previous_updates = prepare.await_count
-        await instance.start()
-        assert prepare.await_count == previous_updates + 1
-    finally:
-        caves.handlers.pop(c.Stop, None)
-        await instance.aclose()
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, caves, prepare, calls = room
+        calls.clear()
+        if stage == "stop":
+            caves.handlers[c.Stop] = AsyncMock(side_effect=RuntimeError("stop failed"))
+            await instance.restart(notice=None)
+            assert master.phase == caves.phase == "running"
+            assert "kill:Caves" in calls
+            assert calls.index("kill:Caves") < calls.index("start:Caves")
+        else:
+            prepare.side_effect = ModUpdateError("mod update failed")
+            with pytest.raises(ModUpdateError):
+                await instance.update_mods(restart=True, notice=None)
+            assert master.phase == caves.phase == "stopped"
+            assert not any(call.startswith("start:") for call in calls)
 
 
 async def test_registration_requires_stopped_game_processes(
@@ -252,6 +243,8 @@ async def test_initial_mod_download_failure_keeps_service_alive_for_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(controller_module, "HEALTH_INTERVAL", 0.005)
+    monkeypatch.setattr(controller_module, "HEALTH_FAILURE_TIMEOUT", 0.02)
     root = tmp_path / "cluster"
     configuration().save(root)
     prepare = AsyncMock(side_effect=ModUpdateError("download unavailable"))
@@ -268,6 +261,8 @@ async def test_initial_mod_download_failure_keeps_service_alive_for_retry(
         assert 290 < status.mod_update.retry_in_seconds <= 300
         assert master.pid is None
         assert caves.pid is None
+        await asyncio.sleep(0.06)
+        assert not instance._fatal.is_set()
         prepare.side_effect = None
         prepare.return_value = layout(root)
         instance._mod_maintenance.retry_at = 0
@@ -275,6 +270,48 @@ async def test_initial_mod_download_failure_keeps_service_alive_for_retry(
         assert (await instance.status()).phase == "running"
     finally:
         await instance.aclose()
+
+
+@pytest.mark.parametrize("command", [c.Start(), c.Restart(notice=None)])
+@pytest.mark.parametrize("initial", [False, True])
+async def test_shard_start_requires_successful_shared_preparation(
+    empty_controller: ClusterController,
+    monkeypatch: pytest.MonkeyPatch,
+    command: c.Request[None],
+    initial: bool,
+) -> None:
+    instance = empty_controller
+    prepare = AsyncMock(return_value=layout(instance.cluster_path))
+    if initial:
+        prepare.side_effect = ModUpdateError("download unavailable")
+    monkeypatch.setattr(service, "prepare_shared", prepare)
+    calls: list[str] = []
+    master = EndpointStub("Master", True, calls)
+    caves = EndpointStub("Caves", False, calls)
+    master.peers = caves.peers = (master, caves)
+    await instance.register(master)
+    await instance.register(caves)
+    await instance.wait_idle()
+    if not initial:
+        await instance.stop(notice=None)
+        prepare.side_effect = ModUpdateError("download unavailable")
+        with pytest.raises(ModUpdateError):
+            await instance.update_mods()
+    calls.clear()
+    prepared_attempts = prepare.await_count
+
+    with pytest.raises(RuntimeError, match="room resources are not prepared"):
+        await instance.shard("Caves").invoke(command)
+
+    assert calls == []
+    assert prepare.await_count == prepared_attempts
+    assert not instance._prepared
+    assert not instance._loading
+    assert master.phase == caves.phase == ShardPhase.STOPPED
+    prepare.side_effect = None
+    await instance.start()
+    assert prepare.await_count == prepared_attempts + 1
+    assert (await instance.status()).phase == "running"
 
 
 async def test_activation_failure_never_starts_a_game_process(
@@ -355,7 +392,7 @@ async def test_fail_close_kill_failure_is_reported_and_shutdown_retries_cleanup(
     master.handlers[c.Kill] = fail_kill
     try:
         caves.phase = ShardPhase.FAILED
-        with pytest.RaisesGroup(RuntimeError):
+        with pytest.RaisesGroup(RuntimeError, RuntimeError):
             await instance.failed(caves)
         assert master.phase == "running"
 
@@ -466,7 +503,7 @@ async def test_close_kill_failure_does_not_seal_cleanup(
 
     master.handlers[c.Stop] = AsyncMock(side_effect=RuntimeError("stop failed"))
     master.handlers[c.Kill] = fail_kill
-    with pytest.RaisesGroup(RuntimeError):
+    with pytest.RaisesGroup(RuntimeError, RuntimeError):
         await instance.aclose()
     assert master.phase == "running"
     assert caves.phase == "stopped"
@@ -505,7 +542,7 @@ async def test_close_cancels_active_update_without_waiting_for_its_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    instance, _, _, _, _ = await controller(tmp_path, monkeypatch)
+    instance, master, _, _, _ = await controller(tmp_path, monkeypatch)
     await instance.stop()
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -525,11 +562,14 @@ async def test_close_cancels_active_update_without_waiting_for_its_lock(
         async with asyncio.timeout(5):
             await wait_for_event(entered, updating)
 
-            async with asyncio.timeout(1):
-                await instance.aclose()
+            master.stop_entered = asyncio.Event()
+            closing = asyncio.create_task(instance.aclose())
+            await wait_for_event(master.stop_entered, closing)
+            assert not closing.done()
             assert not updating.done()
 
             release.set()
+            await closing
             result = (await asyncio.gather(updating, return_exceptions=True))[0]
             assert isinstance(result, DisconnectedError)
             assert "closed" in str(result)
@@ -717,39 +757,23 @@ async def test_save_and_reload_coordinate_every_shard_from_master_once(
 ) -> None:
     async with managed_controller(tmp_path, monkeypatch) as room:
         instance, master, secondary, _, _ = room
-        saved = await instance.save(timeout=9)
-        assert saved.snapshot == 91
-        assert tuple(name for name, _ in saved.shards) == ("Master", "Caves")
+        assert await instance.save(timeout=9) is None
         assert master.requests.count(c.Save(timeout=9)) == 1
         assert c.Save(timeout=9) not in secondary.requests
-        assert (
-            c.WaitSaved(cursor=secondary.save_cursor, snapshot=91, timeout=9)
-            in secondary.requests
-        )
-        assert not any(
-            isinstance(request, c.SaveMarker | c.WaitSaved)
-            for request in master.requests
-        )
-
         assert tuple(
             result.value
             for result in await instance.execute_all("return true", timeout=4)
         ) == ("Master:return true", "Caves:return true")
         caves = instance.shard("Caves")
         assert await caves.execute("return false", timeout=6) == "Caves:return false"
-        assert await caves.save(timeout=8) == SavedEvent(
-            path="session/Caves/0000000092", snapshot=92
-        )
+        assert not hasattr(caves, "save")
         assert c.Execute(source="return true", timeout=4) in master.requests
         assert c.Execute(source="return false", timeout=6) in secondary.requests
-        assert c.Save(timeout=8) in secondary.requests
 
         with pytest.raises(ValueError, match="greater than 0"):
             await instance.execute_all("return true", timeout=0)
         with pytest.raises(ValueError, match="greater than 0"):
             await caves.execute("return true", timeout=0)
-        with pytest.raises(ValueError, match="greater than 0"):
-            await caves.save(timeout=0)
 
         await instance.reset(timeout=11)
         await instance.rollback(2, timeout=12)
@@ -757,8 +781,8 @@ async def test_save_and_reload_coordinate_every_shard_from_master_once(
             expected_session_id="SESSION", require_empty=True, timeout=13
         )
         for command in (
-            c.RollbackToSnapshot(session_id="Master", snapshot_id=92, timeout=11),
-            c.RollbackToSnapshot(session_id="Master", snapshot_id=90, timeout=12),
+            c.RollbackToSnapshot(session_id="Master", snapshot_id=91, timeout=11),
+            c.RollbackToSnapshot(session_id="Master", snapshot_id=89, timeout=12),
             c.Regenerate(expected_session_id="SESSION", require_empty=True, timeout=13),
         ):
             assert command in master.requests
@@ -773,17 +797,13 @@ async def test_save_and_reload_coordinate_every_shard_from_master_once(
         (c.Rollback(timeout=0.5), c.RollbackToSnapshot),
         (c.RollbackToDay(day=8, timeout=0.5), c.RollbackToSnapshot),
         (c.Regenerate(timeout=0.5), c.Regenerate),
-        (c.Restart(notice=None, timeout=0.5), c.Save),
-        (c.UpdateMods(restart=True, notice=None, timeout=0.5), c.Save),
     ],
 )
-@pytest.mark.parametrize("stage", ["command", "confirmation"])
 async def test_cluster_timeout_after_submission_is_indeterminate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     operation: c.Request[Any],
     mutation: type[c.Save | c.RollbackToSnapshot | c.Regenerate],
-    stage: str,
 ) -> None:
     async with managed_controller(tmp_path, monkeypatch) as room:
         instance, master, caves, _, _ = room
@@ -793,26 +813,19 @@ async def test_cluster_timeout_after_submission_is_indeterminate(
         async def hang(_: c.Request[Any]) -> None:
             await asyncio.Event().wait()
 
-        async def submit(command: c.Request[Any]) -> Any:
-            if stage == "command":
-                await hang(command)
-            result = await master.dispatch(command)
-            if mutation is not c.Save:
-                caves.ready = False
-            return result
-
-        master.handlers[mutation] = submit
-        caves.handlers[c.WaitSaved] = hang
+        master.handlers[mutation] = hang
         with pytest.raises(IndeterminateError):
             await instance.invoke(operation)
         assert sum(isinstance(command, mutation) for command in master.requests) == 1
         assert instance._phase is None
 
-        # An unfinished operation must not taint the next operation's preflight.
-        caves.ready = True
-        master.connected_ids = ("Master",)
-        with pytest.raises(TimeoutError):
-            await instance.save(timeout=0.01)
+        # Loading remains supervised even after an indeterminate reply.
+        if mutation is not c.Save:
+            assert instance._loading
+            with pytest.raises(RuntimeError, match="busy"):
+                await instance.save()
+            await instance.stop(notice=None)
+            assert not instance._loading
 
 
 @pytest.mark.parametrize(
@@ -822,7 +835,7 @@ async def test_cluster_timeout_after_submission_is_indeterminate(
         c.UpdateMods(restart=True, notice=None, timeout=0.5),
     ],
 )
-async def test_restart_timeout_after_save_is_indeterminate(
+async def test_restart_timeout_is_indeterminate_without_extra_save(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     operation: c.Request[None],
@@ -838,7 +851,7 @@ async def test_restart_timeout_after_save_is_indeterminate(
         caves.handlers[c.Start] = start
         with pytest.raises(IndeterminateError):
             await instance.invoke(operation)
-        assert any(isinstance(command, c.Save) for command in master.requests)
+        assert not any(isinstance(command, c.Save) for command in master.requests)
         assert calls.count("stop:Master") == calls.count("start:Master") == 1
         assert calls.count("stop:Caves") == calls.count("start:Caves") == 1
 
@@ -848,7 +861,7 @@ async def test_cluster_operation_defaults_allow_saving_and_reloading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with managed_controller(tmp_path, monkeypatch) as room:
-        instance, master, caves, _, _ = room
+        instance, master, _, _, _ = room
         await instance.execute_all("return true")
         await instance.save()
         await instance.reset()
@@ -856,10 +869,6 @@ async def test_cluster_operation_defaults_allow_saving_and_reloading(
         await instance.regenerate()
         assert c.Execute(source="return true", timeout=120) in master.requests
         assert c.Save(timeout=300) in master.requests
-        assert (
-            c.WaitSaved(cursor=caves.save_cursor, snapshot=91, timeout=300)
-            in caves.requests
-        )
         assert (
             c.RollbackToSnapshot(session_id="Master", snapshot_id=91, timeout=900)
             in master.requests
@@ -879,12 +888,12 @@ async def test_cluster_operation_defaults_allow_saving_and_reloading(
         ("missing_shard_copy", KeyError),
         ("session_changed", ValueError),
         ("restore_failed", IndeterminateError),
-        ("wrong_day", IndeterminateError),
-        ("wrong_session", IndeterminateError),
-        ("wrong_snapshot_same_day", IndeterminateError),
+        ("wrong_day", None),
+        ("wrong_session", None),
+        ("wrong_snapshot_same_day", None),
     ],
 )
-async def test_rollback_to_day_uses_earliest_complete_snapshot_and_verifies_reload(
+async def test_rollback_to_day_selects_complete_snapshot_and_returns_on_acceptance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     scenario: str,
@@ -984,7 +993,7 @@ async def test_save_and_reload_disconnects_are_stage_aware(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with managed_controller(tmp_path, monkeypatch) as room:
-        instance, master, caves, _, _ = room
+        instance, master, _, _, _ = room
         master.handlers[c.Runtime] = AsyncMock(side_effect=DisconnectedError())
         with pytest.RaisesGroup(DisconnectedError):
             await instance.reset()
@@ -995,13 +1004,9 @@ async def test_save_and_reload_disconnects_are_stage_aware(
         with pytest.raises(IndeterminateError):
             await instance.reset()
 
-        caves.handlers[c.SaveMarker] = AsyncMock(side_effect=DisconnectedError())
-        with pytest.RaisesGroup(DisconnectedError):
-            await instance.save()
-        caves.handlers.pop(c.SaveMarker)
-        caves.handlers[c.WaitSaved] = AsyncMock(
-            side_effect=RuntimeError("confirmation failed")
-        )
+        await instance.stop(notice=None)
+        await instance.start()
+        master.handlers[c.Save] = AsyncMock(side_effect=DisconnectedError())
         with pytest.raises(IndeterminateError):
             await instance.save()
 
@@ -1087,7 +1092,7 @@ async def test_shard_restart_forwards_the_callers_lifecycle_budget(
         monkeypatch.setattr(instance, "_agent_call", agent_call)
         async with asyncio.timeout(5):
             await instance.shard("Caves").invoke(c.Restart(timeout=17))
-        assert caves.requests[-1] == c.Restart(timeout=17, notice=None)
+        assert c.Restart(timeout=17, notice=None) in caves.requests
         assert any(
             call.kwargs["limit"] == 17 + controller_module.RPC_TIMEOUT_MARGIN
             for call in agent_call.await_args_list
@@ -1201,7 +1206,7 @@ async def test_concurrent_close_survives_repeated_caller_cancellation(
         assert caught.value.args == ("first cancellation",)
         await asyncio.wait_for(asyncio.shield(other), timeout=5)
         assert master.phase == caves.phase == ShardPhase.STOPPED
-        assert calls == ["stop:Master", "stop:Caves"]
+        assert calls == ["drain:Master", "drain:Caves"]
     finally:
         async with asyncio.timeout(5):
             master.stop_release.set()
@@ -1287,9 +1292,10 @@ async def test_cluster_operations_wait_for_actual_shard_connections(
 
 
 @pytest.mark.parametrize(
-    "outcome", ["new-worlds", "old-cave", "old-generation", "new-process"]
+    "outcome",
+    ["new-worlds", "old-cave", "old-generation", "new-process", "disconnected"],
 )
-async def test_regeneration_requires_new_worlds_in_the_same_processes(
+async def test_reload_acceptance_is_separate_from_loading_supervision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     outcome: str,
@@ -1306,16 +1312,101 @@ async def test_regeneration_requires_new_worlds_in_the_same_processes(
                 caves.generation -= 1
             elif outcome == "new-process":
                 caves.attempt = ULID()
+            elif outcome == "disconnected":
+                master.connected_ids = ("Master",)
 
         mutation = master.handlers[c.Regenerate] = AsyncMock(side_effect=regenerate)
-        if outcome == "new-worlds":
-            await instance.regenerate(timeout=1)
-        else:
-            with pytest.raises(IndeterminateError) as caught:
-                await instance.regenerate(timeout=1)
-            if outcome == "old-cave":
-                assert caught.value.error.fields == ("Caves",)
+        await instance.regenerate(timeout=1)
+        status = await instance.status()
+        assert status.busy is (
+            outcome in {"old-generation", "new-process", "disconnected"}
+        )
+        if status.busy:
+            with pytest.raises(RuntimeError, match="busy"):
+                await instance.regenerate()
+            instance._load_deadline = 0
+            with pytest.raises(TimeoutError, match="loading"):
+                await instance._runtime_ready()
         mutation.assert_awaited_once()
+
+
+@pytest.mark.parametrize("action", ["stop", "kill"])
+@pytest.mark.parametrize("name", ["Master", "Caves"])
+async def test_stopping_one_shard_preserves_other_shards_loading_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str, name: str
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, caves, _, _ = room
+
+        async def regenerate(command: c.Regenerate) -> None:
+            await master.dispatch(command)
+            master.ready = caves.ready = False
+
+        master.handlers[c.Regenerate] = regenerate
+        await instance.regenerate()
+        deadline = instance._load_deadline
+        command = c.Stop(notice=None) if action == "stop" else c.Kill()
+        await instance.shard(name).invoke(command)
+        remaining = caves if name == "Master" else master
+        assert tuple(instance._loading) == (remaining.name,)
+        assert instance._load_deadline == deadline
+        assert await instance._runtime_ready()
+        assert not instance._fatal.is_set()
+        with pytest.raises(RuntimeError, match="busy"):
+            await instance.save()
+        remaining.ready = True
+        assert await instance._runtime_ready()
+        assert not instance._loading
+
+
+@pytest.mark.parametrize("hang", [False, True])
+async def test_loading_survives_failed_connection_query_then_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hang: bool
+) -> None:
+    monkeypatch.setattr(controller_module, "AGENT_STATUS_TIMEOUT", 0.1)
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, _, _, _ = room
+        await instance.regenerate()
+
+        async def connections(_: c.ConnectedShards) -> Any:
+            if hang:
+                await asyncio.Event().wait()
+            raise TimeoutError
+
+        master.handlers[c.ConnectedShards] = connections
+        assert (await instance.invoke(c.ClusterStatusQuery(timeout=0.05))).busy
+        assert await instance._runtime_ready()
+        assert instance._loading
+        del master.handlers[c.ConnectedShards]
+        assert not (await instance.status()).busy
+
+
+async def test_delayed_loading_observation_cannot_complete_a_new_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, _, _, _ = room
+        await instance.regenerate()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def connections(command: c.ConnectedShards) -> Any:
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+            return await master.dispatch(command)
+
+        master.handlers[c.ConnectedShards] = connections
+        status = asyncio.create_task(instance.status())
+        try:
+            await wait_for_event(entered, status)
+            assert not (await instance.status()).busy
+            await instance.regenerate()
+            release.set()
+            await status
+            assert instance._loading
+        finally:
+            release.set()
+            await status
 
 
 @pytest.mark.parametrize(
@@ -1326,8 +1417,6 @@ async def test_regeneration_requires_new_worlds_in_the_same_processes(
         c.Rollback(timeout=0.01),
         c.RollbackToDay(day=8, timeout=0.01),
         c.Regenerate(timeout=0.01),
-        c.Restart(notice=None, timeout=0.01),
-        c.UpdateMods(restart=True, notice=None, timeout=0.01),
     ],
 )
 async def test_connection_timeout_does_not_submit_a_mutation(
@@ -1410,6 +1499,55 @@ async def test_manual_lifecycle_replaces_pending_initialization(
         assert not any(call.startswith("start:") for call in calls)
         prepare.assert_not_awaited()
         await instance.start()
+    assert (await instance.status()).phase == "running"
+
+
+@pytest.mark.parametrize("command", [c.Start(), c.Restart(notice=None)])
+@pytest.mark.parametrize("preparing", [False, True])
+async def test_shard_start_preserves_initialization(
+    empty_controller: ClusterController,
+    monkeypatch: pytest.MonkeyPatch,
+    command: c.Request[None],
+    preparing: bool,
+) -> None:
+    instance = empty_controller
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def prepare_shared(*_: object, **__: object) -> tuple[Shard, ...]:
+        entered.set()
+        await release.wait()
+        return layout(instance.cluster_path)
+
+    prepare = AsyncMock(side_effect=prepare_shared)
+    monkeypatch.setattr(service, "prepare_shared", prepare)
+    calls: list[str] = []
+    master = EndpointStub("Master", True, calls)
+    caves = EndpointStub("Caves", False, calls)
+    master.peers = caves.peers = (master, caves)
+    await instance.register(master)
+    await instance.register(caves)
+    initial = instance._initial_task
+    assert initial is not None
+    if preparing:
+        await wait_for_event(entered, initial)
+
+    try:
+        message = "busy" if preparing else "room resources are not prepared"
+        with pytest.raises(RuntimeError, match=message):
+            await instance.shard("Caves").invoke(command)
+    finally:
+        release.set()
+
+    assert calls == []
+    assert not initial.cancelling()
+    await asyncio.wait_for(instance.wait_idle(), 1)
+    prepare.assert_awaited_once()
+    assert calls == [
+        "activate:Master",
+        "activate:Caves",
+        "start:Master",
+        "start:Caves",
+    ]
     assert (await instance.status()).phase == "running"
 
 
@@ -1546,3 +1684,514 @@ async def test_mutation_forwarding_timeout_is_indeterminate(
             master.handlers[kind] = hang
         with pytest.raises(IndeterminateError):
             await instance.invoke(operation)
+
+
+async def test_save_only_submits_once_without_optional_presence_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, caves, _, _ = room
+        for agent in (master, caves):
+            agent.handlers[c.Presence] = AsyncMock(
+                side_effect=RuntimeError("unavailable")
+            )
+            agent.handlers[c.Room] = AsyncMock(side_effect=RuntimeError("unavailable"))
+            agent.requests.clear()
+        assert await instance.save() is None
+        assert sum(isinstance(request, c.Save) for request in master.requests) == 1
+        assert not any(isinstance(request, c.Save) for request in caves.requests)
+
+
+@pytest.mark.parametrize("code", [ErrorCode.INDETERMINATE, ErrorCode.INVALID_ARGUMENT])
+@pytest.mark.parametrize("shard", [None, "Caves"])
+async def test_remote_reload_rejection_and_unknown_result_have_distinct_busy_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: ErrorCode, shard: str | None
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, caves, _, _ = room
+        endpoint = master if shard is None else caves
+        command = c.Regenerate if shard is None else c.RegenerateShard
+        endpoint.handlers[command] = AsyncMock(
+            side_effect=RemoteError(ErrorInfo(code, ULID(), "test"))
+        )
+        target = instance if shard is None else instance.shard(shard)
+        with pytest.raises(RemoteError):
+            await target.invoke(command())
+        assert (await instance.status()).busy is (code is ErrorCode.INDETERMINATE)
+        assert sum(isinstance(item, command) for item in endpoint.requests) == 1
+
+
+@pytest.mark.parametrize("responsive", [True, False])
+async def test_runtime_monitor_ignores_optional_telemetry_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, responsive: bool
+) -> None:
+    monkeypatch.setattr(controller_module, "HEALTH_INTERVAL", 0.005)
+    monkeypatch.setattr(controller_module, "HEALTH_FAILURE_TIMEOUT", 0.025)
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, caves, _, _ = room
+
+        original_status = master.runtime_status
+
+        async def status() -> ShardRuntimeStatus:
+            value = await original_status()
+            health = value.driver_health
+            return value.replace(
+                driver_health=health.replace(telemetry_status="degraded", errors=2)
+                if health is not None
+                else None
+            )
+
+        monkeypatch.setattr(master, "runtime_status", status)
+
+        async def runtime(command: c.Runtime) -> Any:
+            if not responsive:
+                await asyncio.Event().wait()
+            return await master.dispatch(command)
+
+        master.handlers[c.Runtime] = runtime
+        if responsive:
+            await asyncio.sleep(0.05)
+            assert not instance._fatal.is_set()
+        else:
+            with pytest.raises(ControllerOperationError):
+                await asyncio.wait_for(instance.wait_fatal(), 1)
+            assert "5 minutes" in ((await instance.status()).error or "")
+        assert master.ready
+        assert caves.ready
+        assert not any(isinstance(item, c.Restart) for item in master.requests)
+
+
+async def test_empty_regeneration_checks_secondary_connections_before_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, caves, _, _ = room
+        presence = await caves.dispatch(c.Presence())
+        caves.handlers[c.Presence] = AsyncMock(
+            return_value=presence.replace(client_count=1)
+        )
+        with pytest.raises(RuntimeError, match="empty shards"):
+            await instance.regenerate(require_empty=True)
+        assert not any(isinstance(item, c.Regenerate) for item in master.requests)
+
+
+async def test_close_joins_owned_finalizers_after_native_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(controller_module, "CONTROLLER_CANCEL_TIMEOUT", 0)
+    instance, master, caves, _, _ = await controller(tmp_path, monkeypatch)
+    cleaning, release = asyncio.Event(), asyncio.Event()
+
+    async def background() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+
+    task = instance._mod_task = asyncio.create_task(background())
+    await asyncio.sleep(0)
+    closing = asyncio.create_task(instance.aclose())
+    try:
+        await wait_for_event(cleaning, closing)
+        assert not closing.done()
+        release.set()
+        await asyncio.wait_for(closing, 1)
+        assert task.done()
+        assert master.pid is None
+        assert caves.pid is None
+    finally:
+        release.set()
+        await closing
+
+
+async def test_stopped_shard_loading_is_reconciled_after_lost_stop_reply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, caves, _, _ = room
+
+        async def regenerate(command: c.Regenerate) -> None:
+            await master.dispatch(command)
+            master.ready = caves.ready = False
+
+        async def stop(command: c.Stop) -> None:
+            await caves.dispatch(command)
+            raise RemoteError(ErrorInfo(ErrorCode.INDETERMINATE, ULID(), "lost reply"))
+
+        master.handlers[c.Regenerate] = regenerate
+        await instance.regenerate()
+        caves.handlers[c.Stop] = stop
+        with pytest.raises(RemoteError):
+            await instance.shard("Caves").stop(notice=None)
+        del caves.handlers[c.Stop]
+        assert caves.phase == "stopped"
+        assert caves.pid is None
+        original_status = caves.runtime_status
+        observed_attempt = ULID()
+
+        async def stopped_status() -> ShardRuntimeStatus:
+            return (await original_status()).replace(game_attempt=observed_attempt)
+
+        monkeypatch.setattr(caves, "runtime_status", stopped_status)
+        assert (await instance.status()).busy
+        assert tuple(instance._loading) == ("Master", "Caves")
+        observed_attempt = caves.attempt
+        assert (await instance.status()).busy
+        assert tuple(instance._loading) == ("Master",)
+        master.ready = True
+        assert not (await instance.status()).busy
+
+
+async def test_loading_monitor_rechecks_operation_after_awaiting_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, caves, _, _ = room
+
+        async def regenerate(command: c.Regenerate) -> None:
+            await master.dispatch(command)
+            master.ready = caves.ready = False
+
+        master.handlers[c.Regenerate] = regenerate
+        await instance.regenerate()
+        observed, release_observation = asyncio.Event(), asyncio.Event()
+        original_status = master.runtime_status
+
+        async def delayed_status() -> ShardRuntimeStatus:
+            status = await original_status()
+            observed.set()
+            await release_observation.wait()
+            return status
+
+        monkeypatch.setattr(master, "runtime_status", delayed_status)
+        monitor = asyncio.create_task(instance._runtime_ready())
+        caves.stop_entered, caves.stop_release = asyncio.Event(), asyncio.Event()
+        stopping: asyncio.Task[None] | None = None
+        try:
+            await wait_for_event(observed, monitor)
+            stopping = asyncio.create_task(instance.shard("Caves").stop(notice=None))
+            await wait_for_event(caves.stop_entered, stopping)
+            instance._load_deadline = 0
+            release_observation.set()
+            assert await monitor is None
+            assert not stopping.done()
+            assert instance._lock.locked()
+        finally:
+            release_observation.set()
+            caves.stop_release.set()
+            await asyncio.gather(
+                monitor,
+                *((stopping,) if stopping is not None else ()),
+                return_exceptions=True,
+            )
+
+
+@pytest.mark.parametrize("shard", [None, "Caves"])
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_startup_readiness_outlives_the_callers_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shard: str | None,
+    restart: bool,
+    cancel: bool,
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, _, _, _ = room
+        if not restart:
+            await instance.stop(notice=None)
+            if shard is not None:
+                await instance.shard("Master").start()
+        master.connected_ids = ("Master",)
+        checked = asyncio.Event()
+
+        async def connected(command: c.ConnectedShards) -> Any:
+            checked.set()
+            return await master.dispatch(command)
+
+        master.handlers[c.ConnectedShards] = connected
+        timeout = 10 if cancel else 0.05
+        command = (
+            c.Restart(notice=None, timeout=timeout)
+            if restart
+            else c.Start(timeout=timeout)
+        )
+        target = instance if shard is None else instance.shard(shard)
+        task = asyncio.create_task(target.invoke(command))
+        try:
+            await wait_for_event(checked, task)
+            if cancel:
+                task.cancel()
+            with pytest.raises(
+                asyncio.CancelledError if cancel else IndeterminateError
+            ):
+                await task
+            assert instance._loading
+            assert (await instance.status()).busy
+            assert await instance._runtime_ready()
+            with pytest.raises(RuntimeError, match="busy"):
+                await instance.shard("Master").execute("return true")
+            master.connected_ids = ("Master", "Caves")
+            assert await instance._runtime_ready()
+            assert not instance._loading
+            assert not instance._fatal.is_set()
+        finally:
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_room_startup_deadline_bounds_a_longer_rpc_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, caves, _, _ = room
+        await instance.stop(notice=None)
+        master.connected_ids = ("Master",)
+        monkeypatch.setattr(controller_module, "DEFAULT_STARTUP_TIMEOUT", 0.025)
+        with pytest.raises(ControllerOperationError):
+            await asyncio.wait_for(instance.invoke(c.Start(timeout=10)), 0.5)
+        assert instance._fatal.is_set()
+        assert master.phase == caves.phase == "stopped"
+
+
+async def test_cancelled_restart_requires_a_new_process_before_becoming_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, _, caves, _, _ = room
+
+        async def restart(_: c.Restart) -> None:
+            await asyncio.Event().wait()
+
+        caves.handlers[c.Restart] = restart
+        with pytest.raises(IndeterminateError):
+            await instance.shard("Caves").restart(notice=None, timeout=0.02)
+        assert await instance._runtime_ready()
+        assert instance._loading
+        await caves.dispatch(c.Restart())
+        assert await instance._runtime_ready()
+        assert not instance._loading
+
+
+async def test_old_status_cannot_complete_a_later_process_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, _, _, _ = room
+        queried, release = asyncio.Event(), asyncio.Event()
+        original_status = master.runtime_status
+
+        async def delayed_status() -> ShardRuntimeStatus:
+            status = await original_status()
+            if not queried.is_set():
+                queried.set()
+                await release.wait()
+            return status
+
+        monkeypatch.setattr(master, "runtime_status", delayed_status)
+        status_task = asyncio.create_task(instance.status())
+        try:
+            await wait_for_event(queried, status_task)
+            await instance.shard("Master").restart(notice=None)
+
+            async def restarting(_: c.Restart) -> None:
+                await asyncio.Event().wait()
+
+            master.handlers[c.Restart] = restarting
+            with pytest.raises(IndeterminateError):
+                await instance.shard("Master").restart(notice=None, timeout=0.02)
+            loading = instance._loading
+            release.set()
+            await status_task
+            assert instance._loading is loading
+            assert await instance._runtime_ready()
+            assert instance._loading
+        finally:
+            release.set()
+            await status_task
+
+
+async def test_startup_deadline_survives_a_shorter_rpc_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(controller_module, "HEALTH_INTERVAL", 0.005)
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, _, _, _ = room
+        await instance.stop(notice=None)
+        master.connected_ids = ("Master",)
+        monkeypatch.setattr(controller_module, "DEFAULT_STARTUP_TIMEOUT", 0.04)
+        with pytest.raises(IndeterminateError):
+            await instance.invoke(c.Start(timeout=0.01))
+        with pytest.raises(ControllerOperationError):
+            await asyncio.wait_for(instance.wait_fatal(), 0.5)
+
+
+async def test_reload_deadline_also_bounds_the_command_acknowledgement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, _, _, _ = room
+
+        async def regenerate(_: c.Regenerate) -> None:
+            await asyncio.Event().wait()
+
+        master.handlers[c.Regenerate] = regenerate
+        monkeypatch.setattr(controller_module, "DEFAULT_RELOAD_TIMEOUT", 0.025)
+        with pytest.raises(IndeterminateError):
+            await asyncio.wait_for(instance.regenerate(timeout=10), 0.5)
+        with pytest.raises(TimeoutError, match="loading"):
+            await instance._runtime_ready()
+
+
+async def test_monitor_reconciles_lost_stop_reply_when_all_shards_are_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, caves, _, _ = room
+
+        async def regenerate(command: c.Regenerate) -> None:
+            await master.dispatch(command)
+            master.ready = caves.ready = False
+
+        master.handlers[c.Regenerate] = regenerate
+        await instance.regenerate()
+        for endpoint in (master, caves):
+            status = await endpoint.runtime_status()
+            monkeypatch.setattr(
+                endpoint,
+                "runtime_status",
+                AsyncMock(
+                    return_value=status.replace(phase=ShardPhase.STOPPED, pid=None)
+                ),
+            )
+
+        async def stop(command: c.Stop) -> None:
+            await master.dispatch(command)
+            await asyncio.Event().wait()
+
+        master.handlers[c.Stop] = stop
+        with pytest.raises(IndeterminateError):
+            await instance.stop(notice=None, timeout=0.01)
+        assert instance._loading
+        assert await instance._runtime_ready()
+        assert not instance._loading
+        assert not instance._fatal.is_set()
+        del master.handlers[c.Stop]
+
+
+@pytest.mark.parametrize("outcome", ["reconnect", "disconnected", "query-failed"])
+async def test_running_topology_has_one_failure_grace_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    monkeypatch.setattr(controller_module, "HEALTH_INTERVAL", 0.005)
+    monkeypatch.setattr(controller_module, "HEALTH_FAILURE_TIMEOUT", 0.04)
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, _, _, _ = room
+        master.connected_ids = ("Master",)
+        assert not await instance._runtime_ready()
+        assert not instance._fatal.is_set()
+        if outcome == "reconnect":
+            master.connected_ids = ("Master", "Caves")
+            await asyncio.sleep(0.08)
+            assert not instance._fatal.is_set()
+        else:
+            if outcome == "query-failed":
+                master.handlers[c.ConnectedShards] = AsyncMock(side_effect=TimeoutError)
+            with pytest.raises(ControllerOperationError):
+                await asyncio.wait_for(instance.wait_fatal(), 1)
+
+
+@pytest.mark.parametrize("stopped", ["Master", "Caves", "all"])
+async def test_monitor_only_requires_intentionally_running_shards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stopped: str
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, caves, _, _ = room
+        if stopped == "all":
+            await instance.stop(notice=None)
+        else:
+            await instance.shard(stopped).stop(notice=None)
+        for endpoint in (master, caves):
+            endpoint.connected_ids = (endpoint.name,)
+            if endpoint.phase == "stopped":
+                endpoint.fail_status = True
+                endpoint.handlers[c.Runtime] = AsyncMock(side_effect=AssertionError)
+        try:
+            assert await instance._runtime_ready()
+            assert not instance._fatal.is_set()
+        finally:
+            master.fail_status = caves.fail_status = False
+
+
+async def test_stale_connection_probe_cannot_fail_an_intentional_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, _, _, _ = room
+        queried, release = asyncio.Event(), asyncio.Event()
+
+        async def connected(_: c.ConnectedShards) -> tuple[()]:
+            queried.set()
+            await release.wait()
+            return ()
+
+        master.handlers[c.ConnectedShards] = connected
+        monitor = asyncio.create_task(instance._runtime_ready())
+        try:
+            await wait_for_event(queried, monitor)
+            await instance.shard("Master").stop(notice=None)
+            release.set()
+            assert await monitor is None
+        finally:
+            release.set()
+            await monitor
+
+
+async def test_mod_preparation_does_not_consume_the_startup_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(controller_module, "HEALTH_INTERVAL", 0.005)
+    monkeypatch.setattr(controller_module, "HEALTH_FAILURE_TIMEOUT", 0.02)
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, _, _, prepare, _ = room
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def preparing(*_: Any, **__: Any) -> None:
+            entered.set()
+            await release.wait()
+
+        prepare.side_effect = preparing
+        monkeypatch.setattr(controller_module, "DEFAULT_STARTUP_TIMEOUT", 0.04)
+        updating = asyncio.create_task(instance.update_mods(restart=True, notice=None))
+        try:
+            await wait_for_event(entered, updating)
+            await asyncio.sleep(0.08)
+            assert not instance._loading
+            assert not instance._fatal.is_set()
+            release.set()
+            await asyncio.wait_for(updating, 1)
+            assert (await instance.status()).phase == "running"
+        finally:
+            release.set()
+            await updating
+
+
+async def test_mod_observation_cannot_renew_a_disconnected_rooms_grace_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dst_server.mods import maintenance
+
+    monkeypatch.setattr(controller_module, "HEALTH_INTERVAL", 0.01)
+    monkeypatch.setattr(controller_module, "HEALTH_FAILURE_TIMEOUT", 0.05)
+    monkeypatch.setattr(maintenance, "STATUS_INTERVAL", 0.01)
+    async with managed_controller(tmp_path, monkeypatch) as room:
+        instance, master, _, _, _ = room
+
+        async def presence(command: c.Presence) -> Any:
+            await asyncio.sleep(0.025)
+            return await master.dispatch(command)
+
+        master.handlers[c.Presence] = presence
+        master.connected_ids = ("Master",)
+        with pytest.raises(ControllerOperationError):
+            await asyncio.wait_for(instance.wait_fatal(), 0.5)

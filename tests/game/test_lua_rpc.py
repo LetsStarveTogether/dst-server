@@ -112,29 +112,15 @@ def test_lua_rpc_keeps_business_prints_out_of_native_control_pipe(
     assert records[1]["result"] == {"ok": True, "data": True}
 
 
-@pytest.mark.parametrize(
-    ("scenario", "result"),
-    [
-        ("ready", {"ok": True, "data": {"snapshot": "session/snapshot"}}),
-        ("save_then_error", {"ok": True, "data": {"snapshot": "session/snapshot"}}),
-        ("save_start_error", {"ok": False, "error": "lua_error"}),
-        ("save_start_indeterminate", {"ok": False, "error": "indeterminate"}),
-        ("save_invalid_value", {"ok": False, "error": "invalid_json_value"}),
-        ("save_indeterminate", {"ok": False, "error": "indeterminate"}),
-    ],
-)
-def test_lua_rpc_save_correlates_its_deferred_completion(
-    native_scripts: Path, scenario: str, result: dict[str, object], lua_runtime: str
+def test_lua_rpc_save_only_acknowledges_native_request(
+    native_scripts: Path, lua_runtime: str
 ) -> None:
     records = run_rpc(
-        native_scripts,
-        PREFIX + orjson.dumps(request(method="save")),
-        lua_runtime,
-        scenario=scenario,
+        native_scripts, PREFIX + orjson.dumps(request(method="save")), lua_runtime
     )
     assert len(records) == 2
     assert records[0]["accepted"] is True
-    assert records[1]["result"] == result
+    assert records[1]["result"] == {"ok": True, "data": True}
 
 
 @pytest.mark.parametrize(

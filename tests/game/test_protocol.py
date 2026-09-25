@@ -3,7 +3,6 @@ import string
 import sys
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
 
 import orjson
 import pytest
@@ -527,17 +526,15 @@ async def test_game_client_sends_typed_method_and_arguments(operation: str) -> N
 
     async def reload(
         method: str, arguments: dict[str, JsonValue], completion_timeout: float
-    ) -> tuple[bytes, int, float]:
+    ) -> bytes:
         assert completion_timeout == 30
-        return await execute(method, arguments), 7, 100.0
+        return await execute(method, arguments)
 
-    wait_reload = AsyncMock()
     observations: list[tuple[int, DriverHealth]] = []
     game = GameClient(
         shard="Master",
         execute_ready=execute,
         execute_reload=reload,
-        wait_reload=wait_reload,
         recorder=Recorder("cluster", "Master"),
         session_id=lambda: "SESSION",
         observe_health=lambda generation, health: observations.append((
@@ -555,7 +552,6 @@ async def test_game_client_sends_typed_method_and_arguments(operation: str) -> N
             await game.reload("echo", value, rpc.response_adapter(JsonValue), 30)
             == value
         )
-        wait_reload.assert_awaited_once_with(7, 100.0)
     else:
         health = await game.invoke(c.Health())
         assert health.generation == 3

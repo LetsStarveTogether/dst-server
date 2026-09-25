@@ -10,6 +10,7 @@ import orjson
 from pydantic import JsonValue
 from ulid import ULID
 
+from dst_server import commands as c
 from dst_server.concurrency import cancel_tasks, complete
 from dst_server.errors import IndeterminateCommandError
 from dst_server.game.rpc import (
@@ -24,7 +25,7 @@ from dst_server.telemetry.recorder import Recorder
 from dst_server.timeouts import DEFAULT_COMMAND_TIMEOUT, positive_timeout
 
 from .fds import read_line
-from .request import RequestState, current_request
+from .request import RequestState, current_request, track_request
 
 COMMAND_DONE = b"DST_RemoteCommandDone"
 LUA_BUSY = b"DST_LuaBusy"
@@ -32,6 +33,9 @@ LUA_BUSY_RETRY_DELAY = 0.1
 # Native command input consumes read chunks, not a newline-delimited stream.
 MAX_REQUEST_BYTES = select.PIPE_BUF
 MAX_PENDING = 64
+_MUTATIONS = {
+    spec.request.method for spec in c.OPERATIONS if spec.game and spec.mutation
+}
 
 
 class LuaBusyError(Exception):
@@ -44,7 +48,6 @@ class StaleGenerationError(RuntimeError):
 
 @dataclass(slots=True)
 class Pending:
-    method: str
     generation: int
     future: asyncio.Future[bytes]
     tracked: RequestState | None
@@ -103,11 +106,17 @@ class Console:
                 if generation_is_current is not None and not generation_is_current():
                     msg = "DST generation changed before the command was written"
                     raise StaleGenerationError(msg)
-                try:
-                    result = await self._send(method, arguments, generation)
-                except LuaBusyError:
-                    await asyncio.sleep(LUA_BUSY_RETRY_DELAY)
-                    continue
+                with track_request(current_request.get()) as request:
+                    try:
+                        result = await self._send(method, arguments, generation)
+                    except LuaBusyError:
+                        await asyncio.sleep(LUA_BUSY_RETRY_DELAY)
+                        continue
+                    except Exception as error:
+                        if request.sent and method in _MUTATIONS:
+                            msg = "DST mutation result could not be confirmed"
+                            raise IndeterminateCommandError(msg) from error
+                        raise
                 if generation_is_current is not None and not generation_is_current():
                     msg = "DST generation changed while the command was executing"
                     raise IndeterminateCommandError(msg)
@@ -147,7 +156,6 @@ class Console:
             msg = f"DST request exceeds the {MAX_REQUEST_BYTES}-byte atomic pipe limit"
             raise ValueError(msg)
         pending = Pending(
-            method,
             generation,
             asyncio.get_running_loop().create_future(),
             current_request.get(),
@@ -204,9 +212,7 @@ class Console:
     def _native_done(self, request_id: str) -> None:
         pending = self.pending[request_id]
         pending.native_done = True
-        # Save completion is asynchronous and explicitly correlated by ID.
-        if pending.method != "save" or not pending.accepted:
-            pending.fail(RuntimeError("DST command did not return a structured result"))
+        pending.fail(RuntimeError("DST command did not return a structured result"))
         if pending.future.done():
             del self.pending[request_id]
 
@@ -250,8 +256,7 @@ class Console:
         if response.generation != pending.generation and not rejected:
             self._diagnostic("generation_mismatch")
             return
-        # Only a reply within an unfinished native frame establishes its place
-        # in the input stream. Deferred save results may arrive after later calls.
+        # Only a reply within an unfinished native frame establishes its place.
         if not pending.native_done:
             for earlier in list(self.pending):
                 if earlier == response.id:

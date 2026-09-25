@@ -5,6 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from dst_server import commands as c
+from dst_server.cluster import controller as controller_module
 from dst_server.cluster import service
 from dst_server.cluster.agent import ShardAgent
 from dst_server.configuration.files import Shard
@@ -16,7 +17,7 @@ from tests.runtime.helpers import FAKE_SERVER
 
 
 @pytest.mark.parametrize("automatic_updates", ["true", "false"])
-async def test_cluster_restart_prepares_every_shard_and_forces_one_mod_update(
+async def test_cluster_restart_reuses_resources_without_save_or_update(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     automatic_updates: str,
@@ -36,8 +37,9 @@ async def test_cluster_restart_prepares_every_shard_and_forces_one_mod_update(
         prepare.side_effect = update
         await instance.restart(notice=None)
         current = await instance.status()
-        prepare.assert_awaited_once_with(
-            tmp_path / "install", tmp_path / "cluster", update_mods=True
+        prepare.assert_not_awaited()
+        assert not any(
+            isinstance(request, c.Save) for request in master.requests + caves.requests
         )
         assert current.phase == "running"
         assert current.prepared
@@ -74,8 +76,10 @@ async def test_shard_restart_reactivates_only_its_target_without_shared_update(
         assert target.attempt != target_attempt
         assert peer.ready
         assert peer.attempt == peer_attempt
-        assert peer.requests == []
-        assert calls == [f"save:{name}", f"activate:{name}", f"restart:{name}"]
+        assert all(
+            not c.operation("agent", request).mutation for request in peer.requests
+        )
+        assert calls == [f"activate:{name}", f"restart:{name}"]
         prepare.assert_not_awaited()
         assert (await instance.status()).phase == "running"
 
@@ -88,6 +92,7 @@ async def test_restart_rejects_a_game_that_returns_without_becoming_ready(
 ) -> None:
     async with managed_controller(tmp_path, monkeypatch) as room:
         instance, _, caves, _, _ = room
+        monkeypatch.setattr(controller_module, "DEFAULT_STARTUP_TIMEOUT", 0.025)
 
         async def not_ready(command: c.Request[None]) -> None:
             await caves.dispatch(command)
@@ -96,7 +101,7 @@ async def test_restart_rejects_a_game_that_returns_without_becoming_ready(
         caves.handlers[c.Start if scope == "cluster" else c.Restart] = not_ready
         endpoint = instance if scope == "cluster" else instance.shard("Caves")
         with pytest.raises((RuntimeError, ControllerOperationError)):
-            await endpoint.restart(notice=None)
+            await asyncio.wait_for(endpoint.restart(notice=None), 0.5)
         assert (await instance.status()).phase != "running"
 
 

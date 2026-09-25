@@ -6,7 +6,6 @@ local state = require("dst_server.state")
 local nonce, identifier = "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FAW"
 local options = { nonce = nonce, generation = 7 }
 local outputs, calls, writes, logs = {}, 0, 0, {}
-local save_callback
 local ordinary_print = function(value) logs[#logs + 1] = value end
 print = ordinary_print
 TheSim = {
@@ -37,19 +36,6 @@ package.loaded["dst_server"] = {
         return true
     end,
 }
-package.loaded["dst_server.commands"] = {
-    save = function(arguments, callback)
-        calls = calls + 1
-        assert(wire.is_object(arguments))
-        if scenario == "save_start_error" then error("SECRET_TOKEN private chat", 0) end
-        if scenario == "save_start_indeterminate" then wire.indeterminate() end
-        if scenario == "save_then_error" then
-            callback({ snapshot = "session/snapshot" })
-            wire.indeterminate()
-        end
-        save_callback = callback
-    end,
-}
 state.nonce, state.generation, state.installed = nonce, 7, scenario ~= "not_ready"
 local rpc = require("dst_server.rpc")
 rpc.install(options)
@@ -76,13 +62,6 @@ else
     assert(print == command_print, "restore the native wrapper's print on every path")
     print = ordinary_print
     assert(delegated == 0)
-    if save_callback then
-        assert(#outputs == 1, "a save must wait for its own completion callback")
-        local data = scenario == "save_invalid_value" and function() end or { snapshot = "session/snapshot" }
-        save_callback(data, scenario == "save_indeterminate" and "indeterminate" or nil)
-        save_callback({ snapshot = "duplicate callback" })
-        assert(#outputs == 2, "a save must complete its request exactly once")
-    end
     if scenario == "write_error" then assert(calls == 0) end
     local accepted = false
     for _, output in ipairs(outputs) do

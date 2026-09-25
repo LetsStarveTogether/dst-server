@@ -2,6 +2,7 @@ local json = require("json")
 local wire = {}
 local object_marker = {}
 local indeterminate = {}
+local rejected = {}
 local success_prefix = '{"ok":true,"data":'
 local maximum_line_bytes = 64 * 1024
 local escapes = { ['"'] = '\\"', ["\\"] = "\\\\" }
@@ -25,6 +26,10 @@ end
 
 function wire.indeterminate()
     error(indeterminate, 0)
+end
+
+function wire.reject()
+    error(rejected, 0)
 end
 
 local function quote(value, remaining)
@@ -303,7 +308,8 @@ function wire.response(callback, limit)
                 and data or "invalid_json_value"
         end
     else
-        failure = data == indeterminate and "indeterminate" or "lua_error"
+        failure = data == indeterminate and "indeterminate"
+            or data == rejected and "rejected" or "lua_error"
     end
     if failure ~= nil then
         payload = '{"ok":false,"error":"' .. failure .. '"}'

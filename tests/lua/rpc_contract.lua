@@ -210,7 +210,7 @@ TheNet = {
     GetServerPlaystyle = function() return nil end,
     GetServerMaxPlayers = function() return 6 end,
     GetServerPVP = function() return false end,
-    IsServerPaused = function() return true end,
+    IsServerPaused = function() return observed.paused == true end,
     GetServerHasPassword = function() return true end,
     GetServerIsDedicated = function() return true end,
     IsOnlineMode = function() return true end,
@@ -275,6 +275,7 @@ SpawnPrefab = function(prefab)
 end
 SetServerPaused = function(paused) observed.paused = paused end
 c_announce = function(message) observed.announcement = message end
+c_save = function() observed.saved = true; snapshot = snapshot + 1 end
 ShardGameIndex = { SaveCurrent = function(_, callback)
     observed.saved = true
     snapshot = snapshot + 1
@@ -330,15 +331,7 @@ local calls = {
 }
 
 for _, call in ipairs(calls) do
-    local result
-    if call[1] == "save" then
-        require("dst_server.commands").save(call[2], function(data, failure)
-            assert(failure == nil)
-            result = data
-        end)
-    else
-        result = driver.call(call[1], call[2])
-    end
+    local result = driver.call(call[1], call[2])
     print(call[1] .. "|" .. require("dst_server.wire").encode({
         ok = true,
         data = result,

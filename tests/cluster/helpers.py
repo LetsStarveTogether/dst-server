@@ -25,13 +25,11 @@ from dst_server.configuration.models import (
 from dst_server.configuration.store import (
     ConfigurationStore,
 )
-from dst_server.events.server import SavedEvent
 from dst_server.models import Player, PlayerState, Runtime, World
 from dst_server.models.cluster import (
     GameEventRecord,
     LifecycleRecord,
     LogRecord,
-    ObservationCursor,
     ShardDesired,
     ShardPhase,
     ShardRuntimeStatus,
@@ -183,9 +181,6 @@ class EndpointStub:
         self.players: tuple[Player, ...] = ()
         self.attempt = ULID()
         self.outdated_mods: tuple[str, ...] = ()
-        self.save_cursor = ObservationCursor(
-            attempt=self.attempt, sequence=10 if master else 20
-        )
         self.generation = 1
         self.peers: tuple[EndpointStub, ...] = (self,)
         self.connected_ids: tuple[str, ...] = ("Master", "Caves")
@@ -243,7 +238,12 @@ class EndpointStub:
             self.calls.append(f"{command.method.replace('_', '-')}:{self.name}")
         result = (
             await handler(command)
-            if (handler := self.handlers.get(type(command))) is not None
+            if (
+                handler := self.handlers.get(
+                    c.Stop if isinstance(command, c.Drain) else type(command)
+                )
+            )
+            is not None
             else await self.dispatch(command)
         )
         return c.operation("agent", command).response.validate_python(
@@ -259,7 +259,7 @@ class EndpointStub:
                     self.attempt = ULID()
                     self.outdated_mods = ()
                 self.phase, self.ready, self.pid = ShardPhase.RUNNING, True, 1
-            case c.Stop():
+            case c.Stop() | c.Drain():
                 if self.stop_entered is not None:
                     self.stop_entered.set()
                 if self.stop_release is not None:
@@ -275,15 +275,7 @@ class EndpointStub:
                 snapshot = self.runtime.snapshot
                 for peer in self.peers:
                     peer.runtime = peer.runtime.replace(snapshot=snapshot + 1)
-                return SavedEvent(
-                    path=f"session/{self.runtime.session_id}/{snapshot:010d}",
-                    snapshot=snapshot,
-                )
-            case c.WaitSaved(snapshot=snapshot):
-                return SavedEvent(
-                    path=f"session/{self.runtime.session_id}/{snapshot:010d}",
-                    snapshot=snapshot,
-                )
+                return None
             case c.ConnectedShards():
                 return tuple(
                     ShardStatus(

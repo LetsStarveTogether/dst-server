@@ -52,6 +52,7 @@ class AgentStub:
         self.failure_waiting = asyncio.Event()
         self.fatal = asyncio.Event()
         self.kill_error = kill_error
+        self.drained = False
 
     async def runtime_status(self) -> ShardRuntimeStatus:
         return ShardRuntimeStatus(
@@ -64,6 +65,9 @@ class AgentStub:
         )
 
     async def invoke[T](self, command: c.Request[T]) -> T:
+        if isinstance(command, c.Drain):
+            await self.drain()
+            return cast(T, None)
         assert isinstance(command, c.Status)
         return cast(T, await self.runtime_status())
 
@@ -78,6 +82,11 @@ class AgentStub:
 
     async def stop(self) -> None:
         self.calls.append("agent.stop")
+
+    async def drain(self) -> None:
+        if not self.drained:
+            await self.stop()
+            self.drained = True
 
     async def kill(self) -> None:
         self.calls.append("agent.kill")
@@ -644,6 +653,29 @@ async def test_registered_connection_loss_exits_without_rejoining(
     assert calls == ["agent.stop", "agent.close"]
 
 
+async def test_agent_drain_failure_still_closes_and_reclaims_tasks() -> None:
+    existing_tasks = asyncio.all_tasks()
+    agent = AgentStub([])
+    agent.drain = AsyncMock(side_effect=RuntimeError("drain failed"))
+    agent.aclose = AsyncMock(side_effect=RuntimeError("close failed"))
+    cycle = asyncio.create_task(asyncio.Event().wait())
+    shutdown = asyncio.create_task(asyncio.Event().wait())
+    fatal = asyncio.create_task(asyncio.Event().wait())
+
+    with pytest.raises(ExceptionGroup, match="Agent cleanup failed") as caught:
+        await daemon._cleanup_agent(cycle, shutdown, fatal, agent)  # ty: ignore[invalid-argument-type]
+
+    assert [str(error) for error in caught.value.exceptions] == [
+        "drain failed",
+        "close failed",
+    ]
+    agent.aclose.assert_awaited_once_with()
+    assert cycle.cancelled()
+    assert shutdown.cancelled()
+    assert fatal.cancelled()
+    assert asyncio.all_tasks() <= existing_tasks
+
+
 def test_signal_handlers_set_shutdown_and_are_removed() -> None:
     shutdown = asyncio.Event()
     callbacks: dict[object, Any] = {}
@@ -688,3 +720,31 @@ async def test_controller_failure_exits_master_and_closes_all_resources(
             asyncio.Event(),
         )
     assert calls == ["controller.close", "agent.close"]
+
+
+async def test_drained_agent_accepts_controller_eof_before_sigterm() -> None:
+    calls: list[str] = []
+    agent = AgentStub(calls)
+    controller = ControllerStub(calls)
+    address = f"dst-server-test-{ULID()}"
+    shutdown = asyncio.Event()
+    task = None
+    async with asyncio.timeout(5), rpc_runtime():
+        try:
+            async with abstract_rpc_server(
+                lambda: WorkerRegistryServant(controller),  # ty: ignore[invalid-argument-type]
+                address,
+            ):
+                task = asyncio.create_task(
+                    daemon._serve_agent(agent, shutdown, internal_address=address)  # ty: ignore[invalid-argument-type]
+                )
+                await wait_for_event(controller.registered, task)
+                await controller.endpoint.invoke(c.Drain())
+                assert agent.drained
+                assert not shutdown.is_set()
+            await task
+        finally:
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    assert calls.count("agent.stop") == 1

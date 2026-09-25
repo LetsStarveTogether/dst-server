@@ -320,6 +320,8 @@ async def running_sharded_cluster(
             "--share",
             "net",
         )
+        # Start infra before a game launcher can pass its native protocol FDs.
+        await run_command("podman", "pod", "start", pod)
         for shard in ("forest", "cave"):
             config = make_server(
                 root,
@@ -330,8 +332,9 @@ async def running_sharded_cluster(
             ).config
             install = root / shard
             executable = install / "bin64" / Path(GAME_EXECUTABLE).name
-            executable.parent.mkdir(parents=True)
-            executable.symlink_to(config.executable)
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            if not executable.exists():
+                executable.symlink_to(config.executable)
             agent = ShardAgent(
                 next(item for item in configuration.shards if item.name == shard),
                 install_path=install,

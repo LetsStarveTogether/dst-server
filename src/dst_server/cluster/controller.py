@@ -2,6 +2,8 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, nullcontext
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -18,7 +20,6 @@ from dst_server.errors import (
     ControllerOperationError,
     DisconnectedError,
     ErrorCode,
-    ErrorInfo,
     IncompleteRosterError,
     IndeterminateCommandError,
     IndeterminateError,
@@ -32,7 +33,6 @@ from dst_server.game.rpc import LuaRequestError
 from dst_server.models import Player, Runtime
 from dst_server.models.cluster import (
     ClusterPhase,
-    ClusterSaveResult,
     ClusterStatus,
     GameEventRecord,
     LifecycleRecord,
@@ -81,6 +81,8 @@ AGENT_STOP_TIMEOUT = (
 AGENT_KILL_TIMEOUT = OUTPUT_DRAIN_TIMEOUT + RPC_TIMEOUT_MARGIN
 CONTROLLER_CANCEL_TIMEOUT = 1.0
 ANNOUNCE_TIMEOUT = 5.0
+HEALTH_INTERVAL = 30.0
+HEALTH_FAILURE_TIMEOUT = 300.0
 
 
 class AgentEndpoint(Protocol):
@@ -99,6 +101,29 @@ class AgentEndpoint(Protocol):
 
 
 type _Operation[T] = Callable[[AgentEndpoint], Awaitable[T]]
+
+
+@dataclass(frozen=True, slots=True)
+class _LoadExpectation:
+    previous: ShardRuntimeStatus | None = None
+    restart: bool = False
+
+    def ready(self, current: ShardRuntimeStatus | None) -> bool:
+        if current is None or current.phase != "running" or not current.ready:
+            return False
+        previous = self.previous
+        if previous is None:
+            return True
+        if self.restart:
+            return current.game_attempt is not None and (
+                current.game_attempt != previous.game_attempt
+            )
+        return (
+            current.game_attempt == previous.game_attempt
+            and current.driver_health is not None
+            and previous.driver_health is not None
+            and current.driver_health.generation > previous.driver_health.generation
+        )
 
 
 def _leaf_errors(error: BaseException) -> Iterator[BaseException]:
@@ -160,6 +185,9 @@ class ClusterController(ClusterAPI):
         self._fatal = asyncio.Event()
         self._mod_maintenance = ModMaintenance()
         self._mod_task: asyncio.Task[None] | None = None
+        self._monitor_task: asyncio.Task[None] | None = None
+        self._loading: dict[str, _LoadExpectation] = {}
+        self._load_deadline = 0.0
         self._streams = {kind: Broadcast[StreamRecord]() for kind in STREAM_MODELS}
         self._shard_streams = {
             name: {kind: Broadcast[StreamRecord]() for kind in STREAM_MODELS}
@@ -211,8 +239,10 @@ class ClusterController(ClusterAPI):
         ):
             arguments["completion_timeout"] = command.timeout
         async with (
-            self._public_operation() if operation.mutation else nullcontext(),
             timeout_scope(command.timeout),
+            self._public_operation(stopping=isinstance(command, c.Stop | c.Kill))
+            if operation.mutation
+            else nullcontext(),
         ):
             result = await handlers[type(command)](**arguments)
         return operation.response.validate_python(result, strict=True)
@@ -277,6 +307,9 @@ class ClusterController(ClusterAPI):
                 self._initial_task = asyncio.create_task(
                     self._initialize(), name=f"dst-start-{self.epoch}"
                 )
+                self._monitor_task = asyncio.create_task(
+                    self._watch_runtime(), name=f"dst-runtime-monitor-{self.epoch}"
+                )
                 if self._mod_task is None and self._mod_maintenance.enabled:
                     self._mod_task = asyncio.create_task(
                         self._watch_mods(), name=f"dst-mod-maintenance-{self.epoch}"
@@ -334,22 +367,17 @@ class ClusterController(ClusterAPI):
         agents = tuple(
             self._agents[name] for name in self._names if name in self._agents
         )
+        loading = self._loading
         statuses = tuple(
             await asyncio.gather(*(self._endpoint_status(agent) for agent in agents))
+        )
+        runtimes = await self._refresh_loading(
+            {state.name: state for state in statuses}, loading
         )
         error_id, error = self._error_id, self._error
         phase = self._cluster_phase(statuses, missing, error_id)
         if phase == "running":
-            budget = AGENT_STATUS_TIMEOUT
-            if (deadline := operation_deadline.get()) is not None:
-                budget = min(
-                    budget, max(0, deadline - asyncio.get_running_loop().time()) / 2
-                )
-            try:
-                async with asyncio.timeout(budget):
-                    runtimes = await self._connected_runtimes()
-            except Exception:
-                runtimes = None
+            runtimes = runtimes or await self._observe_connections()
             if runtimes is None:
                 phase = "degraded"
             else:
@@ -361,7 +389,7 @@ class ClusterController(ClusterAPI):
             epoch=self.epoch,
             phase=phase,
             prepared=self._prepared,
-            busy=self._lock.locked(),
+            busy=self._lock.locked() or bool(self._loading),
             master=self.master,
             missing_shards=missing,
             shards=statuses,
@@ -388,15 +416,8 @@ class ClusterController(ClusterAPI):
         self._desired = dict.fromkeys(self._names, ShardDesired.RUNNING)
         self._require_complete()
         self._clear_error()
-        statuses = tuple(
-            await asyncio.gather(
-                *(self._endpoint_status(agent) for agent in self._ordered_agents)
-            )
-        )
-        if all(status.phase == "running" and status.ready for status in statuses):
-            await self._save_ready()
         await self._stop_registered(force=False)
-        await self._start_desired(force_prepare=True)
+        await self._start_desired()
 
     async def _kill(self) -> None:
         self._desired = dict.fromkeys(self._names, ShardDesired.STOPPED)
@@ -416,10 +437,8 @@ class ClusterController(ClusterAPI):
 
     async def _update_and_start(self, *, running: bool) -> None:
         if running:
-            await self._save_ready()
             await self._stop_registered(force=False)
-        await self._prepare(force=True)
-        await self._start_desired()
+        await self._start_desired(force_prepare=True)
 
     async def _read_configuration(self) -> ClusterConfig:
         self._require_open()
@@ -517,39 +536,9 @@ class ClusterController(ClusterAPI):
 
     async def _save_ready(
         self, completion_timeout: float = DEFAULT_SAVE_TIMEOUT
-    ) -> ClusterSaveResult:
-        peers = tuple(
-            agent for agent in self._ordered_agents if agent.name != self.master
-        )
-        before = await self._wait_ready()
-        markers = await self._gather(peers, lambda agent: agent.invoke(c.SaveMarker()))
-        self._pending_confirmation = True
-        master_event = await self._agent_call(
-            lambda: self.agent(self.master).invoke(c.Save(timeout=completion_timeout)),
-            limit=completion_timeout + RPC_TIMEOUT_MARGIN,
-        )
-        events = await self._gather(
-            peers,
-            lambda agent: agent.invoke(
-                c.WaitSaved(
-                    cursor=markers[agent.name],
-                    snapshot=master_event.snapshot,
-                    timeout=completion_timeout,
-                )
-            ),
-            limit=completion_timeout + RPC_TIMEOUT_MARGIN,
-        )
-        after = await self._wait_ready()
-        if any(
-            after[name].session_id != state.session_id for name, state in before.items()
-        ):
-            raise IndeterminateError
-        self._pending_confirmation = False
-        events[self.master] = master_event
-        return ClusterSaveResult(
-            master_event.snapshot,
-            tuple((name, events[name]) for name in self._names),
-        )
+    ) -> None:
+        await self._wait_ready()
+        await self.shard(self.master)._call(c.Save(timeout=completion_timeout))
 
     async def _pause(self, paused: bool) -> tuple[ShardResult[bool], ...]:
         return await self._shard_results(
@@ -595,9 +584,7 @@ class ClusterController(ClusterAPI):
                 )
             ),
             completion_timeout,
-            snapshot=snapshot,
             sessions=sessions,
-            day=day,
         )
         return snapshot
 
@@ -757,7 +744,7 @@ class ClusterController(ClusterAPI):
             ):
                 self._close_task = None
 
-    async def _close(self) -> None:
+    async def _close(self) -> None:  # ruff: ignore[complex-structure]
         if self._shutdown_complete:
             return
         self._closed = True
@@ -767,6 +754,7 @@ class ClusterController(ClusterAPI):
             for task in (
                 self._initial_task,
                 self._mod_task,
+                self._monitor_task,
                 self._lock_owner,
             )
             if task is not None and task is not current and not task.done()
@@ -780,18 +768,19 @@ class ClusterController(ClusterAPI):
             )
             await asyncio.gather(*done, return_exceptions=True)
         agents = tuple(self._agents.values())
-        forced, failures = await self._terminate_agents(agents)
+        forced, failures = await self._terminate_agents(agents, draining=True)
+        await cancel_tasks(*tasks)
         if forced:
             self._record_error("cluster shutdown required forced termination")
-        if failures:
-            error = BaseExceptionGroup("cluster shutdown failed", failures)
-            self._record_error("cluster shutdown failed", error)
-            raise error
         for name in tuple(self._relays):
             await self._cancel_relays(name)
         for streams in (self._streams, *self._shard_streams.values()):
             for broadcast in streams.values():
                 broadcast.close()
+        if failures:
+            error = BaseExceptionGroup("cluster shutdown failed", failures)
+            self._record_error("cluster shutdown failed", error)
+            raise error
         self._shutdown_complete = True
 
     @property
@@ -801,6 +790,10 @@ class ClusterController(ClusterAPI):
     @property
     def _missing(self) -> tuple[str, ...]:
         return tuple(name for name in self._names if name not in self._agents)
+
+    @property
+    def _running_names(self) -> tuple[str, ...]:
+        return tuple(name for name in self._names if self._desired[name] == "running")
 
     @property
     def _ordered_agents(self) -> tuple[AgentEndpoint, ...]:
@@ -819,12 +812,16 @@ class ClusterController(ClusterAPI):
     async def _terminate_agents(
         self,
         agents: tuple[AgentEndpoint, ...],
+        *,
+        draining: bool = False,
     ) -> tuple[bool, tuple[BaseException, ...]]:
         stopped = await asyncio.gather(
             *(
                 self._agent_call(
                     lambda agent=agent: agent.invoke(
-                        c.Stop(timeout=AGENT_STOP_TIMEOUT, notice=None)
+                        c.Drain(timeout=AGENT_STOP_TIMEOUT)
+                        if draining
+                        else c.Stop(timeout=AGENT_STOP_TIMEOUT, notice=None)
                     ),
                     limit=AGENT_STOP_TIMEOUT,
                 )
@@ -839,7 +836,17 @@ class ClusterController(ClusterAPI):
         )
         if not failed:
             return False, ()
-        return True, await self._kill_agents(failed)
+        failures = tuple(
+            result for result in stopped if isinstance(result, BaseException)
+        )
+        killed = await self._kill_agents(failed)
+        self._record_error(
+            "graceful shutdown failed; forced termination requested",
+            BaseExceptionGroup("shard shutdown failed", failures),
+        )
+        if await self._all_stopped():
+            return True, ()
+        return True, (*failures, *killed)
 
     async def _kill_agents(
         self,
@@ -905,18 +912,36 @@ class ClusterController(ClusterAPI):
             raise DisconnectedError(msg)
 
     @asynccontextmanager
-    async def _public_operation(self) -> AsyncIterator[None]:
+    async def _public_operation(self, *, stopping: bool = False) -> AsyncIterator[None]:
         self._require_open()
         if self._fatal.is_set():
             msg = "room failed; restart its service"
             raise RuntimeError(msg)
-        if self._lock.locked():
+        if self._loading and not stopping and not self._lock.locked():
+            loading = self._loading
+            await self._refresh_loading(
+                await self._gather(
+                    self._ordered_agents,
+                    lambda agent: agent.runtime_status(),
+                ),
+                loading,
+            )
+        if self._lock.locked() or (self._loading and not stopping):
             msg = "room operation is busy"
             raise RuntimeError(msg)
         async with self._serialized():
             self._require_open()
             try:
                 yield
+            except asyncio.CancelledError:
+                deadline = operation_deadline.get()
+                if (
+                    self._pending_confirmation
+                    and deadline is not None
+                    and asyncio.get_running_loop().time() >= deadline
+                ):
+                    raise IndeterminateError from None
+                raise
             except Exception as error:
                 if self._pending_confirmation and not isinstance(
                     error, ControllerOperationError
@@ -952,31 +977,54 @@ class ClusterController(ClusterAPI):
             msg = "all shard game processes must be ready"
             raise RuntimeError(msg)
 
-    async def _connected_runtimes(self) -> dict[str, Runtime] | None:
+    async def _observe_connections(
+        self, names: tuple[str, ...] | None = None
+    ) -> dict[str, Runtime] | None:
+        budget = AGENT_STATUS_TIMEOUT
+        if (deadline := operation_deadline.get()) is not None:
+            budget = min(
+                budget, max(0, deadline - asyncio.get_running_loop().time()) / 2
+            )
+        try:
+            async with asyncio.timeout(budget):
+                return await self._connected_runtimes(names)
+        except Exception:
+            return None
+
+    async def _connected_runtimes(
+        self, names: tuple[str, ...] | None = None
+    ) -> dict[str, Runtime] | None:
+        names = self._names if names is None else names
         runtimes = await self._gather(
-            self._ordered_agents, lambda agent: agent.invoke(c.Runtime())
+            tuple(self.agent(name) for name in names),
+            lambda agent: agent.invoke(c.Runtime()),
         )
+        expected = {state.shard_id for state in runtimes.values()}
+        if len(expected) != len(names):
+            msg = "game shards must have unique IDs"
+            raise RuntimeError(msg)
+        # An intentionally stopped master cannot provide shard connectivity.
+        if self.master not in names or len(names) == 1:
+            return runtimes
         connected = await self._agent_call(
             lambda: self.agent(self.master).invoke(c.ConnectedShards())
         )
-        expected = {state.shard_id for state in runtimes.values()}
-        if len(expected) != len(self._names):
-            msg = "game shards must have unique IDs"
-            raise RuntimeError(msg)
-        if {shard.id for shard in connected} == expected and all(
-            shard.ready for shard in connected
-        ):
+        if expected <= {shard.id for shard in connected if shard.ready}:
             return runtimes
         return None
 
-    async def _wait_ready(self) -> dict[str, Runtime]:
+    async def _wait_ready(
+        self, names: tuple[str, ...] | None = None
+    ) -> dict[str, Runtime]:
         self._require_complete()
-        if any(desired != "running" for desired in self._desired.values()):
+        names = self._names if names is None else names
+        if any(self._desired[name] != "running" for name in names):
             msg = "all shards must be enabled for a cluster operation"
             raise RuntimeError(msg)
         while True:
             statuses = await self._gather(
-                self._ordered_agents, lambda agent: agent.runtime_status()
+                tuple(self.agent(name) for name in names),
+                lambda agent: agent.runtime_status(),
             )
             if any(
                 state.phase in {"stopped", "failed", "unavailable"}
@@ -984,13 +1032,22 @@ class ClusterController(ClusterAPI):
             ):
                 msg = "all shard game processes must be running"
                 raise RuntimeError(msg)
-            if all(
-                state.phase == "running" and state.ready for state in statuses.values()
-            ):
-                runtimes = await self._connected_runtimes()
+            if self._ready(statuses, names):
+                loading = self._loading
+                runtimes = await self._connected_runtimes(names)
                 if runtimes is not None:
+                    if self._loading is loading:
+                        self._loading = {}
                     return runtimes
             await asyncio.sleep(0.1)
+
+    def _ready(
+        self, statuses: dict[str, ShardRuntimeStatus], names: tuple[str, ...]
+    ) -> bool:
+        return all(
+            self._loading.get(name, _LoadExpectation()).ready(statuses.get(name))
+            for name in names
+        )
 
     async def _shard_status(self, name: str) -> ShardRuntimeStatus:
         return await self._endpoint_status(self.agent(name))
@@ -1037,6 +1094,8 @@ class ClusterController(ClusterAPI):
             return "failed"
         if any(status.phase == "unavailable" for status in statuses):
             return "degraded"
+        if self._loading:
+            return "starting"
         desired = tuple(self._desired.values())
         if (
             all(value == "running" for value in desired)
@@ -1096,22 +1155,24 @@ class ClusterController(ClusterAPI):
 
     async def _start_desired(self, *, force_prepare: bool = False) -> None:
         self._require_complete()
-        names = tuple(name for name in self._names if self._desired[name] == "running")
+        names = self._running_names
         if not names:
             return
         await self._prepare(force=force_prepare)
+        self._expect_ready(
+            dict.fromkeys(names, _LoadExpectation()), DEFAULT_STARTUP_TIMEOUT
+        )
         try:  # ruff: ignore[too-many-statements-in-try-clause]
             self._pending_confirmation = True
-            await self._lifecycle_operation(
-                "starting",
-                lambda agent: agent.invoke(c.Start(timeout=AGENT_START_TIMEOUT)),
-                names,
-                limit=AGENT_START_TIMEOUT,
-            )
-            await self._require_ready(names)
-            self._phase = "starting"
-            if len(names) == len(self._names):
-                await self._wait_ready()
+            async with asyncio.timeout_at(self._load_deadline):
+                await self._lifecycle_operation(
+                    "starting",
+                    lambda agent: agent.invoke(c.Start(timeout=AGENT_START_TIMEOUT)),
+                    names,
+                    limit=AGENT_START_TIMEOUT,
+                )
+                self._phase = "starting"
+                await self._wait_ready(names)
             self._pending_confirmation = False
             self._clear_error()
         except Exception as error:
@@ -1130,7 +1191,6 @@ class ClusterController(ClusterAPI):
 
     async def _stop_registered(self, *, force: bool) -> None:
         self._require_open()
-        self._prepared = False
         operation: _Operation[object]
         operation = (
             (lambda agent: agent.invoke(c.Kill(timeout=AGENT_KILL_TIMEOUT)))
@@ -1160,8 +1220,13 @@ class ClusterController(ClusterAPI):
                     "cluster stop and forced termination failed",
                     (error, *failures),
                 )
-            self._record_error("cluster stop failed", error)
+            self._record_error("cluster stop required forced termination", error)
+            if await self._all_stopped():
+                self._pending_confirmation = False
+                self._loading = {}
+                return
             raise self._operation_error(error, self._error_id) from None
+        self._loading = {}
         self._clear_error()
 
     async def _lifecycle_operation(
@@ -1208,91 +1273,184 @@ class ClusterController(ClusterAPI):
 
     async def _reload(
         self,
-        operation: _Operation[None],
+        operation: _Operation[object],
         completion_timeout: float,
         *,
-        snapshot: Snapshot | None = None,
         sessions: dict[str, str] | None = None,
-        day: int | None = None,
+        names: tuple[str, ...] | None = None,
     ) -> None:
-        before = await self._wait_ready()
+        if names is None:
+            await self._wait_ready()
+        else:
+            await self._require_ready(names)
+        markers = await self._gather(
+            tuple(self.agent(name) for name in (names or self._names)),
+            lambda agent: agent.runtime_status(),
+        )
         if sessions is not None and any(
-            state.session_id != sessions[name] for name, state in before.items()
+            state.session_id != sessions[name] for name, state in markers.items()
         ):
             msg = "world session changed while selecting a snapshot"
             raise ValueError(msg)
-        markers = await self._gather(
-            self._ordered_agents, lambda agent: agent.runtime_status()
+        self._expect_ready(
+            {name: _LoadExpectation(state) for name, state in markers.items()},
+            DEFAULT_RELOAD_TIMEOUT,
         )
-        self._phase = "starting"
         self._pending_confirmation = True
         try:
-            await self._agent_call(
-                lambda: operation(self.agent(self.master)),
-                limit=completion_timeout + RPC_TIMEOUT_MARGIN,
-            )
-            await self._wait_reloaded(markers)
-            after = await self._wait_ready()
-            await self._verify_reload(before, after, snapshot, day)
-            self._pending_confirmation = False
-        finally:
-            self._phase = None
-
-    async def _verify_reload(
-        self,
-        before: dict[str, Runtime],
-        after: dict[str, Runtime],
-        snapshot: Snapshot | None,
-        day: int | None,
-    ) -> None:
-        failed = tuple(
-            name
-            for name, state in after.items()
-            if not (
-                state.session_id != before[name].session_id
-                if snapshot is None
-                else state.session_id == before[name].session_id
-                and state.snapshot == snapshot.snapshot_id + 1
-            )
-        )
-        if day is not None:
-            worlds = await self._gather(
-                self._ordered_agents, lambda agent: agent.invoke(c.World())
-            )
-            failed = tuple(
-                name
-                for name, world in worlds.items()
-                if name in failed or world.day != day
-            )
-        if failed:
-            raise IndeterminateError(
-                ErrorInfo(
-                    ErrorCode.INDETERMINATE,
-                    ULID(),
-                    "world operation result did not match the target",
-                    failed,
+            async with asyncio.timeout_at(self._load_deadline):
+                await self._agent_call(
+                    lambda: operation(self.agent((names or (self.master,))[0])),
+                    limit=completion_timeout + RPC_TIMEOUT_MARGIN,
                 )
+        except (LuaRequestError, RemoteError) as error:
+            rejected = (
+                error.code
+                in {"invalid_request", "not_ready", "stale_generation", "rejected"}
+                if isinstance(error, LuaRequestError)
+                else error.error.code
+                in {
+                    ErrorCode.INVALID_ARGUMENT,
+                    ErrorCode.INVALID_STATE,
+                    ErrorCode.NOT_FOUND,
+                    ErrorCode.CONFLICT,
+                }
             )
+            if rejected:
+                self._loading.clear()
+            self._pending_confirmation = False
+            raise
+        self._pending_confirmation = False
 
-    async def _wait_reloaded(self, before: dict[str, ShardRuntimeStatus]) -> None:
-        while True:
-            statuses = await self._gather(
-                self._ordered_agents, lambda agent: agent.runtime_status()
+    def _expect_ready(
+        self, expectations: dict[str, _LoadExpectation], timeout: float
+    ) -> None:
+        self._loading = expectations
+        self._load_deadline = asyncio.get_running_loop().time() + timeout
+
+    async def _refresh_loading(
+        self,
+        statuses: dict[str, ShardRuntimeStatus],
+        loading: dict[str, _LoadExpectation],
+    ) -> dict[str, Runtime] | None:
+        if self._loading is not loading:
+            return None
+        stopped = {
+            name
+            for name, status in statuses.items()
+            if name in self._loading
+            and (
+                (previous := loading[name].previous) is None
+                or self._loading[name].restart
+                or status.game_attempt == previous.game_attempt
             )
-            if any(
-                state.game_attempt != before[name].game_attempt
-                for name, state in statuses.items()
+            and self._desired[name] is ShardDesired.STOPPED
+            and status.phase in {"stopped", "failed"}
+            and status.pid is None
+        }
+        if stopped:
+            self._loading = {
+                name: state
+                for name, state in self._loading.items()
+                if name not in stopped
+            }
+        loading = self._loading
+        names = self._running_names
+        if (
+            not loading
+            or not self._ready(statuses, tuple(loading))
+            or not self._ready(statuses, names)
+        ):
+            return None
+        runtimes = await self._observe_connections(names)
+        # A concurrent stop or reload may replace the operation being observed.
+        if runtimes is not None and self._loading is loading:
+            self._loading = {}
+        return runtimes
+
+    async def _watch_runtime(self) -> None:
+        # One room-owned observer; caller deadlines never own failure recovery.
+        operation_deadline.set(None)
+        unready_since: float | None = None
+        try:  # ruff: ignore[too-many-statements-in-try-clause]
+            while not self._closed and not self._fatal.is_set():
+                await asyncio.sleep(HEALTH_INTERVAL)
+                ready = await self._runtime_ready()
+                if ready is True:
+                    unready_since = None
+                elif ready is False:
+                    now = asyncio.get_running_loop().time()
+                    unready_since = now if unready_since is None else unready_since
+                    if now - unready_since >= HEALTH_FAILURE_TIMEOUT:
+                        self._record_error(
+                            "room was not ready or connected for 5 minutes"
+                        )
+                        self._fatal.set()
+        except Exception as error:
+            self._record_error("room runtime failed", error)
+            self._fatal.set()
+
+    async def _runtime_ready(self) -> bool | None:  # ruff: ignore[complex-structure]
+        if self._lock.locked():
+            return None  # The running operation owns its existing deadline.
+        names = self._running_names
+        loading = self._loading
+        if not names and not loading:
+            return True
+        try:
+            statuses = await self._gather(
+                tuple(
+                    self.agent(name)
+                    for name in self._names
+                    if name in names or name in loading
+                ),
+                lambda agent: agent.runtime_status(),
+                limit=AGENT_STATUS_TIMEOUT,
+            )
+        except Exception:
+            statuses = {}
+        if (
+            self._lock.locked()
+            or names != self._running_names
+            or self._loading is not loading
+        ):
+            return None
+        if self._loading:
+            await self._refresh_loading(statuses, loading)
+            if (
+                self._loading
+                and names
+                and self._loading is loading
+                and not self._lock.locked()
+                and asyncio.get_running_loop().time() >= self._load_deadline
             ):
-                raise IndeterminateError
-            if all(
-                state.ready
-                and state.driver_health is not None
-                and (previous := before[name].driver_health) is not None
-                and state.driver_health.generation > previous.generation
-                for name, state in statuses.items()
-            ):
-                return
-            await asyncio.sleep(0.1)
+                msg = "world loading timed out"
+                raise TimeoutError(msg)
+            return True
+        if (
+            self._mod_maintenance.enabled
+            and self._mod_maintenance.pending
+            and statuses
+            and all(
+                status.phase == "stopped" and status.pid is None
+                for status in statuses.values()
+            )
+        ):
+            return True
+        if not self._ready(statuses, names):
+            return False
+        try:
+            async with asyncio.timeout(HEALTH_INTERVAL):
+                runtimes = await self._connected_runtimes(names)
+        except Exception:
+            runtimes = None
+        if (
+            self._lock.locked()
+            or self._loading is not loading
+            or names != self._running_names
+        ):
+            return None
+        return runtimes is not None
 
     async def _shard_results[T](
         self,
@@ -1374,7 +1532,7 @@ class ClusterController(ClusterAPI):
                 self._record_error("MOD state observation failed", error)
 
     async def _maintain_mods(self) -> None:
-        if self._lock.locked():
+        if self._lock.locked() or self._loading:
             return
         async with self._public_operation():
             maintenance = self._mod_maintenance
@@ -1495,16 +1653,24 @@ class ShardController(ShardAPI):
         operation = c.operation("shard", command)
         if isinstance(command, c.Stop | c.Kill):
             await self.cluster._interrupt_operation()
-        elif isinstance(command, c.Start | c.Restart):
-            await self.cluster._cancel_initial_start()
         async with (
-            self.cluster._public_operation() if operation.mutation else nullcontext(),
             timeout_scope(command.timeout),
+            self.cluster._public_operation(
+                stopping=isinstance(command, c.Stop | c.Kill)
+            )
+            if operation.mutation
+            else nullcontext(),
         ):
             if isinstance(command, c.Status):
                 result = await self.cluster._shard_status(self.name)
             elif isinstance(command, c.Start | c.Stop | c.Restart | c.Kill):
                 result = await self._lifecycle(command)
+            elif operation.game == "reload":
+                result = await self.cluster._reload(
+                    lambda agent: agent.invoke(command),
+                    command.timeout,
+                    names=(self.name,),
+                )
             else:
                 result = await self._call(command)
         return operation.response.validate_python(result, strict=True)
@@ -1513,6 +1679,9 @@ class ShardController(ShardAPI):
         running = isinstance(command, c.Start | c.Restart)
         if running:
             self.cluster._require_complete()
+            if not self.cluster._prepared:
+                msg = "room resources are not prepared; start the room first"
+                raise RuntimeError(msg)
         if isinstance(command, c.Stop | c.Restart):
             notice = command.notice
             if notice is not None and notice.parameters.get("subject") == "本房间":
@@ -1523,20 +1692,35 @@ class ShardController(ShardAPI):
         self.cluster._desired[self.name] = (
             ShardDesired.RUNNING if running else ShardDesired.STOPPED
         )
-        if isinstance(command, c.Restart):
-            status = await self.cluster._shard_status(self.name)
-            if status.phase == "running" and status.ready:
-                await self._call(c.Save())
         if running:
             await self._call(c.Activate())
+            previous = (
+                await self.cluster._shard_status(self.name)
+                if isinstance(command, c.Restart)
+                else None
+            )
+            self.cluster._expect_ready(
+                {self.name: _LoadExpectation(previous, restart=True)},
+                DEFAULT_STARTUP_TIMEOUT,
+            )
         internal = (
             command.replace(notice=None)
             if isinstance(command, c.Stop | c.Restart)
             else command
         )
-        await self._call(internal)
         if running:
-            await self.cluster._require_ready((self.name,))
+            async with asyncio.timeout_at(self.cluster._load_deadline):
+                await self._call(internal)
+                self.cluster._pending_confirmation = True
+                await self.cluster._wait_ready(self.cluster._running_names)
+                self.cluster._pending_confirmation = False
+        else:
+            await self._call(internal)
+            self.cluster._loading = {
+                name: state
+                for name, state in self.cluster._loading.items()
+                if name != self.name
+            }
 
     async def _call[T](self, command: c.Request[T]) -> T:
         mutation = c.operation("agent", command).mutation

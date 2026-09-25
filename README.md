@@ -23,7 +23,7 @@ Start with [Quick start](#quick-start), then jump to the task you need.
 | [Configuration and deployment](#configuration-and-deployment) | [Directory layout](#directory-layout) · [Ports](#shards-and-ports) · [World settings](#world-settings) · [Configuration SDK](#configuration-sdk) · [Permissions](#container-users-and-directory-permissions) · [DNS](#container-dns) |
 | [Unified CLI](#unified-cli) | Room creation, configuration, templates, selection, and JSON output |
 | [Routine maintenance](#routine-maintenance) | Image updates, console and logs, schedules, and maintenance tasks |
-| [Runtime](#runtime) | [Components and communication](#components-and-communication) · [Lifecycle](#lifecycle-and-failure-recovery) · [Save confirmation](#saving-and-world-reloads) · [Timeouts](#default-timeouts) |
+| [Runtime](#runtime) | [Components and communication](#components-and-communication) · [Lifecycle](#lifecycle-and-failure-recovery) · [Saving and reloads](#saving-and-world-reloads) · [Timeouts](#default-timeouts) |
 | [RPC and game SDK](#rpc-and-game-sdk) | [Connection example](#connecting-to-a-cluster) · [Shared requests](#shared-requests-and-validation) · [API index](#api-index) · [Emoji and Emote](#emoji-and-emote-enums) |
 | [Saves and exports](#saves-and-exports) | [File reference](#save-files) · [Snapshots and rollback](#snapshot-queries-and-rollback-by-day) · [Exports and R2](#exports-and-r2-uploads) |
 | [Mod management](#mod-management) | [Native updates](#native-mod-updates) · [Downloads and activation](#declaring-downloads-and-activation) |
@@ -418,7 +418,7 @@ podman network inspect podman |
     '.[0] | del(.containers) | . + $dns[0]'
 ```
 
-1. Back up the network configuration and save the games.
+1. Back up the network configuration and gracefully stop the games.
    Stop every container on the network, including infra and non-DST containers.
 2. Confirm that the candidate changes only DNS fields.
    Install it as `/etc/containers/networks/podman.json` with mode `0644`.
@@ -439,9 +439,9 @@ dst-server room restart 299
 dst-server room stop 299
 ```
 
-Host service shutdown, container restarts, and SDK `stop()` do not implicitly confirm a save.
-When a current snapshot is required, wait for `world save` or the SDK's [cluster `save()`](#saving-and-world-reloads).
-SDK `restart()` confirms a save when all shards are ready before performing a full game restart.
+Shutdown, restart, and Mod maintenance rely on native graceful shutdown saving without an extra save command.
+Use `world save` or [cluster `save()`](#saving-and-world-reloads) only for an independent save while continuing to run.
+Restart reuses prepared resources; explicit updates and automatic maintenance own Mod updates.
 
 ### Player Announcements
 
@@ -746,17 +746,17 @@ sequenceDiagram
     A->>G: Create each shard's process
     G->>G: Native script bundle starts the Lua driver
     G-->>A: Native Ready and driver readiness
-    Note over A,G: Core failure prevents startup; optional telemetry may degrade
+    Note over A,G: Core failure prevents startup#59; optional telemetry may degrade
 ```
 
 | Operation | Shared Mods and game processes |
 | --- | --- |
 | Cluster `start()` | Prepares shared files and updates Mods when automatic updates are enabled, then starts the required shards; repeated calls reuse valid preparation. |
-| Cluster `stop()` / `kill()` | Stops games and invalidates cached preparation, so the next `start()` prepares again. |
-| Cluster `restart()` | Announces, saves ready games, stops all games, checks and updates shared Mods even when automatic updates are disabled, then activates and starts every shard. |
+| Cluster `stop()` / `kill()` | Stops games while retaining successfully prepared shared resources. |
+| Cluster `restart()` | Announces, gracefully stops all games, reuses installed Mods, then activates and starts every shard. |
 | `stop()` → `update_mods()` → `start()` | Manual refresh; the final step reuses the successful update. |
-| `update_mods(restart=True)` | Saves and stops running games, updates once, and restarts them inside the existing containers. |
-| Native outdated-Mod report | Schedules one internal room maintenance operation, using the same save, stop, update, and start steps. |
+| `update_mods(restart=True)` | Gracefully stops running games, updates and activates once, then starts them inside the existing containers. |
+| Native outdated-Mod report | Schedules one internal room maintenance operation, using the same graceful stop, update, and start steps. |
 | Explicit single-shard restart | Reuses installed Mods without a shared update. |
 
 Shared updates require all Agents connected and all game processes stopped, including any PID left in a failed state.
@@ -783,6 +783,10 @@ The Supervisor tries once per start or restart request.
 Startup failure, unexpected exit, or Agent disconnection stops all games and fails the management service.
 Unexpected exit includes status zero.
 Requested stops, restarts, and Mod maintenance are expected exits.
+Graceful shutdown uses the game's native saving; no extra save is sent.
+A stop timeout is recorded and followed by forced termination.
+Maintenance continues only after every affected process has exited.
+Explicit `kill()` interrupts an ongoing graceful stop immediately, and cleanup attempts every step before reporting errors.
 
 | Recovery | Behavior |
 | --- | --- |
@@ -799,6 +803,14 @@ Clients must reconnect RPC and subscriptions after recovery.
 
 With `NOTIFY_SOCKET`, the daemon sends `READY=1`, then `WATCHDOG=1` every 60 seconds.
 Quadlet's `WatchdogSec=300` triggers room recovery after five minutes without a notification.
+The Controller checks game runtime state and required shard connections to confirm room readiness.
+Five consecutive minutes without that confirmation during normal operation cause it to report failure.
+Brief probe failures have time to recover; simulation pauses and degraded optional telemetry do not themselves cause recovery.
+Startup and world loading have a 900-second limit; maintenance uses its own operation deadline.
+Caller timeout or cancellation ends the wait; the room continues supervising startup and loading already in progress.
+Conflicting changes remain blocked until readiness is confirmed; stopping is allowed.
+Intentionally stopped shards are excluded; Mod preparation and retry waits do not count as game connection failures.
+The Controller reports failures; systemd performs restarts and enforces its retry limit.
 
 - **Watchdog:** confirms the management event loop is active.
 - **`status.ready`:** confirms a live game reported native readiness.
@@ -835,51 +847,48 @@ Startup waits for driver readiness even with profile `off`; optional telemetry f
 
 Direct `Server` users must continuously consume lifecycle and game-event notifications; the Agent does this automatically.
 Diagnostics go to the Recorder for local logging and optional OTLP export.
-Full notification queues report losses without blocking readiness or save confirmation.
+Full notification queues report losses without blocking readiness or command replies.
 
 ### Saving and World Reloads
 
-`await cluster.save()` saves through the master and waits for its native completion callback.
-Other shards must confirm matching snapshots.
-Wait for success before stopping, restarting, or [exporting](#exports-and-r2-uploads).
+`await cluster.save()` submits one native coordinated save through the master.
+It returns after the native command acknowledges the request.
+Lua rejects saving while paused; saving never unpauses the game.
+There is no cross-shard save confirmation, snapshot inference or extra save during shutdown.
+Empty servers may overwrite the preceding snapshot without increasing its number.
 
-- Use the cluster or master: direct saves on secondary shards are rejected.
-- `ObservationCursor(attempt, sequence)` excludes notifications from earlier processes or operations.
-- Submission, native Done, and unrelated autosaves do not confirm this save.
-- Empty servers may overwrite the preceding snapshot without increasing its number.
+Reset, rollback and regeneration also return after native acknowledgement, not after world loading finishes.
+`rollback_to_day()` returns the selected `Snapshot`, not a completion receipt.
+The Controller remains busy until the affected shards report readiness in a new Lua generation.
+Conflicting mutations are rejected while loading.
+Stop and kill can interrupt loading, and the 900-second loading deadline still applies after the request returns.
 
-Regeneration succeeds only after every shard has a new world ID.
-Native resets and rollbacks start a new Lua generation within the same game process.
+Native reloads create a new Lua generation within the same process.
 The bootstrap tracks it through `TheSim:GetNumLaunches()` and single-line `DST_DRIVER|` records.
 FD 5 Session notifications do not control generations.
+Hooks install once per VM; typed requests use the current generation's driver.
+A generation change before writing can wait and retry; an uncertain mutation after writing is never automatically replayed.
+`Server.execute()` uses the same generation-aware JSON RPC and bounded Lua evaluator as typed Console requests.
 
-- Typed requests wait for the current generation's driver.
-  Resets, rollbacks, and regeneration also wait for native startup in the new generation.
-- Hooks install once per VM without Console commands; duplicate installation is rejected.
-  Late Session notifications do not reinstall hooks or reset event sequences.
-- A generation change detected before writing can wait and retry.
-  A change after writing reports an uncertain outcome without automatic replay.
-- `Server.execute()` uses the same generation-aware JSON RPC and bounded Lua evaluator as typed Console requests.
-
-After a timeout or disconnection, a submitted save or rollback may still be running.
-Check status or confirmation events before deciding what to do next.
-See the [driver](src/dst_server/runtime/driver.py) and [save completion](src/dst_server/lua/dst_server/commands.lua) implementations.
+Timeout or disconnection can leave a submitted operation running.
+Query current status before deciding on another action.
+See the [driver](src/dst_server/runtime/driver.py) and [native commands](src/dst_server/lua/dst_server/commands.lua).
 
 ### Default Timeouts
 
 | Operation | Default budget |
 | --- | --- |
 | Ordinary commands and typed game requests | 120 seconds. |
-| Saving and waiting for confirmation | 300 seconds. |
+| Save submission and acknowledgement | 300 seconds. |
 | Reset, rollback, rollback by day, and regeneration | 900 seconds. |
 | One game startup and native driver readiness | 900 seconds. |
 | Graceful game stop | 120 seconds; forced exit and output cleanup have separate budgets. |
 | RPC connection and handshake | 60 seconds. |
 
-Cluster operations use one deadline for readiness checks, forwarding, and confirmation.
-Concurrent mutations are rejected while an operation holds the room lock.
-The reload budget includes confirmation from every shard and new driver readiness.
-Rollback by day also includes snapshot selection and result verification.
+Command deadlines cover readiness checks, target selection, forwarding and acknowledgement.
+World loading is monitored separately for up to 900 seconds after submission.
+Concurrent mutations are rejected while the room is executing an operation or loading a world.
+Start, stop, restart and Mod updates retain their lifecycle waits.
 
 RPC budgets are declared in [commands.py](src/dst_server/commands.py).
 `Start`, `Restart`, and `UpdateMods` allow three hours; `Stop` and `Kill` allow 120 seconds.
@@ -1183,7 +1192,8 @@ They do not interpret Mod calendars.
 `cluster.rollback(1)` loads the preceding save; the count follows the saved snapshot list, independent of elapsed time.
 All shards must have the selected snapshot before rollback begins.
 
-`await cluster.rollback_to_day(day, timeout=900)` verifies sessions, rolls back all shards, and returns the chosen `Snapshot`.
+`await cluster.rollback_to_day(day, timeout=900)` verifies sessions and submits the coordinated rollback.
+It returns the chosen `Snapshot` after acknowledgement.
 It selects the **earliest** snapshot that day with a complete match on every shard; unknown days are excluded.
 No complete match means failure, without guessing days from IDs.
 
@@ -1197,7 +1207,7 @@ The exporting process needs the `export` extra; the image includes only `otel` b
 uv sync --extra export
 ```
 
-Save and stop the games, then package configuration and saves as `.7z`:
+Wait for graceful game shutdown, then package configuration and saves as `.7z`:
 
 ```python
 import shutil
@@ -1239,6 +1249,8 @@ Saves with only `saveindex`, or a corrupt/unsupported `shardindex`, cannot be ex
 
 Export scans once: stop games or use an unchanged copy.
 It checks file types, paths, collisions, and credentials, without monitoring concurrent writes.
+Scanning is best effort: directory read errors can omit saves, so success does not guarantee completeness.
+Keep the source saves; do not delete them solely because export succeeded.
 
 Pass S3 connection settings and credentials directly when uploading to R2:
 
@@ -1359,7 +1371,7 @@ See the [lifecycle table](#lifecycle-and-failure-recovery) for shared update tim
 
 | Operation | Behavior |
 | --- | --- |
-| `cluster.update_mods(restart=True)` | Saves, stops, updates, and restarts games in the existing containers |
+| `cluster.update_mods(restart=True)` | Gracefully stops, updates, and restarts games in the existing containers |
 | `cluster.update_mods()` | Requires stopped games; the next `start()` reuses the successful update |
 | `mod update --room 000` | Requires stopped room services; uses the room lock and a temporary container, then leaves the room stopped |
 
@@ -1712,7 +1724,7 @@ Pydantic validates and serializes configuration and deployment models.
 | [mods](src/dst_server/mods) | Mod configuration, files, updates, and scheduling |
 | [lua_codec.py](src/dst_server/lua_codec.py) / [json_codec.py](src/dst_server/json_codec.py) | Lua/JSON conversion and validation, without file I/O |
 | [process.py](src/dst_server/process.py) | Subprocess output and process-group cleanup |
-| [runtime](src/dst_server/runtime) | Game processes, FD protocols, readiness, and command confirmation |
+| [runtime](src/dst_server/runtime) | Game processes, FD protocols, readiness, and command acknowledgements |
 | [cluster](src/dst_server/cluster) | Agent topology, coordinated operations, subscriptions, and daemon setup |
 | [rpc](src/dst_server/rpc) | Cap'n Proto connections, payloads, and remote subscriptions |
 | [telemetry](src/dst_server/telemetry) | Collection and OpenTelemetry export |

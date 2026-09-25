@@ -18,7 +18,6 @@ from dst_server.errors import (
     IndeterminateError,
     RemoteError,
 )
-from dst_server.events.server import SavedEvent
 from dst_server.models.cluster import (
     ModUpdateStatus,
 )
@@ -45,9 +44,7 @@ async def test_typed_commands_cross_real_capabilities(tmp_path: Path) -> None:
         assert shard is client.shard("Master")
         assert await shard.status() == controller.master.value
         assert await shard.execute("return 1", timeout=4) == "return 1"
-        assert await shard.save(timeout=5) == SavedEvent(
-            path="session/SESSION/0000000031", snapshot=31
-        )
+        assert not hasattr(shard, "save")
         assert (
             await client.list_snapshots(limit=17, before=0) == controller.master.catalog
         )
@@ -55,10 +52,7 @@ async def test_typed_commands_cross_real_capabilities(tmp_path: Path) -> None:
             await client.rollback_to_day(21, timeout=6)
             == controller.master.catalog.snapshots[0]
         )
-        assert controller.master.requests[-2:] == [
-            c.Execute(source="return 1", timeout=4),
-            c.Save(timeout=5),
-        ]
+        assert controller.master.requests[-1] == c.Execute(source="return 1", timeout=4)
         assert controller.requests[-2:] == [
             c.Snapshots(limit=17, before=0),
             c.RollbackToDay(day=21, timeout=6),
@@ -172,7 +166,7 @@ async def test_untrusted_requests_fail_before_dispatch(
 @pytest.mark.parametrize(
     "command",
     [
-        c.Save().model_copy(update={"timeout": 0}),
+        c.World().model_copy(update={"timeout": 0}),
         c.Snapshots().model_copy(update={"before": True}),
     ],
 )
@@ -243,6 +237,7 @@ async def test_controller_regeneration_timeouts_preserve_submission_stage_over_r
             async def regenerate(command: c.Regenerate) -> None:
                 await master.dispatch(command)
                 caves.ready = False
+                await asyncio.Event().wait()
 
             master.handlers[c.Regenerate] = regenerate
         else:

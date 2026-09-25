@@ -352,10 +352,16 @@ class ShardSupervisor:
 
     async def _stop_attempt(self, server: Server, action: _Action) -> None:
         await self._set_phase(ShardPhase.STOPPING)
-        returncode = await self._terminate(
-            server,
-            force=action is _Action.KILL,
-        )
+        try:
+            returncode = await self._terminate(
+                server,
+                force=action is _Action.KILL,
+            )
+        except TimeoutError as error:
+            self._record_error("stop", error)
+            if self._is_live(server):
+                raise
+            returncode = server.returncode
         if self._is_live(server):
             msg = f"failed to stop live shard process: {self.shard}"
             raise RuntimeError(msg)
@@ -466,7 +472,6 @@ class ShardSupervisor:
         try:
             while not stopping.done():
                 if self._action is _Action.KILL:
-                    await cancel_tasks(stopping)
                     return await self._terminate_now(server, force=True)
                 self._wake.clear()
                 wake = asyncio.create_task(self._wake.wait())
@@ -490,12 +495,7 @@ class ShardSupervisor:
                 return server.returncode
             return await server.wait()
         try:
-            if not force:
-                try:
-                    return await server.stop()
-                except TimeoutError:
-                    pass
-            return await server.kill()
+            return await server.kill() if force else await server.stop()
         except ProcessLookupError:
             return await server.wait()
 

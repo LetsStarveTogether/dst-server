@@ -80,22 +80,9 @@ function rpc.install(options)
                 if not encoded then response = '{"ok":false,"error":"lua_error"}' end
                 pcall(remote_print, sim, beginning .. response .. "}\n")
             end
-            if request.method == "save" then
-                -- Saving finishes asynchronously, after native command dispatch.
-                -- Keep the request ID until this particular save's callback.
-                local saved, failure = pcall(require("dst_server.commands").save, request.arguments, function(data, failure)
-                    respond(function()
-                        if failure == "indeterminate" then wire.indeterminate() end
-                        assert(failure == nil)
-                        return data
-                    end)
-                end)
-                if not saved then respond(function() error(failure, 0) end) end
-            else
-                respond(function()
-                    return require("dst_server").call(request.method, request.arguments)
-                end)
-            end
+            respond(function()
+                return require("dst_server").call(request.method, request.arguments)
+            end)
         end)
         print = command_print
         if not ok then

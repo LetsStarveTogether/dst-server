@@ -4,6 +4,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock, Mock
 
 import logbook
 import pytest
@@ -11,7 +12,7 @@ from ulid import ULID
 
 from dst_server.errors import DisconnectedError
 from dst_server.models.cluster import ShardDesired, ShardPhase
-from dst_server.runtime import Server
+from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.supervisor import (
     ShardSupervisor,
     ShardSupervisorStatus,
@@ -83,6 +84,8 @@ class ProcessStub:
         if self.stop_gate is not None:
             await self.stop_gate.wait()
         if isinstance(self.stop_error, TimeoutError):
+            self.exit(-signal.SIGKILL)
+            await self.wait()
             raise self.stop_error
         self.exit(0)
         if self.stop_error is not None:
@@ -407,6 +410,73 @@ async def test_termination_failure_matrix(
     assert status.phase is ShardPhase.STOPPED
     assert status.returncode == expected
     assert supervisor.server is None
+    if isinstance(stop_error, TimeoutError):
+        assert status.error_id is not None
+        assert server.kill_calls == 0
+
+
+async def test_restart_continues_after_native_stop_times_out_and_reaps(
+    managed_supervisor: Callable[..., ShardSupervisor],
+) -> None:
+    first, second = ProcessStub(stop_error=TimeoutError()), ProcessStub()
+    supervisor = managed_supervisor("Forest", Factory(first, second))
+
+    with logbook.TestHandler() as output:
+        await supervisor.start()
+        status = await supervisor.restart()
+
+    assert status.phase is ShardPhase.RUNNING
+    assert supervisor.server is cast(Server, second)
+    assert first.returncode == -signal.SIGKILL
+    assert first.closed
+    assert first.kill_calls == 0
+    assert any(
+        record.exc_info and isinstance(record.exc_info[1], TimeoutError)
+        for record in output.records
+    )
+
+
+@pytest.mark.parametrize("action", ["kill", "aclose"])
+async def test_force_action_does_not_wait_for_shielded_native_stop(
+    action: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminated, exited = asyncio.Event(), asyncio.Event()
+    process = Mock(returncode=None)
+
+    async def wait() -> int:
+        await exited.wait()
+        assert isinstance(process.returncode, int)
+        return process.returncode
+
+    def kill() -> None:
+        process.returncode = -signal.SIGKILL
+        exited.set()
+
+    process.terminate.side_effect = terminated.set
+    process.kill.side_effect = kill
+    process.wait = AsyncMock(side_effect=wait)
+    server = Server(ServerConfig(shard="Forest"))
+    server.child = process
+    monkeypatch.setattr(server, "start", AsyncMock())
+    supervisor = ShardSupervisor("Forest", lambda: server)
+    await supervisor.start()
+    stopping = asyncio.create_task(supervisor.stop())
+    acting = None
+    try:
+        await wait_for_event(terminated, stopping)
+        acting = asyncio.create_task(getattr(supervisor, action)())
+        async with asyncio.timeout(1):
+            await asyncio.gather(stopping, acting)
+        process.kill.assert_called_once_with()
+        assert server.closed
+        assert supervisor.server is None
+    finally:
+        await server.kill()
+        if acting is not None:
+            await asyncio.gather(acting, return_exceptions=True)
+        await asyncio.gather(stopping, return_exceptions=True)
+        await supervisor.aclose()
 
 
 @pytest.mark.parametrize("action", ["kill", "aclose"])

@@ -75,7 +75,7 @@ async def test_lifecycle_announces_repeated_countdown_before_disrupting_players(
     assert max(
         index for index, call in enumerate(calls) if call == "announce:Master"
     ) < calls.index(mutation)
-    assert prepare.await_count == (2 if operation in {"restart", "mods"} else 1)
+    assert prepare.await_count == (2 if operation == "mods" else 1)
 
 
 async def test_explicit_opt_out_and_empty_room_do_not_start_a_countdown(
@@ -223,7 +223,7 @@ async def test_failed_announcement_does_not_block_maintenance(room: Room) -> Non
     await instance.restart(notice=maintenance(Template.RESTART, delay=0))
     assert master.ready
     assert caves.ready
-    assert prepare.await_count == 2
+    assert prepare.await_count == 1
 
 
 @pytest.mark.parametrize(

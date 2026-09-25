@@ -145,11 +145,6 @@ def test_console_source_validates_modes_and_preserves_multiline(
     ("arguments", "shard", "command"),
     [
         (["world", "save", "--timeout", "45"], None, c.ClusterSave(timeout=45)),
-        (
-            ["world", "save", "--shard", "cave", "--timeout", "46"],
-            "cave",
-            c.Save(timeout=46),
-        ),
     ],
 )
 def test_game_command_executes_once_and_reports_json(

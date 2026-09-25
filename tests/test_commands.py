@@ -2,10 +2,8 @@ import math
 
 import pytest
 from pydantic import ValidationError
-from ulid import ULID
 
 from dst_server import commands
-from dst_server.models.cluster import ObservationCursor
 from dst_server.timeouts import DEFAULT_COMMAND_TIMEOUT, DEFAULT_RELOAD_TIMEOUT
 
 
@@ -20,7 +18,7 @@ def test_requests_preserve_typed_arguments_and_operation_policy() -> None:
     assert commands.operation("agent", request) is commands.operation("shard", request)
     assert commands.operation("agent", request).game == "request"
     assert commands.operation("agent", commands.Reset()).game == "reload"
-    assert commands.operation("agent", commands.Save()).game is None
+    assert commands.operation("agent", commands.Save()).game == "request"
 
 
 def test_operation_catalog_defines_each_scoped_method_once() -> None:
@@ -86,14 +84,11 @@ def test_invalid_commands_fail_before_dispatch(
         command_type.model_validate(arguments)
 
 
-def test_wire_round_trip_preserves_cursor_identity_and_presence() -> None:
-    cursor = ObservationCursor(attempt=ULID(), sequence=0)
-    request = commands.WaitSaved(cursor=cursor, snapshot=None, timeout=1.5)
-    restored = commands.parse_request(commands.encode_request(request), scope="agent")
-    assert isinstance(restored, commands.WaitSaved)
+def test_save_wire_contract_only_acknowledges_submission() -> None:
+    request = commands.ClusterSave(timeout=1.5)
+    restored = commands.parse_request(commands.encode_request(request), scope="cluster")
     assert restored == request
-    assert restored.cursor == cursor
-    assert restored.arguments == {"cursor": cursor, "snapshot": None}
+    assert commands.operation("cluster", restored).result_type is None
 
 
 @pytest.mark.parametrize(
@@ -115,7 +110,7 @@ def test_wire_request_cannot_bypass_scope_or_parameter_validation(
 
 @pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), True])
 def test_copied_requests_are_revalidated(timeout: object) -> None:
-    copied = commands.Save().model_copy(update={"timeout": timeout})
+    copied = commands.World().model_copy(update={"timeout": timeout})
     with pytest.raises(ValidationError):
         commands.operation("shard", copied)
     with pytest.raises(ValidationError):

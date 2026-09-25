@@ -107,12 +107,10 @@ function scenarios.off()
     TheWorld.WatchWorldState = nil
     BufferedAction, Shard_UpdateWorldState, GetTick, GetTimeReal = nil, nil, nil, nil
     local driver = install("off")
-    local result
-    require("dst_server.commands").save({}, function(data, failure)
-        assert(failure == nil)
-        result = data
-    end)
-    assert(saved and result.snapshot == "session/SESSION/0000000001")
+    TheNet.IsServerPaused = function() return false end
+    c_save = function() saved = true end
+    assert(require("dst_server.commands").save({}) == true)
+    assert(saved)
     assert(#outputs == 0)
 end
 

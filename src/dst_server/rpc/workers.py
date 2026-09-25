@@ -1,5 +1,6 @@
 # ruff: file-ignore[async-function-with-timeout]
 import asyncio
+from collections.abc import Callable
 from contextlib import suppress
 from typing import Any, Protocol
 
@@ -198,8 +199,11 @@ class RemoteAgent(RemoteEndpoint):
 
 
 class WorkerRegistryServant(Responder, schema.WorkerRegistry.Server):
-    def __init__(self, controller: RegistryController) -> None:
+    def __init__(
+        self, controller: RegistryController, shutdown: Callable[[], None] | None = None
+    ) -> None:
         super().__init__()
+        self.shutdown = shutdown
         self.controller = controller
         self.remote: RemoteAgent | None = None
         self._closed = False
@@ -249,6 +253,15 @@ class WorkerRegistryServant(Responder, schema.WorkerRegistry.Server):
                 raise RuntimeError(msg)
 
         await self._respond(_context, "failed", failed, mutation=True)
+
+    async def draining(self, _context: Any) -> None:
+        async def draining() -> None:  # ruff: ignore[unused-async]
+            if self.remote is None or self.shutdown is None:
+                msg = "no registered shutdown coordinator"
+                raise RuntimeError(msg)
+            self.shutdown()
+
+        await self._respond(_context, "draining", draining, mutation=True)
 
     async def aclose(self) -> None:
         if self._closed:

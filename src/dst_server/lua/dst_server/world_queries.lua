@@ -82,7 +82,7 @@ function queries.room()
         max_players = TheNet:GetServerMaxPlayers(),
         player_count = #GetPlayerClientTable(),
         pvp = TheNet:GetServerPVP() == true,
-        is_paused = TheNet:IsServerPaused(true) == true,
+        is_paused = require("dst_server.state").sim_paused or TheNet:IsServerPaused() == true,
         has_password = TheNet:GetServerHasPassword() == true,
         is_dedicated = TheNet:GetServerIsDedicated() == true,
         is_online = TheNet:IsOnlineMode() == true,

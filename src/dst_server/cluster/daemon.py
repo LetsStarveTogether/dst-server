@@ -108,11 +108,8 @@ async def _daemon(
     try:
         async with rpc_runtime():
             await _run_with_watchdog(operation, shutdown)
-    except Exception as error:
-        logger.error(  # ruff: ignore[error-instead-of-exception]
-            "DST daemon stopped: {kind}",
-            kind=type(error).__name__,
-        )
+    except Exception:
+        logger.exception("DST daemon stopped")
         return 1
     else:
         return 0
@@ -233,7 +230,7 @@ async def _serve_master(
         await controller.register(cast(AgentEndpoint, agent))
         await stack.enter_async_context(
             abstract_rpc_server(
-                lambda: WorkerRegistryServant(controller),
+                lambda: WorkerRegistryServant(controller, shutdown.set),
                 internal_address,
             )
         )
@@ -307,7 +304,9 @@ async def _serve_agent(
     shutdown_task = asyncio.create_task(shutdown.wait(), name="dst-shutdown")
     fatal_task = asyncio.create_task(agent.wait_fatal(), name="dst-agent-fatal")
     cycle = asyncio.create_task(
-        _registered_cycle(agent, internal_address, reconnect_delay=reconnect_delay),
+        _registered_cycle(
+            agent, internal_address, shutdown=shutdown, reconnect_delay=reconnect_delay
+        ),
         name=f"dst-registry-{agent.name}",
     )
     try:
@@ -315,10 +314,13 @@ async def _serve_agent(
             {shutdown_task, fatal_task, cycle}, return_when=asyncio.FIRST_COMPLETED
         )
         if shutdown_task in done:
+            await cycle
             return
         if fatal_task in done:
             fatal_task.result()
         cycle.result()
+        if agent.drained:
+            return
         msg = "shard registry connection closed"
         raise ConnectionError(msg)
     finally:
@@ -330,6 +332,7 @@ async def _registered_cycle(
     internal_address: str,
     *,
     reconnect_delay: float = RECONNECT_DELAY,
+    shutdown: Shutdown | None = None,
 ) -> None:
     stack = AsyncExitStack()
     servant = AgentServant(agent)
@@ -338,6 +341,8 @@ async def _registered_cycle(
     try:
         async with asyncio.timeout(DEFAULT_CONNECT_TIMEOUT):
             while True:
+                if shutdown is not None and shutdown.is_set():
+                    return
                 try:
                     stream = await capnp.AsyncIoStream.create_unix_connection(
                         f"\0{internal_address}"
@@ -353,16 +358,27 @@ async def _registered_cycle(
             response = await registry.register(agent=servant)
         unwrap_outcome(response.result)
         disconnected = asyncio.ensure_future(client.on_disconnect())
+        stopping = asyncio.create_task((shutdown or asyncio.Event()).wait())
+        stack.push_async_callback(cancel_tasks, stopping)
         while True:
             failure = asyncio.create_task(
                 agent.next_failure(),
                 name=f"dst-failure-report-{agent.name}",
             )
             done, _ = await asyncio.wait(
-                {disconnected, failure},
+                {disconnected, failure, stopping},
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            if stopping in done:
+                async with asyncio.timeout(REGISTRY_FAILURE_TIMEOUT):
+                    response = await registry.draining()
+                    unwrap_outcome(response.result)
+                    await agent.drain()
+                    await disconnected
+                return
             if disconnected in done:
+                if agent.drained:
+                    return
                 msg = "registered controller disconnected"
                 raise ConnectionError(msg)
             failure.result()
@@ -385,21 +401,25 @@ async def _cleanup_agent(
     agent: ShardAgent,
 ) -> None:
     # Stop while the registry capability is still live, then release the connection.
-    await _best_effort(agent.stop)
-    await cancel_tasks(cycle)
-    await cancel_tasks(shutdown, fatal)
-    await _best_effort(agent.aclose)
+    await _best_effort(
+        agent.drain,
+        lambda: cancel_tasks(cycle),
+        lambda: cancel_tasks(shutdown, fatal),
+        agent.aclose,
+    )
 
 
 async def _best_effort(*operations: _Close) -> None:
+    errors: list[Exception] = []
     for operation in operations:
         try:
             await operation()
         except Exception as error:
-            logger.error(  # ruff: ignore[error-instead-of-exception]
-                "Agent cleanup failed: {kind}",
-                kind=type(error).__name__,
-            )
+            logger.exception("Agent cleanup failed")
+            errors.append(error)
+    if errors:
+        msg = "Agent cleanup failed"
+        raise ExceptionGroup(msg, errors)
 
 
 def _install_signal_handlers(

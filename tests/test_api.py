@@ -67,5 +67,5 @@ async def test_facade_rejects_invalid_arguments_before_invoke() -> None:
     with pytest.raises(ValidationError):
         await shard.players.give("KU_example", "log", count=65)
     with pytest.raises(ValidationError):
-        await shard.save(timeout=0)
+        await shard.execute("return true", timeout=0)
     assert shard.requests == []

@@ -333,16 +333,14 @@ async def world_save(
     room: tuple[str, ...] = (),
     all_rooms: AllRooms = False,
     template: str | None = None,
-    shard: str | None = None,
     timeout: float = DEFAULT_SAVE_TIMEOUT,
 ) -> None:
-    """Save every shard, or one explicitly selected shard."""
+    """Submit a native coordinated save; return when accepted."""
     await _command(
-        c.ClusterSave(timeout=timeout) if shard is None else c.Save(timeout=timeout),
+        c.ClusterSave(timeout=timeout),
         room,
         all_rooms,
         template,
-        shard=shard,
     )
 
 
@@ -408,7 +406,7 @@ async def world_rollback(
     template: str | None = None,
     timeout: float = DEFAULT_RELOAD_TIMEOUT,
 ) -> None:
-    """Roll back a whole room by snapshot count or to a specific day."""
+    """Submit a room rollback by snapshot count or day; return when accepted."""
     if day is not None and count != 1:
         msg = "--day and --count are mutually exclusive"
         raise ValueError(msg)
@@ -431,7 +429,7 @@ async def world_regenerate(
     shard: str | None = None,
     timeout: float = DEFAULT_RELOAD_TIMEOUT,
 ) -> None:
-    """Generate a new world using the room's saved world-generation settings."""
+    """Submit regeneration using saved world settings; return when accepted."""
     await _command(
         c.Regenerate(timeout=timeout)
         if shard is None

@@ -11,17 +11,21 @@ import pytest
 
 from dst_server import commands as c
 from dst_server.archive import export_cluster
+from dst_server.cluster.agent import ShardAgent
+from dst_server.cluster.controller import ClusterController
 from dst_server.errors import (
     DisconnectedError,
     IndeterminateCommandError,
 )
 from dst_server.events import player
+from dst_server.events.server import SavedEvent
 from dst_server.game.rpc import LuaRequestError
 from dst_server.klei_id import encode_klei_id
 from dst_server.lua_codec import lua_string
-from dst_server.models.cluster import GameEventRecord
+from dst_server.models.cluster import GameEventRecord, LifecycleRecord
 from dst_server.rooms import Room, RoomStore
 from dst_server.rpc import rpc_runtime
+from dst_server.runtime import Server
 from tests.system.helpers import (
     GAME_EXECUTABLE,
     IMAGE,
@@ -47,6 +51,54 @@ from tests.system.helpers import (
 pytestmark = pytest.mark.system
 
 
+async def native_save(server: Server) -> SavedEvent:
+    before = await server.game.invoke(c.Runtime())
+    await server.game.invoke(c.Save(timeout=OPERATION_TIMEOUT))
+    return await wait_saved(server, before.snapshot)
+
+
+async def wait_saved(server: Server, snapshot: int) -> SavedEvent:
+    async with asyncio.timeout(OPERATION_TIMEOUT):
+        while (event := await server.read_event()) is not None:
+            if isinstance(event, SavedEvent) and event.snapshot == snapshot:
+                return event
+    msg = "native save completion missing"
+    raise AssertionError(msg)
+
+
+async def wait_world(server: Server, previous_generation: int) -> None:
+    async with asyncio.timeout(OPERATION_TIMEOUT):
+        while (
+            server.driver.generation <= previous_generation
+            or not server.driver.is_ready(server.driver.generation)
+        ):
+            await server.driver.changed.wait()
+
+
+async def native_cluster_save(
+    controller: ClusterController, agents: dict[str, ShardAgent]
+) -> int:
+    with closing(controller.subscribe("lifecycle")) as events:
+        snapshots = {
+            shard: (await agent.invoke(c.Runtime())).snapshot
+            for shard, agent in agents.items()
+        }
+        assert await controller.save() is None
+        saved: dict[str, SavedEvent] = {}
+        async with asyncio.timeout(OPERATION_TIMEOUT):
+            while len(saved) < len(agents):
+                for record in await events.next(64):
+                    if (
+                        isinstance(record, LifecycleRecord)
+                        and isinstance(record.event, SavedEvent)
+                        and record.event.snapshot == snapshots[record.shard]
+                    ):
+                        saved[record.shard] = record.event
+        snapshot = saved[MASTER].snapshot
+        assert snapshot is not None
+        return snapshot
+
+
 async def test_export_restores_world_and_encoded_player_save(tmp_path: Path) -> None:
     py7zr = pytest.importorskip("py7zr")
     source = write_cluster(tmp_path / "source", encode_user_path=False)
@@ -66,7 +118,7 @@ async def test_export_restores_world_and_encoded_player_save(tmp_path: Path) -> 
                 "SerializeUserSession(player,true);return true"
             )
         )
-        await server.save(completion_timeout=OPERATION_TIMEOUT)
+        await native_save(server)
         before = await read_player(server, userid)
         assert f"/{userid}_/" in str(before["file"])
         assert before["health"] == 63
@@ -188,12 +240,16 @@ async def test_player_activity_needs_no_files_and_resets_with_process(
             assert status.game_attempt != attempts[shard]
             assert status.last_active_at is None
         assert not marker.exists()
+        generations = {
+            shard: agent.server.driver.generation for shard, agent in agents.items()
+        }
         await controller.regenerate(
             expected_session_id=sessions[MASTER],
             require_empty=True,
             timeout=STARTUP_TIMEOUT,
         )
         for shard, agent in agents.items():
+            await wait_world(agent.server, generations[shard])
             session = (await agent.invoke(c.Runtime())).session_id
             assert session != sessions[shard]
             assert (await agent.runtime_status()).last_active_at is None
@@ -210,6 +266,13 @@ async def test_snapshot_restore_preserves_both_shards_and_player_saves(
     users = {"forest": "KU_1234567_", "cave": "KU_7654321_"}
     health = {"forest": 63, "cave": 74}
     async with running_sharded_cluster(tmp_path) as (controller, agents):
+        # This fixture selects explicit snapshots; changing the test clock must
+        # not schedule a second native autosave behind the one under test.
+        await agents[MASTER].invoke(
+            c.ExecuteJson(
+                source="TheWorld:PushEvent('ms_setautosaveenabled', false); return true"
+            )
+        )
         sessions = {
             shard: (await agent.invoke(c.Runtime())).session_id
             for shard, agent in agents.items()
@@ -230,7 +293,7 @@ async def test_snapshot_restore_preserves_both_shards_and_player_saves(
                     "player.components.inventory:GiveItem(item);return true"
                 )
             )
-        target = await controller.save()
+        target = await native_cluster_save(controller, agents)
         for shard, later_health in {"forest": 41, "cave": 42}.items():
             await agents[shard].invoke(
                 c.ExecuteJson(
@@ -238,7 +301,7 @@ async def test_snapshot_restore_preserves_both_shards_and_player_saves(
                     f"{later_health});return true"
                 )
             )
-        later_same_day = await controller.save()
+        later_same_day = await native_cluster_save(controller, agents)
         for agent in agents.values():
             await agent.invoke(
                 c.ExecuteJson(
@@ -248,8 +311,8 @@ async def test_snapshot_restore_preserves_both_shards_and_player_saves(
                     "clock:OnLoad(data);return true"
                 )
             )
-        missing = await controller.save()
-        latest = await controller.save()
+        missing = await native_cluster_save(controller, agents)
+        latest = await native_cluster_save(controller, agents)
         for agent in agents.values():
             assert (
                 await agent.invoke(
@@ -266,31 +329,20 @@ async def test_snapshot_restore_preserves_both_shards_and_player_saves(
             async with asyncio.timeout(OPERATION_TIMEOUT):
                 while (await agent.invoke(c.World())).day != 30:  # ruff: ignore[async-busy-wait]
                     await asyncio.sleep(0.1)
-        assert target.snapshot is not None
-        assert later_same_day.snapshot is not None
-        assert missing.snapshot is not None
-        assert latest.snapshot is not None
-        assert (
-            latest.snapshot
-            > missing.snapshot
-            > later_same_day.snapshot
-            > target.snapshot
-        )
-        for path in (tmp_path / "cluster").glob(f"*/save/**/{missing.snapshot:010d}*"):
+        assert latest > missing > later_same_day > target
+        for path in (tmp_path / "cluster").glob(f"*/save/**/{missing:010d}*"):
             path.unlink()
         page = await controller.list_snapshots(limit=1)
         assert page.has_more
-        assert page.snapshots[0].snapshot_id == latest.snapshot
+        assert page.snapshots[0].snapshot_id == latest
         assert page.snapshots[0].metadata is not None
         assert page.snapshots[0].metadata.day == 20
-        previous = await controller.list_snapshots(limit=1, before=latest.snapshot)
-        assert previous.snapshots[0].snapshot_id == later_same_day.snapshot
+        previous = await controller.list_snapshots(limit=1, before=latest)
+        assert previous.snapshots[0].snapshot_id == later_same_day
         assert previous.snapshots[0].metadata is not None
         assert previous.snapshots[0].metadata.day == 10
-        earliest = await controller.list_snapshots(
-            limit=1, before=later_same_day.snapshot
-        )
-        assert earliest.snapshots[0].snapshot_id == target.snapshot
+        earliest = await controller.list_snapshots(limit=1, before=later_same_day)
+        assert earliest.snapshots[0].snapshot_id == target
         assert earliest.snapshots[0].metadata is not None
         assert earliest.snapshots[0].metadata.day == 10
         # Schedule a native autosave at the exact point rollback begins truncating.
@@ -304,16 +356,19 @@ async def test_snapshot_restore_preserves_both_shards_and_player_saves(
                 "return original(self,session,count) end;return true"
             )
         )
+        generations = {
+            shard: agent.server.driver.generation for shard, agent in agents.items()
+        }
         if operation == "day":
-            assert (await controller.rollback_to_day(10)).snapshot_id == target.snapshot
+            assert (await controller.rollback_to_day(10)).snapshot_id == target
         elif operation == "count":
             await controller.rollback(1)
         else:
             await controller.reset()
         expected_snapshot = {
-            "day": target.snapshot,
-            "count": later_same_day.snapshot,
-            "latest": latest.snapshot,
+            "day": target,
+            "count": later_same_day,
+            "latest": latest,
         }[operation]
         health = {
             "day": health,
@@ -321,6 +376,7 @@ async def test_snapshot_restore_preserves_both_shards_and_player_saves(
             "latest": {"forest": 17, "cave": 17},
         }[operation]
         for shard, agent in agents.items():
+            await wait_world(agent.server, generations[shard])
             runtime = await agent.invoke(c.Runtime())
             assert runtime.session_id == sessions[shard]
             assert runtime.snapshot == expected_snapshot + 1
@@ -500,10 +556,11 @@ async def test_sdk_real_game_core_contract(
             assert isinstance(failure.value.__cause__, LuaRequestError)
             assert failure.value.__cause__.code == "lua_error"
             assert (await server.game.invoke(c.Room())).is_dedicated is True
-            saved = await server.save(completion_timeout=OPERATION_TIMEOUT)
+            saved = await native_save(server)
             assert saved.snapshot is None or saved.snapshot >= runtime.snapshot
             generation = server.driver_health.generation
             await server.game.invoke(c.Reset(timeout=OPERATION_TIMEOUT))
+            await wait_world(server, generation)
             assert server.driver_health.generation > generation
             assert server.returncode is None
         await server.stop(grace_period=OPERATION_TIMEOUT)
@@ -620,14 +677,12 @@ async def test_real_game_driver_restarts_with_unchanged_session_id(
         generation = server.driver_health.generation
         async with asyncio.timeout(OPERATION_TIMEOUT):
             await server.execute("c_reset()", completion_timeout=OPERATION_TIMEOUT)
-            await server.game.wait_reload(
-                generation,
-                asyncio.get_running_loop().time() + OPERATION_TIMEOUT,
-            )
+            await wait_world(server, generation)
             assert server.driver_health.generation > generation
             assert server.session_id == session_id
             generation = server.driver_health.generation
             await server.game.invoke(c.Reset(timeout=OPERATION_TIMEOUT))
+            await wait_world(server, generation)
             assert server.driver_health.generation > generation
             assert server.session_id == session_id
             assert server.driver_error is None
@@ -688,6 +743,50 @@ async def test_real_game_driver_degrades_safely(
                 assert health.telemetry_status == "active"
                 assert server.driver_error is None
             assert (await server.game.invoke(c.Room())).is_dedicated is True
-            await server.save(completion_timeout=OPERATION_TIMEOUT)
+            await native_save(server)
             assert server.returncode is None
         await server.stop(grace_period=OPERATION_TIMEOUT)
+
+
+@pytest.mark.parametrize("paused", [False, True])
+async def test_native_restart_preserves_world_without_pre_save(
+    tmp_path: Path, paused: bool
+) -> None:
+    async with running_sharded_cluster(tmp_path, pause_when_empty=paused) as (
+        controller,
+        agents,
+    ):
+        if paused:
+            async with asyncio.timeout(OPERATION_TIMEOUT):
+                while not all(  # ruff: ignore[async-busy-wait] -- Poll native state across processes.
+                    value.is_paused
+                    for value in await asyncio.gather(
+                        *(
+                            agent.server.game.invoke(c.Room())
+                            for agent in agents.values()
+                        )
+                    )
+                ):
+                    await asyncio.sleep(0.1)
+            before = {
+                name: await agent.server.game.invoke(c.Runtime())
+                for name, agent in agents.items()
+            }
+            with pytest.raises(LuaRequestError, match="rejected"):
+                await controller.save(timeout=10)
+            assert before == {
+                name: await agent.server.game.invoke(c.Runtime())
+                for name, agent in agents.items()
+            }
+        before = {
+            name: await agent.server.game.invoke(c.Runtime())
+            for name, agent in agents.items()
+        }
+        await controller.restart(notice=None)
+        after = {
+            name: await agent.server.game.invoke(c.Runtime())
+            for name, agent in agents.items()
+        }
+        for name in before:
+            assert after[name].session_id == before[name].session_id
+            assert after[name].snapshot <= before[name].snapshot + 1

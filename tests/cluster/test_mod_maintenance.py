@@ -66,8 +66,9 @@ async def test_current_shard_reports_merge_into_one_saved_room_update(
 
     assert prepare.await_count == 2
     assert calls.count("start:Master") == calls.count("start:Caves") == 1
-    assert calls.index("save:Master") < calls.index("stop:Master")
-    assert calls.index("wait-saved:Caves") < calls.index("stop:Master")
+    assert "save:Master" not in calls
+    assert "wait-saved:Caves" not in calls
+    assert calls.count("activate:Master") == calls.count("activate:Caves") == 1
     assert (master.attempt, caves.attempt) != old_attempts
     assert not (await instance.status()).mod_update.pending
 
@@ -100,7 +101,7 @@ async def test_new_instance_outdated_during_startup_survives_and_backs_off(
     assert 290 < status.retry_in_seconds <= 300
 
 
-@pytest.mark.parametrize("stage", ["save", "stop", "download"])
+@pytest.mark.parametrize("stage", ["stop", "download"])
 async def test_failed_maintenance_retains_demand_and_recovers_after_backoff(
     room: Room, stage: str
 ) -> None:
@@ -108,8 +109,6 @@ async def test_failed_maintenance_retains_demand_and_recovers_after_backoff(
     master.outdated_mods = ("Insight",)
     fail = AsyncMock(side_effect=RuntimeError("maintenance failure"))
     match stage:
-        case "save":
-            master.handlers[c.Save] = fail
         case "stop":
             caves.handlers[c.Stop] = fail
         case "download":
@@ -118,17 +117,18 @@ async def test_failed_maintenance_retains_demand_and_recovers_after_backoff(
     try:
         await instance._maintain_mods()
         status = (await instance.status()).mod_update
+        if stage == "stop":
+            assert not status.pending
+            assert master.ready
+            assert caves.ready
+            assert "kill:Caves" in calls
+            return
         assert status.pending
         assert status.error
         assert not status.updating
         assert status.retry_in_seconds > 0
-        if stage == "save":
-            assert not any(call.startswith("stop:") for call in calls)
-            assert master.ready
-            assert caves.ready
-        else:
-            assert master.pid is None
-            assert caves.pid is None
+        assert master.pid is None
+        assert caves.pid is None
         previous = calls.copy()
         await instance._maintain_mods()
         assert calls == previous
@@ -188,6 +188,43 @@ async def test_background_watcher_uses_retained_state_and_own_deadline(
         prepare.side_effect = old_prepare
 
 
+@pytest.mark.parametrize("existing_failure", [False, True])
+async def test_presence_probe_retry_preserves_room_lifecycle_status(
+    room: Room, monkeypatch: pytest.MonkeyPatch, existing_failure: bool
+) -> None:
+    instance, master, _, prepare, _ = room
+    if existing_failure:
+        instance._record_error("existing lifecycle failure")
+    before = await instance.status()
+    probe = master.handlers[c.Presence] = AsyncMock(
+        side_effect=(TimeoutError(), await master.dispatch(c.Presence()))
+    )
+    maintenance = instance._mod_maintenance
+    wait = maintenance.wait
+    waiting: asyncio.Queue[None] = asyncio.Queue()
+
+    async def next_poll() -> None:
+        waiting.put_nowait(None)
+        await wait()
+
+    monkeypatch.setattr(maintenance, "wait", next_poll)
+    instance._mod_task = asyncio.create_task(instance._watch_mods())
+    async with asyncio.timeout(1):
+        await waiting.get()
+        for _ in range(2):
+            maintenance.wake()
+            await waiting.get()
+            status = await instance.status()
+            assert (status.phase, status.error_id, status.error) == (
+                before.phase,
+                before.error_id,
+                before.error,
+            )
+    assert probe.await_count == 2
+    assert prepare.await_count == 1
+    assert not instance._fatal.is_set()
+
+
 async def test_late_event_payload_cannot_restart_new_instances(room: Room) -> None:
     instance, _, caves, prepare, _ = room
     old_attempt = caves.attempt
@@ -196,7 +233,7 @@ async def test_late_event_payload_cannot_restart_new_instances(room: Room) -> No
     async with asyncio.timeout(1):
         await instance._mod_maintenance.wait()
     await instance._maintain_mods()
-    assert prepare.await_count == 2
+    assert prepare.await_count == 1
     assert not (await instance.status()).mod_update.pending
 
 

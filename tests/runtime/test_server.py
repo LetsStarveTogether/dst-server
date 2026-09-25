@@ -17,6 +17,7 @@ from dst_server.runtime import Server, ServerConfig
 from dst_server.runtime.console import Console, StaleGenerationError
 from dst_server.runtime.lifecycle import Lifecycle
 from dst_server.telemetry import TelemetryProfile, TelemetrySettings
+from dst_server.timeouts import timeout_scope
 from tests.helpers import wait_for_event
 from tests.runtime.helpers import FAKE_SERVER, structured_result
 
@@ -98,7 +99,7 @@ async def test_cloud_protocol_and_lifecycle(tmp_path: Path) -> None:
         assert isinstance(event, server_events.SessionEvent)
         assert event.session_id == "TEST"
         assert await server.execute("print(1)\nprint(2)") == "result:print(1)\nprint(2)"
-        assert await server.stop() == -signal.SIGKILL
+        assert await server.stop() == 0
         event = await server.read_event()
         assert event is not None
         assert event.event == "shutdown"
@@ -159,7 +160,7 @@ async def test_telemetry_install_failure_keeps_core_driver_running(
         assert server.driver_health.telemetry_status == "failed"
         assert server.returncode is None
         assert await server.game.invoke(c.ListPlayers()) == ()
-        await server.game.request_save()
+        await server.game.invoke(c.Save())
         assert server.returncode is None
 
 
@@ -344,6 +345,36 @@ async def test_execute_timeout_includes_server_readiness() -> None:
         await server.execute("return true", completion_timeout=0.01)
 
 
+@pytest.mark.parametrize(("request_timeout", "times_out"), [(1.0, False), (0.01, True)])
+async def test_direct_game_call_respects_requested_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_timeout: float,
+    times_out: bool,
+) -> None:
+    async with make_fake_server(tmp_path, "game-timeout") as server:
+        # The first native Busy reply delays the retry past this inner default.
+        monkeypatch.setattr("dst_server.runtime.server.DEFAULT_COMMAND_TIMEOUT", 0.02)
+        if times_out:
+            with pytest.raises(IndeterminateCommandError) as caught:
+                await server.game.invoke(c.Save(timeout=request_timeout))
+            assert isinstance(caught.value.__cause__, TimeoutError)
+        else:
+            assert await server.game.invoke(c.Save(timeout=request_timeout)) is None
+
+
+async def test_game_request_timeout_is_not_extended_by_outer_operation(
+    tmp_path: Path,
+) -> None:
+    async with (
+        make_fake_server(tmp_path, "game-timeout") as server,
+        timeout_scope(1),
+    ):
+        with pytest.raises(IndeterminateCommandError) as caught:
+            await server.game.invoke(c.Save(timeout=0.01))
+        assert isinstance(caught.value.__cause__, TimeoutError)
+
+
 async def test_stop_timeout_must_be_positive_before_signalling() -> None:
     process = Mock()
     process.returncode = None
@@ -356,7 +387,34 @@ async def test_stop_timeout_must_be_positive_before_signalling() -> None:
     process.terminate.assert_not_called()
 
 
-async def test_context_manager_kills_after_stop_timeout(
+async def test_native_stop_timeout_kills_and_reaps_before_raising() -> None:
+    exited = asyncio.Event()
+    process = Mock(returncode=None)
+
+    async def wait() -> int:
+        await exited.wait()
+        assert isinstance(process.returncode, int)
+        return process.returncode
+
+    def kill() -> None:
+        process.returncode = -signal.SIGKILL
+        exited.set()
+
+    process.kill.side_effect = kill
+    process.wait = AsyncMock(side_effect=wait)
+    server = Server(ServerConfig(shard="stop-timeout"))
+    server.child = process
+
+    with pytest.raises(TimeoutError):
+        await server.stop(grace_period=0.01)
+
+    assert server.closed
+    assert server.returncode == -signal.SIGKILL
+    process.terminate.assert_called_once_with()
+    process.kill.assert_called_once_with()
+
+
+async def test_context_manager_does_not_kill_again_after_reaped_stop_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = Server(ServerConfig(shard="stop-timeout"))
@@ -369,12 +427,10 @@ async def test_context_manager_kills_after_stop_timeout(
         await server.__aexit__(None, None, None)
 
     stop.assert_awaited_once_with()
-    kill.assert_awaited_once_with()
+    kill.assert_not_awaited()
 
 
-async def test_cancelled_stop_reaps_its_wait_tasks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_cancelled_stop_waits_for_native_exit_without_killing() -> None:
     class HangingProcess:
         def __init__(self) -> None:
             self.returncode: int | None = None
@@ -404,40 +460,26 @@ async def test_cancelled_stop_reaps_its_wait_tasks(
     process = HangingProcess()
     server = Server(ServerConfig(shard="stop-cancel"))
     server.child = cast("asyncio.subprocess.Process", process)
-    stopping_started = asyncio.Event()
-    stopping_finished = asyncio.Event()
-    wait_for_stopping = server.lifecycle.stopping.wait
-
-    async def observe_stopping() -> None:
-        stopping_started.set()
-        try:
-            await wait_for_stopping()
-        finally:
-            stopping_finished.set()
-
-    monkeypatch.setattr(server.lifecycle.stopping, "wait", observe_stopping)
     stopping = asyncio.create_task(server.stop())
     try:
-        watchdog = asyncio.timeout(5)
-        async with watchdog:
+        async with asyncio.timeout(5):
             await wait_for_event(process.wait_started, stopping)
-            await wait_for_event(stopping_started, stopping)
             stopping.cancel()
-
+            await asyncio.sleep(0)
+            assert not stopping.done()
+            assert not process.killed
+            process.returncode = 0
+            process.exited.set()
             with pytest.raises(asyncio.CancelledError):
                 await stopping
-            assert process.terminated is True
-            assert process.killed is True
+            assert process.terminated
+            assert not process.killed
             assert process.wait_finished.is_set()
-            assert stopping_finished.is_set()
-            assert server.closed is True
-        assert not watchdog.expired()
+            assert server.closed
     finally:
-        async with asyncio.timeout(5):
-            process.kill()
-            stopping.cancel()
-            await asyncio.gather(stopping, return_exceptions=True)
-            await server.finish()
+        process.exited.set()
+        await asyncio.gather(stopping, return_exceptions=True)
+        await server.finish()
 
 
 @pytest.mark.parametrize("cancellations", [1, 3])
@@ -577,87 +619,6 @@ async def test_finish_wakes_native_driver_waiter() -> None:
     await server.finish()
 
 
-async def test_save_uses_its_rpc_callback_and_ignores_unrelated_native_saves(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    server = Server(ServerConfig(shard="save"))
-    started, completed = asyncio.Event(), asyncio.Event()
-    expected = server_events.SavedEvent(path="session/REQUEST/27", snapshot=27)
-
-    async def native_save() -> server_events.SavedEvent:
-        started.set()
-        await completed.wait()
-        return expected
-
-    monkeypatch.setattr(server.game, "request_save", native_save)
-    saving = asyncio.create_task(server.save(completion_timeout=1))
-    try:
-        await wait_for_event(started, saving)
-        server.lifecycle.handle(
-            server_events.SavedEvent(path="session/AUTOSAVE/26", snapshot=26),
-        )
-        await asyncio.sleep(0)
-        assert not saving.done()
-        completed.set()
-        assert await saving == expected
-    finally:
-        saving.cancel()
-        await asyncio.gather(saving, return_exceptions=True)
-        await server.finish()
-
-
-@pytest.mark.parametrize("phase", ["lock", "request"])
-async def test_save_timeout_covers_its_lock_and_callback(
-    phase: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    server = Server(ServerConfig(shard="save-timeout"))
-    request = AsyncMock(side_effect=asyncio.Event().wait)
-    monkeypatch.setattr(server.game, "request_save", request)
-    if phase == "lock":
-        await server.save_lock.acquire()
-    try:
-        with pytest.raises(TimeoutError):
-            await server.save(completion_timeout=0.01)
-    finally:
-        if server.save_lock.locked():
-            server.save_lock.release()
-        await server.finish()
-    assert request.await_count == (0 if phase == "lock" else 1)
-
-
-async def test_cancelled_save_does_not_wait_for_an_uncorrelated_fd5_barrier(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    server = Server(ServerConfig(shard="save-cancel"))
-    started = asyncio.Event()
-    expected = server_events.SavedEvent(path="session/REQUEST/28", snapshot=28)
-    calls = 0
-
-    async def request() -> server_events.SavedEvent:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            started.set()
-            await asyncio.Event().wait()
-        return expected
-
-    monkeypatch.setattr(server.game, "request_save", request)
-    saving = asyncio.create_task(server.save())
-    try:
-        await wait_for_event(started, saving)
-        saving.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await saving
-        # Native code rejects a new save while the abandoned one is still running.
-        # Once it completes, the next correlated callback needs no FD5 barrier.
-        assert await server.save(completion_timeout=0.1) == expected
-    finally:
-        saving.cancel()
-        await asyncio.gather(saving, return_exceptions=True)
-        await server.finish()
-
-
 async def test_readiness_followed_by_fd5_eof_is_not_startup_success() -> None:
     lifecycle = Lifecycle()
     reader = asyncio.StreamReader()
@@ -761,15 +722,11 @@ async def test_stale_native_failure_does_not_disable_current_driver(
     await server.finish()
 
 
-async def test_new_world_failure_interrupts_reload_wait() -> None:
+async def test_new_world_failure_prevents_driver_readiness() -> None:
     server = Server(ServerConfig(shard="test"))
     observe = server.recorder.observe_log = Mock()
     await native_ready(server, 0)
-    waiting = asyncio.create_task(
-        server._wait_reload(0, asyncio.get_running_loop().time() + 10)
-    )
     try:
-        await asyncio.sleep(0)
         await server._observe_driver(
             DriverFailed(
                 nonce=server.game_events.nonce,
@@ -778,24 +735,21 @@ async def test_new_world_failure_interrupts_reload_wait() -> None:
             )
         )
         with pytest.raises(RuntimeError, match="installation_failed"):
-            await asyncio.wait_for(waiting, 1)
+            await server.driver.wait_ready()
         assert server.driver.generation == 1
         assert server.driver_error == "installation_failed"
         record = observe.call_args.kwargs
         assert record["event_name"] == "dst.runtime.diagnostic"
         assert record["body"]["generation"] == 1
     finally:
-        waiting.cancel()
-        await asyncio.gather(waiting, return_exceptions=True)
         await server.finish()
 
 
-async def test_reload_retries_only_before_write_and_waits_for_next_generation(
+async def test_reload_retries_only_before_write_and_returns_on_acceptance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = Server(ServerConfig(shard="test"))
     await native_ready(server, 0)
-    written = asyncio.Event()
     attempts = 0
 
     async def execute(
@@ -816,29 +770,15 @@ async def test_reload_retries_only_before_write_and_waits_for_next_generation(
             msg = "generation changed before write"
             raise StaleGenerationError(msg)
         assert generation_is_current() is True
-        written.set()
         return structured_result(data=True)
 
     monkeypatch.setattr(server, "_execute", execute)
-    resetting = asyncio.create_task(server.game.invoke(c.Reset(timeout=1)))
     try:
-        async with asyncio.timeout(5):
-            await wait_for_event(written, resetting)
-            await asyncio.sleep(0)
-
-            assert attempts == 2
-            assert server.driver.generation == 1
-            assert not resetting.done()
-
-            await native_ready(server, 2)
-            async with asyncio.timeout(1):
-                await resetting
-            assert server.driver_health.generation == 2
+        await server.game.invoke(c.Reset(timeout=1))
+        assert attempts == 2
+        assert server.driver.generation == 1
     finally:
-        async with asyncio.timeout(5):
-            resetting.cancel()
-            await asyncio.gather(resetting, return_exceptions=True)
-            await server.finish()
+        await server.finish()
 
 
 async def test_reload_timeout_does_not_replay_written_command(
@@ -846,7 +786,7 @@ async def test_reload_timeout_does_not_replay_written_command(
 ) -> None:
     server = Server(ServerConfig(shard="test"))
     await native_ready(server, 0)
-    execute = AsyncMock(return_value=structured_result(data=True))
+    execute = AsyncMock(side_effect=TimeoutError("response timed out"))
     monkeypatch.setattr(server, "_execute", execute)
 
     with pytest.raises(IndeterminateCommandError) as caught:
