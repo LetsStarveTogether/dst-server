@@ -48,7 +48,7 @@ def next_boundary(definition: Room | Control, now: datetime) -> datetime | None:
 
 
 def effective_state(definition: Control, now: datetime | None = None) -> bool | None:
-    if definition.paused or not definition.schedule:
+    if definition.paused:
         return None
     return is_open(definition, now or local_now())
 
@@ -106,11 +106,13 @@ async def _check_room(
     job_id, job_type = status["job_id"], status["job_type"]
     if load == "masked" or (job_id and job_type == "stop"):
         return {"status": "unchanged"}
-    if load != "loaded" or active == "failed":
+    if load != "loaded":
         msg = f"load={load} active={active}"
         raise RuntimeError(msg)
+    members = status.get("units", {})
     if not desired and (
-        active in {"active", "activating"}
+        status.get("running", False)
+        or active in {"active", "activating"}
         or (job_id and job_type in {"start", "restart"})
     ):
         await host.stop(
@@ -119,7 +121,14 @@ async def _check_room(
             wait=False,
         )
         return {"status": "stopped"}
-    if desired and active == "inactive" and not job_id:
+    if (
+        desired
+        and active == "inactive"
+        and not job_id
+        and all(
+            unit.active != "failed" and not unit.job_id for unit in members.values()
+        )
+    ):
         await host.start(number, automatic=True, wait=False)
         return {"status": "started"}
     result: dict[str, object] = {"status": "unchanged"}

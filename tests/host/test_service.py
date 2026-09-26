@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, call
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -47,9 +47,16 @@ async def host(tmp_path: Path) -> Host:
     manager.restart = AsyncMock(
         side_effect=lambda name: states.__setitem__(name, "active") or "restart-job"
     )
-    manager.stop = AsyncMock(
-        side_effect=lambda name: states.__setitem__(name, "inactive") or f"stop-{name}"
-    )
+
+    def stop(name: str) -> str:
+        states[name] = "inactive"
+        if name.endswith("-pod.service"):
+            for member in tuple(states):
+                if member.startswith(name.removesuffix("pod.service")):
+                    states[member] = "inactive"
+        return f"stop-{name}"
+
+    manager.stop = AsyncMock(side_effect=stop)
     manager.wait_idle = AsyncMock()
     manager.reload = AsyncMock()
     manager.reset_failed = AsyncMock()
@@ -158,6 +165,81 @@ async def test_edit_requires_all_units_stopped_without_mutating_files(
     assert host.rooms.load(0) == original
     for action in ("stop", "start", "restart", "wait_idle", "reload"):
         getattr(host.systemd, action).assert_not_awaited()
+
+
+async def test_edit_detects_running_renamed_container(host: Host) -> None:
+    definition = host.rooms.load(0)
+    (host.quadlet_dir / "dst-000-forest.container").rename(
+        host.quadlet_dir / "custom-master.container"
+    )
+    cave = host.quadlet_dir / "dst-000-cave.container"
+    cave.write_text(cave.read_text().replace("dst-000-forest", "custom-master"))
+    assert host.rooms.load(0) == definition
+    (host.quadlet_dir / "other.container").write_text("[Container]\nPod=other.pod\n")
+    host.systemd.states["custom-master.service"] = "active"
+    units = host.units(0)
+    assert "custom-master.service" in units
+    assert "other.service" not in units
+    before = (host.rooms.path(0) / "cluster.ini").read_bytes()
+
+    with pytest.raises(RuntimeError, match="stopped room"):
+        await host.edit(definition.edit("/cluster/settings/max_players", 10))
+
+    assert (host.rooms.path(0) / "cluster.ini").read_bytes() == before
+    host.systemd.reload.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", ["native", "deployment", "reload"])
+async def test_complete_edit_replays_after_partial_failure(
+    host: Host, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from dst_server.configuration import files
+    from dst_server.deployment import QuadletApplication
+
+    original = host.rooms.load(0)
+    definition = original.edit_many((
+        (
+            "/cluster/shards/forest/settings/server_port",
+            original.cluster.shards["cave"].settings.server_port,
+        ),
+        (
+            "/cluster/shards/cave/settings/server_port",
+            original.cluster.shards["forest"].settings.server_port,
+        ),
+    ))
+    write = files.atomic_write
+
+    def fail(path: Path, content: str, mode: int) -> None:
+        if (failure == "native" and path.parts[-2:] == ("forest", "server.ini")) or (
+            failure == "deployment" and path.suffix == ".pod"
+        ):
+            msg = "injected partial edit failure"
+            raise OSError(msg)
+        write(path, content, mode)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(files, "atomic_write", fail)
+        if failure == "reload":
+            patch.setattr(
+                host.systemd,
+                "reload",
+                AsyncMock(side_effect=OSError("injected partial edit failure")),
+            )
+        with pytest.raises(OSError, match="partial edit failure"):
+            await host.edit(definition)
+    if failure == "native":
+        with pytest.raises(ValueError, match="UDP port"):
+            host.rooms.load(0)
+
+    updated = await host.edit(definition)
+
+    assert updated == definition
+    assert QuadletApplication.load(host.quadlet_dir, name="dst-000") == (
+        definition.application(host.rooms.path(0))
+    )
+    host.systemd.reload.assert_awaited_once()
+    host.systemd.start.assert_not_awaited()
+    host.systemd.stop.assert_not_awaited()
 
 
 async def test_removed_shard_is_inactive_and_readding_it_reuses_the_untouched_save(
@@ -287,12 +369,15 @@ async def test_wait_ready_requires_every_expected_shard_to_be_ready(
     assert agent.opened == agent.closed == 3
 
 
-@pytest.mark.parametrize("failure", ["unit", "game", "unreachable"])
+@pytest.mark.parametrize("failure", ["unit", "member", "game", "unreachable"])
 async def test_wait_ready_reports_failure_and_releases_agent(
     host: Host, agent: SimpleNamespace, ready_game: ClusterStatus, failure: str
 ) -> None:
     if failure == "unit":
         host.systemd.states[host.unit(0)] = "failed"
+    elif failure == "member":
+        host.systemd.states["dst-000-forest.service"] = "failed"
+        agent.status.side_effect = ConnectionError("agent disconnected")
     elif failure == "game":
         agent.status.return_value = ready_game.replace(phase="failed", error="bad save")
     else:
@@ -309,6 +394,31 @@ async def test_wait_ready_reports_failure_and_releases_agent(
                 await host.wait_ready(0)
     assert agent.opened == agent.closed
     assert agent.opened == (0 if failure == "unit" else 1)
+
+
+@pytest.mark.parametrize(
+    ("active", "sub", "job_id"),
+    [("activating", "auto-restart", 0), ("failed", "failed", 1)],
+)
+async def test_wait_ready_allows_systemd_member_recovery(
+    host: Host,
+    agent: SimpleNamespace,
+    ready_game: ClusterStatus,
+    active: str,
+    sub: str,
+    job_id: int,
+) -> None:
+    master = "dst-000-forest.service"
+    host.systemd.states[master] = "active"
+    ready_units = await host.systemd.list_units(host.units(0))
+    host.systemd.list_units.side_effect = [
+        ready_units
+        | {master: UnitStatus(master, "loaded", active, sub, job_id, "start", "/")},
+        ready_units,
+    ]
+    agent.status.side_effect = [ConnectionError("agent disconnected"), ready_game]
+    assert (await host.wait_ready(0, timeout=5))["game"] == ready_game
+    assert agent.opened == agent.closed == 2
 
 
 async def test_cancel_wait_ready_closes_inflight_connection(
@@ -676,7 +786,7 @@ async def test_status_keeps_live_rpc_diagnostics_with_a_damaged_native_configura
     assert agent.opened == agent.closed == 1
 
 
-async def test_stopped_policy_edit_preserves_native_files(
+async def test_complete_edit_normalizes_managed_files(
     host: Host,
 ) -> None:
     original = host.rooms.load(0)
@@ -685,10 +795,10 @@ async def test_stopped_policy_edit_preserves_native_files(
     game.write_text(game.read_text() + "\n; native formatting\n")
     unit = host.quadlet_dir / "dst-000-forest.container"
     unit.write_text(unit.read_text() + "\n# native formatting\n")
-    before = {path: path.read_bytes() for path in (game, unit)}
     await host.edit(original.replace(recycle=False))
     assert not host.rooms.policy(0).recycle
-    assert {path: path.read_bytes() for path in before} == before
+    assert game.read_text() == original.game_files()[Path("cluster.ini")]
+    assert unit.read_text() == original.application(root).files()[Path(unit.name)]
     host.systemd.stop.assert_not_awaited()
     host.systemd.start.assert_not_awaited()
 
@@ -710,9 +820,11 @@ async def test_deployment_regenerates_managed_units_and_preserves_drop_ins(
         "[Container]\nEnvironment=DST_SERVER_MOD_PROXY=http://proxy.invalid\n"
     )
     original = host.rooms.load(0)
-    before = {path: path.read_bytes() for path in host.quadlet_dir.glob("*.container")}
     await host.edit(original.edit("/cluster/settings/max_players", 10))
-    assert {path: path.read_bytes() for path in before} == before
+    normalized = QuadletApplication.load(host.quadlet_dir, name="dst-000")
+    assert (
+        normalized.master.nice == original.application(host.rooms.path(0)).master.nice
+    )
     original = host.rooms.load(0)
     await host.edit(original.edit("/deployment/image", "localhost/custom:latest"))
     updated = QuadletApplication.load(host.quadlet_dir, name="dst-000")
@@ -809,7 +921,9 @@ async def test_stopped_edit_preserves_world_and_permission_files(host: Host) -> 
     )
     assert updated.cluster.settings.max_players == 10
     assert updated == host.rooms.load(0)
-    assert world.read_text() == written
+    assert (
+        world.read_text() == original.game_files()[Path("forest/worldgenoverride.lua")]
+    )
     assert (root / "blocklist.txt").read_text() == "KU_newban\n"
     assert save.read_bytes() == b"native saved world"
     host.systemd.stop.assert_not_awaited()
@@ -824,9 +938,7 @@ async def test_manual_stop_pauses_and_start_resumes_without_countdown(
     assert read_control(host.rooms.path(0)).paused
     await host.start(0, wait=False)
     assert not read_control(host.rooms.path(0)).paused
-    assert host.systemd.reset_failed.await_args_list == [
-        call(unit) for unit in host.units(0)
-    ]
+    host.systemd.reset_failed.assert_not_awaited()
     assert not (host.quadlet_dir / ".dst-operation.lock").exists()
 
 
@@ -849,11 +961,25 @@ async def test_automatic_start_never_clears_start_limit(
     host.systemd.reset_failed.assert_not_awaited()
 
 
-async def test_status_reports_failed_master_even_when_pod_is_active(host: Host) -> None:
+@pytest.mark.parametrize("pod", ["active", "inactive", "failed"])
+async def test_automatic_start_cannot_recover_failed_member(
+    host: Host, monkeypatch: pytest.MonkeyPatch, pod: str
+) -> None:
+    monkeypatch.setattr(service, "effective_state", lambda *_: True)
+    host.systemd.states[host.unit(0)] = pod
+    host.systemd.states["dst-000-forest.service"] = "failed"
+    assert (await host.start(0, automatic=True, wait=False))["action"] == "skipped"
+    host.systemd.start.assert_not_awaited()
+    host.systemd.restart.assert_not_awaited()
+    host.systemd.reset_failed.assert_not_awaited()
+
+
+async def test_status_preserves_pod_and_failed_member_states(host: Host) -> None:
     host.systemd.states[host.unit(0)] = "active"
     host.systemd.states["dst-000-forest.service"] = "failed"
     result = await host.status(0, game=False)
-    assert result["active"] == "failed"
+    assert result["active"] == "active"
+    assert result["units"]["dst-000-forest.service"].active == "failed"
 
 
 async def test_explicit_start_recovers_failed_master_with_active_pod(
@@ -864,7 +990,7 @@ async def test_explicit_start_recovers_failed_master_with_active_pod(
     await host.start(0, wait=False)
     host.systemd.restart.assert_awaited_once_with(host.unit(0))
     host.systemd.start.assert_not_awaited()
-    assert host.systemd.reset_failed.await_count == len(host.units(0))
+    host.systemd.reset_failed.assert_awaited_once_with("dst-000-forest.service")
 
 
 async def test_explicit_restart_recovers_unreachable_controller(
@@ -873,3 +999,11 @@ async def test_explicit_restart_recovers_unreachable_controller(
     agent.status.side_effect = ConnectionError("controller unavailable")
     await host.restart(0, wait=False)
     host.systemd.restart.assert_awaited_once_with(host.unit(0))
+
+
+async def test_start_allows_systemd_to_load_collected_units(host: Host) -> None:
+    host.systemd.list_units.side_effect = lambda _: {}
+    host.systemd.reset_failed.side_effect = RuntimeError("unit not loaded")
+    await host.start(0, wait=False)
+    host.systemd.start.assert_awaited_once_with(host.unit(0))
+    host.systemd.reset_failed.assert_not_awaited()

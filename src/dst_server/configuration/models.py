@@ -289,23 +289,6 @@ def _shared_cluster_key(
     return keys.pop()
 
 
-def cluster_structure(
-    settings: ClusterSettings, shards: Mapping[str, ShardSettings]
-) -> dict[tuple[str, ...], object]:
-    structure: dict[tuple[str, ...], object] = {
-        ("settings", field): getattr(settings, field)
-        for field in CLUSTER_STRUCTURE_FIELDS
-    }
-    if len(shards) > 1 and "shard_enabled" not in settings.model_fields_set:
-        structure["settings", "shard_enabled"] = True
-    structure.update(
-        (("shards", name, "settings", field), getattr(shard, field))
-        for name, shard in shards.items()
-        for field in ShardSettings.model_fields
-    )
-    return structure
-
-
 class ShardConfig(RevalidatedFrozenModel):
     settings: ShardSettings
     level: LevelDataOverride | None = None

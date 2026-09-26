@@ -23,6 +23,7 @@ from dst_server.activity import ActivityCheckpoint
 from dst_server.configuration.files import (
     atomic_write,
     configuration_file_exists,
+    load_ini,
     read_text,
     validate_directory,
     write_files,
@@ -107,10 +108,18 @@ class Room(RevalidatedFrozenModel):
             if path.name not in PERMISSION_FILES
         }
 
-    def save_game(
-        self, directory: Path, *, previous: Room | None = None
-    ) -> tuple[Path, ...]:
+    def save_game(self, directory: Path) -> tuple[Path, ...]:
         """Write changed native files, preserving permissions and shard saves."""
+        servers = []
+        if directory.exists() or directory.is_symlink():
+            validate_directory(directory)
+            for path in directory.iterdir():
+                if path.name == "mods" or path.name.startswith("."):
+                    continue
+                if path.is_dir():
+                    validate_directory(path)
+                    if configuration_file_exists(path / "server.ini"):
+                        servers.append(path / "server.ini")
         cluster = self.cluster
         if (
             _shared_cluster_key(
@@ -119,24 +128,15 @@ class Room(RevalidatedFrozenModel):
             is None
         ):
             path = directory / "cluster.ini"
-            key = (
-                _shared_cluster_key(
-                    previous.cluster.settings,
-                    (shard.settings for shard in previous.cluster.shards.values()),
-                )
-                if previous is not None
-                else _shared_cluster_key(
-                    ClusterSettings.load(path)
-                    if configuration_file_exists(path)
-                    else ClusterSettings(),
-                    (
-                        ShardSettings.load(server)
-                        for name in cluster.shards
-                        if configuration_file_exists(
-                            server := directory / name / "server.ini"
-                        )
-                    ),
-                )
+            include = frozenset({"cluster_key"})
+            key = _shared_cluster_key(
+                load_ini(path, ClusterSettings, include=include)
+                if configuration_file_exists(path)
+                else ClusterSettings(),
+                (
+                    load_ini(server, ShardSettings, include=include)
+                    for server in servers
+                ),
             )
             cluster = cluster.replace(
                 settings=cluster.settings.replace(
@@ -144,9 +144,10 @@ class Room(RevalidatedFrozenModel):
                 )
             )
         files = self.replace(cluster=cluster).game_files()
-        old = previous.game_files() if previous is not None else {}
         removed = {
-            path for path in old.keys() - files.keys() if path.name == "server.ini"
+            server.relative_to(directory)
+            for server in servers
+            if server.parent.name not in cluster.shards
         } | {
             Path(shard) / name
             for shard in self.cluster.shards
@@ -158,7 +159,10 @@ class Room(RevalidatedFrozenModel):
             validate_directory(directory / path.parent)
             configuration_file_exists(directory / path)
         changed = {
-            path: content for path, content in files.items() if old.get(path) != content
+            path: content
+            for path, content in files.items()
+            if not configuration_file_exists(directory / path)
+            or (directory / path).read_bytes() != content.encode("utf-8")
         }
         written = write_files(directory, changed, directories=(Path("mods/ugc"),))
         for path in removed:
@@ -192,7 +196,7 @@ class Room(RevalidatedFrozenModel):
         application = room.application(directory) if quadlet_dir is not None else None
         if application is not None and quadlet_dir is not None:
             application.validate_save(quadlet_dir)
-        written = room.save_game(directory, previous=previous)
+        written = room.save_game(directory)
         room.save_policy(directory)
         if application is not None and quadlet_dir is not None:
             written += application.save(quadlet_dir)

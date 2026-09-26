@@ -7,6 +7,7 @@ import pytest
 from pydantic import SecretStr
 
 from dst_server.host import schedule
+from dst_server.host.systemd import UnitStatus
 from dst_server.presets.lst import fleet_room
 from dst_server.rooms import (
     CONTROL_FILE,
@@ -67,8 +68,8 @@ def test_overlapping_touching_and_midnight_windows_merge() -> None:
     assert schedule.next_boundary(all_day, now(9)) is None
 
 
-def test_unscheduled_and_paused_are_not_automatically_managed() -> None:
-    assert schedule.effective_state(Control(), now(10)) is None
+def test_all_day_is_managed_and_paused_is_not() -> None:
+    assert schedule.effective_state(Control(), now(10)) is True
     control = Control(schedule=make_room().schedule, paused=True)
     assert schedule.effective_state(control, now(10)) is None
 
@@ -136,8 +137,8 @@ def fake_host(tmp_path: Path, numbers: tuple[int, ...]) -> Mock:
         (18, "loaded", "deactivating", "", "unchanged"),
         (10, "masked", "inactive", "", "unchanged"),
         (18, "masked", "active", "", "unchanged"),
-        (10, "loaded", "failed", "", "failed"),
-        (18, "loaded", "failed", "", "failed"),
+        (10, "loaded", "failed", "", "unchanged"),
+        (18, "loaded", "failed", "", "unchanged"),
         (10, "not-found", "inactive", "", "failed"),
         (10, "loaded", "inactive", "start", "unchanged"),
         (10, "loaded", "inactive", "restart", "unchanged"),
@@ -296,3 +297,31 @@ async def test_schedule_and_pause_do_not_parse_dynamic_game_configuration(
     assert await schedule.set_paused(host, (16,), True) == {16: {"status": "paused"}}
     assert read_control(host.rooms.path(16)).schedule == make_room(16).schedule
     assert world.read_bytes() == before
+
+
+@pytest.mark.parametrize("pod", ["active", "inactive"])
+@pytest.mark.parametrize("member", ["activating", "failed"])
+async def test_schedule_never_recovers_failed_or_starting_members(
+    tmp_path: Path, pod: str, member: str
+) -> None:
+    host = fake_host(tmp_path, (16,))
+    host.restart = AsyncMock()
+    host.status.return_value.update(
+        active=pod,
+        error="control socket is not available",
+        units={
+            "master": UnitStatus(
+                "master",
+                "loaded",
+                member,
+                "",
+                int(member == "activating"),
+                "start",
+                "/",
+            )
+        },
+    )
+    assert await schedule.run_schedule(host, now(10)) == {16: {"status": "unchanged"}}
+    host.status.assert_awaited_once_with(16, game=False)
+    host.start.assert_not_awaited()
+    host.restart.assert_not_awaited()

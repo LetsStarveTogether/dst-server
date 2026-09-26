@@ -91,9 +91,6 @@ def test_changing_players_only_writes_cluster_ini(tmp_path: Path) -> None:
     store = RoomStore(tmp_path)
     store.save(fleet_room(0, token=SecretStr("test-token")))
     directory = store.path(0)
-    for relative in ("forest/worldgenoverride.lua", "forest/modoverrides.lua"):
-        path = directory / relative
-        path.write_text("-- Keep this native comment.\n" + path.read_text())
     permissions = directory / "blocklist.txt"
     permissions.write_bytes(b"KU_newlybanned\r\n")
     world = directory / "cave/save/world"
@@ -134,9 +131,7 @@ def test_stopping_a_shard_only_removes_its_server_ini(tmp_path: Path) -> None:
         if path.is_file() and path.name != "server.ini"
     }
 
-    previous.edit("/cluster/shards/cave", unset=True).save_game(
-        directory, previous=previous
-    )
+    previous.edit("/cluster/shards/cave", unset=True).save_game(directory)
 
     assert not (directory / "cave/server.ini").exists()
     assert tuple(store.load(0).cluster.shards) == ("forest",)
@@ -390,9 +385,9 @@ def test_partial_write_failure_keeps_world_and_can_retry_requested_change(
     with monkeypatch.context() as patch:
         patch.setattr(files, "atomic_write", fail)
         with pytest.raises(OSError, match="game file failure"):
-            requested.save_game(directory, previous=previous)
+            requested.save_game(directory)
     assert world.read_bytes() == b"existing world"
-    requested.save_game(directory, previous=previous)
+    requested.save_game(directory)
     loaded = store.load(0)
     assert loaded.cluster.settings.max_players == 12
     assert loaded.get("/cluster/shards/forest/world/worldgen_preset") == "ENDLESS"
@@ -407,23 +402,21 @@ def test_readding_shard_does_not_reactivate_its_old_overrides(tmp_path: Path) ->
     world.parent.mkdir()
     world.write_bytes(b"existing cave world")
     original = store.load(0)
-    original.edit("/cluster/shards/cave", unset=True).save_game(
-        directory, previous=original
-    )
+    original.edit("/cluster/shards/cave", unset=True).save_game(directory)
     assert (directory / "cave/worldgenoverride.lua").exists()
     cave = original.cluster.shards["cave"].replace(world=None)
     current = store.load(0)
     current.replace(
         cluster=current.cluster.replace(shards={**current.cluster.shards, "cave": cave})
-    ).save_game(directory, previous=current)
+    ).save_game(directory)
     assert store.load(0).cluster.shards["cave"].world is None
     assert not (directory / "cave/worldgenoverride.lua").exists()
     assert world.read_bytes() == b"existing cave world"
 
 
-@pytest.mark.parametrize("use_previous", [False, True])
+@pytest.mark.parametrize("rename_shards", [False, True])
 def test_regeneration_preserves_key_stored_only_in_server_ini(
-    tmp_path: Path, *, use_previous: bool
+    tmp_path: Path, *, rename_shards: bool
 ) -> None:
     store = RoomStore(tmp_path)
     key = SecretStr("existing-shard-key")
@@ -440,7 +433,16 @@ def test_regeneration_preserves_key_stored_only_in_server_ini(
     regenerated = previous.replace(
         cluster=build_template("pure_survival", token=previous.cluster.token)
     )
-    regenerated.save_game(store.path(0), previous=previous if use_previous else None)
+    if rename_shards:
+        regenerated = regenerated.replace(
+            cluster=regenerated.cluster.replace(
+                shards={
+                    f"new-{name}": shard
+                    for name, shard in regenerated.cluster.shards.items()
+                }
+            )
+        )
+    regenerated.save_game(store.path(0))
     loaded = store.load(0)
     assert loaded.cluster.settings.cluster_key == key
     assert all(

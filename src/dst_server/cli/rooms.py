@@ -148,6 +148,8 @@ async def edit_rooms(
 
     --set accepts /json/pointer=JSON; --unset removes an explicitly set field.
     Common settings are applied first, followed by --set and then --unset.
+    Existing configuration must be readable; use Host.edit with a complete Room
+    target to recover an interrupted write that left invalid configuration.
 
     Raises:
         ValueError: No changes were supplied or a --set assignment is malformed.

@@ -349,15 +349,22 @@ Each new directory gets its own key, including single-shard rooms.
 `RoomStore.load(number)` reads current files each time, including game-written changes.
 Load before editing: saving applies the complete definition, including schedules and recycling policy.
 
-- Use `room edit` or `Host.edit()` after stopping the room; editing does not start or stop services.
-- Offline saves require readable game configuration.
+- Use `room edit` or `Host.edit()` after stopping every shard service; editing does not start or stop services.
+- Field edits through `room edit` and offline `Room.save()` require readable game configuration.
   Configuration edits parse declarative Lua without executing it and reject unsupported dynamic Lua.
   Startup and schedule `show` / `pause` / `resume` / `run` do not parse world Lua.
-- Changed native files are reformatted and lose their original comments.
+- `Host.edit(target)` applies the complete target to managed native files and Quadlet base units, then reloads systemd.
+  Files that differ from the target text are reformatted and lose their comments; identical native files are not rewritten.
   Files are replaced individually, without a cross-file transaction.
   Saves, permission lists, and unrelated files remain intact.
-- Deployment changes regenerate SDK-owned Quadlet base units.
-  Put local changes in systemd drop-ins; edits reject fields still overridden by a drop-in.
+- Put local changes in systemd drop-ins; the target replaces handwritten changes in base units.
+  Edits reject fields still overridden by a drop-in.
+
+A write or reload failure can leave partial updates; keep the room stopped and fix the cause.
+Retain the complete target `Room` and repeat `await host.edit(target)` to finish applying it.
+This does not require loading the partially updated room first.
+CLI field edits still read the old configuration; use a complete SDK target if that configuration no longer parses.
+Omitted shared keys reuse a confirmed existing key; provide an explicit target key if the existing key cannot be established.
 
 [ClusterClient](#connecting-to-a-cluster).`read_configuration()` returns a validated `ClusterConfig` or raises an error.
 Persistent edits use host operations.
@@ -640,7 +647,12 @@ Daily windows use host local time and may cross midnight.
 
 Scheduled closing announces every minute for eight minutes.
 The installed timer checks every minute, then runs recycling even if a schedule check fails.
-Policy comes from each room's `.dst-control.json`; without it, schedules and recycling are disabled.
+Policy comes from each room's `.dst-control.json`.
+Without it, the scheduler treats the room as open all day and may start its stopped service.
+Automatic recycling remains disabled by default.
+Use `room stop` or `schedule pause` to pause automatic management; deleting the control file restores the defaults.
+The scheduler owns opening hours and announcements; systemd owns failure recovery.
+RPC errors do not trigger scheduled restarts, and the scheduler neither retries failed rooms nor clears systemd start limits.
 
 #### Install Automation
 

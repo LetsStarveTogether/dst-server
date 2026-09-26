@@ -26,7 +26,7 @@ from dst_server.configuration.files import (
     read_text,
     write_files,
 )
-from dst_server.configuration.models import ShardName, cluster_structure
+from dst_server.configuration.models import ShardName
 from dst_server.deployment.application import QuadletApplication, _escape_unit_name
 from dst_server.deployment.quadlet import _escape_expansions, references_pod
 from dst_server.klei_id import encode_klei_id
@@ -138,9 +138,7 @@ class Host:  # ruff: ignore[too-many-public-methods]
             self.unit(number),
             *(
                 f"{path.stem}.service"
-                for path in sorted(
-                    self.quadlet_dir.glob(f"dst-{number:03d}-*.container")
-                )
+                for path in sorted(self.quadlet_dir.glob("*.container"))
                 if references_pod(path, pod)
             ),
         )
@@ -233,18 +231,21 @@ class Host:  # ruff: ignore[too-many-public-methods]
     async def status(self, number: int, *, game: bool = True) -> dict[str, Any]:
         self.rooms.path(number)
         configuration_error = None
+        desired = None
         try:
-            self.rooms.policy(number)
+            desired = effective_state(self.rooms.policy(number))
             discover(self.rooms.path(number))
         except OSError, ValueError:
             configuration_error = "room configuration could not be loaded"
         units = await self.systemd.list_units(self.units(number))
-        state = next(
-            (unit for unit in units.values() if unit.active == "failed"),
-            units.get(self.unit(number)),
-        )
+        state = units.get(self.unit(number))
         result: dict[str, Any] = {
             "number": number,
+            "desired": desired,
+            "running": any(
+                unit.active not in {"inactive", "failed"} for unit in units.values()
+            ),
+            "units": units,
             "load": state.load if state else "not-found",
             "active": state.active if state else "inactive",
             "sub": state.sub if state else "dead",
@@ -264,8 +265,6 @@ class Host:  # ruff: ignore[too-many-public-methods]
 
     async def diagnose(self, number: int) -> dict[str, Any]:
         result = await self.status(number)
-        units = self.units(number)
-        result["units"] = await self.systemd.list_units(units)
         result["logs"] = await self.journal(number, JournalQuery(limit=50))
         return result
 
@@ -287,29 +286,27 @@ class Host:  # ruff: ignore[too-many-public-methods]
         return self.rooms.load(definition.number)
 
     async def edit(self, definition: Room) -> Room:
-        """Write configuration for a stopped room without changing its lifecycle."""
+        """Apply a complete target to a stopped room; retries finish partial updates."""
         definition = Room.model_validate(definition)
         number = definition.number
         directory = self.rooms.path(number)
         async with room_lock(directory):
-            previous = self.rooms.load(number)
+            if not configuration_file_exists(directory / "cluster.ini"):
+                raise FileNotFoundError(directory / "cluster.ini")
             if await self._running_units(number):
                 msg = "configuration changes require a stopped room"
                 raise RuntimeError(msg)
-            structural = self._structure(previous) != self._structure(definition)
-            application = definition.application(directory) if structural else None
-            if application is not None:
-                application.validate_updates(self.quadlet_dir)
-            definition.save_game(directory, previous=previous)
+            application = definition.application(directory)
+            application.validate_updates(self.quadlet_dir)
+            definition.save_game(directory)
             self.rooms.save_policy(definition)
-            if application is not None:
-                files = application.files()
-                pod = f"{application.pod.name}.pod"
-                for path in self.quadlet_dir.glob("*.container"):
-                    if Path(path.name) not in files and references_pod(path, pod):
-                        path.unlink()
-                application.save(self.quadlet_dir)
-                await self.systemd.reload()
+            files = application.files()
+            pod = f"{application.pod.name}.pod"
+            for path in self.quadlet_dir.glob("*.container"):
+                if Path(path.name) not in files and references_pod(path, pod):
+                    path.unlink()
+            application.save(self.quadlet_dir)
+            await self.systemd.reload()
             return self.rooms.load(number)
 
     async def _running_units(self, number: int) -> tuple[str, ...]:
@@ -318,19 +315,6 @@ class Host:  # ruff: ignore[too-many-public-methods]
             unit
             for unit, state in states.items()
             if state.active not in {"inactive", "failed"} or state.job_id
-        )
-
-    @staticmethod
-    def _structure(definition: Room) -> object:
-        return (
-            definition.deployment,
-            cluster_structure(
-                definition.cluster.settings,
-                {
-                    name: shard.settings
-                    for name, shard in definition.cluster.shards.items()
-                },
-            ),
         )
 
     async def _check_busy(self, number: int) -> None:
@@ -363,15 +347,29 @@ class Host:  # ruff: ignore[too-many-public-methods]
                 running = await self._running_units(number)
                 operation = action
                 if action != "stop":
-                    if running:
+                    if running or automatic:
                         state = await self.status(number, game=False)
-                        if state["active"] == "failed":
+                        failed = state["active"] == "failed" or any(
+                            unit.active == "failed" for unit in state["units"].values()
+                        )
+                        if automatic and failed:
+                            return {
+                                "number": number,
+                                "action": "skipped",
+                                "waiting": False,
+                            }
+                        if failed:
                             operation = "restart"
-                        else:
+                        elif running:
                             await self._check_busy(number)
                     await self.systemd.reload()
                     if not automatic:
-                        for unit in self.units(number):
+                        states = await self.systemd.list_units(self.units(number))
+                        for unit in (
+                            name
+                            for name, state in states.items()
+                            if state.active == "failed"
+                        ):
                             await self.systemd.reset_failed(unit)
                 if not automatic:
                     write_control(
@@ -379,8 +377,11 @@ class Host:  # ruff: ignore[too-many-public-methods]
                         policy.model_copy(update={"paused": action == "stop"}),
                     )
                 if action == "stop":
-                    for unit in running:
-                        await self.systemd.stop(unit)
+                    pod = self.unit(number)
+                    await self.systemd.stop(pod)
+                    if pod not in running:
+                        for unit in running:
+                            await self.systemd.stop(unit)
                 else:
                     await getattr(self.systemd, operation)(self.unit(number))
             if wait:
@@ -448,6 +449,10 @@ class Host:  # ruff: ignore[too-many-public-methods]
                 if (
                     state["load"] != "loaded"
                     or state["active"] in {"failed", "inactive", "deactivating"}
+                    or any(
+                        unit.active == "failed" and not unit.job_id
+                        for unit in state["units"].values()
+                    )
                     or (game is not None and game.phase == "failed")
                 ):
                     detail = state["error"] or getattr(game, "error", None)
