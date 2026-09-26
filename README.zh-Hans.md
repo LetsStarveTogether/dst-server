@@ -588,6 +588,14 @@ asyncio.run(main())
 
 SDK follow 始终向前，默认不读历史；需要时传入 `JournalQuery(direction="forward", limit=100)`。
 带 cursor 时读取其后所有保留记录，不受初始历史条数限制。
+`JournalQuery(grep=r"DST_RECORD\|")` 使用 journalctl 原生 PCRE 表达式，在分页或 follow 前过滤 `MESSAGE`。
+大小写遵循 journalctl 规则：全小写表达式忽略大小写，其他表达式区分大小写。
+使用游标续读时保持相同表达式，确保锚点仍在所选记录中。
+无匹配返回空页；带诊断的原生失败仍会抛出异常。
+`JournalLogs.query(None, request)` 和 `follow(None, request)` 显式选择整个可访问的 journal。
+空 unit 序列仍无效；显式 unit 模式保持 journalctl 原生 unit 匹配语义。
+大范围扫描可用 `None` 配合原生时间和 `grep` 过滤，避免展开数百个保留的 unit 名称。
+`limit` 仍限制匹配记录数，namespace、游标和 follow 行为保持不变。
 
 无效 follow 游标在首条记录或读取器退出时报告；退出上下文总会关闭并回收读取进程。
 

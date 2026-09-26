@@ -19,7 +19,7 @@ from pydantic import (
 from dst_server.models.base import FrozenModel, NonNegativeInt
 from dst_server.timeouts import DEFAULT_COMMAND_TIMEOUT, positive_timeout
 
-from ._process import LogOutput, log_process, positive_bytes
+from ._process import LogOutput, LogProcessError, log_process, positive_bytes
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _UNIT_PATTERN = re.compile(r"(?:[A-Za-z0-9:_.@*?\[\]-]|\\x[0-9a-f]{2})+\Z")
@@ -92,14 +92,17 @@ class JournalRecord(FrozenModel):
 
 
 class JournalQuery(FrozenModel):
+    """Select journal entries; grep is journalctl's native MESSAGE PCRE pattern."""
+
     limit: NonNegativeInt = 100
     direction: Literal["forward", "backward"] = "backward"
     cursor: str | None = None
     since: str | AwareDatetime | None = None
     until: str | AwareDatetime | None = None
     namespace: str | None = None
+    grep: str | None = None
 
-    @field_validator("cursor", "since", "until", "namespace")
+    @field_validator("cursor", "since", "until", "namespace", "grep")
     @classmethod
     def _validate_text(cls, value: str | datetime | None) -> str | datetime | None:
         if isinstance(value, str) and (
@@ -141,9 +144,12 @@ class JournalCursorError(RuntimeError):
 class JournalStream:
     """Records and bounded diagnostics, valid until the enclosing context exits."""
 
-    def __init__(self, output: LogOutput, cursor: str | None) -> None:
+    def __init__(
+        self, output: LogOutput, cursor: str | None, *, grep: bool = False
+    ) -> None:
         self._output = output
         self._cursor = cursor
+        self._grep = grep
 
     @property
     def diagnostics(self) -> str:
@@ -160,13 +166,22 @@ class JournalStream:
         if self._cursor is not None:
             cursor = self._cursor
             try:
-                anchor = _record(await anext(self._output))
+                anchor = await self._next_record()
             except StopAsyncIteration as error:
                 raise JournalCursorError(cursor) from error
             if anchor.cursor != cursor:
                 raise JournalCursorError(cursor)
             self._cursor = None
-        return _record(await anext(self._output))
+        return await self._next_record()
+
+    async def _next_record(self) -> JournalRecord:
+        try:
+            return _record(await anext(self._output))
+        except LogProcessError as error:
+            # journalctl --grep returns 1 for no matches. Preserve diagnostic failures.
+            if self._grep and error.returncode == 1 and not error.diagnostics:
+                raise StopAsyncIteration from None
+            raise
 
 
 def _record(line: bytes) -> JournalRecord:
@@ -177,11 +192,13 @@ def _record(line: bytes) -> JournalRecord:
         raise ValueError(message) from error
 
 
-def _command(units: Sequence[str], request: JournalQuery, *, follow: bool) -> list[str]:
-    if isinstance(units, str) or not units:
+def _command(
+    units: Sequence[str] | None, request: JournalQuery, *, follow: bool
+) -> list[str]:
+    if units is not None and (isinstance(units, str) or not units):
         message = "journal logs require at least one explicit unit pattern"
         raise ValueError(message)
-    for unit in units:
+    for unit in units or ():
         if (
             not isinstance(unit, str)
             or _UNIT_PATTERN.fullmatch(unit) is None
@@ -192,7 +209,7 @@ def _command(units: Sequence[str], request: JournalQuery, *, follow: bool) -> li
             message = "invalid journal unit pattern"
             raise ValueError(message)
     command = ["journalctl", "--no-pager", "--all", "--output=json"]
-    command.extend(f"--unit={unit}" for unit in dict.fromkeys(units))
+    command.extend(f"--unit={unit}" for unit in dict.fromkeys(units or ()))
     if follow:
         command.extend(("--follow", f"--lines={request.limit}"))
     else:
@@ -202,7 +219,7 @@ def _command(units: Sequence[str], request: JournalQuery, *, follow: bool) -> li
         )
         if request.direction == "backward":
             command.append("--reverse")
-    for name in ("cursor", "since", "until", "namespace"):
+    for name in ("cursor", "since", "until", "namespace", "grep"):
         value = getattr(request, name)
         if value is not None:
             if isinstance(value, datetime):
@@ -227,19 +244,21 @@ class JournalLogs:
 
     async def query(
         self,
-        units: Sequence[str],
+        units: Sequence[str] | None,
         request: JournalQuery = _DEFAULT_QUERY,
         *,
         completion_timeout: float = DEFAULT_COMMAND_TIMEOUT,
     ) -> JournalResult:
         """Return a bounded page in the requested journal order.
 
+        Explicit units=None selects the whole accessible journal; an empty
+        sequence is invalid. Unit patterns retain journalctl's native semantics.
         Forward reads oldest to newest; backward reads newest to oldest.
         has_more indicates an additional matching record beyond this page.
         next_cursor identifies the last delivered record, excluding lookahead.
         Resume with request.replace(cursor=result.next_cursor, since=None);
-        journalctl forbids combining since with a cursor. Keep until to retain
-        the same upper time bound across pages.
+        journalctl forbids combining since with a cursor. Keep until and grep
+        unchanged across pages.
 
         Returns:
             Records, continuation metadata, and bounded native diagnostics.
@@ -254,7 +273,12 @@ class JournalLogs:
                 max_output_bytes=self.max_output_bytes,
             ) as output,
         ):
-            records = [record async for record in JournalStream(output, request.cursor)]
+            records = [
+                record
+                async for record in JournalStream(
+                    output, request.cursor, grep=request.grep is not None
+                )
+            ]
             returned = tuple(records[: request.limit])
             return JournalResult(
                 records=returned,
@@ -267,11 +291,13 @@ class JournalLogs:
     @asynccontextmanager
     async def follow(
         self,
-        units: Sequence[str],
+        units: Sequence[str] | None,
         request: JournalQuery = _DEFAULT_FOLLOW,
     ) -> AsyncIterator[JournalStream]:
         """Read initial history and new records with one owned journalctl process.
 
+        Explicit units=None selects the whole accessible journal; an empty
+        sequence is invalid. Unit patterns retain journalctl's native semantics.
         Without a cursor, limit selects the recent initial history; zero starts
         with new records. With a cursor, every retained record after it is read.
         A missing cursor can only be detected when a record or EOF arrives.
@@ -294,4 +320,4 @@ class JournalLogs:
             max_record_bytes=self.max_record_bytes,
             max_output_bytes=None,
         ) as output:
-            yield JournalStream(output, request.cursor)
+            yield JournalStream(output, request.cursor, grep=request.grep is not None)

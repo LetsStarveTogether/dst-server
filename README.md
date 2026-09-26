@@ -607,6 +607,14 @@ asyncio.run(main())
 SDK follow reads forward, with no initial history by default.
 Use `JournalQuery(direction="forward", limit=100)` to include history.
 A cursor reads all retained subsequent records, regardless of the initial-history limit.
+`JournalQuery(grep=r"DST_RECORD\|")` filters `MESSAGE` with journalctl's native PCRE expression before pagination or follow.
+Matching follows journalctl's case rules: all-lowercase patterns ignore case; other patterns are case-sensitive.
+Keep the same pattern when resuming from a cursor so the anchor remains in the selected records.
+No matches return an empty page; native failures with diagnostics still raise an error.
+`JournalLogs.query(None, request)` and `follow(None, request)` explicitly select the whole accessible journal.
+An empty unit sequence remains invalid; explicit unit patterns retain journalctl's native unit-matching semantics.
+Use `None` with native time and `grep` filters for a broad scan without expanding hundreds of retained unit names.
+This still applies `limit` to matching records and preserves namespace, cursor, and follow behavior.
 
 Invalid follow cursors are reported on the first record or reader exit.
 Leaving the context always closes and reaps the reader.

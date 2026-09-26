@@ -72,6 +72,7 @@ async def test_query_preserves_fields_and_success_diagnostics(
             since=datetime(2026, 9, 12, 8, tzinfo=timezone(timedelta(hours=8))),
             until="now",
             namespace="dst",
+            grep=r"^DST_RECORD ",
         ),
     )
     assert len(commands) == 1
@@ -83,6 +84,7 @@ async def test_query_preserves_fields_and_success_diagnostics(
     assert "--since=2026-09-12 00:00:00.000000 UTC" in command
     assert "--until=now" in command
     assert "--namespace=dst" in command
+    assert r"--grep=^DST_RECORD " in command
     assert "--unit=dst-007-*.service" in command
     assert not any(argument.startswith("--output-fields") for argument in command)
     assert not any(argument.startswith("--boot") for argument in command)
@@ -104,16 +106,41 @@ async def test_query_preserves_fields_and_success_diagnostics(
     assert processes[0].returncode == 0
 
 
+@pytest.mark.parametrize("follow", [False, True])
+async def test_explicit_unscoped_reader_preserves_native_query_options(
+    journal_process: tuple, follow: bool
+) -> None:
+    write, commands, _ = journal_process
+    write(f"print({orjson.dumps(entry('matched')).decode()!r})\n")
+    request = JournalQuery(
+        direction="forward", limit=1, namespace="games", grep="DST_RECORD"
+    )
+    reader = JournalLogs()
+    if follow:
+        async with reader.follow(None, request) as stream:
+            records = [record async for record in stream]
+    else:
+        records = (await reader.query(None, request)).records
+    assert [record.cursor for record in records] == ["matched"]
+    assert not any(argument.startswith("--unit=") for argument in commands[0])
+    assert "--namespace=games" in commands[0]
+    assert "--grep=DST_RECORD" in commands[0]
+    assert ("--follow" in commands[0]) == follow
+
+
 @pytest.mark.parametrize("direction", ["forward", "backward"])
+@pytest.mark.parametrize("grep", [None, r"^event [0246]$"])
 async def test_cursor_pages_preserve_equal_timestamps_and_lookahead(
-    journal_process: tuple, direction: Literal["forward", "backward"]
+    journal_process: tuple, direction: Literal["forward", "backward"], grep: str | None
 ) -> None:
     write, commands, processes = journal_process
-    entries = [entry(str(index)) for index in range(7)]
+    entries = [entry(str(index), MESSAGE=f"event {index}") for index in range(7)]
     write(
-        "import orjson, sys\n"
+        "import orjson, re, sys\n"
         f"records = {entries!r}\n"
         "options = dict(arg.split('=', 1) for arg in sys.argv[1:] if '=' in arg)\n"
+        "if '--grep' in options: records = [item for item in records "
+        "if re.search(options['--grep'], item['MESSAGE'])]\n"
         "if '--reverse' in sys.argv: records.reverse()\n"
         "if '--cursor' in options:\n"
         "    index = next(i for i, item in enumerate(records) "
@@ -128,7 +155,7 @@ async def test_cursor_pages_preserve_equal_timestamps_and_lookahead(
     while True:
         result = await reader.query(
             ("dst-007-forest.service",),
-            JournalQuery(limit=2, direction=direction, cursor=cursor),
+            JournalQuery(limit=2, direction=direction, cursor=cursor, grep=grep),
         )
         delivered.extend(record.cursor for record in result.records)
         assert len(result.records) <= 2
@@ -136,9 +163,9 @@ async def test_cursor_pages_preserve_equal_timestamps_and_lookahead(
         if not result.has_more:
             break
         cursor = result.next_cursor
-    expected = [str(index) for index in range(7)]
+    expected = [str(index) for index in range(0, 7, 2 if grep else 1)]
     assert delivered == (expected if direction == "forward" else expected[::-1])
-    assert len(commands) == 4
+    assert len(commands) == (2 if grep else 4)
     assert all(process.returncode == 0 for process in processes)
     if direction == "forward":
         assert "--lines=+3" in commands[0]
@@ -223,12 +250,35 @@ async def test_follow_cursor_drops_anchor_and_keeps_resumed_history(
     )
     async with JournalLogs().follow(
         ("dst-007-forest.service",),
-        JournalQuery(direction="forward", cursor="0", limit=1),
+        JournalQuery(direction="forward", cursor="0", limit=1, grep="DST_RECORD"),
     ) as stream:
         delivered = [record.cursor async for record in stream]
     assert delivered == ["1", "2", "3", "4"]
     assert "--cursor=0" in commands[0]
     assert "--follow" in commands[0]
+    assert "--grep=DST_RECORD" in commands[0]
+
+
+@pytest.mark.parametrize("grep", [None, "DST_RECORD"])
+@pytest.mark.parametrize("diagnostics", ["", "permission denied"])
+async def test_grep_no_matches_preserves_real_reader_errors(
+    journal_process: tuple, grep: str | None, diagnostics: str
+) -> None:
+    write, _, _ = journal_process
+    write(f"import sys\nsys.stderr.write({diagnostics!r})\nsys.exit(1)\n")
+    request = JournalQuery(grep=grep)
+    if grep and not diagnostics:
+        result = await JournalLogs().query(("dst-007-forest.service",), request)
+        assert result.records == ()
+        assert result.next_cursor is None
+        assert not result.has_more
+        with pytest.raises(JournalCursorError):
+            await JournalLogs().query(
+                ("dst-007-forest.service",), request.replace(cursor="missing")
+            )
+    else:
+        with pytest.raises(_process.LogProcessError, match="status 1"):
+            await JournalLogs().query(("dst-007-forest.service",), request)
 
 
 async def test_cancelled_cursor_wait_keeps_anchor_validation(
@@ -337,6 +387,11 @@ async def test_query_timeout_reaps_process(journal_process: tuple) -> None:
             {"since": datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None)},
         ),
         (("dst-007-forest.service",), {"cursor": "bad\0cursor"}),
+        (("dst-007-forest.service",), {"grep": ""}),
+        (("dst-007-forest.service",), {"grep": " "}),
+        (("dst-007-forest.service",), {"grep": "bad\0pattern"}),
+        (("dst-007-forest.service",), {"grep": "bad\npattern"}),
+        (("dst-007-forest.service",), {"grep": "bad\rpattern"}),
         (
             ("dst-007-forest.service",),
             {"cursor": "previous", "since": "yesterday"},
