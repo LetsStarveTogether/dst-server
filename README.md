@@ -154,7 +154,7 @@ All special rooms are always open:
 | `210–212` | Island Adventure | 6 |
 | `213–215` | Hamlet | 6 |
 | `216–217` | Lights-out survival | 9 |
-| `218–219` | Lights-out endless | 6 |
+| `218–219` | Lights-out endless | 9 |
 
 Generic templates support any slot in `000–299`, including `lights_out_survival` and `lights_out_endless`.
 Existing rooms are read from native files and never inherit template changes automatically.

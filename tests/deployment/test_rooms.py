@@ -196,7 +196,6 @@ def test_template_settings_worlds_and_shard_roles(
         "steam_group_id": 45_524_458,
         "max_players": {
             RoomType.AFK: 64,
-            RoomType.LIGHTS_OUT_ENDLESS: 6,
             RoomType.ISLAND_ADVENTURE: 6,
             RoomType.HAMLET: 6,
             RoomType.FORGE: 6,

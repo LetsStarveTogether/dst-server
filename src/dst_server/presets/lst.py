@@ -77,7 +77,7 @@ _TEMPLATE_DEFAULTS = {
     RoomType.SEMI_ENDLESS: ("半纯无尽", 9),
     RoomType.AFK: ("挂皮肤", 64),
     RoomType.LIGHTS_OUT_SURVIVAL: ("永夜生存", 9),
-    RoomType.LIGHTS_OUT_ENDLESS: ("永夜无尽", 6),
+    RoomType.LIGHTS_OUT_ENDLESS: ("永夜无尽", 9),
     RoomType.ISLAND_ADVENTURE: ("岛屿冒险", 6),
     RoomType.HAMLET: ("云霄国度", 6),
     RoomType.ADVENTURE: ("冒险", 9),
