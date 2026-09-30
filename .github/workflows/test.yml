@@ -2,6 +2,11 @@ name: Test
 
 on:
   workflow_call:
+    inputs:
+      revision:
+        description: 'Commit to test; defaults to the triggering commit'
+        required: false
+        type: string
 
 permissions: {}
 
@@ -16,6 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
         with:
+          ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
           submodules: true
 

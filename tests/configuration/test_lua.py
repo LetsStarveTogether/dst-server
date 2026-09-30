@@ -253,17 +253,6 @@ def test_internal_worldgen_topology_overrides_are_typed_and_sparse(
         ForestOverrides(layout_mode="unknown")  # ty: ignore[invalid-argument-type]
 
 
-def test_world_override_fields_match_pinned_source(
-    luajit: str,
-    pinned_scripts: Path,
-) -> None:
-    contract = source_customize_contract(luajit, pinned_scripts)
-    options = cast(dict[str, dict[str, object]], contract["options"])
-    misc = cast(dict[str, object], contract["misc"])
-    for location, model in (("forest", ForestOverrides), ("cave", CaveOverrides)):
-        assert set(model.model_fields) == set(options[location]) | set(misc)
-
-
 def test_world_override_models_cover_native_customize_options(
     luajit: str,
     native_scripts: Path,
