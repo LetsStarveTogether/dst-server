@@ -380,6 +380,7 @@ function scenarios.explosive_deaths()
     explosive.skip_camera_flash = true
     local victim = entity("hound", 5)
     victim.IsInLimbo = function() return false end
+    TheSim = { FindEntities = function() return { victim } end }
     local dead = false
     victim.components.health = { IsDead = function() return dead end }
     local hits = 0
@@ -398,7 +399,7 @@ function scenarios.explosive_deaths()
             explosive:SetPvpAttacker(nil)
             explosive[setter](explosive, owner)
             dead = false
-            explosive:OnBurnt(victim)
+            explosive:OnBurnt()
             assert(bomb.removed)
         end
     end
