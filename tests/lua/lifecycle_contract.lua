@@ -1,5 +1,5 @@
 local root, scripts, profile = assert(arg[1]), assert(arg[2]), assert(arg[3])
-package.path = root .. "/src/dst_server/lua/?.lua;" .. scripts .. "/?.lua;" .. package.path
+package.path = root .. "/resources/lua/?.lua;" .. scripts .. "/?.lua;" .. package.path
 json = require("json")
 require("class")
 Entity = {}
