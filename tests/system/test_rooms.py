@@ -186,10 +186,15 @@ async def test_quadlet_native_configuration_preserves_game_writes_and_stopped_ed
         )
         saved = await client.save()
         assert saved is None
-        world = rooms.load(number).cluster.shards[MASTER].world
-        assert world is not None
-        assert isinstance(world.overrides, ForestOverrides)
-        assert world.overrides.day == "onlynight"
+        # The save request is acknowledged before native configuration writes finish.
+        async with asyncio.timeout(OPERATION_TIMEOUT):
+            while True:
+                world = rooms.load(number).cluster.shards[MASTER].world
+                assert world is not None
+                assert isinstance(world.overrides, ForestOverrides)
+                if world.overrides.day == "onlynight":
+                    break
+                await asyncio.sleep(0.5)
 
     await run_command("systemctl", "stop", *system.services)
     rooms.save(rooms.load(number).edit("/cluster/settings/max_players", 8))
