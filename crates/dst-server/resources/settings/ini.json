@@ -1,0 +1,145 @@
+{
+  "ClusterSettings": {
+    "fields": {
+      "autosaver_enabled": "NETWORK",
+      "bind_ip": "SHARD",
+      "cluster_description": "NETWORK",
+      "cluster_key": "SHARD",
+      "cluster_language": "NETWORK",
+      "cluster_name": "NETWORK",
+      "cluster_password": "NETWORK",
+      "connection_timeout": "NETWORK",
+      "console_enabled": "MISC",
+      "game_mode": "GAMEPLAY",
+      "idle_timeout": "NETWORK",
+      "internet_broadcasting_enabled": "NETWORK",
+      "lan_only_cluster": "NETWORK",
+      "master_ip": "SHARD",
+      "master_port": "SHARD",
+      "max_players": "GAMEPLAY",
+      "max_snapshots": "MISC",
+      "mods_enabled": "MISC",
+      "offline_cluster": "NETWORK",
+      "override_dns": "NETWORK",
+      "pause_when_empty": "GAMEPLAY",
+      "pvp": "GAMEPLAY",
+      "shard_enabled": "SHARD",
+      "steam_group_admins": "STEAM",
+      "steam_group_id": "STEAM",
+      "steam_group_only": "STEAM",
+      "tick_rate": "NETWORK",
+      "use_alternate_gc": "MISC",
+      "vote_enabled": "GAMEPLAY",
+      "whitelist_slots": "NETWORK"
+    },
+    "ignored": {},
+    "sections": [
+      {
+        "fields": [
+          "max_snapshots",
+          "console_enabled",
+          "use_alternate_gc",
+          "mods_enabled"
+        ],
+        "name": "MISC"
+      },
+      {
+        "fields": [
+          "shard_enabled",
+          "bind_ip",
+          "master_ip",
+          "master_port",
+          "cluster_key"
+        ],
+        "name": "SHARD"
+      },
+      {
+        "fields": [
+          "steam_group_only",
+          "steam_group_id",
+          "steam_group_admins"
+        ],
+        "name": "STEAM"
+      },
+      {
+        "fields": [
+          "cluster_name",
+          "cluster_password",
+          "cluster_description",
+          "tick_rate",
+          "offline_cluster",
+          "lan_only_cluster",
+          "autosaver_enabled",
+          "whitelist_slots",
+          "cluster_language",
+          "connection_timeout",
+          "internet_broadcasting_enabled",
+          "idle_timeout",
+          "override_dns"
+        ],
+        "name": "NETWORK"
+      },
+      {
+        "fields": [
+          "max_players",
+          "pvp",
+          "game_mode",
+          "pause_when_empty",
+          "vote_enabled"
+        ],
+        "name": "GAMEPLAY"
+      }
+    ]
+  },
+  "ShardSettings": {
+    "fields": {
+      "bind_ip": "SHARD",
+      "cluster_key": "SHARD",
+      "encode_user_path": "ACCOUNT",
+      "id": "SHARD",
+      "is_master": "SHARD",
+      "master_ip": "SHARD",
+      "master_port": "SHARD",
+      "master_server_port": "STEAM",
+      "name": "SHARD",
+      "server_port": "NETWORK"
+    },
+    "ignored": {
+      "STEAM": [
+        "authentication_port"
+      ]
+    },
+    "sections": [
+      {
+        "fields": [
+          "is_master",
+          "name",
+          "id",
+          "bind_ip",
+          "master_ip",
+          "master_port",
+          "cluster_key"
+        ],
+        "name": "SHARD"
+      },
+      {
+        "fields": [
+          "master_server_port"
+        ],
+        "name": "STEAM"
+      },
+      {
+        "fields": [
+          "server_port"
+        ],
+        "name": "NETWORK"
+      },
+      {
+        "fields": [
+          "encode_user_path"
+        ],
+        "name": "ACCOUNT"
+      }
+    ]
+  }
+}
