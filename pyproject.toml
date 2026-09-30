@@ -34,6 +34,7 @@ include = [
     { path = "resources/lua/**/*", format = "sdist" },
     { path = "crates/dst-server/resources/**/*", format = "sdist" },
     { path = "Cargo.lock", format = "sdist" },
+    { path = "rust-toolchain.toml", format = "sdist" },
 ]
 
 [tool.ruff]
