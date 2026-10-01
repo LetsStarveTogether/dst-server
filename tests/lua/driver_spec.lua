@@ -289,6 +289,18 @@ function scenarios.large_loot()
     assert(driver.health().errors == 0, "byte limit replaces arbitrary item count loss")
 end
 
+function scenarios.retired_target()
+    local driver = install()
+    target.IsValid = function() return false end
+    target.Transform.GetWorldPosition = function() error("retired transform accessed") end
+    work()
+    local events = records("dst.player.finished_work")
+    assert(#events == 1)
+    assert(events[1].data.target.prefab == target.prefab and events[1].data.target.guid == target.GUID)
+    assert(events[1].data.target.position == nil)
+    assert(driver.health().errors == 0)
+end
+
 function scenarios.native_action_results()
     install()
     local current = action("CHOP", function() work(); return true, "worked" end)
