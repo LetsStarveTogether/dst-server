@@ -67,7 +67,11 @@ flowchart TD
 
 When due, `Scheduler:OnTick()` calls `k.fn(...)` directly without going through `Scheduler:Run()`.
 
-It runs `onfinish` and `Cleanup()` only after the callback returns.
+After the callback returns, a continuing periodic task is rescheduled.
+
+When its limit is exhausted, the scheduler calls any remaining `onfinish(task, true, ...)` and then `Cleanup()`.
+
+`GetListForTimeFromNow()` clamps the wake tick to at least the next scheduler tick, including for a zero delay.
 
 ### `0x21033121` Coroutine Tasks
 
@@ -97,7 +101,11 @@ Both use `GetTickTime()` to convert seconds to wake ticks.
 
 ## `0x21034121` `Periodic` Lifecycle
 
-`Periodic:Cancel()` removes the callback from its list, clears `fn`, `arg`, and `nexttick`, and calls `onfinish`.
+`Periodic:Cancel()` removes the callback from its list and calls `onfinish(task, false, ...)`.
+
+It then clears `fn`, `arg`, and `nexttick`.
+
+Cancellation inside a running callback therefore invokes `onfinish` immediately.
 
 Entity tasks use `task_finish` to leave `inst.pendingtasks`.
 
@@ -118,6 +126,7 @@ rg -n \
   -e "DoPeriodicTask" \
   -e "ExecuteInTime" \
   -e "ExecutePeriodic" \
+  -e "GetListForTimeFromNow" \
   -e "Scheduler:OnTick" \
   -e "Scheduler:Run" \
   -e "StartThread" \

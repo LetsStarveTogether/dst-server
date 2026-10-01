@@ -16,7 +16,8 @@ This page separates startup side effects, the engine-facing `Start()`, and callb
 | --- | --- | --- |
 | `scripts/main.lua` | `ModSafeStartup` | Clear filesystem aliases, load mods, and register global prefab data |
 | `scripts/main.lua` | `KnownModIndex:Load` / `BeginStartupSequence` | Reach `ModSafeStartup` when mods are enabled |
-| `scripts/mainfunctions.lua` | `Start` | Create `TheFrontEnd` and `require("gamelogic")` |
+| `scripts/mainfunctions.lua` | `Start` | Create `TheFrontEnd`, show a pending error, and `require("gamelogic")` |
+| `scripts/mainfunctions.lua` | `SetGlobalErrorWidget` / `ShowPendingGlobalError` | Defer an error widget until `TheFrontEnd` exists |
 | `scripts/mainfunctions.lua` | `GlobalInit` | Load `global` and global event prefabs |
 | `scripts/gamelogic.lua` | `OnFilesLoaded` / `DoResetAction` | Bridge nested load callbacks into reset routing |
 | `scripts/gamelogic.lua` | `LoadSlot` | Check whether the current shard has a saved world |
@@ -49,7 +50,8 @@ flowchart TD
     D --> AA["LoadPrefabFile and data registries"]
     D --> AB["GlobalInit when RUN_GLOBAL_INIT"]
     H["engine-facing Start()"] --> I["TheFrontEnd = FrontEnd()"]
-    I --> J["require gamelogic"]
+    I --> AC["ShowPendingGlobalError"]
+    AC --> J["require gamelogic"]
     J --> K["Profile and three index load callbacks"]
     K --> L["OnFilesLoaded"]
     L --> M["purchase-state callback"]
@@ -80,7 +82,13 @@ When `RUN_GLOBAL_INIT` is true, `ModSafeStartup()` calls `GlobalInit()`.
 
 ### `0x21013121` `Start()` and Load Callbacks
 
-`Start()` creates `TheFrontEnd` and loads `gamelogic.lua`.
+`Start()` creates `TheFrontEnd`, calls `ShowPendingGlobalError()`, and loads `gamelogic.lua`.
+
+`SetGlobalErrorWidget()` is defined in `mainfunctions.lua`, which loads before mods.
+
+When `TheFrontEnd` does not yet exist, it stores the first error's arguments for `ShowPendingGlobalError()`.
+
+Once an error widget exists, later calls leave it intact.
 
 At the end of `gamelogic.lua`, `Profile:Load` starts the nested load chain.
 
@@ -140,6 +148,8 @@ These assertions are the fastest anchors for the world-load data shape.
 rg -n \
   -e "ModSafeStartup" \
   -e "function Start" \
+  -e "SetGlobalErrorWidget" \
+  -e "ShowPendingGlobalError" \
   -e "function GlobalInit" \
   -e "local function DoResetAction" \
   -e "local function LoadSlot" \

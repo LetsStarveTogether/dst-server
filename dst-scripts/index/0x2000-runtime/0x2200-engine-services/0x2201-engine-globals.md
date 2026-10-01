@@ -76,7 +76,7 @@ Components, events, tasks, and persistence belong to the `EntityScript` created 
 
 Check server authority before writing world state.
 
-For example, `SaveGame` returns immediately on a client and prints a disabled message.
+For example, `SaveGame` prints a disabled message, calls its optional callback with `true`, and returns on a client.
 
 ### `0x22013311` `TheInput` and Intent
 
@@ -88,11 +88,17 @@ World changes still require server-side action, component, or RPC handling.
 
 `Ents[guid]` maps engine GUIDs to `EntityScript` objects.
 
-`OnRemoveEntity` clears `Ents`, tasks, update queues, the Brain, and the StateGraph.
+`OnRemoveEntity` removes the entity from `Ents` and update tables and kills its tasks.
+
+It also removes its Brain and StateGraph from their managers.
 
 ## `0x22014211` Persistence Wrapper
 
-`SavePersistentString` is a thin wrapper around `TheSim:SetPersistentString`.
+`SavePersistentString` calls `TheSim:SetPersistentString`.
+
+When `TheFrontEnd` exists, it keeps the saving indicator visible until the write callback.
+
+Its frontend callback wrapper invokes the caller's callback without forwarding engine callback arguments.
 
 Full world saves instead use `SerializeWorldSession` and finish through `ShardGameIndex`.
 
