@@ -21,7 +21,8 @@ Treat the player StateGraph as a common animation path, not the only damage entr
 ##### `0x62011111` Damage Facts
 
 `Combat:DoAttack` resolves the weapon, projectile, AOE, reflected damage, and hit.
-The target's `Combat:GetAttacked` handles armor, dodge, damage types, and `Health:DoDelta`.
+The target's `Combat:GetAttacked_Internal` handles armor, dodge, damage types, and `Health:DoDelta`.
+`Combat:GetAttacked` delegates direct external hits to that implementation.
 When health reaches zero, `Health:SetVal` pushes `entity_death` and `death`.
 
 ## `0x62012000` Source Anchors
@@ -34,7 +35,7 @@ When health reaches zero, `Health:SetVal` pushes `entity_death` and `death`.
 | `scripts/entityscript.lua` | `EntityScript:PerformBufferedAction` | Executes an action at StateGraph timing |
 | `scripts/bufferedaction.lua` | `BufferedAction:Do` | Calls the selected action function |
 | `scripts/components/combat.lua` | `Combat:DoAttack` | Executes an attack and calculates damage |
-| `scripts/components/combat.lua` | `Combat:GetAttacked` | Applies target defenses and damage |
+| `scripts/components/combat.lua` | `Combat:GetAttacked` / `GetAttacked_Internal` | Accepts external hits and applies target defenses and damage |
 | `scripts/components/health.lua` | `Health:DoDelta` / `Health:DoFireDamage` | Changes health and emits death events |
 | `scripts/components/weapon.lua` | `Weapon:GetDamage` | Supplies weapon and special damage |
 | `scripts/components/propagator.lua` | `Health:DoFireDamage` call | Applies fire-spread damage |
@@ -72,7 +73,7 @@ Search for `ActionHandler(ACTIONS.ATTACK`, `abouttoattack`, `slingshot_shoot`, `
 ### `0x62012140` `scripts/components/combat.lua`
 
 `combat.lua` uses `DoAttack` to resolve weapons, projectiles, stimuli, AOE, reflected damage, and the hit.
-The target's `GetAttacked` then resolves defense, armor, dodge, planar damage, and special damage.
+The target's `GetAttacked_Internal` then resolves defense, armor, dodge, planar damage, and special damage.
 
 #### `0x62012141` Search Terms
 
@@ -112,7 +113,7 @@ flowchart TD
     N --> F["ACTIONS.ATTACK.fn"]
     F --> G["Combat:DoAttack"]
     G --> H["Weapon:GetDamage / projectile / AOE"]
-    H --> I["Target Combat:GetAttacked"]
+    H --> I["Target Combat:GetAttacked_Internal"]
     I --> J["Armor / dodge / damage type / planar"]
     J --> K["Health:DoDelta"]
     K --> L["healthdelta / death / entity_death"]
@@ -139,15 +140,26 @@ The StateGraph is therefore not the only path into damage resolution.
 
 ### `0x62013310` Attacker and Target Responsibilities
 
-The attacker's `DoAttack` calculates outgoing damage and calls the target's `combat:GetAttacked`.
-`GetAttacked` resolves defense, armor, dodge, and special damage.
+`DoAttack` calculates outgoing damage.
+It calls the target's `combat:GetAttacked_Internal` with `from_doattack = true`.
+External callers can use `GetAttacked`, which forwards with no `from_doattack` marker.
+`GetAttacked_Internal` resolves defense, armor, dodge, and special damage.
 `health:DoDelta` applies the final health change.
 
 #### `0x62013311` Checks
 
-`GetAttacked` calls `health:DoDelta(-damage, ...)`.
+`GetAttacked_Internal` calls `health:DoDelta(-damage, ...)`.
+The resulting `attacked` and `killed` events include `from_doattack` so consumers can identify the attack path.
 `DoDelta` pushes `healthdelta`.
 `SetVal` pushes `entity_death` and `death` when the target dies.
+
+### `0x62013321` Projectile and Planar Checks
+
+`GetAttacked_Internal` calls `IsRangedWeapon(weapon or attacker)` when setting `lastattacktype`.
+This recognizes a projectile attacker even when the caller supplies no weapon.
+`OnPlanarAttackUndefended` requires `spdamage.planar` and an attacker with `planarentity`.
+It also requires target inventory without planar defense.
+Having a planar attacker alone does not invoke `OnPlanarAttackUndefended`.
 
 ### `0x62013410` AOE Target Tracking
 
@@ -195,7 +207,9 @@ rg -n "PerformBufferedAction|BufferedAction:Do|self\\.action\\.fn" \
   scripts/entityscript.lua \
   scripts/bufferedaction.lua
 
-rg -n "DoAttack|CalcDamage|GetAttacked|CalcReflectedDamage|onhitother|onattackother" \
+rg -n \
+  -e "DoAttack|CalcDamage|GetAttacked|CalcReflectedDamage|onhitother|onattackother" \
+  -e "from_doattack|IsRangedWeapon|OnPlanarAttackUndefended" \
   scripts/components/combat.lua
 
 rg -n "SetDamage|GetDamage|OnAttack|LaunchProjectile" \
@@ -224,10 +238,10 @@ rg -n "DoJoustAoe|ruinsnightmare_horn_attack|components\\.rider|targets\\[" \
 ### `0x62015110` Reading Order
 
 Read the `SGwilson.lua` action handler and follow its state to `EntityScript:PerformBufferedAction` and `BufferedAction:Do`.
-Continue through `ACTIONS.ATTACK.fn`, `Combat:DoAttack`, and `Combat:GetAttacked`.
+Continue through `ACTIONS.ATTACK.fn`, `Combat:DoAttack`, and `Combat:GetAttacked_Internal`.
 Finish in `health.lua` to verify the health change and death events.
 
 #### `0x62015111` Minimal Trace
 
 Use a spear attack.
-Follow `SetDamage` in `spear.lua` through `Combat:CalcDamage`, the target's `Combat:GetAttacked`, and `Health:DoDelta`.
+Follow `SetDamage` in `spear.lua` through `Combat:CalcDamage`, the target's `Combat:GetAttacked_Internal`, and `Health:DoDelta`.
