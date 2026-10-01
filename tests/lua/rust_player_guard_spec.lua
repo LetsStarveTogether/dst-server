@@ -53,4 +53,22 @@ assert(not ok and largest == 6400)
 largest = 0
 ok = pcall(driver.call, "rollback_to_snapshot", { session_id = "SESSION", snapshot_id = 1 })
 assert(not ok and largest == 6400)
+local target = "session/SESSION/0000000001"
+TheNet.ListSnapshots = function(_, _, _, count)
+    if count < 6400 then return {}, true end
+    return { { snapshot_id = 1, world_file = target } }, true
+end
+TheNet.GetCurrentSnapshot = function() return 10 end
+local truncated, rolled_back = false, false
+TheNet.TruncateSnapshots = function(_, session, offset)
+    assert(session == "SESSION" and offset == -9)
+    truncated = true
+end
+TheNet.GetWorldSessionFile = function() return target end
+WorldRollbackFromSim = function(count)
+    assert(count == 0 and truncated)
+    rolled_back = true
+end
+assert(driver.call("rollback_to_snapshot", { session_id = "SESSION", snapshot_id = 1 }))
+assert(rolled_back)
 print("ok")
