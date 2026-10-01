@@ -156,16 +156,13 @@ class JournalLogs:
     async def follow(
         self, units: Sequence[str] | None, request: JournalQuery | None = None
     ) -> AsyncGenerator[JournalStream]:
-        stream = JournalStream(
+        async with JournalStream(
             await self._reader.follow(
                 units,
                 (request or JournalQuery(limit=0, direction="forward")).to_native(),
             )
-        )
-        try:
+        ) as stream:
             yield stream
-        finally:
-            await stream.close()
 
 
 @dataclass(frozen=True, slots=True)

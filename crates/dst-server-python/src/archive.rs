@@ -10,8 +10,8 @@ use pyo3::{
 };
 
 use crate::{
-    from_python,
-    host::{Host, error, room_number},
+    anyhow_error as error, from_python,
+    host::{Host, room_number},
     to_python,
 };
 
@@ -168,15 +168,12 @@ impl Upload {
             Option<std::result::Result<native::UploadResult, String>>,
         >,
     ) -> std::result::Result<native::UploadResult, String> {
-        loop {
-            if let Some(outcome) = completion.borrow_and_update().clone() {
-                return outcome;
-            }
-            completion
-                .changed()
-                .await
-                .map_err(|_| "archive upload worker ended before confirmation".to_owned())?;
-        }
+        completion
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| "archive upload worker ended before confirmation".to_owned())?
+            .clone()
+            .expect("upload completion is present")
     }
 }
 

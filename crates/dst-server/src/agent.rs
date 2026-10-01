@@ -43,67 +43,7 @@ pub struct Options {
 #[serde(default, deny_unknown_fields)]
 struct RunState {
     active: bool,
-    failure: Option<FailureRecord>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum FailureRecord {
-    Retryable,
-    LoadFailure {
-        shard: String,
-        session_id: String,
-        world_file: String,
-    },
-    Disk,
-    Permission,
-    Configuration,
-    Mods,
-    Unknown,
-}
-
-impl From<Failure> for FailureRecord {
-    fn from(value: Failure) -> Self {
-        match value {
-            Failure::Retryable => Self::Retryable,
-            Failure::LoadFailure {
-                shard,
-                session_id,
-                world_file,
-            } => Self::LoadFailure {
-                shard,
-                session_id,
-                world_file,
-            },
-            Failure::Disk => Self::Disk,
-            Failure::Permission => Self::Permission,
-            Failure::Configuration => Self::Configuration,
-            Failure::Mods => Self::Mods,
-            Failure::Unknown => Self::Unknown,
-        }
-    }
-}
-
-impl From<FailureRecord> for Failure {
-    fn from(value: FailureRecord) -> Self {
-        match value {
-            FailureRecord::Retryable => Self::Retryable,
-            FailureRecord::LoadFailure {
-                shard,
-                session_id,
-                world_file,
-            } => Self::LoadFailure {
-                shard,
-                session_id,
-                world_file,
-            },
-            FailureRecord::Disk => Self::Disk,
-            FailureRecord::Permission => Self::Permission,
-            FailureRecord::Configuration => Self::Configuration,
-            FailureRecord::Mods => Self::Mods,
-            FailureRecord::Unknown => Self::Unknown,
-        }
-    }
+    failure: Option<Failure>,
 }
 
 struct Controller {
@@ -203,10 +143,7 @@ impl Controller {
                     recovery::resume_pending(lock, &self.required(), &catalogs, now_ms())
                 })?;
             } else {
-                let failure = previous
-                    .failure
-                    .map(Into::into)
-                    .unwrap_or(Failure::Retryable);
+                let failure = previous.failure.unwrap_or(Failure::Retryable);
                 self.room.with_lock(|lock| {
                     recovery::on_failure(lock, failure, &self.required(), &catalogs, now_ms())
                 })?;
@@ -501,7 +438,7 @@ impl Controller {
         self.room.with_lock(|lock| {
             let mut state = PolicyState::load(lock)?;
             let now = Utc::now();
-            state.record_clean_shutdown(now);
+            state.record_clean_shutdown();
             if state.mods.phase == ModPhase::Updating {
                 state.finish_mod_update(now, Err("Mod update interrupted by shutdown".into()))?;
             }
@@ -896,7 +833,7 @@ impl Controller {
         let failure = preloader::classify(&states);
         self.save_run(RunState {
             active: false,
-            failure: Some(failure.into()),
+            failure: Some(failure),
         })
     }
 }

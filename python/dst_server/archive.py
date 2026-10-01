@@ -111,7 +111,7 @@ async def export_cluster(
     compression_level: int = 3,
 ) -> AsyncGenerator[ClusterArchive]:
     """Snapshot a stopped room through its Agent or an exclusive offline lock."""
-    archive = ClusterArchive._from_native(
+    with ClusterArchive._from_native(
         await _export_archive(
             host._host,
             number,
@@ -122,11 +122,8 @@ async def export_cluster(
             },
             compression_level=compression_level,
         )
-    )
-    try:
+    ) as archive:
         yield archive
-    finally:
-        archive.close()
 
 
 __all__ = ["ArchiveUploadResult", "ClusterArchive", "SecretValue", "export_cluster"]

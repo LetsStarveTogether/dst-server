@@ -429,7 +429,7 @@ fn clean_shutdown_preserves_idle_but_world_changes_and_clock_jumps_reset_it() {
     policy
         .plan(&mut state, now + TimeDelta::hours(1), &stopping)
         .unwrap();
-    state.record_clean_shutdown(now + TimeDelta::hours(1));
+    state.record_clean_shutdown();
     state = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
     state
         .resume_after_restart(now + TimeDelta::hours(2))

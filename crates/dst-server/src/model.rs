@@ -952,27 +952,8 @@ pub(crate) fn validate_artifact_id(value: &str) -> Result<()> {
 }
 
 fn validate_shard_name(name: &str) -> Result<()> {
-    if name.trim().is_empty()
-        || name.len() > 255
-        || name.starts_with('.')
-        || name.contains(['/', '\\', '\0', '\r', '\n'])
-        || [
-            "console",
-            "mods",
-            "cluster.ini",
-            "cluster_token.txt",
-            "adminlist.txt",
-            "whitelist.txt",
-            "blocklist.txt",
-        ]
-        .contains(&name.to_lowercase().as_str())
-    {
-        return Err(Error::invalid(
-            "target.shard",
-            "unsafe shard directory name",
-        ));
-    }
-    Ok(())
+    crate::configuration::validate_shard_name(name)
+        .map_err(|error| Error::invalid("target.shard", error.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

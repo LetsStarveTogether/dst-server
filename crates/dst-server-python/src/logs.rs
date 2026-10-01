@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use dst_server::logs as native;
 use pyo3::{
-    exceptions::{PyOSError, PyRuntimeError, PyTimeoutError, PyValueError},
+    exceptions::{PyRuntimeError, PyValueError},
     prelude::*,
 };
 use serde_json::{Value, json};
@@ -36,15 +36,8 @@ pub(crate) fn error(error: anyhow::Error) -> PyErr {
             let result = JournalCursorError::new_err(cursor.to_string());
             let _ = result.value(py).setattr("cursor", &cursor.cursor);
             result
-        } else if error
-            .downcast_ref::<tokio::time::error::Elapsed>()
-            .is_some()
-        {
-            PyTimeoutError::new_err(error.to_string())
-        } else if let Some(io) = error.downcast_ref::<std::io::Error>() {
-            PyOSError::new_err((io.raw_os_error().unwrap_or(0), error.to_string()))
         } else {
-            PyValueError::new_err(error.to_string())
+            crate::anyhow_error(error)
         }
     })
 }

@@ -419,14 +419,6 @@ pub fn classify(states: &[DriverState]) -> Failure {
     })
 }
 
-pub fn classify_io(error: &std::io::Error) -> Failure {
-    match error.raw_os_error() {
-        Some(libc::EACCES | libc::EPERM) => Failure::Permission,
-        Some(libc::ENOSPC | libc::EDQUOT | libc::EIO | libc::EROFS | libc::ENODEV) => Failure::Disk,
-        _ => Failure::Unknown,
-    }
-}
-
 fn internal(error: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Internal, error.to_string())
 }
@@ -767,17 +759,5 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
         ));
         ready.output_drained = false;
         assert!(matches!(classify(&[ready]), Failure::Unknown));
-        assert!(matches!(
-            classify_io(&std::io::Error::from_raw_os_error(libc::EACCES)),
-            Failure::Permission
-        ));
-        assert!(matches!(
-            classify_io(&std::io::Error::from_raw_os_error(libc::ENOSPC)),
-            Failure::Disk
-        ));
-        assert!(matches!(
-            classify_io(&std::io::Error::from_raw_os_error(libc::EINVAL)),
-            Failure::Unknown
-        ));
     }
 }

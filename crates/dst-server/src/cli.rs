@@ -225,23 +225,22 @@ enum Template {
     },
 }
 
-fn input(source: &str) -> Result<Value> {
-    let data = if source == "-" {
-        let mut data = Vec::new();
-        std::io::stdin()
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut data)?;
-        data
-    } else if let Some(path) = source.strip_prefix('@') {
-        let mut data = Vec::new();
-        std::fs::File::open(path)?
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut data)?;
-        data
-    } else {
-        source.as_bytes().to_vec()
-    };
+fn read_json<T: serde::de::DeserializeOwned>(source: impl Read) -> Result<T> {
+    let mut data = Vec::new();
+    source
+        .take(model::MAX_REQUEST_BYTES as u64 + 1)
+        .read_to_end(&mut data)?;
     model::parse_json(&data).context("invalid JSON input")
+}
+
+fn input(source: &str) -> Result<Value> {
+    if source == "-" {
+        read_json(std::io::stdin())
+    } else if let Some(path) = source.strip_prefix('@') {
+        read_json(std::fs::File::open(path)?)
+    } else {
+        read_json(source.as_bytes())
+    }
 }
 
 fn emit(value: &impl serde::Serialize, compact: bool) -> Result<()> {
@@ -548,10 +547,7 @@ async fn run(arguments: Arguments) -> Result<u8> {
             &mut std::io::stdout(),
         ),
         Command::Inspect { directory } => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&dst_server::configuration::discover(directory)?)?
-            );
+            emit(&dst_server::configuration::discover(directory)?, compact)?
         }
         Command::Probe {
             cluster,
@@ -560,7 +556,7 @@ async fn run(arguments: Arguments) -> Result<u8> {
             rounds,
         } => {
             let report = dst_server::probe::run(&cluster, &executable, timeout, rounds).await?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            emit(&report, compact)?;
         }
         Command::ProbeRecovery {
             cluster,
@@ -569,18 +565,12 @@ async fn run(arguments: Arguments) -> Result<u8> {
             targets,
         } => {
             let targets = targets
-                .map(|path| -> Result<_> {
-                    let mut bytes = Vec::new();
-                    std::fs::File::open(path)?
-                        .take(1024 * 1024 + 1)
-                        .read_to_end(&mut bytes)?;
-                    Ok(model::parse_json(&bytes)?)
-                })
+                .map(|path| read_json(std::fs::File::open(path)?))
                 .transpose()?;
             let report =
                 dst_server::probe::recovery(&cluster, &executable, timeout, targets.as_ref())
                     .await?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            emit(&report, compact)?;
         }
         Command::ProbePlayer {
             cluster,
@@ -590,7 +580,7 @@ async fn run(arguments: Arguments) -> Result<u8> {
         } => {
             let report =
                 dst_server::probe::player_fixture(&cluster, &executable, timeout, health).await?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            emit(&report, compact)?;
         }
     }
     Ok(0)

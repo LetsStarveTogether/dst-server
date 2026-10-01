@@ -27,23 +27,6 @@ fn timeout() -> f64 {
     900.0
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Permission {
-    Admin,
-    Whitelist,
-    Ban,
-}
-impl From<Permission> for PermissionKind {
-    fn from(value: Permission) -> Self {
-        match value {
-            Permission::Admin => Self::Admin,
-            Permission::Whitelist => Self::Whitelist,
-            Permission::Ban => Self::Ban,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostOperation {
@@ -88,7 +71,7 @@ pub enum HostOperation {
         notice: Option<Countdown>,
     },
     Permission {
-        kind: Permission,
+        kind: PermissionKind,
         #[serde(default)]
         userid: Option<String>,
         #[serde(default)]
@@ -218,7 +201,7 @@ impl Host {
                 userid,
                 remove,
             } => {
-                self.permission(number, (*kind).into(), userid.as_deref(), *remove)
+                self.permission(number, *kind, userid.as_deref(), *remove)
                     .await
             }
             HostOperation::SetPolicy { policy } => {

@@ -19,7 +19,6 @@ use crate::{files::RoomLock, model::Countdown};
 
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(30);
 pub const MOD_NOTICE_DELAY: Duration = Duration::from_secs(60);
-pub const MOD_NOTICE_INTERVAL: Duration = Duration::from_secs(30);
 pub const MOD_RETRY_DELAY: Duration = Duration::from_secs(300);
 pub const MOD_ATTEMPTS: u8 = 3;
 const CLOSING_NOTICE_MINUTES: i64 = 8;
@@ -609,7 +608,7 @@ impl PolicyState {
     }
 
     /// Call only after native normal shutdown, process reaping and output draining.
-    pub fn record_clean_shutdown(&mut self, _now: DateTime<Utc>) {
+    pub fn record_clean_shutdown(&mut self) {
         if let Some(activity) = &mut self.activity
             && !activity.interrupted
         {

@@ -86,23 +86,9 @@ pub async fn run(cluster: &Path, executable: &Path, timeout: u64, rounds: usize)
                 "round exceeded its {timeout}s total deadline"
             )),
         };
-        // Await every supervisor even when spawn, parsing, or another child failed.
-        let mut cleanup_errors = Vec::new();
-        for shard in &room.shards {
-            if let Err(error) = shard.process.kill().await {
-                cleanup_errors.push(format!("{}: {error}", shard.name));
-            }
-        }
-        let report = result.with_context(|| {
-            format!(
-                "native probe round {round} failed; cleanup errors: {cleanup_errors:?}\n{}",
-                room.diagnostics()
-            )
-        })?;
-        ensure!(
-            cleanup_errors.is_empty(),
-            "probe cleanup failed: {cleanup_errors:?}"
-        );
+        let report = room
+            .finish(result, &format!("native probe round {round} failed"))
+            .await?;
         let sessions: Vec<_> = report["shards"]
             .as_array()
             .unwrap()
@@ -197,23 +183,7 @@ pub async fn recovery(
             "recovery exceeded its {timeout}s total deadline"
         ))
     });
-    let mut cleanup_errors = Vec::new();
-    for shard in &room.shards {
-        if let Err(error) = shard.process.kill().await {
-            cleanup_errors.push(format!("{}: {error}", shard.name));
-        }
-    }
-    let report = result.with_context(|| {
-        format!(
-            "native recovery probe failed; cleanup errors: {cleanup_errors:?}\n{}",
-            room.diagnostics()
-        )
-    })?;
-    ensure!(
-        cleanup_errors.is_empty(),
-        "probe cleanup failed: {cleanup_errors:?}"
-    );
-    Ok(report)
+    room.finish(result, "native recovery probe failed").await
 }
 
 /// Write or inspect one synthetic player using the game's own session APIs.
@@ -248,23 +218,7 @@ pub async fn player_fixture(
             "player probe exceeded its {timeout}s total deadline"
         ))
     });
-    let mut cleanup_errors = Vec::new();
-    for shard in &room.shards {
-        if let Err(error) = shard.process.kill().await {
-            cleanup_errors.push(format!("{}: {error}", shard.name));
-        }
-    }
-    let report = result.with_context(|| {
-        format!(
-            "native player probe failed; cleanup errors: {cleanup_errors:?}\n{}",
-            room.diagnostics()
-        )
-    })?;
-    ensure!(
-        cleanup_errors.is_empty(),
-        "probe cleanup failed: {cleanup_errors:?}"
-    );
-    Ok(report)
+    room.finish(result, "native player probe failed").await
 }
 
 fn disposable(path: &Path) -> Result<Cluster> {
@@ -339,6 +293,27 @@ fn recovery_requests(
 }
 
 impl Room {
+    async fn finish(&self, result: Result<Value>, context: &str) -> Result<Value> {
+        // Await every supervisor even when spawn, parsing, or another child failed.
+        let mut cleanup_errors = Vec::new();
+        for shard in &self.shards {
+            if let Err(error) = shard.process.kill().await {
+                cleanup_errors.push(format!("{}: {error}", shard.name));
+            }
+        }
+        let report = result.with_context(|| {
+            format!(
+                "{context}; cleanup errors: {cleanup_errors:?}\n{}",
+                self.diagnostics()
+            )
+        })?;
+        ensure!(
+            cleanup_errors.is_empty(),
+            "probe cleanup failed: {cleanup_errors:?}"
+        );
+        Ok(report)
+    }
+
     fn launch(
         &mut self,
         cluster: &Cluster,
@@ -467,14 +442,7 @@ impl Room {
             if actual == ids && records.len() == ids.len() {
                 break connected;
             }
-            let delay = tokio::time::sleep(Duration::from_millis(250));
-            tokio::pin!(delay);
-            loop {
-                tokio::select! {
-                    _ = &mut delay => break,
-                    event = self.pump(false) => event?,
-                }
-            }
+            self.idle(Duration::from_millis(250)).await?;
         };
         let player = if let Some(mode) = self.player {
             self.player_step(mode).await?

@@ -201,7 +201,8 @@ fn validate_service(unit: &str) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PermissionKind {
     Admin,
     Whitelist,
@@ -268,12 +269,7 @@ impl Host {
         let configuration = self.call(number, Request::ReadConfiguration {}).await?;
         let mut room = Room::new(
             number,
-            ClusterConfig::from_value(
-                configuration
-                    .get("cluster")
-                    .cloned()
-                    .unwrap_or_else(|| configuration.clone()),
-            )?,
+            ClusterConfig::from_value(configuration["cluster"].clone())?,
         )?;
         if let Some(policy) = configuration.get("policy") {
             room.policy = serde_json::from_value(policy.clone())?;
@@ -468,14 +464,7 @@ impl Host {
                 .cluster
                 .save(&mut stopped, PermissionFiles::Preserve)?;
         }
-        lock.update_control(|control| {
-            control.insert(
-                "template".into(),
-                serde_json::to_value(&definition.template)?,
-            );
-            control.insert("policy".into(), serde_json::to_value(&definition.policy)?);
-            Ok(())
-        })?;
+        crate::rooms::save_policy(lock, definition)?;
         unit.save(&self.quadlet_dir)?;
         allocation.commit()
     }

@@ -286,7 +286,7 @@ fn unsigned(value: &str, field: &str) -> Result<u32> {
 // Raw values may contain credentials; never derive Debug or Serialize.
 pub(crate) struct Ini {
     path: PathBuf,
-    values: BTreeMap<(String, String), String>,
+    values: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Ini {
@@ -323,7 +323,7 @@ impl Ini {
             "INI configuration exceeds size limit: {}",
             path.display()
         );
-        let mut values = BTreeMap::new();
+        let mut values = BTreeMap::<String, BTreeMap<String, String>>::new();
         let mut sections = BTreeSet::new();
         let mut section = String::new();
         for (index, line) in source.lines().enumerate() {
@@ -371,7 +371,9 @@ impl Ini {
             ensure!(!section.is_empty() && !key.is_empty(), "{}", invalid());
             ensure!(
                 values
-                    .insert((section.clone(), key.clone()), value.trim().to_owned())
+                    .entry(section.clone())
+                    .or_default()
+                    .insert(key.clone(), value.trim().to_owned())
                     .is_none(),
                 "{} (duplicate option)",
                 invalid()
@@ -411,17 +413,11 @@ impl Ini {
     }
 
     pub(crate) fn into_sections(self) -> BTreeMap<String, BTreeMap<String, String>> {
-        let mut sections = BTreeMap::<String, BTreeMap<String, String>>::new();
-        for ((section, key), value) in self.values {
-            sections.entry(section).or_default().insert(key, value);
-        }
-        sections
+        self.values
     }
 
     fn get(&self, section: &str, key: &str) -> Option<&str> {
-        self.values
-            .get(&(section.to_owned(), key.to_owned()))
-            .map(String::as_str)
+        self.values.get(section)?.get(key).map(String::as_str)
     }
 
     fn boolean(&self, section: &str, key: &str, default: bool) -> Result<bool> {

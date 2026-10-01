@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{Read, Seek};
+use std::io::Seek;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -627,17 +627,9 @@ pub fn prepare(room: &mut StoppedRoom<'_>, options: &ExportOptions) -> Result<Pr
             if names.contains(filename) {
                 let path = save.join(filename);
                 if filename == "shardindex" {
-                    let mut bytes = Vec::new();
-                    room.open_regular(&path)?
-                        .take(crate::files::MAX_FILE_BYTES as u64 + 1)
-                        .read_to_end(&mut bytes)?;
-                    ensure!(
-                        bytes.len() <= crate::files::MAX_FILE_BYTES,
-                        "shard index exceeds byte limit"
-                    );
                     prepared.write(
                         &path,
-                        &sanitize_shard_index(&bytes, options.encode_user_path)?,
+                        &sanitize_shard_index(&room.read_text(&path)?, options.encode_user_path)?,
                     )?;
                 } else {
                     prepared.copy(room, &path, &path)?;
@@ -715,10 +707,7 @@ impl PreparedArchive {
             ),
             "archive paths collide"
         );
-        ensure!(
-            self.entries.insert(path.to_owned()),
-            "archive paths collide"
-        );
+        self.entries.insert(path.to_owned());
         let target = self.staging.path().join(path);
         fs::create_dir_all(target.parent().context("archive entry has no parent")?)?;
         Ok(target)
@@ -829,10 +818,8 @@ fn sanitize_ini(ini: &mut IniDocument) {
     ini.retain(|_, fields| !fields.is_empty());
 }
 
-fn sanitize_shard_index(source: &[u8], encode: bool) -> Result<Vec<u8>> {
-    let mut index = lua::parse_return_table(
-        std::str::from_utf8(source).context("shard index must contain valid UTF-8")?,
-    )?;
+fn sanitize_shard_index(source: &str, encode: bool) -> Result<Vec<u8>> {
+    let mut index = lua::parse_return_table(source)?;
     let server = index
         .get_mut("server")
         .and_then(serde_json::Value::as_object_mut)
@@ -939,7 +926,7 @@ pub fn encode_klei_id(userid: &str) -> Result<String> {
 mod tests {
     use super::*;
     use crate::files::RoomLock;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::time::Duration;
 
     fn payload_archive() -> ClusterArchive {

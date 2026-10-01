@@ -24,16 +24,8 @@ const MAX_SUBSCRIPTIONS: usize = 128;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn error(code: ErrorCode, message: impl Into<String>) -> Error {
-    Error {
-        code,
-        message: message.into(),
-        details: Value::Null,
-    }
-}
-
 fn transport(message: impl std::fmt::Display) -> Error {
-    error(ErrorCode::Transport, message.to_string())
+    Error::new(ErrorCode::Transport, message.to_string())
 }
 
 /// Receiving this message transfers request ownership to the Agent.
@@ -93,7 +85,7 @@ impl EventHub {
 
     fn subscribe(&self, kind: &str) -> Result<Arc<StreamState>> {
         if !matches!(kind, "logs" | "lifecycle" | "events") {
-            return Err(error(
+            return Err(Error::new(
                 ErrorCode::Invalid,
                 "subscription kind must be logs, lifecycle or events",
             ));
@@ -101,7 +93,7 @@ impl EventHub {
         let mut streams = self.0.lock().unwrap();
         streams.retain(|stream| stream.strong_count() > 0);
         if streams.len() >= MAX_SUBSCRIPTIONS {
-            return Err(error(ErrorCode::Busy, "subscription limit reached"));
+            return Err(Error::new(ErrorCode::Busy, "subscription limit reached"));
         }
         let state = Arc::new(StreamState {
             kind: kind.to_owned(),
@@ -217,7 +209,7 @@ fn set_outcome(
     if bytes.len() > MAX_MESSAGE {
         return set_outcome(
             builder,
-            Err(error(ErrorCode::Overflow, "RPC result exceeds 1 MiB")),
+            Err(Error::new(ErrorCode::Overflow, "RPC result exceeds 1 MiB")),
         );
     }
     if failed {
@@ -236,7 +228,7 @@ impl room::Server for RoomServer {
     ) -> capnp::Result<()> {
         let bytes = params.get()?.get_request()?;
         let request = if bytes.len() > MAX_MESSAGE {
-            Err(error(ErrorCode::Invalid, "RPC request exceeds 1 MiB"))
+            Err(Error::new(ErrorCode::Invalid, "RPC request exceeds 1 MiB"))
         } else {
             Envelope::from_json(bytes)
         };
@@ -246,7 +238,7 @@ impl room::Server for RoomServer {
                 let (reply, response) = oneshot::channel();
                 match self.dispatch.try_send(Incoming { request, reply }) {
                     Err(mpsc::error::TrySendError::Full(_)) => {
-                        Err(error(ErrorCode::Busy, "room request queue is full"))
+                        Err(Error::new(ErrorCode::Busy, "room request queue is full"))
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
                         Err(transport("room dispatcher is closed"))
@@ -303,14 +295,14 @@ pub async fn serve(
 ) -> Result<()> {
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         if !metadata.file_type().is_socket() {
-            return Err(error(
+            return Err(Error::new(
                 ErrorCode::Invalid,
                 "socket path is not a Unix socket",
             ));
         }
         match UnixStream::connect(path).await {
             Ok(_) => {
-                return Err(error(
+                return Err(Error::new(
                     ErrorCode::Busy,
                     "another Agent is listening on the socket",
                 ));
@@ -431,7 +423,7 @@ impl Client {
                 path: path.as_ref().to_owned(),
                 reply,
             })
-            .map_err(|_| error(ErrorCode::Busy, "RPC connection queue is unavailable"))?;
+            .map_err(|_| Error::new(ErrorCode::Busy, "RPC connection queue is unavailable"))?;
         response.await.map_err(transport)?
     }
 
@@ -441,14 +433,14 @@ impl Client {
         let mutation = request.request.metadata().mutation;
         let encoded = serde_json::to_vec(&request).map_err(transport)?;
         if encoded.len() > MAX_MESSAGE {
-            return Err(error(ErrorCode::Invalid, "RPC request exceeds 1 MiB"));
+            return Err(Error::new(ErrorCode::Invalid, "RPC request exceeds 1 MiB"));
         }
         let (reply, response) = oneshot::channel();
         self.send(ClientMessage::Call(encoded, reply))?;
         let result = match tokio::time::timeout(timeout, response).await {
             Ok(Ok(result)) => result,
             Ok(Err(failure)) => Err(transport(failure)),
-            Err(_) => Err(error(
+            Err(_) => Err(Error::new(
                 if mutation {
                     ErrorCode::Unknown
                 } else {
@@ -490,7 +482,7 @@ impl Client {
             .try_send(message)
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => {
-                    crate::rpc::error(ErrorCode::Busy, "RPC request queue is full")
+                    Error::new(ErrorCode::Busy, "RPC request queue is full")
                 }
                 mpsc::error::TrySendError::Closed(_) => transport("RPC connection is closed"),
             })
@@ -504,7 +496,7 @@ fn read_outcome(reader: room_capnp::outcome::Reader<'_>) -> Result<Value> {
     };
     let bytes = bytes.map_err(transport)?;
     if bytes.len() > MAX_MESSAGE {
-        return Err(error(ErrorCode::Overflow, "RPC result exceeds 1 MiB"));
+        return Err(Error::new(ErrorCode::Overflow, "RPC result exceeds 1 MiB"));
     }
     if failed {
         Err(serde_json::from_slice(bytes).map_err(transport)?)
@@ -546,10 +538,10 @@ async fn connect(path: PathBuf) -> Result<Client> {
                         None => break,
                         Some(ClientMessage::Close(reply)) => { close_reply = Some(reply); break; },
                         Some(ClientMessage::Call(_, reply) | ClientMessage::Describe(reply)) if calls.len() >= 64 => {
-                            let _ = reply.send(Err(error(ErrorCode::Busy, "64 RPC requests are already pending")));
+                            let _ = reply.send(Err(Error::new(ErrorCode::Busy, "64 RPC requests are already pending")));
                         }
                         Some(ClientMessage::Subscribe(_, reply)) if calls.len() >= 64 => {
-                            let _ = reply.send(Err(error(ErrorCode::Busy, "64 RPC requests are already pending")));
+                            let _ = reply.send(Err(Error::new(ErrorCode::Busy, "64 RPC requests are already pending")));
                         }
                         Some(ClientMessage::Call(encoded, reply)) => {
                             let mut request = endpoint.call_request();
@@ -627,13 +619,16 @@ pub struct Subscription {
 impl Subscription {
     pub async fn next(&self, max_items: u16) -> Result<Batch> {
         if !(1..=512).contains(&max_items) {
-            return Err(error(ErrorCode::Invalid, "max_items must be in 1..=512"));
+            return Err(Error::new(
+                ErrorCode::Invalid,
+                "max_items must be in 1..=512",
+            ));
         }
         let (reply, response) = oneshot::channel();
         self.requests
             .try_send(SubscriptionMessage::Next(max_items, reply))
             .map_err(|_| {
-                error(
+                Error::new(
                     ErrorCode::Busy,
                     "subscription is closed or has a pending read",
                 )
@@ -665,7 +660,7 @@ fn subscription_client(endpoint: subscription::Client) -> Subscription {
             };
             match message {
                 SubscriptionMessage::Next(_, reply) if !reads.is_empty() => {
-                    let _ = reply.send(Err(error(
+                    let _ = reply.send(Err(Error::new(
                         ErrorCode::Busy,
                         "subscription already has a pending read",
                     )));
@@ -673,21 +668,27 @@ fn subscription_client(endpoint: subscription::Client) -> Subscription {
                 SubscriptionMessage::Next(count, reply) => {
                     let mut request = endpoint.next_request();
                     request.get().set_max_items(count);
-                    reads.spawn_local(async move {
-                        let mut reply = reply;
-                        let result = tokio::select! {
-                            _ = reply.closed() => return,
-                            result = request.send().promise => (|| {
-                                let response = result.map_err(transport)?;
-                                let batch = response.get().map_err(transport)?.get_batch().map_err(transport)?;
-                                let records = batch.get_records().map_err(transport)?.iter()
-                                    .map(|data| serde_json::from_slice(data.map_err(transport)?).map_err(transport))
-                                    .collect::<Result<Vec<_>>>()?;
-                                Ok(Batch { records, dropped: batch.get_dropped(), closed: batch.get_closed() })
-                            })(),
-                        };
-                        let _ = reply.send(result);
-                    });
+                    reads.spawn_local(reply_or_cancel(reply, async move {
+                        let response = request.send().promise.await.map_err(transport)?;
+                        let batch = response
+                            .get()
+                            .map_err(transport)?
+                            .get_batch()
+                            .map_err(transport)?;
+                        let records = batch
+                            .get_records()
+                            .map_err(transport)?
+                            .iter()
+                            .map(|data| {
+                                serde_json::from_slice(data.map_err(transport)?).map_err(transport)
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        Ok(Batch {
+                            records,
+                            dropped: batch.get_dropped(),
+                            closed: batch.get_closed(),
+                        })
+                    }));
                 }
                 SubscriptionMessage::Close(reply) => {
                     incoming.close();
@@ -716,7 +717,7 @@ async fn close_subscription(endpoint: &subscription::Client) -> Result<()> {
         endpoint.close_request().send().promise,
     )
     .await
-    .map_err(|_| error(ErrorCode::Timeout, "subscription close timed out"))?
+    .map_err(|_| Error::new(ErrorCode::Timeout, "subscription close timed out"))?
     .map(|_| ())
     .map_err(transport)
 }
@@ -728,7 +729,7 @@ mod tests {
 
     #[test]
     fn oversized_errors_obey_the_same_rpc_limit_as_values() {
-        let large = error(ErrorCode::PartialFailure, "x".repeat(MAX_MESSAGE));
+        let large = Error::new(ErrorCode::PartialFailure, "x".repeat(MAX_MESSAGE));
         let mut encoded = capnp::message::Builder::new_default();
         set_outcome(encoded.init_root(), Err(large.clone())).unwrap();
         let result = read_outcome(encoded.get_root_as_reader().unwrap()).unwrap_err();
