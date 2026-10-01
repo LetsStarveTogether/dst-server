@@ -226,5 +226,5 @@ It also records Lua, protocol and artifact digests, plus the game version.
 The `distributions` container target builds native and Python artifacts; the `game` target creates the room runtime image.
 CI checks Rust format/lints/tests, Lua 5.1 and LuaJIT contracts, and Python wrappers.
 It also checks source distribution/wheel installation and CLI discovery.
-Native game probes run separately from CI.
+Optional CI jobs run native game probes in disposable containers.
 Use the deployment procedure above when replacing an existing installation.
