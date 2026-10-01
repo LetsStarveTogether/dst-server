@@ -1,0 +1,47 @@
+[package]
+name = "dst-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+clap.workspace = true
+clap_complete = "4"
+full_moon.workspace = true
+libc.workspace = true
+ulid = "1"
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic", "logs"] }
+opentelemetry = { version = "0.33", default-features = false, features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "metrics", "grpc-tonic", "gzip-tonic", "tls-aws-lc", "tls-roots"] }
+tonic = { version = "0.14", default-features = false, features = ["transport", "codegen", "router", "tls-aws-lc", "tls-native-roots", "gzip"] }
+prost = "0.14"
+tonic-types = "0.14"
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+sha2 = "0.10"
+include_dir = "0.7"
+tempfile.workspace = true
+capnp = "0.27"
+capnp-rpc = "0.27"
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["compat"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "gzip", "json", "stream"] }
+percent-encoding = "2"
+scraper = { version = "0.27", default-features = false }
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+jsonschema = { version = "0.58.5", default-features = false }
+sevenz-rust2 = { version = "0.23", default-features = false, features = ["compress", "util", "zstd"] }
+object_store = { version = "0.14", default-features = false, features = ["aws"] }
+
+[build-dependencies]
+capnpc = "0.27"
+
+[dev-dependencies]
+tokio-stream = { version = "0.1", features = ["net"] }

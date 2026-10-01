@@ -1,0 +1,4818 @@
+{
+  "fleet": [
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-000-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 0,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-001-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 1,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-002-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 2,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-003-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 3,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-004-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 4,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-005-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 5,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-006-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 6,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-007-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 7,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-008-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 8,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-009-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 9,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-010-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 10,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-011-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 11,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-012-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 12,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-013-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 13,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-014-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 14,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-015-\u7eaf\u51c0\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 15,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-016-\u7eaf\u51c0\u751f\u5b58-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 16,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-017-\u7eaf\u51c0\u751f\u5b58-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 17,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-018-\u7eaf\u51c0\u751f\u5b58-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 18,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-019-\u7eaf\u51c0\u751f\u5b58-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 19,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-020-\u7eaf\u51c0\u751f\u5b58-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 20,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-021-\u7eaf\u51c0\u751f\u5b58-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 21,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-022-\u7eaf\u51c0\u751f\u5b58-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 22,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-023-\u7eaf\u51c0\u751f\u5b58-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 23,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-024-\u7eaf\u51c0\u751f\u5b58-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 24,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-025-\u7eaf\u51c0\u751f\u5b58-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 25,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-026-\u7eaf\u51c0\u751f\u5b58-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 26,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-027-\u7eaf\u51c0\u751f\u5b58-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 27,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-028-\u7eaf\u51c0\u751f\u5b58-\u591c\u996e | \u6bcf\u65e5 0-8 \u5f00\u653e",
+      "number": 28,
+      "recycle": true,
+      "schedule": [
+        "\u591c\u996e",
+        0,
+        8
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-029-\u7eaf\u51c0\u751f\u5b58-\u591c\u996e | \u6bcf\u65e5 0-8 \u5f00\u653e",
+      "number": 29,
+      "recycle": true,
+      "schedule": [
+        "\u591c\u996e",
+        0,
+        8
+      ],
+      "template": "pure_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-030-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 30,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-031-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 31,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-032-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 32,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-033-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 33,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-034-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 34,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-035-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 35,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-036-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 36,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-037-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 37,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-038-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 38,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-039-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 39,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-040-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 40,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-041-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 41,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-042-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 42,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-043-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 43,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-044-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 44,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-045-\u7eaf\u51c0\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 45,
+      "recycle": true,
+      "schedule": null,
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-046-\u7eaf\u51c0\u65e0\u5c3d-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 46,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-047-\u7eaf\u51c0\u65e0\u5c3d-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 47,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-048-\u7eaf\u51c0\u65e0\u5c3d-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 48,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-049-\u7eaf\u51c0\u65e0\u5c3d-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 49,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-050-\u7eaf\u51c0\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 50,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-051-\u7eaf\u51c0\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 51,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-052-\u7eaf\u51c0\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 52,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-053-\u7eaf\u51c0\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 53,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-054-\u7eaf\u51c0\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 54,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-055-\u7eaf\u51c0\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 55,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-056-\u7eaf\u51c0\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 56,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-057-\u7eaf\u51c0\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 57,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-058-\u7eaf\u51c0\u65e0\u5c3d-\u591c\u996e | \u6bcf\u65e5 0-8 \u5f00\u653e",
+      "number": 58,
+      "recycle": true,
+      "schedule": [
+        "\u591c\u996e",
+        0,
+        8
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-059-\u7eaf\u51c0\u65e0\u5c3d-\u591c\u996e | \u6bcf\u65e5 0-8 \u5f00\u653e",
+      "number": 59,
+      "recycle": true,
+      "schedule": [
+        "\u591c\u996e",
+        0,
+        8
+      ],
+      "template": "pure_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-060-\u534a\u7eaf\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 60,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-061-\u534a\u7eaf\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 61,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-062-\u534a\u7eaf\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 62,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-063-\u534a\u7eaf\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 63,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-064-\u534a\u7eaf\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 64,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-065-\u534a\u7eaf\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 65,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-066-\u534a\u7eaf\u751f\u5b58-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 66,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "semi_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-067-\u534a\u7eaf\u751f\u5b58-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 67,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "semi_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-068-\u534a\u7eaf\u751f\u5b58-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 68,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "semi_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-069-\u534a\u7eaf\u751f\u5b58-\u591c\u996e | \u6bcf\u65e5 0-8 \u5f00\u653e",
+      "number": 69,
+      "recycle": true,
+      "schedule": [
+        "\u591c\u996e",
+        0,
+        8
+      ],
+      "template": "semi_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-070-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 70,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-071-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 71,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-072-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 72,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-073-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 73,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-074-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 74,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-075-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 75,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-076-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 76,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-077-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 77,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-078-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 78,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-079-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 79,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-080-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 80,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-081-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 81,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-082-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 82,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-083-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 83,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-084-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 84,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-085-\u534a\u7eaf\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 85,
+      "recycle": true,
+      "schedule": null,
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-086-\u534a\u7eaf\u65e0\u5c3d-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 86,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-087-\u534a\u7eaf\u65e0\u5c3d-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 87,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-088-\u534a\u7eaf\u65e0\u5c3d-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 88,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-089-\u534a\u7eaf\u65e0\u5c3d-\u767d\u996d | \u6bcf\u65e5 10-18 \u5f00\u653e",
+      "number": 89,
+      "recycle": true,
+      "schedule": [
+        "\u767d\u996d",
+        10,
+        18
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-090-\u534a\u7eaf\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 90,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-091-\u534a\u7eaf\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 91,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-092-\u534a\u7eaf\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 92,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-093-\u534a\u7eaf\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 93,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-094-\u534a\u7eaf\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 94,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-095-\u534a\u7eaf\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 95,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-096-\u534a\u7eaf\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 96,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-097-\u534a\u7eaf\u65e0\u5c3d-\u665a\u5bb4 | \u6bcf\u65e5 18-24 \u5f00\u653e",
+      "number": 97,
+      "recycle": true,
+      "schedule": [
+        "\u665a\u5bb4",
+        18,
+        0
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-098-\u534a\u7eaf\u65e0\u5c3d-\u591c\u996e | \u6bcf\u65e5 0-8 \u5f00\u653e",
+      "number": 98,
+      "recycle": true,
+      "schedule": [
+        "\u591c\u996e",
+        0,
+        8
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": false,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-099-\u534a\u7eaf\u65e0\u5c3d-\u591c\u996e | \u6bcf\u65e5 0-8 \u5f00\u653e",
+      "number": 99,
+      "recycle": true,
+      "schedule": [
+        "\u591c\u996e",
+        0,
+        8
+      ],
+      "template": "semi_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 64,
+      "name": "LST-200-\u6302\u76ae\u80a4 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 200,
+      "recycle": false,
+      "schedule": null,
+      "template": "afk"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 64,
+      "name": "LST-201-\u6302\u76ae\u80a4 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 201,
+      "recycle": false,
+      "schedule": null,
+      "template": "afk"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 64,
+      "name": "LST-202-\u6302\u76ae\u80a4 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 202,
+      "recycle": false,
+      "schedule": null,
+      "template": "afk"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 64,
+      "name": "LST-203-\u6302\u76ae\u80a4 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 203,
+      "recycle": false,
+      "schedule": null,
+      "template": "afk"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 64,
+      "name": "LST-204-\u6302\u76ae\u80a4 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 204,
+      "recycle": false,
+      "schedule": null,
+      "template": "afk"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-205-\u5192\u9669 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 205,
+      "recycle": false,
+      "schedule": null,
+      "template": "adventure"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-206-\u66b4\u98df | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 206,
+      "recycle": false,
+      "schedule": null,
+      "template": "gorge"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 6,
+      "name": "LST-207-\u7194\u7089 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 207,
+      "recycle": false,
+      "schedule": null,
+      "template": "forge"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 6,
+      "name": "LST-208-\u7194\u7089 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 208,
+      "recycle": false,
+      "schedule": null,
+      "template": "forge"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 6,
+      "name": "LST-209-\u7194\u7089 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 209,
+      "recycle": false,
+      "schedule": null,
+      "template": "forge"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 6,
+      "name": "LST-210-\u5c9b\u5c7f\u5192\u9669 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 210,
+      "recycle": false,
+      "schedule": null,
+      "template": "island_adventure"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 6,
+      "name": "LST-211-\u5c9b\u5c7f\u5192\u9669 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 211,
+      "recycle": false,
+      "schedule": null,
+      "template": "island_adventure"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 6,
+      "name": "LST-212-\u5c9b\u5c7f\u5192\u9669 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 212,
+      "recycle": false,
+      "schedule": null,
+      "template": "island_adventure"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 6,
+      "name": "LST-213-\u4e91\u9704\u56fd\u5ea6 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 213,
+      "recycle": false,
+      "schedule": null,
+      "template": "hamlet"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 6,
+      "name": "LST-214-\u4e91\u9704\u56fd\u5ea6 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 214,
+      "recycle": false,
+      "schedule": null,
+      "template": "hamlet"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 6,
+      "name": "LST-215-\u4e91\u9704\u56fd\u5ea6 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 215,
+      "recycle": false,
+      "schedule": null,
+      "template": "hamlet"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-216-\u6c38\u591c\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 216,
+      "recycle": false,
+      "schedule": null,
+      "template": "lights_out_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-217-\u6c38\u591c\u751f\u5b58 | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 217,
+      "recycle": false,
+      "schedule": null,
+      "template": "lights_out_survival"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-218-\u6c38\u591c\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 218,
+      "recycle": false,
+      "schedule": null,
+      "template": "lights_out_endless"
+    },
+    {
+      "deployment": {
+        "environment": {
+          "DST_SERVER_TELEMETRY_PROFILE": "history",
+          "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.255.255.254:4317",
+          "OTEL_TRACES_EXPORTER": "none"
+        },
+        "image": "quay.io/wh2099/dst-server:latest",
+        "start_on_boot": true,
+        "userns": null,
+        "volume_idmap": null
+      },
+      "max_players": 9,
+      "name": "LST-219-\u6c38\u591c\u65e0\u5c3d | \u6717\u8bf5\u56e2 5 \u5468\u5e74\u5566\uff01\u5165\u56e2\u627e\u5230\u4f60\u672a\u6765\u7684 5 \u5e74\u597d\u9965\u53cb\u5427~",
+      "number": 219,
+      "recycle": false,
+      "schedule": null,
+      "template": "lights_out_endless"
+    }
+  ],
+  "parts": {
+    "CAVES": {
+      "mods": {},
+      "settings": {
+        "master_ip": "127.0.0.1",
+        "shard_enabled": true
+      },
+      "shards": {
+        "cave": {
+          "mods": {},
+          "settings": {
+            "id": 2,
+            "is_master": false,
+            "master_server_port": 27017,
+            "name": "Caves",
+            "server_port": 11000
+          },
+          "world": {
+            "overrides": {
+              "kind": "cave",
+              "values": {}
+            },
+            "settings_preset": "DST_CAVE",
+            "worldgen_preset": "DST_CAVE"
+          }
+        }
+      }
+    },
+    "ENDLESS": {
+      "mods": {},
+      "settings": {},
+      "shards": {
+        "cave": {
+          "mods": {},
+          "settings": {},
+          "world": {
+            "overrides": {
+              "kind": "cave",
+              "values": {
+                "basicresource_regrowth": "always",
+                "ghostsanitydrain": "none",
+                "portalresurection": "always",
+                "resettime": "none"
+              }
+            }
+          }
+        },
+        "forest": {
+          "mods": {},
+          "settings": {},
+          "world": {
+            "settings_preset": "ENDLESS",
+            "worldgen_preset": "ENDLESS"
+          }
+        }
+      }
+    },
+    "ENDLESS_GENERATION": {
+      "shards": {
+        "forest": {
+          "settings": {},
+          "world": {
+            "worldgen_preset": "ENDLESS"
+          }
+        }
+      }
+    },
+    "ENDLESS_SETTINGS": {
+      "mods": {},
+      "settings": {},
+      "shards": {
+        "cave": {
+          "mods": {},
+          "settings": {},
+          "world": {
+            "overrides": {
+              "kind": "cave",
+              "values": {
+                "basicresource_regrowth": "always",
+                "ghostsanitydrain": "none",
+                "portalresurection": "always",
+                "resettime": "none"
+              }
+            }
+          }
+        },
+        "forest": {
+          "mods": {},
+          "settings": {},
+          "world": {
+            "settings_preset": "ENDLESS"
+          }
+        }
+      }
+    },
+    "FOREST": {
+      "shards": {
+        "forest": {
+          "settings": {},
+          "world": {
+            "overrides": {
+              "kind": "forest",
+              "values": {}
+            },
+            "settings_preset": "SURVIVAL_TOGETHER",
+            "worldgen_preset": "SURVIVAL_TOGETHER"
+          }
+        }
+      }
+    },
+    "FOREST_CAVES": {
+      "mods": {},
+      "settings": {
+        "master_ip": "127.0.0.1",
+        "shard_enabled": true
+      },
+      "shards": {
+        "cave": {
+          "mods": {},
+          "settings": {
+            "id": 2,
+            "is_master": false,
+            "master_server_port": 27017,
+            "name": "Caves",
+            "server_port": 11000
+          },
+          "world": {
+            "overrides": {
+              "kind": "cave",
+              "values": {}
+            },
+            "settings_preset": "DST_CAVE",
+            "worldgen_preset": "DST_CAVE"
+          }
+        },
+        "forest": {
+          "mods": {},
+          "settings": {},
+          "world": {
+            "overrides": {
+              "kind": "forest",
+              "values": {}
+            },
+            "settings_preset": "SURVIVAL_TOGETHER",
+            "worldgen_preset": "SURVIVAL_TOGETHER"
+          }
+        }
+      }
+    },
+    "FOREST_ONLY_NIGHT": {
+      "shards": {
+        "forest": {
+          "settings": {},
+          "world": {
+            "overrides": {
+              "kind": "forest",
+              "values": {
+                "day": "onlynight"
+              }
+            }
+          }
+        }
+      }
+    },
+    "LAVAARENA": {
+      "mods": {},
+      "settings": {
+        "game_mode": "lavaarena"
+      },
+      "shards": {
+        "xforge": {
+          "level": {
+            "background_node_range": [
+              0,
+              1
+            ],
+            "desc": "",
+            "id": "LAVAARENA",
+            "location": "lavaarena",
+            "name": "The Forge",
+            "overrides": {
+              "kind": "lavaarena",
+              "values": {
+                "autumn": "default",
+                "basicresource_regrowth": "none",
+                "beefaloheat": "default",
+                "boons": "never",
+                "brightmarecreatures": "default",
+                "crow_carnival": "default",
+                "darkness": "default",
+                "day": "default",
+                "dropeverythingondespawn": "default",
+                "extrastartingitems": "default",
+                "ghostenabled": "always",
+                "ghostsanitydrain": "always",
+                "hallowed_nights": "default",
+                "healthpenalty": "always",
+                "hunger": "default",
+                "keep_disconnected_tiles": true,
+                "krampus": "default",
+                "layout_mode": "RestrictNodesByKey",
+                "lessdamagetaken": "none",
+                "no_joining_islands": true,
+                "no_wormholes_to_disconnected_tiles": true,
+                "poi": "never",
+                "portalresurection": "none",
+                "protected": "never",
+                "resettime": "default",
+                "roads": "never",
+                "season_start": "default",
+                "seasonalstartingitems": "default",
+                "shadowcreatures": "default",
+                "spawnmode": "fixed",
+                "spawnprotection": "default",
+                "specialevent": "default",
+                "spring": "default",
+                "start_location": "lavaarena",
+                "summer": "default",
+                "task_set": "lavaarena_taskset",
+                "temperaturedamage": "default",
+                "touchstone": "never",
+                "traps": "never",
+                "winter": "default",
+                "winters_feast": "default",
+                "world_size": "small",
+                "year_of_the_beefalo": "default",
+                "year_of_the_bunnyman": "default",
+                "year_of_the_carrat": "default",
+                "year_of_the_catcoon": "default",
+                "year_of_the_dragonfly": "default",
+                "year_of_the_gobbler": "default",
+                "year_of_the_knight": "default",
+                "year_of_the_pig": "default",
+                "year_of_the_snake": "default",
+                "year_of_the_varg": "default"
+              }
+            },
+            "required_prefabs": [
+              "lavaarena_portal"
+            ],
+            "version": 4
+          },
+          "mods": {},
+          "settings": {},
+          "world": {
+            "overrides": {
+              "kind": "lavaarena",
+              "values": {}
+            },
+            "settings_preset": "LAVAARENA",
+            "worldgen_preset": "LAVAARENA"
+          }
+        }
+      }
+    },
+    "LIGHTS_OUT_GENERATION": {
+      "mods": {},
+      "settings": {},
+      "shards": {
+        "cave": {
+          "mods": {},
+          "settings": {},
+          "world": {
+            "overrides": {
+              "kind": "cave",
+              "values": {
+                "day": "onlynight"
+              }
+            }
+          }
+        },
+        "forest": {
+          "mods": {},
+          "settings": {},
+          "world": {
+            "worldgen_preset": "LIGHTS_OUT"
+          }
+        }
+      }
+    },
+    "LIGHTS_OUT_SETTINGS": {
+      "shards": {
+        "forest": {
+          "settings": {},
+          "world": {
+            "settings_preset": "LIGHTS_OUT"
+          }
+        }
+      }
+    },
+    "QUAGMIRE": {
+      "mods": {},
+      "settings": {
+        "game_mode": "quagmire"
+      },
+      "shards": {
+        "gorge": {
+          "level": {
+            "background_node_range": [
+              0,
+              1
+            ],
+            "desc": "",
+            "id": "QUAGMIRE",
+            "location": "quagmire",
+            "name": "The Gorge",
+            "overrides": {
+              "kind": "quagmire",
+              "values": {
+                "autumn": "default",
+                "basicresource_regrowth": "none",
+                "beefaloheat": "default",
+                "boons": "never",
+                "branching": "random",
+                "brightmarecreatures": "default",
+                "crow_carnival": "default",
+                "darkness": "default",
+                "day": "default",
+                "disease_delay": "none",
+                "dropeverythingondespawn": "default",
+                "extrastartingitems": "default",
+                "ghostenabled": "always",
+                "ghostsanitydrain": "always",
+                "hallowed_nights": "default",
+                "healthpenalty": "always",
+                "hunger": "default",
+                "keep_disconnected_tiles": false,
+                "krampus": "default",
+                "layout_mode": "RestrictNodesByKey",
+                "lessdamagetaken": "none",
+                "loop_percent": 0,
+                "no_joining_islands": true,
+                "no_wormholes_to_disconnected_tiles": true,
+                "petrification": "none",
+                "poi": "never",
+                "portalresurection": "none",
+                "prefabswaps_start": "classic",
+                "protected": "never",
+                "resettime": "default",
+                "roads": "never",
+                "season_start": "default",
+                "seasonalstartingitems": "default",
+                "shadowcreatures": "default",
+                "spawnmode": "fixed",
+                "spawnprotection": "default",
+                "specialevent": "default",
+                "spring": "default",
+                "start_location": "quagmire_startlocation",
+                "summer": "default",
+                "task_set": "quagmire_taskset",
+                "temperaturedamage": "default",
+                "touchstone": "never",
+                "traps": "never",
+                "wildfires": "never",
+                "winter": "default",
+                "winters_feast": "default",
+                "world_size": "small",
+                "year_of_the_beefalo": "default",
+                "year_of_the_bunnyman": "default",
+                "year_of_the_carrat": "default",
+                "year_of_the_catcoon": "default",
+                "year_of_the_dragonfly": "default",
+                "year_of_the_gobbler": "default",
+                "year_of_the_knight": "default",
+                "year_of_the_pig": "default",
+                "year_of_the_snake": "default",
+                "year_of_the_varg": "default"
+              }
+            },
+            "required_prefabs": [
+              "quagmire_portal"
+            ],
+            "version": 4
+          },
+          "mods": {},
+          "settings": {},
+          "world": {
+            "overrides": {
+              "kind": "quagmire",
+              "values": {}
+            },
+            "settings_preset": "QUAGMIRE",
+            "worldgen_preset": "QUAGMIRE"
+          }
+        }
+      }
+    },
+    "SHARDED": {
+      "settings": {
+        "master_ip": "127.0.0.1",
+        "shard_enabled": true
+      }
+    }
+  },
+  "template_names": [
+    "pure_survival",
+    "pure_endless",
+    "semi_survival",
+    "semi_endless",
+    "afk",
+    "lights_out_survival",
+    "lights_out_endless",
+    "island_adventure",
+    "hamlet",
+    "adventure",
+    "gorge",
+    "forge"
+  ],
+  "templates": {
+    "adventure": {
+      "cluster": {
+        "settings": {
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u5192\u9669",
+          "master_ip": "127.0.0.1",
+          "max_players": 9,
+          "max_snapshots": 999999999,
+          "pause_when_empty": true,
+          "shard_enabled": true,
+          "steam_group_id": 45524458
+        },
+        "shards": {
+          "adventure": {
+            "mods": {
+              "entries": {
+                "workshop-1847959350": {
+                  "configuration_options": {
+                    "acoldreception": "2,3,4",
+                    "archipelago": "2,3,4,5",
+                    "autumnacoldreception": false,
+                    "autumnarchipelago": false,
+                    "autumndarkness": false,
+                    "autumnkingofwinter": false,
+                    "autumnthegameisafoot": false,
+                    "autumntwoworlds": false,
+                    "checkmate": "7",
+                    "darkness": "6",
+                    "dayacoldreception": false,
+                    "dayarchipelago": false,
+                    "daydarkness": false,
+                    "daykingofwinter": false,
+                    "daythegameisafoot": false,
+                    "daytwoworlds": false,
+                    "difficulty": 2,
+                    "experimentalcode": false,
+                    "kingofwinter": "2,3,4,5",
+                    "maxwellsdoor": "1",
+                    "null_option": 0,
+                    "repickcharacter": false,
+                    "sandboxpreconfigured": true,
+                    "springacoldreception": false,
+                    "springarchipelago": false,
+                    "springdarkness": false,
+                    "springkingofwinter": false,
+                    "springthegameisafoot": false,
+                    "springtwoworlds": false,
+                    "startseasonacoldreception": false,
+                    "startseasonarchipelago": false,
+                    "startseasondarkness": false,
+                    "startseasonkingofwinter": false,
+                    "startseasonthegameisafoot": false,
+                    "startseasontwoworlds": false,
+                    "summeracoldreception": false,
+                    "summerarchipelago": false,
+                    "summerdarkness": false,
+                    "summerkingofwinter": false,
+                    "summerthegameisafoot": false,
+                    "summertwoworlds": false,
+                    "thegameisafoot": "2,3,4,5",
+                    "twoworlds": "4,5",
+                    "winteracoldreception": false,
+                    "winterarchipelago": false,
+                    "winterdarkness": false,
+                    "winterkingofwinter": false,
+                    "winterthegameisafoot": false,
+                    "wintertwoworlds": false,
+                    "withocean": "oceanwormholes",
+                    "worldsizeacoldreception": false,
+                    "worldsizearchipelago": false,
+                    "worldsizedarkness": false,
+                    "worldsizekingofwinter": false,
+                    "worldsizethegameisafoot": false,
+                    "worldsizetwoworlds": false
+                  },
+                  "enabled": true
+                },
+                "workshop-756229217": {
+                  "configuration_options": {
+                    "ALLsave": true,
+                    "Ancient": 1,
+                    "Chests": 2,
+                    "DSlike": false,
+                    "Enemies": 1,
+                    "RegeneratePlayerHealth": 2,
+                    "RegeneratePlayerHunger": 0.25,
+                    "RegeneratePlayerSanity": 6,
+                    "Thulecite": 2,
+                    "adv_itemcarrysandbox": false,
+                    "agesave": true,
+                    "announcepickparts": false,
+                    "inventorysave": true,
+                    "inventorysavenumber": "all",
+                    "island_size_setting": "allsamesize",
+                    "min_players": "half",
+                    "newworld": true,
+                    "null_option": 0,
+                    "recipesave": true,
+                    "set_behaviour": 4,
+                    "spawntelemoonisland": true,
+                    "spawnteleworld": "forest",
+                    "statssave": false,
+                    "variate_islands": false,
+                    "variate_specialevent": 0,
+                    "variate_suck": true,
+                    "variateworld": false
+                  },
+                  "enabled": true
+                }
+              }
+            },
+            "settings": {},
+            "world": {
+              "overrides": {
+                "kind": "forest",
+                "values": {}
+              },
+              "settings_preset": "SURVIVAL_TOGETHER",
+              "worldgen_preset": "SURVIVAL_TOGETHER"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u5192\u9669",
+      "max_players": 9
+    },
+    "afk": {
+      "cluster": {
+        "settings": {
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u6302\u76ae\u80a4",
+          "max_players": 64,
+          "max_snapshots": 9,
+          "pause_when_empty": true,
+          "steam_group_id": 45524458,
+          "tick_rate": 1,
+          "vote_enabled": false
+        },
+        "shards": {
+          "afk": {
+            "mods": {
+              "entries": {
+                "workshop-1981709850": {
+                  "configuration_options": {
+                    "character": "wendy",
+                    "clean_interval": 300,
+                    "dsc": true,
+                    "hasocean": false,
+                    "language": "ZH",
+                    "regen": false,
+                    "reroll_cd": 600,
+                    "showcounter": true
+                  },
+                  "enabled": true
+                }
+              }
+            },
+            "settings": {},
+            "world": {
+              "overrides": {
+                "kind": "forest",
+                "values": {
+                  "boons": "never",
+                  "fruitfly": "never",
+                  "has_ocean": true,
+                  "world_size": "small"
+                }
+              },
+              "settings_preset": "ENDLESS",
+              "worldgen_preset": "ENDLESS"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u6302\u76ae\u80a4",
+      "max_players": 64
+    },
+    "forge": {
+      "cluster": {
+        "settings": {
+          "autosaver_enabled": false,
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u7194\u7089",
+          "game_mode": "lavaarena",
+          "max_players": 6,
+          "max_snapshots": 999999999,
+          "steam_group_id": 45524458,
+          "tick_rate": 1
+        },
+        "shards": {
+          "xforge": {
+            "level": {
+              "background_node_range": [
+                0,
+                1
+              ],
+              "desc": "",
+              "id": "LAVAARENA",
+              "location": "lavaarena",
+              "name": "The Forge",
+              "overrides": {
+                "kind": "lavaarena",
+                "values": {
+                  "autumn": "default",
+                  "basicresource_regrowth": "none",
+                  "beefaloheat": "default",
+                  "boons": "never",
+                  "brightmarecreatures": "default",
+                  "crow_carnival": "default",
+                  "darkness": "default",
+                  "day": "default",
+                  "dropeverythingondespawn": "default",
+                  "extrastartingitems": "default",
+                  "ghostenabled": "always",
+                  "ghostsanitydrain": "always",
+                  "hallowed_nights": "default",
+                  "healthpenalty": "always",
+                  "hunger": "default",
+                  "keep_disconnected_tiles": true,
+                  "krampus": "default",
+                  "layout_mode": "RestrictNodesByKey",
+                  "lessdamagetaken": "none",
+                  "no_joining_islands": true,
+                  "no_wormholes_to_disconnected_tiles": true,
+                  "poi": "never",
+                  "portalresurection": "none",
+                  "protected": "never",
+                  "resettime": "default",
+                  "roads": "never",
+                  "season_start": "default",
+                  "seasonalstartingitems": "default",
+                  "shadowcreatures": "default",
+                  "spawnmode": "fixed",
+                  "spawnprotection": "default",
+                  "specialevent": "default",
+                  "spring": "default",
+                  "start_location": "lavaarena",
+                  "summer": "default",
+                  "task_set": "lavaarena_taskset",
+                  "temperaturedamage": "default",
+                  "touchstone": "never",
+                  "traps": "never",
+                  "winter": "default",
+                  "winters_feast": "default",
+                  "world_size": "small",
+                  "year_of_the_beefalo": "default",
+                  "year_of_the_bunnyman": "default",
+                  "year_of_the_carrat": "default",
+                  "year_of_the_catcoon": "default",
+                  "year_of_the_dragonfly": "default",
+                  "year_of_the_gobbler": "default",
+                  "year_of_the_knight": "default",
+                  "year_of_the_pig": "default",
+                  "year_of_the_snake": "default",
+                  "year_of_the_varg": "default"
+                }
+              },
+              "required_prefabs": [
+                "lavaarena_portal"
+              ],
+              "version": 4
+            },
+            "mods": {
+              "entries": {
+                "workshop-1938752683": {
+                  "configuration_options": {
+                    "ADJUST_FILTER": false,
+                    "BATTLESTANDARD_EFFICIENCY": 1,
+                    "COMMAND_SPAM_BAN_TIME": 10,
+                    "DAMAGE_NUMBER_FONT_SIZE": 32,
+                    "DAMAGE_NUMBER_HEIGHT": 40,
+                    "DAMAGE_NUMBER_OPTIONS": "default",
+                    "DAMAGE_NUMBER_PLAYERS": false,
+                    "DEBUG": false,
+                    "DEFAULT_FILTER": 1,
+                    "DEFAULT_LOBBY_TAB": "news",
+                    "DEFAULT_ROTATION": false,
+                    "DIFFICULTY": "normal",
+                    "DISPLAY_COLORED_STATS": true,
+                    "DISPLAY_TARGET_BADGE": true,
+                    "DISPLAY_TEAMMATES_DEBUFFS": false,
+                    "Damage Number Options": 0,
+                    "Detailed Summary Options": 0,
+                    "EVENT_TRACKING": true,
+                    "FORCE_START_DELAY_TIME": 30,
+                    "FRIENDLY_FIRE": false,
+                    "GAMETYPE": "forge",
+                    "GIFT_SIDE": "right",
+                    "Gameplay Settings": 0,
+                    "HIDE_INDICATORS": true,
+                    "JOINABLE_MIDMATCH": true,
+                    "LOBBY_GEAR": true,
+                    "Lobby Options": 0,
+                    "MAX_MESSAGES": 100,
+                    "MOB_ATTACK_RATE": 1,
+                    "MOB_DAMAGE_DEALT": 1,
+                    "MOB_DAMAGE_TAKEN": 1,
+                    "MOB_DUPLICATOR": 1,
+                    "MOB_HEALTH": 1,
+                    "MOB_SIZE": 1,
+                    "MOB_SPEED": 1,
+                    "MODE": "reforged",
+                    "Mutators": 0,
+                    "NO_HUD": false,
+                    "NO_REVIVES": false,
+                    "NO_SLEEP": false,
+                    "ONLY_SHOW_NONZERO_STATS": true,
+                    "Other": 0,
+                    "PING_KEYBIND": "KEY_R",
+                    "PING_TRANSPARENCY": 100,
+                    "PLAYER_DEBUFF_DISPLAY": "mini",
+                    "Player HUD Options": 0,
+                    "RESERVE_SLOTS": true,
+                    "ROTATION": 0,
+                    "SANDBOX": false,
+                    "SERVER_ACHIEVEMENTS": false,
+                    "SERVER_LEVEL": false,
+                    "SHOW_CHAT_ICON": false,
+                    "SPECTATORS_ONLY": true,
+                    "SPECTATOR_ON_DEATH": false,
+                    "VOTE_FORCE_START": true,
+                    "VOTE_GAME_SETTINGS": true,
+                    "VOTE_KICK": true,
+                    "Visual Options": 0,
+                    "Vote": 0,
+                    "WAVESET": "swineclops"
+                  },
+                  "enabled": true
+                },
+                "workshop-2038128735": {
+                  "configuration_options": {
+                    "klaustrophobia": false
+                  },
+                  "enabled": true
+                },
+                "workshop-2633870801": {
+                  "configuration_options": {
+                    "Gameplay Settings": 0,
+                    "MAP": "none",
+                    "Other Settings": 0,
+                    "WAVESET": "none",
+                    "light_color_override": false
+                  },
+                  "enabled": true
+                },
+                "workshop-2961923603": {
+                  "configuration_options": {},
+                  "enabled": true
+                }
+              }
+            },
+            "settings": {},
+            "world": {
+              "overrides": {
+                "kind": "lavaarena",
+                "values": {}
+              },
+              "settings_preset": "LAVAARENA",
+              "worldgen_preset": "LAVAARENA"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u7194\u7089",
+      "max_players": 6
+    },
+    "gorge": {
+      "cluster": {
+        "settings": {
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u66b4\u98df",
+          "game_mode": "quagmire",
+          "master_ip": "127.0.0.1",
+          "max_players": 9,
+          "max_snapshots": 999999999,
+          "shard_enabled": true,
+          "steam_group_id": 45524458
+        },
+        "shards": {
+          "gorge": {
+            "level": {
+              "background_node_range": [
+                0,
+                1
+              ],
+              "desc": "",
+              "id": "QUAGMIRE",
+              "location": "quagmire",
+              "name": "The Gorge",
+              "overrides": {
+                "kind": "quagmire",
+                "values": {
+                  "autumn": "default",
+                  "basicresource_regrowth": "none",
+                  "beefaloheat": "default",
+                  "boons": "never",
+                  "branching": "random",
+                  "brightmarecreatures": "default",
+                  "crow_carnival": "default",
+                  "darkness": "default",
+                  "day": "default",
+                  "disease_delay": "none",
+                  "dropeverythingondespawn": "default",
+                  "extrastartingitems": "default",
+                  "ghostenabled": "always",
+                  "ghostsanitydrain": "always",
+                  "hallowed_nights": "default",
+                  "healthpenalty": "always",
+                  "hunger": "default",
+                  "keep_disconnected_tiles": false,
+                  "krampus": "default",
+                  "layout_mode": "RestrictNodesByKey",
+                  "lessdamagetaken": "none",
+                  "loop_percent": 0,
+                  "no_joining_islands": true,
+                  "no_wormholes_to_disconnected_tiles": true,
+                  "petrification": "none",
+                  "poi": "never",
+                  "portalresurection": "none",
+                  "prefabswaps_start": "classic",
+                  "protected": "never",
+                  "resettime": "default",
+                  "roads": "never",
+                  "season_start": "default",
+                  "seasonalstartingitems": "default",
+                  "shadowcreatures": "default",
+                  "spawnmode": "fixed",
+                  "spawnprotection": "default",
+                  "specialevent": "default",
+                  "spring": "default",
+                  "start_location": "quagmire_startlocation",
+                  "summer": "default",
+                  "task_set": "quagmire_taskset",
+                  "temperaturedamage": "default",
+                  "touchstone": "never",
+                  "traps": "never",
+                  "wildfires": "never",
+                  "winter": "default",
+                  "winters_feast": "default",
+                  "world_size": "small",
+                  "year_of_the_beefalo": "default",
+                  "year_of_the_bunnyman": "default",
+                  "year_of_the_carrat": "default",
+                  "year_of_the_catcoon": "default",
+                  "year_of_the_dragonfly": "default",
+                  "year_of_the_gobbler": "default",
+                  "year_of_the_knight": "default",
+                  "year_of_the_pig": "default",
+                  "year_of_the_snake": "default",
+                  "year_of_the_varg": "default"
+                }
+              },
+              "required_prefabs": [
+                "quagmire_portal"
+              ],
+              "version": 4
+            },
+            "mods": {
+              "entries": {
+                "workshop-1918927570": {
+                  "configuration_options": {
+                    "": 0,
+                    "Gameplay": 0,
+                    "Vote": 0,
+                    "changablefemusic": true,
+                    "fixed_gamemode": false,
+                    "forceendmatch": false,
+                    "gamemode": true,
+                    "gamemodesign": false,
+                    "kick": true,
+                    "newsoil": false,
+                    "perks": true,
+                    "specialevents": false
+                  },
+                  "enabled": true
+                }
+              }
+            },
+            "settings": {},
+            "world": {
+              "overrides": {
+                "kind": "quagmire",
+                "values": {}
+              },
+              "settings_preset": "QUAGMIRE",
+              "worldgen_preset": "QUAGMIRE"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u66b4\u98df",
+      "max_players": 9
+    },
+    "hamlet": {
+      "cluster": {
+        "settings": {
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u4e91\u9704\u56fd\u5ea6",
+          "max_players": 6,
+          "max_snapshots": 999999999,
+          "pause_when_empty": true,
+          "steam_group_id": 45524458
+        },
+        "shards": {
+          "hamlet": {
+            "mods": {
+              "entries": {
+                "workshop-3322803908": {
+                  "configuration_options": {},
+                  "enabled": true
+                }
+              }
+            },
+            "settings": {},
+            "world": {
+              "settings_preset": "PORKLAND_DEFAULT",
+              "worldgen_preset": "PORKLAND_DEFAULT"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u4e91\u9704\u56fd\u5ea6",
+      "max_players": 6
+    },
+    "island_adventure": {
+      "cluster": {
+        "settings": {
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u5c9b\u5c7f\u5192\u9669",
+          "master_ip": "127.0.0.1",
+          "max_players": 6,
+          "max_snapshots": 999999999,
+          "pause_when_empty": true,
+          "shard_enabled": true,
+          "steam_group_id": 45524458
+        },
+        "shards": {
+          "shipwrecked": {
+            "mods": {
+              "entries": {
+                "workshop-1467214795": {
+                  "configuration_options": {
+                    "armorlimestonebuff": 0.8,
+                    "mermlegs": true,
+                    "newloot": true,
+                    "newplayerboats": true,
+                    "octopuskingtweak": true,
+                    "octopustrade": true,
+                    "windstaffbuff": 2,
+                    "\u6e38\u620f\u529f\u80fd": false,
+                    "\u7269\u54c1\u548c\u5efa\u7b51": false,
+                    "\u751f\u7269\u6539\u53d8": false
+                  },
+                  "enabled": true
+                },
+                "workshop-3435352667": {
+                  "configuration_options": {
+                    "devmode": false,
+                    "droplootground": true,
+                    "dynamicmusic": true,
+                    "enable_walani": true,
+                    "enable_wilbur": true,
+                    "enable_woodlegs": true,
+                    "gamemode_recipes": true,
+                    "locale": false,
+                    "pondfishable": true,
+                    "quick_worthies": false,
+                    "slotmachineloot": true,
+                    "tuningmodifiers": true,
+                    "waveforce": true,
+                    "windgustable": "all",
+                    "\u6742\u9879": false,
+                    "\u6e38\u620f\u529f\u80fd": false,
+                    "\u7269\u54c1\u548c\u5efa\u7b51": false,
+                    "\u751f\u7269\u6539\u53d8": false,
+                    "\u89d2\u8272": false
+                  },
+                  "enabled": true
+                }
+              }
+            },
+            "settings": {},
+            "world": {
+              "settings_preset": "SHIPWRECKED_ENDLESS",
+              "worldgen_preset": "SHIPWRECKED_ENDLESS"
+            }
+          },
+          "volcano": {
+            "mods": {
+              "entries": {
+                "workshop-1467214795": {
+                  "configuration_options": {
+                    "armorlimestonebuff": 0.8,
+                    "mermlegs": true,
+                    "newloot": true,
+                    "newplayerboats": true,
+                    "octopuskingtweak": true,
+                    "octopustrade": true,
+                    "windstaffbuff": 2,
+                    "\u6e38\u620f\u529f\u80fd": false,
+                    "\u7269\u54c1\u548c\u5efa\u7b51": false,
+                    "\u751f\u7269\u6539\u53d8": false
+                  },
+                  "enabled": true
+                },
+                "workshop-3435352667": {
+                  "configuration_options": {
+                    "devmode": false,
+                    "droplootground": true,
+                    "dynamicmusic": true,
+                    "enable_walani": true,
+                    "enable_wilbur": true,
+                    "enable_woodlegs": true,
+                    "gamemode_recipes": true,
+                    "locale": false,
+                    "pondfishable": true,
+                    "quick_worthies": false,
+                    "slotmachineloot": true,
+                    "tuningmodifiers": true,
+                    "waveforce": true,
+                    "windgustable": "all",
+                    "\u6742\u9879": false,
+                    "\u6e38\u620f\u529f\u80fd": false,
+                    "\u7269\u54c1\u548c\u5efa\u7b51": false,
+                    "\u751f\u7269\u6539\u53d8": false,
+                    "\u89d2\u8272": false
+                  },
+                  "enabled": true
+                }
+              }
+            },
+            "settings": {
+              "id": 2,
+              "is_master": false,
+              "master_server_port": 27017,
+              "name": "volcano",
+              "server_port": 11000
+            },
+            "world": {
+              "settings_preset": "SURVIVAL_VOLCANO_CLASSIC",
+              "worldgen_preset": "SURVIVAL_VOLCANO_CLASSIC"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u5c9b\u5c7f\u5192\u9669",
+      "max_players": 6
+    },
+    "lights_out_endless": {
+      "cluster": {
+        "settings": {
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u6c38\u591c\u65e0\u5c3d",
+          "master_ip": "127.0.0.1",
+          "max_players": 9,
+          "max_snapshots": 999999999,
+          "pause_when_empty": true,
+          "shard_enabled": true,
+          "steam_group_id": 45524458
+        },
+        "shards": {
+          "cave": {
+            "mods": {},
+            "settings": {
+              "id": 2,
+              "is_master": false,
+              "master_server_port": 27017,
+              "name": "Caves",
+              "server_port": 11000
+            },
+            "world": {
+              "overrides": {
+                "kind": "cave",
+                "values": {
+                  "basicresource_regrowth": "always",
+                  "day": "onlynight",
+                  "ghostsanitydrain": "none",
+                  "portalresurection": "always",
+                  "resettime": "none"
+                }
+              },
+              "settings_preset": "DST_CAVE",
+              "worldgen_preset": "DST_CAVE"
+            }
+          },
+          "forest": {
+            "mods": {},
+            "settings": {},
+            "world": {
+              "overrides": {
+                "kind": "forest",
+                "values": {
+                  "day": "onlynight"
+                }
+              },
+              "settings_preset": "ENDLESS",
+              "worldgen_preset": "LIGHTS_OUT"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u6c38\u591c\u65e0\u5c3d",
+      "max_players": 9
+    },
+    "lights_out_survival": {
+      "cluster": {
+        "settings": {
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u6c38\u591c\u751f\u5b58",
+          "master_ip": "127.0.0.1",
+          "max_players": 9,
+          "max_snapshots": 999999999,
+          "pause_when_empty": true,
+          "shard_enabled": true,
+          "steam_group_id": 45524458
+        },
+        "shards": {
+          "cave": {
+            "mods": {},
+            "settings": {
+              "id": 2,
+              "is_master": false,
+              "master_server_port": 27017,
+              "name": "Caves",
+              "server_port": 11000
+            },
+            "world": {
+              "overrides": {
+                "kind": "cave",
+                "values": {
+                  "day": "onlynight"
+                }
+              },
+              "settings_preset": "DST_CAVE",
+              "worldgen_preset": "DST_CAVE"
+            }
+          },
+          "forest": {
+            "mods": {},
+            "settings": {},
+            "world": {
+              "overrides": {
+                "kind": "forest",
+                "values": {}
+              },
+              "settings_preset": "LIGHTS_OUT",
+              "worldgen_preset": "LIGHTS_OUT"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u6c38\u591c\u751f\u5b58",
+      "max_players": 9
+    },
+    "pure_endless": {
+      "cluster": {
+        "settings": {
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u7eaf\u51c0\u65e0\u5c3d",
+          "master_ip": "127.0.0.1",
+          "max_players": 9,
+          "max_snapshots": 999999999,
+          "pause_when_empty": true,
+          "shard_enabled": true,
+          "steam_group_id": 45524458
+        },
+        "shards": {
+          "cave": {
+            "mods": {},
+            "settings": {
+              "id": 2,
+              "is_master": false,
+              "master_server_port": 27017,
+              "name": "Caves",
+              "server_port": 11000
+            },
+            "world": {
+              "overrides": {
+                "kind": "cave",
+                "values": {
+                  "basicresource_regrowth": "always",
+                  "ghostsanitydrain": "none",
+                  "portalresurection": "always",
+                  "resettime": "none"
+                }
+              },
+              "settings_preset": "DST_CAVE",
+              "worldgen_preset": "DST_CAVE"
+            }
+          },
+          "forest": {
+            "mods": {},
+            "settings": {},
+            "world": {
+              "overrides": {
+                "kind": "forest",
+                "values": {}
+              },
+              "settings_preset": "ENDLESS",
+              "worldgen_preset": "ENDLESS"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u7eaf\u51c0\u65e0\u5c3d",
+      "max_players": 9
+    },
+    "pure_survival": {
+      "cluster": {
+        "settings": {
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u7eaf\u51c0\u751f\u5b58",
+          "master_ip": "127.0.0.1",
+          "max_players": 9,
+          "max_snapshots": 999999999,
+          "pause_when_empty": true,
+          "shard_enabled": true,
+          "steam_group_id": 45524458
+        },
+        "shards": {
+          "cave": {
+            "mods": {},
+            "settings": {
+              "id": 2,
+              "is_master": false,
+              "master_server_port": 27017,
+              "name": "Caves",
+              "server_port": 11000
+            },
+            "world": {
+              "overrides": {
+                "kind": "cave",
+                "values": {}
+              },
+              "settings_preset": "DST_CAVE",
+              "worldgen_preset": "DST_CAVE"
+            }
+          },
+          "forest": {
+            "mods": {},
+            "settings": {},
+            "world": {
+              "overrides": {
+                "kind": "forest",
+                "values": {}
+              },
+              "settings_preset": "SURVIVAL_TOGETHER",
+              "worldgen_preset": "SURVIVAL_TOGETHER"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u7eaf\u51c0\u751f\u5b58",
+      "max_players": 9
+    },
+    "semi_endless": {
+      "cluster": {
+        "settings": {
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u534a\u7eaf\u65e0\u5c3d",
+          "master_ip": "127.0.0.1",
+          "max_players": 9,
+          "max_snapshots": 999999999,
+          "pause_when_empty": true,
+          "shard_enabled": true,
+          "steam_group_id": 45524458
+        },
+        "shards": {
+          "cave": {
+            "mods": {
+              "entries": {
+                "workshop-1803285852": {
+                  "configuration_options": {
+                    "": 0,
+                    "AutoPickupAsh": true,
+                    "AutoPickupEnabled": true,
+                    "AutoPickupPoop": true,
+                    "AutoPickupRange": 10,
+                    "AutoPickupSeeds": true,
+                    "AutoStackAsh": true,
+                    "AutoStackEnabled": true,
+                    "AutoStackMakeNewStackMainStack": true,
+                    "AutoStackManuallyDroppedItems": false,
+                    "AutoStackPoop": true,
+                    "AutoStackRange": 12,
+                    "AutoStackSeeds": true,
+                    "AutoStackTwiggyTreeTwigs": false,
+                    "ManualDropStackRange": 5,
+                    "ManualStackAsh": false,
+                    "ManualStackMakeNewStackMainStack": false,
+                    "ManualStackPoop": false,
+                    "ManualStackSeeds": false,
+                    "PlayerMustHaveOneOfItemToAutoPickup": true,
+                    "SmokePuffOnStacking": true,
+                    "StackDuringPopulation": false
+                  },
+                  "enabled": true
+                },
+                "workshop-2189004162": {
+                  "configuration_options": {
+                    "DEBUG_ENABLED": false,
+                    "DEBUG_SHOW_DISABLED": false,
+                    "DEBUG_SHOW_NOTIMPLEMENTED": false,
+                    "DEBUG_SHOW_PREFAB": false,
+                    "alt_only_information": false,
+                    "appeasement_value": "undefined",
+                    "armor": "undefined",
+                    "attack_range_type": "undefined",
+                    "battlesong_range": "both",
+                    "blink_range": false,
+                    "boss_indicator": true,
+                    "bottle_indicator": true,
+                    "crash_reporter": false,
+                    "danger_announcements": "undefined",
+                    "death_indicator": false,
+                    "display_attack_range": false,
+                    "display_batwave_information": "undefined",
+                    "display_cawnival": "undefined",
+                    "display_compostvalue": "undefined",
+                    "display_crafting_lookup_button": true,
+                    "display_fertilizer": "undefined",
+                    "display_finiteuses": true,
+                    "display_food": "undefined",
+                    "display_gyminfo": "undefined",
+                    "display_harvestable": true,
+                    "display_health": "undefined",
+                    "display_hunger": "undefined",
+                    "display_insight_menu_button": true,
+                    "display_itemmimic_information": "undefined",
+                    "display_mob_attack_damage": "undefined",
+                    "display_oceanfishing": "undefined",
+                    "display_perishable": "undefined",
+                    "display_pickable": true,
+                    "display_plant_stressors": "undefined",
+                    "display_pollination": "undefined",
+                    "display_rabbitking_information": "undefined",
+                    "display_rechargeable": "undefined",
+                    "display_sanity": "undefined",
+                    "display_sanity_interactions": "undefined",
+                    "display_sanityaura": "undefined",
+                    "display_shadowthrall_information": "undefined",
+                    "display_shared_stats": "undefined",
+                    "display_shelter_info": "undefined",
+                    "display_simplefishing": "undefined",
+                    "display_spawner_information": "undefined",
+                    "display_tackle_information": "undefined",
+                    "display_timers": "undefined",
+                    "display_unwrappable": "undefined",
+                    "display_upgradeable": "undefined",
+                    "display_weather": "undefined",
+                    "display_weighable": "undefined",
+                    "display_world_events": "undefined",
+                    "display_worldmigrator": "undefined",
+                    "display_yotb_appraisal": "undefined",
+                    "display_yotb_winners": "undefined",
+                    "domestication_information": "undefined",
+                    "experimental_highlighting": true,
+                    "follower_info": "undefined",
+                    "followtext_insight_font_size": 28,
+                    "food_effects": true,
+                    "food_memory": "undefined",
+                    "food_order": "interface",
+                    "food_style": "long",
+                    "food_units": true,
+                    "fuel_highlighting": false,
+                    "fuel_highlighting_color": "RED",
+                    "fuel_verbosity": "undefined",
+                    "growth_verbosity": "undefined",
+                    "herd_information": "undefined",
+                    "highlighting": true,
+                    "highlighting_color": "GREEN",
+                    "highlighting_darkness": true,
+                    "hover_range_indicator": true,
+                    "hoverer_insight_font_size": 30,
+                    "hoverer_line_truncation": "None",
+                    "hunt_indicator": "undefined",
+                    "info_preload": "undefined",
+                    "info_style": "text",
+                    "insight_font": "UIFONT",
+                    "inventorybar_insight_font_size": 25,
+                    "item_worth": "undefined",
+                    "itemtile_display": "percentages",
+                    "klaus_sack_info": "undefined",
+                    "klaus_sack_markers": "undefined",
+                    "language": "automatic",
+                    "lightningrod_range": 1,
+                    "miniboss_indicator": true,
+                    "naughtiness_verbosity": "undefined",
+                    "nightmareclock_display": "undefined",
+                    "notable_indicator": true,
+                    "orchestrina_indicator": "undefined",
+                    "pipspook_indicator": true,
+                    "refresh_delay": "undefined",
+                    "repair_values": "undefined",
+                    "sinkhole_marks": 2,
+                    "soil_moisture": 2,
+                    "soil_nutrients": "undefined",
+                    "soil_nutrients_needs_hat": "undefined",
+                    "stewer_chef": "undefined",
+                    "suspicious_marble_indicator": false,
+                    "temperature_units": "game",
+                    "text_coloring": true,
+                    "time_style": "realtime_short",
+                    "tumbleweed_info": "undefined",
+                    "weapon_damage": "undefined",
+                    "weather_detail": "undefined",
+                    "wortox_soul_range": true,
+                    "wx78_scanner_info": "undefined",
+                    "\u4fe1\u606f\u63a7\u5236": 0,
+                    "\u6307\u793a\u5668": 0,
+                    "\u6742\u9879": 0,
+                    "\u683c\u5f0f": 0,
+                    "\u8c03\u8bd5": 0,
+                    "\u98df\u7269\u76f8\u5173": 0
+                  },
+                  "enabled": true
+                },
+                "workshop-2950657933": {
+                  "configuration_options": {
+                    "add_cklist1": [
+                      "spoiled_food",
+                      "poop",
+                      "guano"
+                    ],
+                    "add_cklist2": [
+                      "nightmarefuel",
+                      "medal_tribute_symbol",
+                      "boneshard"
+                    ],
+                    "add_cklist3": [],
+                    "add_cklist4": [
+                      "twigs"
+                    ],
+                    "add_cklist5": [
+                      "silk",
+                      "spidergland",
+                      "sketch",
+                      "blueprint"
+                    ],
+                    "ck_listtime1": 1,
+                    "ck_listtime2": 3,
+                    "ck_listtime3": 7,
+                    "ck_listtime4": 15,
+                    "ck_listtime5": 35
+                  },
+                  "enabled": true
+                },
+                "workshop-3046339764": {
+                  "configuration_options": {
+                    "antlion": true,
+                    "birdcage": true,
+                    "mermking": true,
+                    "monkeyisland_portal": false,
+                    "monkeyqueen": true,
+                    "pigking": true
+                  },
+                  "enabled": true
+                },
+                "workshop-3223103565": {
+                  "configuration_options": {
+                    "SIB": false,
+                    "SSB": false,
+                    "mod_support_enabled": false,
+                    "sort_bookstation": true,
+                    "sort_chest": true,
+                    "sort_dragonflychest": true
+                  },
+                  "enabled": true
+                }
+              }
+            },
+            "settings": {
+              "id": 2,
+              "is_master": false,
+              "master_server_port": 27017,
+              "name": "Caves",
+              "server_port": 11000
+            },
+            "world": {
+              "overrides": {
+                "kind": "cave",
+                "values": {
+                  "basicresource_regrowth": "always",
+                  "boons": "often",
+                  "ghostsanitydrain": "none",
+                  "grass": "often",
+                  "grassgekkos": "never",
+                  "krampus": "always",
+                  "portalresurection": "always",
+                  "prefabswaps_start": "classic",
+                  "reeds": "often",
+                  "resettime": "none",
+                  "sapling": "often",
+                  "touchstone": "often"
+                }
+              },
+              "settings_preset": "DST_CAVE",
+              "worldgen_preset": "DST_CAVE"
+            }
+          },
+          "forest": {
+            "mods": {
+              "entries": {
+                "workshop-1803285852": {
+                  "configuration_options": {
+                    "": 0,
+                    "AutoPickupAsh": true,
+                    "AutoPickupEnabled": true,
+                    "AutoPickupPoop": true,
+                    "AutoPickupRange": 10,
+                    "AutoPickupSeeds": true,
+                    "AutoStackAsh": true,
+                    "AutoStackEnabled": true,
+                    "AutoStackMakeNewStackMainStack": true,
+                    "AutoStackManuallyDroppedItems": false,
+                    "AutoStackPoop": true,
+                    "AutoStackRange": 12,
+                    "AutoStackSeeds": true,
+                    "AutoStackTwiggyTreeTwigs": false,
+                    "ManualDropStackRange": 5,
+                    "ManualStackAsh": false,
+                    "ManualStackMakeNewStackMainStack": false,
+                    "ManualStackPoop": false,
+                    "ManualStackSeeds": false,
+                    "PlayerMustHaveOneOfItemToAutoPickup": true,
+                    "SmokePuffOnStacking": true,
+                    "StackDuringPopulation": false
+                  },
+                  "enabled": true
+                },
+                "workshop-2189004162": {
+                  "configuration_options": {
+                    "DEBUG_ENABLED": false,
+                    "DEBUG_SHOW_DISABLED": false,
+                    "DEBUG_SHOW_NOTIMPLEMENTED": false,
+                    "DEBUG_SHOW_PREFAB": false,
+                    "alt_only_information": false,
+                    "appeasement_value": "undefined",
+                    "armor": "undefined",
+                    "attack_range_type": "undefined",
+                    "battlesong_range": "both",
+                    "blink_range": false,
+                    "boss_indicator": true,
+                    "bottle_indicator": true,
+                    "crash_reporter": false,
+                    "danger_announcements": "undefined",
+                    "death_indicator": false,
+                    "display_attack_range": false,
+                    "display_batwave_information": "undefined",
+                    "display_cawnival": "undefined",
+                    "display_compostvalue": "undefined",
+                    "display_crafting_lookup_button": true,
+                    "display_fertilizer": "undefined",
+                    "display_finiteuses": true,
+                    "display_food": "undefined",
+                    "display_gyminfo": "undefined",
+                    "display_harvestable": true,
+                    "display_health": "undefined",
+                    "display_hunger": "undefined",
+                    "display_insight_menu_button": true,
+                    "display_itemmimic_information": "undefined",
+                    "display_mob_attack_damage": "undefined",
+                    "display_oceanfishing": "undefined",
+                    "display_perishable": "undefined",
+                    "display_pickable": true,
+                    "display_plant_stressors": "undefined",
+                    "display_pollination": "undefined",
+                    "display_rabbitking_information": "undefined",
+                    "display_rechargeable": "undefined",
+                    "display_sanity": "undefined",
+                    "display_sanity_interactions": "undefined",
+                    "display_sanityaura": "undefined",
+                    "display_shadowthrall_information": "undefined",
+                    "display_shared_stats": "undefined",
+                    "display_shelter_info": "undefined",
+                    "display_simplefishing": "undefined",
+                    "display_spawner_information": "undefined",
+                    "display_tackle_information": "undefined",
+                    "display_timers": "undefined",
+                    "display_unwrappable": "undefined",
+                    "display_upgradeable": "undefined",
+                    "display_weather": "undefined",
+                    "display_weighable": "undefined",
+                    "display_world_events": "undefined",
+                    "display_worldmigrator": "undefined",
+                    "display_yotb_appraisal": "undefined",
+                    "display_yotb_winners": "undefined",
+                    "domestication_information": "undefined",
+                    "experimental_highlighting": true,
+                    "follower_info": "undefined",
+                    "followtext_insight_font_size": 28,
+                    "food_effects": true,
+                    "food_memory": "undefined",
+                    "food_order": "interface",
+                    "food_style": "long",
+                    "food_units": true,
+                    "fuel_highlighting": false,
+                    "fuel_highlighting_color": "RED",
+                    "fuel_verbosity": "undefined",
+                    "growth_verbosity": "undefined",
+                    "herd_information": "undefined",
+                    "highlighting": true,
+                    "highlighting_color": "GREEN",
+                    "highlighting_darkness": true,
+                    "hover_range_indicator": true,
+                    "hoverer_insight_font_size": 30,
+                    "hoverer_line_truncation": "None",
+                    "hunt_indicator": "undefined",
+                    "info_preload": "undefined",
+                    "info_style": "text",
+                    "insight_font": "UIFONT",
+                    "inventorybar_insight_font_size": 25,
+                    "item_worth": "undefined",
+                    "itemtile_display": "percentages",
+                    "klaus_sack_info": "undefined",
+                    "klaus_sack_markers": "undefined",
+                    "language": "automatic",
+                    "lightningrod_range": 1,
+                    "miniboss_indicator": true,
+                    "naughtiness_verbosity": "undefined",
+                    "nightmareclock_display": "undefined",
+                    "notable_indicator": true,
+                    "orchestrina_indicator": "undefined",
+                    "pipspook_indicator": true,
+                    "refresh_delay": "undefined",
+                    "repair_values": "undefined",
+                    "sinkhole_marks": 2,
+                    "soil_moisture": 2,
+                    "soil_nutrients": "undefined",
+                    "soil_nutrients_needs_hat": "undefined",
+                    "stewer_chef": "undefined",
+                    "suspicious_marble_indicator": false,
+                    "temperature_units": "game",
+                    "text_coloring": true,
+                    "time_style": "realtime_short",
+                    "tumbleweed_info": "undefined",
+                    "weapon_damage": "undefined",
+                    "weather_detail": "undefined",
+                    "wortox_soul_range": true,
+                    "wx78_scanner_info": "undefined",
+                    "\u4fe1\u606f\u63a7\u5236": 0,
+                    "\u6307\u793a\u5668": 0,
+                    "\u6742\u9879": 0,
+                    "\u683c\u5f0f": 0,
+                    "\u8c03\u8bd5": 0,
+                    "\u98df\u7269\u76f8\u5173": 0
+                  },
+                  "enabled": true
+                },
+                "workshop-2950657933": {
+                  "configuration_options": {
+                    "add_cklist1": [
+                      "spoiled_food",
+                      "poop",
+                      "guano"
+                    ],
+                    "add_cklist2": [
+                      "nightmarefuel",
+                      "medal_tribute_symbol",
+                      "boneshard"
+                    ],
+                    "add_cklist3": [],
+                    "add_cklist4": [
+                      "twigs"
+                    ],
+                    "add_cklist5": [
+                      "silk",
+                      "spidergland",
+                      "sketch",
+                      "blueprint"
+                    ],
+                    "ck_listtime1": 1,
+                    "ck_listtime2": 3,
+                    "ck_listtime3": 7,
+                    "ck_listtime4": 15,
+                    "ck_listtime5": 35
+                  },
+                  "enabled": true
+                },
+                "workshop-3046339764": {
+                  "configuration_options": {
+                    "antlion": true,
+                    "birdcage": true,
+                    "mermking": true,
+                    "monkeyisland_portal": false,
+                    "monkeyqueen": true,
+                    "pigking": true
+                  },
+                  "enabled": true
+                },
+                "workshop-3223103565": {
+                  "configuration_options": {
+                    "SIB": false,
+                    "SSB": false,
+                    "mod_support_enabled": false,
+                    "sort_bookstation": true,
+                    "sort_chest": true,
+                    "sort_dragonflychest": true
+                  },
+                  "enabled": true
+                }
+              }
+            },
+            "settings": {},
+            "world": {
+              "overrides": {
+                "kind": "forest",
+                "values": {
+                  "antliontribute": "never",
+                  "beefalo": "often",
+                  "boons": "often",
+                  "cactus": "often",
+                  "grass": "often",
+                  "grassgekkos": "never",
+                  "krampus": "always",
+                  "moon_starfish": "often",
+                  "ocean_bullkelp": "often",
+                  "prefabswaps_start": "classic",
+                  "reeds": "often",
+                  "resettime": "none",
+                  "sapling": "often",
+                  "tallbirds": "often",
+                  "touchstone": "often",
+                  "wildfires": "never"
+                }
+              },
+              "settings_preset": "ENDLESS",
+              "worldgen_preset": "ENDLESS"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u534a\u7eaf\u65e0\u5c3d",
+      "max_players": 9
+    },
+    "semi_survival": {
+      "cluster": {
+        "settings": {
+          "cluster_description": "\u6717\u8bf5\u56e2\uff1a924715341 \u9891\u9053\uff1a\u9965\u8352\u8054\u673a\u7248 Let's Starve Together!",
+          "cluster_language": "zh",
+          "cluster_name": "LST-000-\u534a\u7eaf\u751f\u5b58",
+          "master_ip": "127.0.0.1",
+          "max_players": 9,
+          "max_snapshots": 999999999,
+          "pause_when_empty": true,
+          "shard_enabled": true,
+          "steam_group_id": 45524458
+        },
+        "shards": {
+          "cave": {
+            "mods": {
+              "entries": {
+                "workshop-1803285852": {
+                  "configuration_options": {
+                    "": 0,
+                    "AutoPickupAsh": true,
+                    "AutoPickupEnabled": true,
+                    "AutoPickupPoop": true,
+                    "AutoPickupRange": 10,
+                    "AutoPickupSeeds": true,
+                    "AutoStackAsh": true,
+                    "AutoStackEnabled": true,
+                    "AutoStackMakeNewStackMainStack": true,
+                    "AutoStackManuallyDroppedItems": false,
+                    "AutoStackPoop": true,
+                    "AutoStackRange": 12,
+                    "AutoStackSeeds": true,
+                    "AutoStackTwiggyTreeTwigs": false,
+                    "ManualDropStackRange": 5,
+                    "ManualStackAsh": false,
+                    "ManualStackMakeNewStackMainStack": false,
+                    "ManualStackPoop": false,
+                    "ManualStackSeeds": false,
+                    "PlayerMustHaveOneOfItemToAutoPickup": true,
+                    "SmokePuffOnStacking": true,
+                    "StackDuringPopulation": false
+                  },
+                  "enabled": true
+                },
+                "workshop-2189004162": {
+                  "configuration_options": {
+                    "DEBUG_ENABLED": false,
+                    "DEBUG_SHOW_DISABLED": false,
+                    "DEBUG_SHOW_NOTIMPLEMENTED": false,
+                    "DEBUG_SHOW_PREFAB": false,
+                    "alt_only_information": false,
+                    "appeasement_value": "undefined",
+                    "armor": "undefined",
+                    "attack_range_type": "undefined",
+                    "battlesong_range": "both",
+                    "blink_range": false,
+                    "boss_indicator": true,
+                    "bottle_indicator": true,
+                    "crash_reporter": false,
+                    "danger_announcements": "undefined",
+                    "death_indicator": false,
+                    "display_attack_range": false,
+                    "display_batwave_information": "undefined",
+                    "display_cawnival": "undefined",
+                    "display_compostvalue": "undefined",
+                    "display_crafting_lookup_button": true,
+                    "display_fertilizer": "undefined",
+                    "display_finiteuses": true,
+                    "display_food": "undefined",
+                    "display_gyminfo": "undefined",
+                    "display_harvestable": true,
+                    "display_health": "undefined",
+                    "display_hunger": "undefined",
+                    "display_insight_menu_button": true,
+                    "display_itemmimic_information": "undefined",
+                    "display_mob_attack_damage": "undefined",
+                    "display_oceanfishing": "undefined",
+                    "display_perishable": "undefined",
+                    "display_pickable": true,
+                    "display_plant_stressors": "undefined",
+                    "display_pollination": "undefined",
+                    "display_rabbitking_information": "undefined",
+                    "display_rechargeable": "undefined",
+                    "display_sanity": "undefined",
+                    "display_sanity_interactions": "undefined",
+                    "display_sanityaura": "undefined",
+                    "display_shadowthrall_information": "undefined",
+                    "display_shared_stats": "undefined",
+                    "display_shelter_info": "undefined",
+                    "display_simplefishing": "undefined",
+                    "display_spawner_information": "undefined",
+                    "display_tackle_information": "undefined",
+                    "display_timers": "undefined",
+                    "display_unwrappable": "undefined",
+                    "display_upgradeable": "undefined",
+                    "display_weather": "undefined",
+                    "display_weighable": "undefined",
+                    "display_world_events": "undefined",
+                    "display_worldmigrator": "undefined",
+                    "display_yotb_appraisal": "undefined",
+                    "display_yotb_winners": "undefined",
+                    "domestication_information": "undefined",
+                    "experimental_highlighting": true,
+                    "follower_info": "undefined",
+                    "followtext_insight_font_size": 28,
+                    "food_effects": true,
+                    "food_memory": "undefined",
+                    "food_order": "interface",
+                    "food_style": "long",
+                    "food_units": true,
+                    "fuel_highlighting": false,
+                    "fuel_highlighting_color": "RED",
+                    "fuel_verbosity": "undefined",
+                    "growth_verbosity": "undefined",
+                    "herd_information": "undefined",
+                    "highlighting": true,
+                    "highlighting_color": "GREEN",
+                    "highlighting_darkness": true,
+                    "hover_range_indicator": true,
+                    "hoverer_insight_font_size": 30,
+                    "hoverer_line_truncation": "None",
+                    "hunt_indicator": "undefined",
+                    "info_preload": "undefined",
+                    "info_style": "text",
+                    "insight_font": "UIFONT",
+                    "inventorybar_insight_font_size": 25,
+                    "item_worth": "undefined",
+                    "itemtile_display": "percentages",
+                    "klaus_sack_info": "undefined",
+                    "klaus_sack_markers": "undefined",
+                    "language": "automatic",
+                    "lightningrod_range": 1,
+                    "miniboss_indicator": true,
+                    "naughtiness_verbosity": "undefined",
+                    "nightmareclock_display": "undefined",
+                    "notable_indicator": true,
+                    "orchestrina_indicator": "undefined",
+                    "pipspook_indicator": true,
+                    "refresh_delay": "undefined",
+                    "repair_values": "undefined",
+                    "sinkhole_marks": 2,
+                    "soil_moisture": 2,
+                    "soil_nutrients": "undefined",
+                    "soil_nutrients_needs_hat": "undefined",
+                    "stewer_chef": "undefined",
+                    "suspicious_marble_indicator": false,
+                    "temperature_units": "game",
+                    "text_coloring": true,
+                    "time_style": "realtime_short",
+                    "tumbleweed_info": "undefined",
+                    "weapon_damage": "undefined",
+                    "weather_detail": "undefined",
+                    "wortox_soul_range": true,
+                    "wx78_scanner_info": "undefined",
+                    "\u4fe1\u606f\u63a7\u5236": 0,
+                    "\u6307\u793a\u5668": 0,
+                    "\u6742\u9879": 0,
+                    "\u683c\u5f0f": 0,
+                    "\u8c03\u8bd5": 0,
+                    "\u98df\u7269\u76f8\u5173": 0
+                  },
+                  "enabled": true
+                },
+                "workshop-2950657933": {
+                  "configuration_options": {
+                    "add_cklist1": [
+                      "spoiled_food",
+                      "poop",
+                      "guano"
+                    ],
+                    "add_cklist2": [
+                      "nightmarefuel",
+                      "medal_tribute_symbol",
+                      "boneshard"
+                    ],
+                    "add_cklist3": [],
+                    "add_cklist4": [
+                      "twigs"
+                    ],
+                    "add_cklist5": [
+                      "silk",
+                      "spidergland",
+                      "sketch",
+                      "blueprint"
+                    ],
+                    "ck_listtime1": 1,
+                    "ck_listtime2": 3,
+                    "ck_listtime3": 7,
+                    "ck_listtime4": 15,
+                    "ck_listtime5": 35
+                  },
+                  "enabled": true
+                },
+                "workshop-3046339764": {
+                  "configuration_options": {
+                    "antlion": true,
+                    "birdcage": true,
+                    "mermking": true,
+                    "monkeyisland_portal": false,
+                    "monkeyqueen": true,
+                    "pigking": true
+                  },
+                  "enabled": true
+                },
+                "workshop-3223103565": {
+                  "configuration_options": {
+                    "SIB": false,
+                    "SSB": false,
+                    "mod_support_enabled": false,
+                    "sort_bookstation": true,
+                    "sort_chest": true,
+                    "sort_dragonflychest": true
+                  },
+                  "enabled": true
+                }
+              }
+            },
+            "settings": {
+              "id": 2,
+              "is_master": false,
+              "master_server_port": 27017,
+              "name": "Caves",
+              "server_port": 11000
+            },
+            "world": {
+              "overrides": {
+                "kind": "cave",
+                "values": {
+                  "boons": "often",
+                  "grass": "often",
+                  "grassgekkos": "never",
+                  "krampus": "always",
+                  "prefabswaps_start": "classic",
+                  "reeds": "often",
+                  "resettime": "none",
+                  "sapling": "often",
+                  "touchstone": "often"
+                }
+              },
+              "settings_preset": "DST_CAVE",
+              "worldgen_preset": "DST_CAVE"
+            }
+          },
+          "forest": {
+            "mods": {
+              "entries": {
+                "workshop-1803285852": {
+                  "configuration_options": {
+                    "": 0,
+                    "AutoPickupAsh": true,
+                    "AutoPickupEnabled": true,
+                    "AutoPickupPoop": true,
+                    "AutoPickupRange": 10,
+                    "AutoPickupSeeds": true,
+                    "AutoStackAsh": true,
+                    "AutoStackEnabled": true,
+                    "AutoStackMakeNewStackMainStack": true,
+                    "AutoStackManuallyDroppedItems": false,
+                    "AutoStackPoop": true,
+                    "AutoStackRange": 12,
+                    "AutoStackSeeds": true,
+                    "AutoStackTwiggyTreeTwigs": false,
+                    "ManualDropStackRange": 5,
+                    "ManualStackAsh": false,
+                    "ManualStackMakeNewStackMainStack": false,
+                    "ManualStackPoop": false,
+                    "ManualStackSeeds": false,
+                    "PlayerMustHaveOneOfItemToAutoPickup": true,
+                    "SmokePuffOnStacking": true,
+                    "StackDuringPopulation": false
+                  },
+                  "enabled": true
+                },
+                "workshop-2189004162": {
+                  "configuration_options": {
+                    "DEBUG_ENABLED": false,
+                    "DEBUG_SHOW_DISABLED": false,
+                    "DEBUG_SHOW_NOTIMPLEMENTED": false,
+                    "DEBUG_SHOW_PREFAB": false,
+                    "alt_only_information": false,
+                    "appeasement_value": "undefined",
+                    "armor": "undefined",
+                    "attack_range_type": "undefined",
+                    "battlesong_range": "both",
+                    "blink_range": false,
+                    "boss_indicator": true,
+                    "bottle_indicator": true,
+                    "crash_reporter": false,
+                    "danger_announcements": "undefined",
+                    "death_indicator": false,
+                    "display_attack_range": false,
+                    "display_batwave_information": "undefined",
+                    "display_cawnival": "undefined",
+                    "display_compostvalue": "undefined",
+                    "display_crafting_lookup_button": true,
+                    "display_fertilizer": "undefined",
+                    "display_finiteuses": true,
+                    "display_food": "undefined",
+                    "display_gyminfo": "undefined",
+                    "display_harvestable": true,
+                    "display_health": "undefined",
+                    "display_hunger": "undefined",
+                    "display_insight_menu_button": true,
+                    "display_itemmimic_information": "undefined",
+                    "display_mob_attack_damage": "undefined",
+                    "display_oceanfishing": "undefined",
+                    "display_perishable": "undefined",
+                    "display_pickable": true,
+                    "display_plant_stressors": "undefined",
+                    "display_pollination": "undefined",
+                    "display_rabbitking_information": "undefined",
+                    "display_rechargeable": "undefined",
+                    "display_sanity": "undefined",
+                    "display_sanity_interactions": "undefined",
+                    "display_sanityaura": "undefined",
+                    "display_shadowthrall_information": "undefined",
+                    "display_shared_stats": "undefined",
+                    "display_shelter_info": "undefined",
+                    "display_simplefishing": "undefined",
+                    "display_spawner_information": "undefined",
+                    "display_tackle_information": "undefined",
+                    "display_timers": "undefined",
+                    "display_unwrappable": "undefined",
+                    "display_upgradeable": "undefined",
+                    "display_weather": "undefined",
+                    "display_weighable": "undefined",
+                    "display_world_events": "undefined",
+                    "display_worldmigrator": "undefined",
+                    "display_yotb_appraisal": "undefined",
+                    "display_yotb_winners": "undefined",
+                    "domestication_information": "undefined",
+                    "experimental_highlighting": true,
+                    "follower_info": "undefined",
+                    "followtext_insight_font_size": 28,
+                    "food_effects": true,
+                    "food_memory": "undefined",
+                    "food_order": "interface",
+                    "food_style": "long",
+                    "food_units": true,
+                    "fuel_highlighting": false,
+                    "fuel_highlighting_color": "RED",
+                    "fuel_verbosity": "undefined",
+                    "growth_verbosity": "undefined",
+                    "herd_information": "undefined",
+                    "highlighting": true,
+                    "highlighting_color": "GREEN",
+                    "highlighting_darkness": true,
+                    "hover_range_indicator": true,
+                    "hoverer_insight_font_size": 30,
+                    "hoverer_line_truncation": "None",
+                    "hunt_indicator": "undefined",
+                    "info_preload": "undefined",
+                    "info_style": "text",
+                    "insight_font": "UIFONT",
+                    "inventorybar_insight_font_size": 25,
+                    "item_worth": "undefined",
+                    "itemtile_display": "percentages",
+                    "klaus_sack_info": "undefined",
+                    "klaus_sack_markers": "undefined",
+                    "language": "automatic",
+                    "lightningrod_range": 1,
+                    "miniboss_indicator": true,
+                    "naughtiness_verbosity": "undefined",
+                    "nightmareclock_display": "undefined",
+                    "notable_indicator": true,
+                    "orchestrina_indicator": "undefined",
+                    "pipspook_indicator": true,
+                    "refresh_delay": "undefined",
+                    "repair_values": "undefined",
+                    "sinkhole_marks": 2,
+                    "soil_moisture": 2,
+                    "soil_nutrients": "undefined",
+                    "soil_nutrients_needs_hat": "undefined",
+                    "stewer_chef": "undefined",
+                    "suspicious_marble_indicator": false,
+                    "temperature_units": "game",
+                    "text_coloring": true,
+                    "time_style": "realtime_short",
+                    "tumbleweed_info": "undefined",
+                    "weapon_damage": "undefined",
+                    "weather_detail": "undefined",
+                    "wortox_soul_range": true,
+                    "wx78_scanner_info": "undefined",
+                    "\u4fe1\u606f\u63a7\u5236": 0,
+                    "\u6307\u793a\u5668": 0,
+                    "\u6742\u9879": 0,
+                    "\u683c\u5f0f": 0,
+                    "\u8c03\u8bd5": 0,
+                    "\u98df\u7269\u76f8\u5173": 0
+                  },
+                  "enabled": true
+                },
+                "workshop-2950657933": {
+                  "configuration_options": {
+                    "add_cklist1": [
+                      "spoiled_food",
+                      "poop",
+                      "guano"
+                    ],
+                    "add_cklist2": [
+                      "nightmarefuel",
+                      "medal_tribute_symbol",
+                      "boneshard"
+                    ],
+                    "add_cklist3": [],
+                    "add_cklist4": [
+                      "twigs"
+                    ],
+                    "add_cklist5": [
+                      "silk",
+                      "spidergland",
+                      "sketch",
+                      "blueprint"
+                    ],
+                    "ck_listtime1": 1,
+                    "ck_listtime2": 3,
+                    "ck_listtime3": 7,
+                    "ck_listtime4": 15,
+                    "ck_listtime5": 35
+                  },
+                  "enabled": true
+                },
+                "workshop-3046339764": {
+                  "configuration_options": {
+                    "antlion": true,
+                    "birdcage": true,
+                    "mermking": true,
+                    "monkeyisland_portal": false,
+                    "monkeyqueen": true,
+                    "pigking": true
+                  },
+                  "enabled": true
+                },
+                "workshop-3223103565": {
+                  "configuration_options": {
+                    "SIB": false,
+                    "SSB": false,
+                    "mod_support_enabled": false,
+                    "sort_bookstation": true,
+                    "sort_chest": true,
+                    "sort_dragonflychest": true
+                  },
+                  "enabled": true
+                }
+              }
+            },
+            "settings": {},
+            "world": {
+              "overrides": {
+                "kind": "forest",
+                "values": {
+                  "antliontribute": "never",
+                  "beefalo": "often",
+                  "boons": "often",
+                  "cactus": "often",
+                  "grass": "often",
+                  "grassgekkos": "never",
+                  "krampus": "always",
+                  "moon_starfish": "often",
+                  "ocean_bullkelp": "often",
+                  "prefabswaps_start": "classic",
+                  "reeds": "often",
+                  "resettime": "none",
+                  "sapling": "often",
+                  "tallbirds": "often",
+                  "touchstone": "often",
+                  "wildfires": "never"
+                }
+              },
+              "settings_preset": "SURVIVAL_TOGETHER",
+              "worldgen_preset": "SURVIVAL_TOGETHER"
+            }
+          }
+        },
+        "token": ""
+      },
+      "label": "\u534a\u7eaf\u751f\u5b58",
+      "max_players": 9
+    }
+  }
+}

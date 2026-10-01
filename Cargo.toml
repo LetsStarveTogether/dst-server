@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/dst-server", "crates/dst-server-python"]
+resolver = "3"
+
+[workspace.package]
+version = "0.4.0-dev.1"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip", "arbitrary_precision"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "process", "signal", "net", "io-util", "fs", "sync", "time"] }
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+full_moon = { version = "2.2", default-features = false }
+libc = "0.2"
