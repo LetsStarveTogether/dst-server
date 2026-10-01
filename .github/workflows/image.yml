@@ -37,15 +37,50 @@ env:
   IMAGE_REGISTRY: quay.io/wh2099
 
 jobs:
+  sync-dst-scripts:
+    name: Sync DST scripts
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      revision: ${{ steps.update-dst-scripts-reference.outputs.revision }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          submodules: true
+
+      - name: Update DST scripts reference
+        id: update-dst-scripts-reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule update --remote --checkout dst-scripts/scripts
+          git add dst-scripts/scripts
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'chore(deps): update dst-scripts'
+            git push origin HEAD:main
+          fi
+          printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   test:
     name: Verify SDK
+    needs: sync-dst-scripts
     if: ${{ github.ref == 'refs/heads/main' }}
     permissions:
       contents: read
     uses: ./.github/workflows/test.yml
+    with:
+      revision: ${{ needs.sync-dst-scripts.outputs.revision }}
 
   detect:
     name: Resolve image versions
+    needs: sync-dst-scripts
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
@@ -58,6 +93,7 @@ jobs:
         env:
           BUILD_TARGET: ${{ inputs.build_target || 'both' }}
           FORCE_BUILD: ${{ inputs.force_build }}
+          SOURCE_REVISION: ${{ needs.sync-dst-scripts.outputs.revision }}
         with:
           script: |
             const fs = require('node:fs/promises');
@@ -96,18 +132,19 @@ jobs:
               const format = [
                 '{{ index .Labels "org.opencontainers.image.version" }}',
                 '{{ index .Labels "io.github.letsstarvetogether.dst.channel" }}',
+                '{{ index .Labels "org.opencontainers.image.revision" }}',
               ].join('|');
               const result = await exec.getExecOutput('skopeo', ['inspect', '--format', format, image], {
                 ignoreReturnCode: true,
                 silent: true,
               });
-              const [version, channel] = result.stdout.trim().split('|');
+              const [version, channel, revision] = result.stdout.trim().split('|');
 
-              if (result.exitCode === 0 && isVersion(version) && channel === target.channel) {
+              if (result.exitCode === 0 && isVersion(version) && channel === target.channel && revision === process.env.SOURCE_REVISION) {
                 return version;
               }
 
-              core.warning(`No valid build metadata found for ${target.tag}`);
+              core.warning(`No matching build metadata found for ${target.tag}`);
               return undefined;
             };
 
@@ -136,7 +173,7 @@ jobs:
 
   image:
     name: ${{ matrix.build && 'Build' || 'Skip' }} ${{ matrix.image_tag }} ${{ matrix.version }}
-    needs: [detect, test]
+    needs: [sync-dst-scripts, detect, test]
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
@@ -151,6 +188,7 @@ jobs:
         if: ${{ matrix.build }}
         uses: actions/checkout@v7.0.1
         with:
+          ref: ${{ needs.sync-dst-scripts.outputs.revision }}
           persist-credentials: false
           submodules: true
 
@@ -184,7 +222,7 @@ jobs:
             GAME_VERSION=${{ matrix.version }}
           labels: |
             org.opencontainers.image.version=${{ matrix.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.sync-dst-scripts.outputs.revision }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.created=${{ matrix.created }}
             org.opencontainers.image.licenses=MIT
