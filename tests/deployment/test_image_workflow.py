@@ -1,3 +1,4 @@
+import runpy
 import shutil
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
@@ -40,7 +41,7 @@ const exec = { getExecOutput: async (command, args) => {
 } };
 const fetch = async () => ({ ok: true, json: async () => input.builds });
 const process = { env: {
-  BUILD_TARGET: 'both', FORCE_BUILD: 'false',
+  BUILD_TARGET: 'both', FORCE_BUILD: 'false', SOURCE_REVISION: 'a'.repeat(40),
   IMAGE_REGISTRY: 'example.test', IMAGE_NAME: 'image',
   ...input.env,
 } };
@@ -89,7 +90,10 @@ def test_channel_tags_and_build_selection(
         env={"FORCE_BUILD": force},
         builds={"release": ["99", "100"], "updatebeta": ["100"]},
         published=(
-            {"latest": f"{published}|release", "beta": f"{published}|beta"}
+            {
+                "latest": f"{published}|release|{'a' * 40}",
+                "beta": f"{published}|beta|{'a' * 40}",
+            }
             if published is not None
             else {}
         ),
@@ -102,3 +106,23 @@ def test_channel_tags_and_build_selection(
     ]
     assert all(item["build"] is build for item in matrix)
     assert len(result["calls"]) == inspections
+
+
+@pytest.mark.parametrize("revision", [None, "b" * 40])
+def test_rebuild_when_source_revision_does_not_match(revision: str | None) -> None:
+    suffix = f"|{revision}" if revision is not None else ""
+    result = run_script(
+        builds={"release": ["100"], "updatebeta": ["100"]},
+        published={"latest": f"100|release{suffix}", "beta": f"100|beta{suffix}"},
+    )
+    assert result["error"] is None
+    matrix = orjson.loads(result["outputs"]["matrix"])["include"]
+    assert len(matrix) == 2
+    assert all(item["build"] for item in matrix)
+
+
+def test_script_reference_sync() -> None:
+    runpy.run_path(
+        str(WORKFLOW.parents[2] / "tests/rust/check_sync_scripts.py"),
+        run_name="__main__",
+    )
