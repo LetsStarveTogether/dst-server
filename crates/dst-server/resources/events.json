@@ -1,0 +1,6226 @@
+{
+  "$defs": {
+    "ActionData": {
+      "additionalProperties": false,
+      "properties": {
+        "action_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "actor": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "forced": {
+          "title": "Forced",
+          "type": "boolean"
+        },
+        "initial_target_owner": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inventory_object": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "position": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Position"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recipe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "success": {
+          "title": "Success",
+          "type": "boolean"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action_id",
+        "success",
+        "reason",
+        "actor",
+        "target",
+        "initial_target_owner",
+        "inventory_object",
+        "position",
+        "recipe",
+        "forced"
+      ],
+      "title": "ActionData",
+      "type": "object"
+    },
+    "ActionEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/ActionData"
+        },
+        "event": {
+          "const": "dst.player.action",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "ActionEvent",
+      "type": "object"
+    },
+    "AnnouncementData": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "title": "AnnouncementData",
+      "type": "object"
+    },
+    "AnnouncementEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/AnnouncementData"
+        },
+        "event": {
+          "const": "dst.server.announcement",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "AnnouncementEvent",
+      "type": "object"
+    },
+    "AppearanceData": {
+      "additionalProperties": false,
+      "properties": {
+        "clothing_body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "clothing_feet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "clothing_hand": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "clothing_legs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prefab": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "skin_base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "prefab",
+        "skin_base",
+        "clothing_body",
+        "clothing_hand",
+        "clothing_legs",
+        "clothing_feet"
+      ],
+      "title": "AppearanceData",
+      "type": "object"
+    },
+    "AppearanceRequestedData": {
+      "additionalProperties": false,
+      "properties": {
+        "player": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requested": {
+          "$ref": "#/$defs/AppearanceData"
+        },
+        "userid": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "validated": {
+          "$ref": "#/$defs/AppearanceData"
+        }
+      },
+      "required": [
+        "userid",
+        "player",
+        "requested",
+        "validated"
+      ],
+      "title": "AppearanceRequestedData",
+      "type": "object"
+    },
+    "AppearanceRequestedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/AppearanceRequestedData"
+        },
+        "event": {
+          "const": "dst.player.appearance_requested",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "AppearanceRequestedEvent",
+      "type": "object"
+    },
+    "AteData": {
+      "additionalProperties": false,
+      "properties": {
+        "feeder": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "food": {
+          "$ref": "#/$defs/ItemRef"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "player",
+        "food",
+        "feeder"
+      ],
+      "title": "AteData",
+      "type": "object"
+    },
+    "AteEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/AteData"
+        },
+        "event": {
+          "const": "dst.player.ate",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "AteEvent",
+      "type": "object"
+    },
+    "BooleanConditionData": {
+      "additionalProperties": false,
+      "properties": {
+        "active": {
+          "title": "Active",
+          "type": "boolean"
+        },
+        "condition": {
+          "enum": [
+            "starving",
+            "freezing",
+            "overheating",
+            "fire_damage",
+            "lunar_burn"
+          ],
+          "title": "Condition",
+          "type": "string"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "player",
+        "condition",
+        "active"
+      ],
+      "title": "BooleanConditionData",
+      "type": "object"
+    },
+    "BooleanState": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "israining",
+            "issnowing",
+            "isacidraining",
+            "islunarhailing"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "title": "BooleanState",
+      "type": "object"
+    },
+    "ChatData": {
+      "additionalProperties": false,
+      "properties": {
+        "emote": {
+          "title": "Emote",
+          "type": "boolean"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Name"
+        },
+        "player": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prefab": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "userid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "whisper": {
+          "title": "Whisper",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "userid",
+        "name",
+        "prefab",
+        "message",
+        "whisper",
+        "emote",
+        "player"
+      ],
+      "title": "ChatData",
+      "type": "object"
+    },
+    "ChatEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/ChatData"
+        },
+        "event": {
+          "const": "dst.player.chat",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "ChatEvent",
+      "type": "object"
+    },
+    "ClientAuthenticatedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/ClientData"
+        },
+        "event": {
+          "const": "dst.client.authenticated",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "ClientAuthenticatedEvent",
+      "type": "object"
+    },
+    "ClientData": {
+      "additionalProperties": false,
+      "properties": {
+        "userid": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "userid"
+      ],
+      "title": "ClientData",
+      "type": "object"
+    },
+    "ClientDisconnectedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/ClientData"
+        },
+        "event": {
+          "const": "dst.client.disconnected",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "ClientDisconnectedEvent",
+      "type": "object"
+    },
+    "CombatBlockedData": {
+      "additionalProperties": false,
+      "properties": {
+        "attacker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "damage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteFloat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "from_doattack": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "From Doattack"
+        },
+        "original_damage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteFloat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "special_damage": {
+          "items": {
+            "$ref": "#/$defs/SpecialDamage"
+          },
+          "title": "Special Damage",
+          "type": "array"
+        },
+        "stimuli": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "weapon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "player",
+        "damage",
+        "weapon",
+        "stimuli",
+        "special_damage",
+        "from_doattack",
+        "attacker",
+        "original_damage"
+      ],
+      "title": "CombatBlockedData",
+      "type": "object"
+    },
+    "CombatBlockedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/CombatBlockedData"
+        },
+        "event": {
+          "const": "dst.player.combat_blocked",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "CombatBlockedEvent",
+      "type": "object"
+    },
+    "CombatHitData": {
+      "additionalProperties": false,
+      "properties": {
+        "damage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteFloat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "damage_resolved": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteFloat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "from_doattack": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "From Doattack"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "redirected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "special_damage": {
+          "items": {
+            "$ref": "#/$defs/SpecialDamage"
+          },
+          "title": "Special Damage",
+          "type": "array"
+        },
+        "stimuli": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "weapon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "player",
+        "damage",
+        "weapon",
+        "stimuli",
+        "special_damage",
+        "from_doattack",
+        "target",
+        "damage_resolved",
+        "redirected"
+      ],
+      "title": "CombatHitData",
+      "type": "object"
+    },
+    "CombatHitEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/CombatHitData"
+        },
+        "event": {
+          "const": "dst.player.combat_hit",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "CombatHitEvent",
+      "type": "object"
+    },
+    "CombatReceivedData": {
+      "additionalProperties": false,
+      "properties": {
+        "attacker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "damage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteFloat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "damage_resolved": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteFloat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "from_doattack": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "From Doattack"
+        },
+        "original_damage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteFloat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "redirected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "special_damage": {
+          "items": {
+            "$ref": "#/$defs/SpecialDamage"
+          },
+          "title": "Special Damage",
+          "type": "array"
+        },
+        "stimuli": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "weapon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "player",
+        "damage",
+        "weapon",
+        "stimuli",
+        "special_damage",
+        "from_doattack",
+        "attacker",
+        "damage_resolved",
+        "original_damage",
+        "redirected"
+      ],
+      "title": "CombatReceivedData",
+      "type": "object"
+    },
+    "CombatReceivedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/CombatReceivedData"
+        },
+        "event": {
+          "const": "dst.player.combat_received",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "CombatReceivedEvent",
+      "type": "object"
+    },
+    "ConditionChangedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/ConditionData"
+        },
+        "event": {
+          "const": "dst.player.condition_changed",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "ConditionChangedEvent",
+      "type": "object"
+    },
+    "ConditionData": {
+      "discriminator": {
+        "mapping": {
+          "fire_damage": "#/$defs/BooleanConditionData",
+          "freezing": "#/$defs/BooleanConditionData",
+          "lunar_burn": "#/$defs/BooleanConditionData",
+          "overheating": "#/$defs/BooleanConditionData",
+          "sanity": "#/$defs/SanityConditionData",
+          "starving": "#/$defs/BooleanConditionData"
+        },
+        "propertyName": "condition"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/BooleanConditionData"
+        },
+        {
+          "$ref": "#/$defs/SanityConditionData"
+        }
+      ]
+    },
+    "CraftedData": {
+      "additionalProperties": false,
+      "properties": {
+        "item": {
+          "$ref": "#/$defs/ItemRef"
+        },
+        "kind": {
+          "enum": [
+            "item",
+            "structure"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "recipe": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "skin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "player",
+        "item",
+        "recipe",
+        "kind",
+        "skin"
+      ],
+      "title": "CraftedData",
+      "type": "object"
+    },
+    "CraftedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/CraftedData"
+        },
+        "event": {
+          "const": "dst.player.crafted",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "CraftedEvent",
+      "type": "object"
+    },
+    "CycleState": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "const": "cycles",
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "title": "CycleState",
+      "type": "object"
+    },
+    "DeployedData": {
+      "additionalProperties": false,
+      "properties": {
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "prefab": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "player",
+        "prefab"
+      ],
+      "title": "DeployedData",
+      "type": "object"
+    },
+    "DeployedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/DeployedData"
+        },
+        "event": {
+          "const": "dst.player.deployed",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "DeployedEvent",
+      "type": "object"
+    },
+    "DiceRolledData": {
+      "additionalProperties": false,
+      "properties": {
+        "max": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Name"
+        },
+        "prefab": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rolls": {
+          "items": {
+            "$ref": "#/$defs/PositiveSafeLuaInteger"
+          },
+          "title": "Rolls",
+          "type": "array"
+        },
+        "userid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "userid",
+        "name",
+        "prefab",
+        "rolls",
+        "max"
+      ],
+      "title": "DiceRolledData",
+      "type": "object"
+    },
+    "DiceRolledEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/DiceRolledData"
+        },
+        "event": {
+          "const": "dst.player.dice_rolled",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "DiceRolledEvent",
+      "type": "object"
+    },
+    "DisconnectedData": {
+      "additionalProperties": false,
+      "properties": {
+        "expected": {
+          "title": "Expected",
+          "type": "boolean"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "player",
+        "expected"
+      ],
+      "title": "DisconnectedData",
+      "type": "object"
+    },
+    "DisconnectedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/DisconnectedData"
+        },
+        "event": {
+          "const": "dst.player.disconnected",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "DisconnectedEvent",
+      "type": "object"
+    },
+    "DriverDiagnostic": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "message": {
+          "enum": [
+            "callback_failed",
+            "encoding_failed",
+            "event_too_large",
+            "installation_failed"
+          ],
+          "title": "Message",
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger",
+          "default": 0
+        },
+        "stage": {
+          "pattern": "^[a-z][a-z0-9_.:]{0,127}$",
+          "title": "Stage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stage",
+        "message",
+        "count"
+      ],
+      "title": "DriverDiagnostic",
+      "type": "object"
+    },
+    "DriverHealth": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/FrozenMapping_str_Literal__disabled____unsupported____active____failed___"
+        },
+        "errors": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "events_emitted": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "faults": {
+          "$ref": "#/$defs/FrozenMapping_str_str_"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "last_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DriverDiagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocol": {
+          "const": 3,
+          "title": "Protocol",
+          "type": "integer"
+        },
+        "revision": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger",
+          "default": 0
+        },
+        "telemetry_status": {
+          "enum": [
+            "disabled",
+            "active",
+            "degraded",
+            "failed"
+          ],
+          "title": "Telemetry Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "generation",
+        "telemetry_status",
+        "last_error",
+        "events_emitted",
+        "errors"
+      ],
+      "title": "DriverHealth",
+      "type": "object"
+    },
+    "DroppedData": {
+      "additionalProperties": false,
+      "properties": {
+        "item": {
+          "$ref": "#/$defs/ItemRef"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "player",
+        "item"
+      ],
+      "title": "DroppedData",
+      "type": "object"
+    },
+    "DroppedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/DroppedData"
+        },
+        "event": {
+          "const": "dst.player.dropped",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "DroppedEvent",
+      "type": "object"
+    },
+    "EmoteRequestedData": {
+      "additionalProperties": false,
+      "properties": {
+        "emote": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "player": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "userid": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "userid",
+        "player",
+        "emote"
+      ],
+      "title": "EmoteRequestedData",
+      "type": "object"
+    },
+    "EmoteRequestedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/EmoteRequestedData"
+        },
+        "event": {
+          "const": "dst.player.emote_requested",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "EmoteRequestedEvent",
+      "type": "object"
+    },
+    "EntityDeathData": {
+      "additionalProperties": false,
+      "properties": {
+        "afflicter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attributed_player": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cause": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cause"
+        },
+        "corpsing": {
+          "title": "Corpsing",
+          "type": "boolean"
+        },
+        "victim": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "victim",
+        "cause",
+        "afflicter",
+        "attributed_player",
+        "corpsing"
+      ],
+      "title": "EntityDeathData",
+      "type": "object"
+    },
+    "EntityDeathEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/EntityDeathData"
+        },
+        "event": {
+          "const": "dst.entity.death",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "EntityDeathEvent",
+      "type": "object"
+    },
+    "EntityRef": {
+      "additionalProperties": false,
+      "properties": {
+        "guid": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "position": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Position"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prefab": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "userid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "prefab",
+        "guid",
+        "userid",
+        "position"
+      ],
+      "title": "EntityRef",
+      "type": "object"
+    },
+    "EquippedData": {
+      "additionalProperties": false,
+      "properties": {
+        "item": {
+          "$ref": "#/$defs/ItemRef"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "slot": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "player",
+        "item",
+        "slot"
+      ],
+      "title": "EquippedData",
+      "type": "object"
+    },
+    "EquippedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/EquippedData"
+        },
+        "event": {
+          "const": "dst.player.equipped",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "EquippedEvent",
+      "type": "object"
+    },
+    "EventText": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "FinishedWorkData": {
+      "additionalProperties": false,
+      "properties": {
+        "action_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "target": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "player",
+        "target",
+        "action_id"
+      ],
+      "title": "FinishedWorkData",
+      "type": "object"
+    },
+    "FinishedWorkEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/FinishedWorkData"
+        },
+        "event": {
+          "const": "dst.player.finished_work",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "FinishedWorkEvent",
+      "type": "object"
+    },
+    "FiniteFloat": {
+      "type": "number"
+    },
+    "FishedData": {
+      "additionalProperties": false,
+      "properties": {
+        "fish": {
+          "$ref": "#/$defs/ItemRef"
+        },
+        "method": {
+          "enum": [
+            "inland",
+            "ocean"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "player",
+        "fish",
+        "method"
+      ],
+      "title": "FishedData",
+      "type": "object"
+    },
+    "FishedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/FishedData"
+        },
+        "event": {
+          "const": "dst.player.fished",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "FishedEvent",
+      "type": "object"
+    },
+    "FrozenMapping_str_Literal__disabled____unsupported____active____failed___": {
+      "additionalProperties": {
+        "enum": [
+          "disabled",
+          "unsupported",
+          "active",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "FrozenMapping_str_str_": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "GhostedData": {
+      "additionalProperties": false,
+      "properties": {
+        "corpse": {
+          "title": "Corpse",
+          "type": "boolean"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "player",
+        "corpse"
+      ],
+      "title": "GhostedData",
+      "type": "object"
+    },
+    "GhostedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/GhostedData"
+        },
+        "event": {
+          "const": "dst.player.ghosted",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "GhostedEvent",
+      "type": "object"
+    },
+    "HarvestedData": {
+      "additionalProperties": false,
+      "properties": {
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "source": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "player",
+        "source"
+      ],
+      "title": "HarvestedData",
+      "type": "object"
+    },
+    "HarvestedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/HarvestedData"
+        },
+        "event": {
+          "const": "dst.player.harvested",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "HarvestedEvent",
+      "type": "object"
+    },
+    "HoundWarningData": {
+      "additionalProperties": false,
+      "properties": {
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "warning_type": {
+          "maximum": 8,
+          "minimum": 0,
+          "title": "Warning Type",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "player",
+        "warning_type"
+      ],
+      "title": "HoundWarningData",
+      "type": "object"
+    },
+    "HoundWarningEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/HoundWarningData"
+        },
+        "event": {
+          "const": "dst.player.hound_warning",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "HoundWarningEvent",
+      "type": "object"
+    },
+    "Identifier": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "IdentifierState": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "phase",
+            "cavephase",
+            "season",
+            "moonphase",
+            "cavemoonphase",
+            "nightmarephase"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "title": "IdentifierState",
+      "type": "object"
+    },
+    "IncidentData": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "sink",
+            "fall_in_void"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "player",
+        "kind"
+      ],
+      "title": "IncidentData",
+      "type": "object"
+    },
+    "IncidentEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/IncidentData"
+        },
+        "event": {
+          "const": "dst.player.incident",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "IncidentEvent",
+      "type": "object"
+    },
+    "ItemRef": {
+      "additionalProperties": false,
+      "properties": {
+        "guid": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "prefab": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "skin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stack_size": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        }
+      },
+      "required": [
+        "prefab",
+        "guid",
+        "skin",
+        "stack_size"
+      ],
+      "title": "ItemRef",
+      "type": "object"
+    },
+    "MapDeliveryStartedData": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "destination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Position"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "item": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Position"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "item",
+        "actor",
+        "origin",
+        "destination"
+      ],
+      "title": "MapDeliveryStartedData",
+      "type": "object"
+    },
+    "MapDeliveryStartedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/MapDeliveryStartedData"
+        },
+        "event": {
+          "const": "dst.world.map_delivery_started",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "MapDeliveryStartedEvent",
+      "type": "object"
+    },
+    "MigrationStartedData": {
+      "additionalProperties": false,
+      "properties": {
+        "destination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Position"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "destination_shard_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "portal_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Portal Id"
+        }
+      },
+      "required": [
+        "player",
+        "destination_shard_id",
+        "portal_id",
+        "destination"
+      ],
+      "title": "MigrationStartedData",
+      "type": "object"
+    },
+    "MigrationStartedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/MigrationStartedData"
+        },
+        "event": {
+          "const": "dst.player.migration_started",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "MigrationStartedEvent",
+      "type": "object"
+    },
+    "ModOutdatedData": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ModOutdatedData",
+      "type": "object"
+    },
+    "ModOutdatedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/ModOutdatedData"
+        },
+        "event": {
+          "const": "dst.mod.outdated",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "ModOutdatedEvent",
+      "type": "object"
+    },
+    "Name": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "NonNegativeSafeLuaInteger": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "PauseChangedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/PauseData"
+        },
+        "event": {
+          "const": "dst.server.pause_changed",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "PauseChangedEvent",
+      "type": "object"
+    },
+    "PauseData": {
+      "discriminator": {
+        "mapping": {
+          "server": "#/$defs/ServerPauseData",
+          "simulation": "#/$defs/SimulationPauseData"
+        },
+        "propertyName": "domain"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ServerPauseData"
+        },
+        {
+          "$ref": "#/$defs/SimulationPauseData"
+        }
+      ]
+    },
+    "PickedData": {
+      "additionalProperties": false,
+      "properties": {
+        "loot": {
+          "items": {
+            "$ref": "#/$defs/ItemRef"
+          },
+          "title": "Loot",
+          "type": "array"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "source": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "player",
+        "source",
+        "loot"
+      ],
+      "title": "PickedData",
+      "type": "object"
+    },
+    "PickedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/PickedData"
+        },
+        "event": {
+          "const": "dst.player.picked",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "PickedEvent",
+      "type": "object"
+    },
+    "PlantedData": {
+      "additionalProperties": false,
+      "properties": {
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "position": {
+          "$ref": "#/$defs/Position"
+        }
+      },
+      "required": [
+        "player",
+        "position"
+      ],
+      "title": "PlantedData",
+      "type": "object"
+    },
+    "PlantedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/PlantedData"
+        },
+        "event": {
+          "const": "dst.player.planted",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "PlantedEvent",
+      "type": "object"
+    },
+    "PlayerData": {
+      "additionalProperties": false,
+      "properties": {
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "player"
+      ],
+      "title": "PlayerData",
+      "type": "object"
+    },
+    "PlayerLoadedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/PlayerData"
+        },
+        "event": {
+          "const": "dst.player.loaded",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "PlayerLoadedEvent",
+      "type": "object"
+    },
+    "PlayerRequestData": {
+      "additionalProperties": false,
+      "properties": {
+        "player": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "userid": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "userid",
+        "player"
+      ],
+      "title": "PlayerRequestData",
+      "type": "object"
+    },
+    "Position": {
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "$ref": "#/$defs/FiniteFloat"
+        },
+        "y": {
+          "$ref": "#/$defs/FiniteFloat"
+        },
+        "z": {
+          "$ref": "#/$defs/FiniteFloat"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "z"
+      ],
+      "title": "Position",
+      "type": "object"
+    },
+    "PositiveSafeLuaInteger": {
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991,
+      "type": "integer"
+    },
+    "PresenceData": {
+      "additionalProperties": false,
+      "properties": {
+        "clients": {
+          "items": {
+            "$ref": "#/$defs/Identifier"
+          },
+          "title": "Clients",
+          "type": "array"
+        },
+        "health": {
+          "$ref": "#/$defs/DriverHealth"
+        },
+        "max_players": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "players": {
+          "items": {
+            "$ref": "#/$defs/PresencePlayer"
+          },
+          "title": "Players",
+          "type": "array"
+        },
+        "reason": {
+          "enum": [
+            "startup",
+            "periodic"
+          ],
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "clients",
+        "players",
+        "max_players",
+        "health"
+      ],
+      "title": "PresenceData",
+      "type": "object"
+    },
+    "PresenceEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/PresenceData"
+        },
+        "event": {
+          "const": "dst.server.presence",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "PresenceEvent",
+      "type": "object"
+    },
+    "PresencePlayer": {
+      "additionalProperties": false,
+      "properties": {
+        "guid": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "userid": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "userid",
+        "guid"
+      ],
+      "title": "PresencePlayer",
+      "type": "object"
+    },
+    "RescueRequestedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/PlayerRequestData"
+        },
+        "event": {
+          "const": "dst.player.rescue_requested",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "RescueRequestedEvent",
+      "type": "object"
+    },
+    "RevivedData": {
+      "additionalProperties": false,
+      "properties": {
+        "corpse": {
+          "title": "Corpse",
+          "type": "boolean"
+        },
+        "method": {
+          "enum": [
+            "ghost",
+            "corpse",
+            "charlie"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "reviver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "player",
+        "corpse",
+        "method",
+        "reviver"
+      ],
+      "title": "RevivedData",
+      "type": "object"
+    },
+    "RevivedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/RevivedData"
+        },
+        "event": {
+          "const": "dst.player.revived",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "RevivedEvent",
+      "type": "object"
+    },
+    "RiftChangedData": {
+      "additionalProperties": false,
+      "properties": {
+        "active": {
+          "title": "Active",
+          "type": "boolean"
+        },
+        "rift": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "rift",
+        "active"
+      ],
+      "title": "RiftChangedData",
+      "type": "object"
+    },
+    "RiftChangedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/RiftChangedData"
+        },
+        "event": {
+          "const": "dst.world.rift_changed",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "RiftChangedEvent",
+      "type": "object"
+    },
+    "RiftUnlockedData": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "lunar",
+            "shadow"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "RiftUnlockedData",
+      "type": "object"
+    },
+    "RiftUnlockedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/RiftUnlockedData"
+        },
+        "event": {
+          "const": "dst.world.rift_unlocked",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "RiftUnlockedEvent",
+      "type": "object"
+    },
+    "SanityConditionData": {
+      "additionalProperties": false,
+      "properties": {
+        "condition": {
+          "const": "sanity",
+          "title": "Condition",
+          "type": "string"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "state": {
+          "enum": [
+            "sane",
+            "insane",
+            "enlightened"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "player",
+        "condition",
+        "state"
+      ],
+      "title": "SanityConditionData",
+      "type": "object"
+    },
+    "ServerPauseData": {
+      "additionalProperties": false,
+      "properties": {
+        "autopause": {
+          "title": "Autopause",
+          "type": "boolean"
+        },
+        "domain": {
+          "const": "server",
+          "title": "Domain",
+          "type": "string"
+        },
+        "gameautopause": {
+          "title": "Gameautopause",
+          "type": "boolean"
+        },
+        "pause": {
+          "title": "Pause",
+          "type": "boolean"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source"
+        }
+      },
+      "required": [
+        "domain",
+        "pause",
+        "autopause",
+        "gameautopause",
+        "source"
+      ],
+      "title": "ServerPauseData",
+      "type": "object"
+    },
+    "ShardBossDefeatedData": {
+      "additionalProperties": false,
+      "properties": {
+        "prefab": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "shard_id": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "prefab",
+        "shard_id"
+      ],
+      "title": "ShardBossDefeatedData",
+      "type": "object"
+    },
+    "ShardBossDefeatedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/ShardBossDefeatedData"
+        },
+        "event": {
+          "const": "dst.world.shard_boss_defeated",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "ShardBossDefeatedEvent",
+      "type": "object"
+    },
+    "ShardConnectionChangedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/ShardConnectionData"
+        },
+        "event": {
+          "const": "dst.shard.connection_changed",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "ShardConnectionChangedEvent",
+      "type": "object"
+    },
+    "ShardConnectionData": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/Name"
+        },
+        "ready": {
+          "title": "Ready",
+          "type": "boolean"
+        },
+        "shard_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "tags": {
+          "items": {
+            "$ref": "#/$defs/Identifier"
+          },
+          "title": "Tags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "shard_id",
+        "name",
+        "ready",
+        "tags"
+      ],
+      "title": "ShardConnectionData",
+      "type": "object"
+    },
+    "ShardEnteredEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/PlayerData"
+        },
+        "event": {
+          "const": "dst.player.shard_entered",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "ShardEnteredEvent",
+      "type": "object"
+    },
+    "ShardLeftEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/PlayerData"
+        },
+        "event": {
+          "const": "dst.player.shard_left",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "ShardLeftEvent",
+      "type": "object"
+    },
+    "SimulationPauseData": {
+      "additionalProperties": false,
+      "properties": {
+        "domain": {
+          "const": "simulation",
+          "title": "Domain",
+          "type": "string"
+        },
+        "paused": {
+          "title": "Paused",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "domain",
+        "paused"
+      ],
+      "title": "SimulationPauseData",
+      "type": "object"
+    },
+    "SkillChangedData": {
+      "additionalProperties": false,
+      "properties": {
+        "active": {
+          "title": "Active",
+          "type": "boolean"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "skill": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "player",
+        "skill",
+        "active"
+      ],
+      "title": "SkillChangedData",
+      "type": "object"
+    },
+    "SkillChangedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/SkillChangedData"
+        },
+        "event": {
+          "const": "dst.player.skill_changed",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "SkillChangedEvent",
+      "type": "object"
+    },
+    "SkinReceivedData": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "skin": {
+          "title": "Skin",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "skin"
+      ],
+      "title": "SkinReceivedData",
+      "type": "object"
+    },
+    "SkinReceivedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/SkinReceivedData"
+        },
+        "event": {
+          "const": "dst.player.skin_received",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "SkinReceivedEvent",
+      "type": "object"
+    },
+    "SpawnedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/PlayerData"
+        },
+        "event": {
+          "const": "dst.player.spawned",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "SpawnedEvent",
+      "type": "object"
+    },
+    "SpecialDamage": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "value": {
+          "$ref": "#/$defs/FiniteFloat"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "title": "SpecialDamage",
+      "type": "object"
+    },
+    "StateChangedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/StateData"
+        },
+        "event": {
+          "const": "dst.world.state_changed",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "StateChangedEvent",
+      "type": "object"
+    },
+    "StateData": {
+      "discriminator": {
+        "mapping": {
+          "cavemoonphase": "#/$defs/IdentifierState",
+          "cavephase": "#/$defs/IdentifierState",
+          "cycles": "#/$defs/CycleState",
+          "isacidraining": "#/$defs/BooleanState",
+          "islunarhailing": "#/$defs/BooleanState",
+          "israining": "#/$defs/BooleanState",
+          "issnowing": "#/$defs/BooleanState",
+          "moonphase": "#/$defs/IdentifierState",
+          "nightmarephase": "#/$defs/IdentifierState",
+          "phase": "#/$defs/IdentifierState",
+          "season": "#/$defs/IdentifierState"
+        },
+        "propertyName": "name"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/CycleState"
+        },
+        {
+          "$ref": "#/$defs/IdentifierState"
+        },
+        {
+          "$ref": "#/$defs/BooleanState"
+        }
+      ]
+    },
+    "SystemMessageData": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "title": "SystemMessageData",
+      "type": "object"
+    },
+    "SystemMessageEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/SystemMessageData"
+        },
+        "event": {
+          "const": "dst.server.system_message",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "SystemMessageEvent",
+      "type": "object"
+    },
+    "TelemetryErrorEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/DriverDiagnostic"
+        },
+        "event": {
+          "const": "dst.telemetry.error",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "TelemetryErrorEvent",
+      "type": "object"
+    },
+    "UnequippedData": {
+      "additionalProperties": false,
+      "properties": {
+        "item": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "slip": {
+          "title": "Slip",
+          "type": "boolean"
+        },
+        "slot": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "player",
+        "item",
+        "slot",
+        "slip"
+      ],
+      "title": "UnequippedData",
+      "type": "object"
+    },
+    "UnequippedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/UnequippedData"
+        },
+        "event": {
+          "const": "dst.player.unequipped",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "UnequippedEvent",
+      "type": "object"
+    },
+    "VaultTrialGuardsDefeatedData": {
+      "additionalProperties": false,
+      "properties": {
+        "bonus_loot": {
+          "const": true,
+          "title": "Bonus Loot",
+          "type": "boolean"
+        },
+        "last_guard": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "trial": {
+          "$ref": "#/$defs/EntityRef"
+        }
+      },
+      "required": [
+        "trial",
+        "last_guard",
+        "bonus_loot"
+      ],
+      "title": "VaultTrialGuardsDefeatedData",
+      "type": "object"
+    },
+    "VaultTrialGuardsDefeatedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/VaultTrialGuardsDefeatedData"
+        },
+        "event": {
+          "const": "dst.world.vault_trial_guards_defeated",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "VaultTrialGuardsDefeatedEvent",
+      "type": "object"
+    },
+    "VaultTrialProgressData": {
+      "additionalProperties": false,
+      "properties": {
+        "sockets": {
+          "maximum": 4,
+          "minimum": 0,
+          "title": "Sockets",
+          "type": "integer"
+        },
+        "sparks": {
+          "maximum": 4,
+          "minimum": 0,
+          "title": "Sparks",
+          "type": "integer"
+        },
+        "trial": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "trigger": {
+          "enum": [
+            "socket",
+            "activator",
+            "loaded"
+          ],
+          "title": "Trigger",
+          "type": "string"
+        }
+      },
+      "required": [
+        "trial",
+        "trigger",
+        "sockets",
+        "sparks"
+      ],
+      "title": "VaultTrialProgressData",
+      "type": "object"
+    },
+    "VaultTrialProgressEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/VaultTrialProgressData"
+        },
+        "event": {
+          "const": "dst.world.vault_trial_progress",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "VaultTrialProgressEvent",
+      "type": "object"
+    },
+    "VoteClosedData": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "worldvoter",
+            "gorge_voter",
+            "lobbyvote"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "starter_userid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_userid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "source",
+        "command",
+        "starter_userid",
+        "target_userid"
+      ],
+      "title": "VoteClosedData",
+      "type": "object"
+    },
+    "VoteClosedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/VoteClosedData"
+        },
+        "event": {
+          "const": "dst.vote.closed",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "VoteClosedEvent",
+      "type": "object"
+    },
+    "VoteResultData": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Selection"
+        },
+        "source": {
+          "enum": [
+            "worldvoter",
+            "gorge_voter",
+            "lobbyvote"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "target_userid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "total_not_voted": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "total_voted": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        }
+      },
+      "required": [
+        "source",
+        "command",
+        "target_userid",
+        "passed",
+        "selection",
+        "count",
+        "total",
+        "total_voted",
+        "total_not_voted",
+        "options"
+      ],
+      "title": "VoteResultData",
+      "type": "object"
+    },
+    "VoteResultEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/VoteResultData"
+        },
+        "event": {
+          "const": "dst.vote.result",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "VoteResultEvent",
+      "type": "object"
+    },
+    "VoteSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "selection": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "userid": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "userid",
+        "selection"
+      ],
+      "title": "VoteSelection",
+      "type": "object"
+    },
+    "VoteSubmittedData": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "$ref": "#/$defs/Identifier"
+            }
+          ],
+          "title": "Selection"
+        },
+        "source": {
+          "enum": [
+            "worldvoter",
+            "gorge_voter",
+            "lobbyvote"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "target_userid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "userid": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "source",
+        "command",
+        "userid",
+        "target_userid",
+        "selection"
+      ],
+      "title": "VoteSubmittedData",
+      "type": "object"
+    },
+    "VoteSubmittedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/VoteSubmittedData"
+        },
+        "event": {
+          "const": "dst.vote.submitted",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "VoteSubmittedEvent",
+      "type": "object"
+    },
+    "VoteUpdatedData": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Command"
+        },
+        "command_hash": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "countdown": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "source": {
+          "enum": [
+            "worldvoter",
+            "gorge_voter",
+            "lobbyvote"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "starter_userid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_userid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "voters": {
+          "items": {
+            "$ref": "#/$defs/VoteSelection"
+          },
+          "title": "Voters",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source",
+        "command",
+        "command_hash",
+        "starter_userid",
+        "target_userid",
+        "countdown",
+        "voters"
+      ],
+      "title": "VoteUpdatedData",
+      "type": "object"
+    },
+    "VoteUpdatedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/VoteUpdatedData"
+        },
+        "event": {
+          "const": "dst.vote.updated",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "VoteUpdatedEvent",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "discriminator": {
+    "mapping": {
+      "dst.client.authenticated": "#/$defs/ClientAuthenticatedEvent",
+      "dst.client.disconnected": "#/$defs/ClientDisconnectedEvent",
+      "dst.entity.death": "#/$defs/EntityDeathEvent",
+      "dst.mod.outdated": "#/$defs/ModOutdatedEvent",
+      "dst.player.action": "#/$defs/ActionEvent",
+      "dst.player.appearance_requested": "#/$defs/AppearanceRequestedEvent",
+      "dst.player.ate": "#/$defs/AteEvent",
+      "dst.player.chat": "#/$defs/ChatEvent",
+      "dst.player.combat_blocked": "#/$defs/CombatBlockedEvent",
+      "dst.player.combat_hit": "#/$defs/CombatHitEvent",
+      "dst.player.combat_received": "#/$defs/CombatReceivedEvent",
+      "dst.player.condition_changed": "#/$defs/ConditionChangedEvent",
+      "dst.player.crafted": "#/$defs/CraftedEvent",
+      "dst.player.deployed": "#/$defs/DeployedEvent",
+      "dst.player.dice_rolled": "#/$defs/DiceRolledEvent",
+      "dst.player.disconnected": "#/$defs/DisconnectedEvent",
+      "dst.player.dropped": "#/$defs/DroppedEvent",
+      "dst.player.emote_requested": "#/$defs/EmoteRequestedEvent",
+      "dst.player.equipped": "#/$defs/EquippedEvent",
+      "dst.player.finished_work": "#/$defs/FinishedWorkEvent",
+      "dst.player.fished": "#/$defs/FishedEvent",
+      "dst.player.ghosted": "#/$defs/GhostedEvent",
+      "dst.player.harvested": "#/$defs/HarvestedEvent",
+      "dst.player.hound_warning": "#/$defs/HoundWarningEvent",
+      "dst.player.incident": "#/$defs/IncidentEvent",
+      "dst.player.loaded": "#/$defs/PlayerLoadedEvent",
+      "dst.player.migration_started": "#/$defs/MigrationStartedEvent",
+      "dst.player.picked": "#/$defs/PickedEvent",
+      "dst.player.planted": "#/$defs/PlantedEvent",
+      "dst.player.rescue_requested": "#/$defs/RescueRequestedEvent",
+      "dst.player.revived": "#/$defs/RevivedEvent",
+      "dst.player.shard_entered": "#/$defs/ShardEnteredEvent",
+      "dst.player.shard_left": "#/$defs/ShardLeftEvent",
+      "dst.player.skill_changed": "#/$defs/SkillChangedEvent",
+      "dst.player.skin_received": "#/$defs/SkinReceivedEvent",
+      "dst.player.spawned": "#/$defs/SpawnedEvent",
+      "dst.player.unequipped": "#/$defs/UnequippedEvent",
+      "dst.server.announcement": "#/$defs/AnnouncementEvent",
+      "dst.server.pause_changed": "#/$defs/PauseChangedEvent",
+      "dst.server.presence": "#/$defs/PresenceEvent",
+      "dst.server.system_message": "#/$defs/SystemMessageEvent",
+      "dst.shard.connection_changed": "#/$defs/ShardConnectionChangedEvent",
+      "dst.telemetry.error": "#/$defs/TelemetryErrorEvent",
+      "dst.vote.closed": "#/$defs/VoteClosedEvent",
+      "dst.vote.result": "#/$defs/VoteResultEvent",
+      "dst.vote.submitted": "#/$defs/VoteSubmittedEvent",
+      "dst.vote.updated": "#/$defs/VoteUpdatedEvent",
+      "dst.world.map_delivery_started": "#/$defs/MapDeliveryStartedEvent",
+      "dst.world.rift_changed": "#/$defs/RiftChangedEvent",
+      "dst.world.rift_unlocked": "#/$defs/RiftUnlockedEvent",
+      "dst.world.shard_boss_defeated": "#/$defs/ShardBossDefeatedEvent",
+      "dst.world.state_changed": "#/$defs/StateChangedEvent",
+      "dst.world.vault_trial_guards_defeated": "#/$defs/VaultTrialGuardsDefeatedEvent",
+      "dst.world.vault_trial_progress": "#/$defs/VaultTrialProgressEvent"
+    },
+    "propertyName": "event"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ShardEnteredEvent"
+    },
+    {
+      "$ref": "#/$defs/ClientAuthenticatedEvent"
+    },
+    {
+      "$ref": "#/$defs/ClientDisconnectedEvent"
+    },
+    {
+      "$ref": "#/$defs/PresenceEvent"
+    },
+    {
+      "$ref": "#/$defs/ChatEvent"
+    },
+    {
+      "$ref": "#/$defs/EmoteRequestedEvent"
+    },
+    {
+      "$ref": "#/$defs/RescueRequestedEvent"
+    },
+    {
+      "$ref": "#/$defs/AppearanceRequestedEvent"
+    },
+    {
+      "$ref": "#/$defs/AnnouncementEvent"
+    },
+    {
+      "$ref": "#/$defs/DiceRolledEvent"
+    },
+    {
+      "$ref": "#/$defs/SkinReceivedEvent"
+    },
+    {
+      "$ref": "#/$defs/SystemMessageEvent"
+    },
+    {
+      "$ref": "#/$defs/VoteUpdatedEvent"
+    },
+    {
+      "$ref": "#/$defs/VoteSubmittedEvent"
+    },
+    {
+      "$ref": "#/$defs/VoteClosedEvent"
+    },
+    {
+      "$ref": "#/$defs/VoteResultEvent"
+    },
+    {
+      "$ref": "#/$defs/PauseChangedEvent"
+    },
+    {
+      "$ref": "#/$defs/PlayerLoadedEvent"
+    },
+    {
+      "$ref": "#/$defs/ShardLeftEvent"
+    },
+    {
+      "$ref": "#/$defs/DisconnectedEvent"
+    },
+    {
+      "$ref": "#/$defs/MigrationStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/SpawnedEvent"
+    },
+    {
+      "$ref": "#/$defs/GhostedEvent"
+    },
+    {
+      "$ref": "#/$defs/RevivedEvent"
+    },
+    {
+      "$ref": "#/$defs/EntityDeathEvent"
+    },
+    {
+      "$ref": "#/$defs/ActionEvent"
+    },
+    {
+      "$ref": "#/$defs/CombatHitEvent"
+    },
+    {
+      "$ref": "#/$defs/CombatReceivedEvent"
+    },
+    {
+      "$ref": "#/$defs/CombatBlockedEvent"
+    },
+    {
+      "$ref": "#/$defs/StateChangedEvent"
+    },
+    {
+      "$ref": "#/$defs/ShardBossDefeatedEvent"
+    },
+    {
+      "$ref": "#/$defs/ShardConnectionChangedEvent"
+    },
+    {
+      "$ref": "#/$defs/CraftedEvent"
+    },
+    {
+      "$ref": "#/$defs/AteEvent"
+    },
+    {
+      "$ref": "#/$defs/PickedEvent"
+    },
+    {
+      "$ref": "#/$defs/HarvestedEvent"
+    },
+    {
+      "$ref": "#/$defs/FinishedWorkEvent"
+    },
+    {
+      "$ref": "#/$defs/DeployedEvent"
+    },
+    {
+      "$ref": "#/$defs/EquippedEvent"
+    },
+    {
+      "$ref": "#/$defs/UnequippedEvent"
+    },
+    {
+      "$ref": "#/$defs/DroppedEvent"
+    },
+    {
+      "$ref": "#/$defs/ConditionChangedEvent"
+    },
+    {
+      "$ref": "#/$defs/IncidentEvent"
+    },
+    {
+      "$ref": "#/$defs/FishedEvent"
+    },
+    {
+      "$ref": "#/$defs/PlantedEvent"
+    },
+    {
+      "$ref": "#/$defs/SkillChangedEvent"
+    },
+    {
+      "$ref": "#/$defs/HoundWarningEvent"
+    },
+    {
+      "$ref": "#/$defs/RiftUnlockedEvent"
+    },
+    {
+      "$ref": "#/$defs/RiftChangedEvent"
+    },
+    {
+      "$ref": "#/$defs/MapDeliveryStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/VaultTrialProgressEvent"
+    },
+    {
+      "$ref": "#/$defs/VaultTrialGuardsDefeatedEvent"
+    },
+    {
+      "$ref": "#/$defs/TelemetryErrorEvent"
+    },
+    {
+      "$ref": "#/$defs/ModOutdatedEvent"
+    }
+  ]
+}
