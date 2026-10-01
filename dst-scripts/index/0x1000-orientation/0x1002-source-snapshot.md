@@ -1,8 +1,10 @@
 # `0x10020000` Source Snapshot
 
-The tracked `scripts` tree contains 4,088 files, including 4,073 Lua files.
+The tracked `scripts` tree contains 4,099 files, including 4,084 Lua files.
 
-The `scripts` submodule tracks build `752666`, authored 2026-09-12.
+The `scripts` submodule is at commit `74530e2ebcfe4e558307ddfd4cf177a93d1d1106`.
+
+Its commit records build `757748`, authored 2026-10-10.
 
 ## `0x10021111` Purpose
 
@@ -39,11 +41,11 @@ Count tracked files first, use directory totals to choose a runtime topic, and l
 
 | Scope | Lua files | Reading focus |
 | --- | ---: | --- |
-| `scripts/` root | 222 | Startup, global services, and data entry points |
-| `scripts/prefabs/` | 1,610 | The largest entity-assembly area |
-| `scripts/components/` | 830 | Primary server-side behaviour state |
-| `scripts/stategraphs/` | 264 | Action presentation and animation state machines |
-| `scripts/brains/` | 195 | AI decision entry points |
+| `scripts/` root | 223 | Startup, global services, and data entry points |
+| `scripts/prefabs/` | 1,617 | The largest entity-assembly area |
+| `scripts/components/` | 831 | Entity behaviour and authoritative state |
+| `scripts/stategraphs/` | 265 | Action presentation and animation state machines |
+| `scripts/brains/` | 196 | AI decision entry points |
 | `scripts/behaviours/` | 29 | Behaviour-tree nodes |
 | `scripts/map/` | 447 | World generation, layouts, and world definitions |
 | `scripts/widgets/` | 274 | HUD and UI components |
@@ -60,9 +62,12 @@ Count tracked files first, use directory totals to choose a runtime topic, and l
 - Virtual rooms use `virtualroommanager`, `virtualroomset`, and `virtualroomteleporter`.
 - `world.lua` installs the shared virtual-room manager and `worldstaticlayouts`; `cave.lua` registers the Vault layout.
 - Prefabs, Brains, and StateGraphs implement Charlie, bat, and rocky bosses and the Atrium ritual.
+- Shrouden now has its own Prefab, Brain, and StateGraph alongside the Charlie arena.
+- King Cane uses `corruption.lua` and shares gem-staff behavior with `staff.lua` through `staff_common.lua`.
 - Three bat-boss cave layouts provide world-generation data.
 - `aoeutil.lua` provides shared area-attack and work helpers.
 - `feedback.lua`, the feedback screen, and screenshot utilities handle player feedback.
+- `poc_feedback_stack.lua` is a manually invoked diagnostic outside the normal feedback startup path.
 - Native Lua contract checks cover entity, combat, customization, and world-settings behavior.
 - `Combat:GetAttacked` delegates to `GetAttacked_Internal` and discards its return value.
 

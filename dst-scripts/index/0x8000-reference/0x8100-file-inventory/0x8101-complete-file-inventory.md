@@ -1,6 +1,6 @@
 # `0x81010000` Complete File Inventory
 
-This page lists all 4,088 paths returned by `git ls-files --recurse-submodules scripts`.
+This page lists all 4,099 paths returned by `git ls-files --recurse-submodules scripts`.
 
 ## `0x81011111` Inventory Source
 
@@ -197,6 +197,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/brains/sharkboi_waterbrain.lua`
 - `scripts/brains/sharkboibrain.lua`
 - `scripts/brains/sharkbrain.lua`
+- `scripts/brains/shroudenbrain.lua`
 - `scripts/brains/slurperbrain.lua`
 - `scripts/brains/slurtlebrain.lua`
 - `scripts/brains/slurtlesnailbrain.lua`
@@ -396,6 +397,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/cookiecutterdrill.lua`
 - `scripts/components/cooldown.lua`
 - `scripts/components/corpsepersistmanager.lua`
+- `scripts/components/corruption.lua`
 - `scripts/components/counter.lua`
 - `scripts/components/crabkingspawner.lua`
 - `scripts/components/craftingstation.lua`
@@ -1654,6 +1656,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/playerdeaths.lua`
 - `scripts/playerhistory.lua`
 - `scripts/playerprofile.lua`
+- `scripts/poc_feedback_stack.lua`
 - `scripts/popupmanager.lua`
 - `scripts/postprocesseffects.lua`
 - `scripts/prefablist.lua`
@@ -1946,6 +1949,8 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/charlie_npc.lua`
 - `scripts/prefabs/charlie_stage.lua`
 - `scripts/prefabs/charliearena_lightrays.lua`
+- `scripts/prefabs/charliearena_spike.lua`
+- `scripts/prefabs/charliearena_teleporter.lua`
 - `scripts/prefabs/charlieresidue.lua`
 - `scripts/prefabs/charlierose.lua`
 - `scripts/prefabs/chessjunk.lua`
@@ -2279,6 +2284,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/junk_pile_big.lua`
 - `scripts/prefabs/junk_pile_common.lua`
 - `scripts/prefabs/junkball.lua`
+- `scripts/prefabs/king_cane.lua`
 - `scripts/prefabs/kitcoon.lua`
 - `scripts/prefabs/kitcoon_nametag.lua`
 - `scripts/prefabs/kitcoondecor.lua`
@@ -2699,6 +2705,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/quagmire_swampigelder.lua`
 - `scripts/prefabs/quagmire_syrup.lua`
 - `scripts/prefabs/quagmire_traders.lua`
+- `scripts/prefabs/queen_torch.lua`
 - `scripts/prefabs/rabbit.lua`
 - `scripts/prefabs/rabbithole.lua`
 - `scripts/prefabs/rabbithouse.lua`
@@ -2830,6 +2837,8 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/shovel.lua`
 - `scripts/prefabs/shovel_lunarplant.lua`
 - `scripts/prefabs/shroom_skin.lua`
+- `scripts/prefabs/shrouden.lua`
+- `scripts/prefabs/shrouden_optic_blast.lua`
 - `scripts/prefabs/silk.lua`
 - `scripts/prefabs/singingshell.lua`
 - `scripts/prefabs/sisturn.lua`
@@ -2911,6 +2920,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/squidherd.lua`
 - `scripts/prefabs/staff.lua`
 - `scripts/prefabs/staff_castinglight.lua`
+- `scripts/prefabs/staff_common.lua`
 - `scripts/prefabs/staff_lunarplant.lua`
 - `scripts/prefabs/staff_projectile.lua`
 - `scripts/prefabs/staff_tornado.lua`
@@ -3710,6 +3720,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/stategraphs/SGshark.lua`
 - `scripts/stategraphs/SGsharkboi.lua`
 - `scripts/stategraphs/SGsharkboi_water.lua`
+- `scripts/stategraphs/SGshrouden.lua`
 - `scripts/stategraphs/SGslurper.lua`
 - `scripts/stategraphs/SGslurtle.lua`
 - `scripts/stategraphs/SGsmallbird.lua`

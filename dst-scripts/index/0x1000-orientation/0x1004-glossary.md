@@ -14,7 +14,7 @@ Each definition points to source code rather than describing only a game concept
 | --- | --- | --- |
 | `scripts/prefabs.lua` | `Prefab = Class` | Defines Prefab objects |
 | `scripts/entityscript.lua` | `AddComponent` | Attaches components |
-| `scripts/entityreplica.lua` | `ReplicateComponent` | Attaches client replicas |
+| `scripts/entityreplica.lua` | `ReplicateComponent` | Attaches replicas on the master and clients |
 | `scripts/stategraph.lua` | `StateGraphInstance` | Implements presentation state-machine instances |
 | `scripts/brain.lua` | `BrainWrangler` / `BrainManager` | Schedules AI updates |
 
@@ -24,7 +24,9 @@ Find `AddComponent` in `scripts/entityscript.lua`.
 
 Then find `ReplicateComponent` in `scripts/entityreplica.lua`.
 
-It marks the boundary between server components and client replicas.
+`AddComponent` invokes `ReplicateComponent` before constructing the component.
+
+On clients, `ReplicateEntity` creates replicas from networked component tags.
 
 ## `0x10043000` Runtime Relationships
 
@@ -42,8 +44,8 @@ flowchart TD
 
 - A `Prefab` is a descriptor for an entity-construction function, assets, and dependencies, not a live entity instance.
 - `EntityScript` is the Lua-side entity shell that holds `components`, `replica`, event listeners, and buffered actions.
-- A `Component` usually holds authoritative behaviour state.
-- A `*_replica` exposes a client-readable or predictive interface.
+- A `Component` holds entity behaviour; the Prefab decides which components exist on the master or clients.
+- A `*_replica` exposes a shared interface backed by authoritative components or client network state.
 - A `StateGraph` coordinates action presentation, state tags, events, and animation windows.
 - A `Brain` uses a behaviour tree to produce intent and usually does not play animations directly.
 
@@ -53,8 +55,8 @@ flowchart TD
 | --- | --- | --- |
 | `Prefab` | `scripts/prefabs.lua` | Entity assembly, asset dependencies, and child prefabs |
 | `EntityScript` | `scripts/entityscript.lua` | Entity lifecycle, components, events, actions, and persistence |
-| `Component` | `scripts/components/*.lua` | Server-authoritative behaviour state |
-| `Replica` | `scripts/components/*_replica.lua` | Client-side read-only or predictive interfaces |
+| `Component` | `scripts/components/*.lua` | Entity behaviour, authoritative state, or client presentation |
+| `Replica` | `scripts/components/*_replica.lua` | Interfaces usable on the master and clients |
 | `Classified` | `scripts/prefabs/*_classified.lua` | Network-variable containers |
 | `StateGraph` | `scripts/stategraph.lua` | Animation states, action windows, and event responses |
 | `Brain` | `scripts/brain.lua` | AI scheduling and behaviour-tree entry points |
