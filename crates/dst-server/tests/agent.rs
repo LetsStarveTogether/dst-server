@@ -37,6 +37,10 @@ impl Agent {
     }
 
     fn with_control(control: Value) -> Self {
+        Self::with_environment(control, &[])
+    }
+
+    fn with_environment(control: Value, environment: &[(&str, &str)]) -> Self {
         let mods = control["policy"]["mod_auto_update"] == true;
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("cluster");
@@ -80,7 +84,7 @@ if not prepared.exists():
         source.push_str(include_str!("fixtures/game.py"));
         fs::write(&game, source).unwrap();
         fs::set_permissions(&game, fs::Permissions::from_mode(0o700)).unwrap();
-        let child = Self::launch(directory.path(), &root);
+        let child = Self::launch(directory.path(), &root, environment);
         Self {
             directory,
             root,
@@ -88,7 +92,7 @@ if not prepared.exists():
         }
     }
 
-    fn launch(directory: &Path, root: &Path) -> Child {
+    fn launch(directory: &Path, root: &Path, environment: &[(&str, &str)]) -> Child {
         let log = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -103,6 +107,7 @@ if not prepared.exists():
             .env("OTEL_LOGS_EXPORTER", "none")
             .env("OTEL_METRICS_EXPORTER", "none")
             .env("OTEL_TRACES_EXPORTER", "none")
+            .envs(environment.iter().copied())
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log)
@@ -112,7 +117,7 @@ if not prepared.exists():
 
     fn relaunch(&mut self) {
         assert!(self.child.try_wait().unwrap().is_some());
-        self.child = Self::launch(self.directory.path(), &self.root);
+        self.child = Self::launch(self.directory.path(), &self.root, &[]);
     }
 
     async fn client(&mut self) -> Client {
@@ -188,6 +193,37 @@ async fn call(client: &Client, request: Request) -> Value {
         .call(Envelope::new(Target::Room, request).unwrap())
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn failed_telemetry_drain_preserves_requested_exit() {
+    let collector = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", collector.local_addr().unwrap());
+    for (request, code) in [
+        (Request::Stop { notice: None }, 0),
+        (Request::Restart { notice: None }, 8),
+    ] {
+        let mut agent = Agent::with_environment(
+            json!({"policy":{"mod_auto_update":false}}),
+            &[
+                ("OTEL_SDK_DISABLED", "false"),
+                ("OTEL_METRICS_EXPORTER", "otlp"),
+                ("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", &endpoint),
+                ("OTEL_EXPORTER_OTLP_METRICS_TIMEOUT", "100"),
+                ("OTEL_METRIC_EXPORT_INTERVAL", "60000"),
+            ],
+        );
+        let client = agent.client().await;
+        call(&client, request).await;
+        agent.wait(code).await;
+        client.close().await.unwrap();
+        agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
+        assert_eq!(agent.control()["agent_run"]["active"], false);
+        assert!(agent.control()["agent_run"]["failure"].is_null());
+        let log = agent.log();
+        assert!(log.contains("telemetry shutdown did not complete"), "{log}");
+        assert!(log.contains("\"observability_error\":\""), "{log}");
+    }
 }
 
 #[tokio::test]

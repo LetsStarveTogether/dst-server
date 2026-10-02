@@ -1042,7 +1042,7 @@ pub async fn run(options: Options) -> Result<u8> {
         terminal_error.get_or_insert_with(|| error.into());
     }
     if let Err(error) = room.close_telemetry().await {
-        terminal_error.get_or_insert_with(|| error.into());
+        eprintln!("warning: {error}: {}", error.details);
     }
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
         while workers.join_next().await.is_some() {}
