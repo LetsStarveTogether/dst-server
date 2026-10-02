@@ -629,7 +629,11 @@ end
 function scenarios.diagnostics()
     local driver = install()
     local telemetry = require("dst_server.telemetry")
-    local guarded = telemetry.guard("test.callback", function() error("SECRET_TOKEN private chat", 0) end)
+    local fails = true
+    local function callback()
+        if fails then error("SECRET_TOKEN private chat", 0) end
+    end
+    local guarded = telemetry.guard("test.callback", callback)
     assert(pcall(guarded))
     local health = driver.health()
     assert(health.telemetry_status == "degraded" and health.errors == 1)
@@ -637,10 +641,25 @@ function scenarios.diagnostics()
     assert(health.last_error.message == "callback_failed" and health.last_error.count == 1)
     local diagnostics = records("dst.telemetry.error")
     assert(#diagnostics == 1 and diagnostics[1].data.count == 1)
-    guarded()
-    assert(driver.health().errors == 2 and driver.health().last_error.count == 2)
+    for _ = 2, 1000 do guarded() end
+    local repeated = driver.health()
+    assert(repeated.errors == 1000 and repeated.last_error.count == 1000)
+    assert(repeated.revision == health.revision + 999)
+    assert(#records("dst.telemetry.error") == 1, "a continuing fault must not flood output")
+    local other = telemetry.guard("test.other", callback)
+    other()
+    assert(#records("dst.telemetry.error") == 2, "independent faults must remain visible")
     TheWorld.watchers.cycles(TheWorld, 2)
     assert(#records("dst.world.state_changed") == 1, "degraded hooks remain active")
+    fails = false
+    guarded()
+    assert(driver.health().telemetry_status == "degraded", "the other fault is still active")
+    other()
+    assert(driver.health().telemetry_status == "active" and driver.health().errors == 1001)
+    fails = true
+    guarded()
+    diagnostics = records("dst.telemetry.error")
+    assert(#diagnostics == 3 and diagnostics[3].data.count == 1002, "recovery must allow a new report")
     assert_safe()
 end
 
@@ -704,23 +723,42 @@ function scenarios.diagnostic_failure()
     local calls = 0
     local guarded = telemetry.guard("test.callback", function() calls = calls + 1; error("failure", 0) end)
     assert(pcall(guarded) and calls == 1)
+    for _ = 2, 1000 do guarded() end
     local health = driver.health()
-    assert(health.errors == 1 and health.last_error.stage == "test.callback")
-    assert(#outputs <= 1, "diagnostic failure must not recurse")
+    assert(health.errors == 1000 and health.last_error.stage == "test.callback")
+    assert(#outputs == 1, "fallback diagnostics must not recurse or repeat")
     assert_safe()
 end
 
 function scenarios.oversized_event()
     local driver = install()
     local telemetry = require("dst_server.telemetry")
-    telemetry.guard("test.oversized", function()
-        telemetry.emit("dst.world.state_changed", { name = "phase", value = string.rep("x", 65536) })
-    end)()
+    local data = { name = "phase", value = string.rep("x", 65536) }
+    local publish = telemetry.guard("test.oversized", function()
+        telemetry.emit("dst.world.state_changed", data)
+    end)
+    publish()
     local health = driver.health()
     assert(health.errors == 1 and health.last_error.message == "event_too_large")
     for _, line in ipairs(outputs) do assert(#line <= 65536) end
     assert(#records("dst.telemetry.error") == 1)
     assert(records()[1].seq == 1 and health.events_emitted == 1)
+    publish()
+    assert(#records("dst.telemetry.error") == 1 and driver.health().errors == 2)
+    data.value = math.huge
+    publish()
+    publish()
+    local diagnostics = records("dst.telemetry.error")
+    assert(#diagnostics == 2 and diagnostics[2].data.message == "encoding_failed")
+    assert(driver.health().errors == 4, "a changed failure type must report once")
+    data.value = "day"
+    publish()
+    assert(driver.health().telemetry_status == "active")
+    data.value = string.rep("x", 65536)
+    publish()
+    diagnostics = records("dst.telemetry.error")
+    assert(#diagnostics == 3 and diagnostics[3].data.count == 5)
+    assert(records()[4].seq == 4, "suppressed diagnostics must not consume sequence numbers")
 end
 
 function scenarios.print_boundary()
@@ -755,6 +793,10 @@ function scenarios.print_partial_failure()
         assert(event.seq == index, "a logger may throw after another logger delivered the record")
     end
     assert(driver.health().events_emitted == 3 and driver.health().errors == 1)
+    TheWorld.watchers.cycles(TheWorld, 3)
+    emitted = records()
+    assert(#emitted == 4 and emitted[4].event == "dst.world.state_changed" and emitted[4].seq == 4)
+    assert(driver.health().errors == 2, "failed diagnostic output must not cause repeated reports")
     assert_safe()
 end
 
