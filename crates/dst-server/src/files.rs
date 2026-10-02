@@ -131,13 +131,10 @@ impl RoomLock {
     }
 
     pub fn read_optional_text(&self, relative: impl AsRef<Path>) -> Result<Option<String>> {
-        let Some((parent, name)) = self.root.existing_parent(relative.as_ref())? else {
-            return Ok(None);
-        };
-        if parent.kind(&name)?.is_none() {
-            return Ok(None);
-        }
-        parent.read_text(&name, MAX_FILE_BYTES).map(Some)
+        self.read_optional_bytes(relative)?
+            .map(String::from_utf8)
+            .transpose()
+            .context("read UTF-8 configuration text")
     }
 
     pub fn read_optional_bytes(&self, relative: impl AsRef<Path>) -> Result<Option<Vec<u8>>> {
@@ -217,22 +214,23 @@ impl RoomLock {
 
     /// Re-read the native control file before changing one part of it so recovery,
     /// policy and activity updates preserve each other's fields.
-    pub fn update_control(
+    pub fn update_control<T>(
         &mut self,
-        update: impl FnOnce(&mut Map<String, Value>) -> Result<()>,
-    ) -> Result<()> {
+        update: impl FnOnce(&mut Map<String, Value>) -> Result<T>,
+    ) -> Result<T> {
         let mut value = self.read_control()?;
         let original = value.clone();
-        update(&mut value)?;
+        let result = update(&mut value)?;
         if value == original {
-            return Ok(());
+            return Ok(result);
         }
         let encoded = serde_json::to_vec(&value)?;
         ensure!(
             encoded.len() <= MAX_FILE_BYTES,
             "room control JSON exceeds the byte limit"
         );
-        self.root.replace(CONTROL_FILE, &encoded, 0o600)
+        self.root.replace(CONTROL_FILE, &encoded, 0o600)?;
+        Ok(result)
     }
 }
 

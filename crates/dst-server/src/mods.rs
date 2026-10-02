@@ -105,18 +105,8 @@ fn collect_call(call: &FunctionCall, setup: &mut Setup) -> Result<()> {
     if !value.is_ascii() || value.is_empty() && !collection {
         return Ok(());
     }
-    if value.is_empty()
-        || value.starts_with('0')
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(Error::invalid(
-            "mods.setup",
-            "Workshop IDs must be positive decimal integers without leading zeros",
-        ));
-    }
-    let item = value
-        .parse::<u64>()
-        .map_err(|_| Error::invalid("mods.setup", "Workshop ID exceeds uint64"))?;
+    let item = crate::settings::workshop_id(&value)
+        .map_err(|error| Error::invalid("mods.setup", error.to_string()))?;
     if collection {
         setup.collections.insert(item);
     } else {

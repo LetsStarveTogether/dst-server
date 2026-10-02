@@ -7,22 +7,10 @@ use dst_server::{
     files::{self, PermissionFiles, RoomLock},
     lua, rooms, scripts, settings as native,
 };
-use pyo3::{
-    exceptions::{PyOSError, PyValueError},
-    prelude::*,
-    types::PyDict,
-};
+use pyo3::{exceptions::PyValueError, prelude::*, types::PyDict};
 use serde_json::{Value, json};
 
-use crate::{from_python, to_python};
-
-fn error(error: anyhow::Error) -> PyErr {
-    if let Some(io) = error.downcast_ref::<std::io::Error>() {
-        PyOSError::new_err((io.raw_os_error().unwrap_or(0), error.to_string()))
-    } else {
-        PyValueError::new_err(error.to_string())
-    }
-}
+use crate::{anyhow_error as error, from_python, to_python};
 
 fn input(value: &Bound<'_, PyAny>) -> PyResult<Value> {
     from_python(value, 0, &mut 0)
@@ -219,7 +207,10 @@ impl Configuration {
                 ));
             }
         };
-        checked(model, result.map_err(error)?)
+        Ok(Self {
+            model: model.into(),
+            value: result.map_err(error)?,
+        })
     }
 
     #[staticmethod]
@@ -539,12 +530,14 @@ impl RoomStore {
 
 #[pyfunction]
 fn configuration_schema(py: Python<'_>, model: &str) -> PyResult<Py<PyAny>> {
-    let room = rooms::schema();
     let schema = match model {
-        "Room" => room,
-        "Policy" => room["properties"]["policy"].clone(),
-        "DailyWindow" => room["properties"]["policy"]["properties"]["schedule"]["items"].clone(),
+        "Room" => rooms::schema(),
+        "Policy" => rooms::schema()["properties"]["policy"].clone(),
+        "DailyWindow" => {
+            rooms::schema()["properties"]["policy"]["properties"]["schedule"]["items"].clone()
+        }
         "DeploymentOptions" => {
+            let room = rooms::schema();
             let mut schema = room["$defs"]["RoomDeployment"].clone();
             schema["$defs"] = room["$defs"].clone();
             schema

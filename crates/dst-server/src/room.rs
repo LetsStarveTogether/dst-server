@@ -313,21 +313,13 @@ impl Room {
         Ok(())
     }
     pub fn require_stopped(&self) -> Result<()> {
-        if self
-            .drivers
-            .lock()
-            .unwrap()
-            .values()
-            .any(|driver| driver.snapshot().running)
-        {
+        let drivers = self.drivers.lock().unwrap();
+        if drivers.values().any(|driver| driver.snapshot().running) {
             Err(Error::new(
                 ErrorCode::Busy,
                 "all game processes must be stopped",
             ))
-        } else if self
-            .drivers
-            .lock()
-            .unwrap()
+        } else if drivers
             .values()
             .any(|driver| !driver.snapshot().output_drained)
         {

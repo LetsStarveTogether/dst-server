@@ -92,23 +92,23 @@ function driver.install(options)
         state.capabilities[name] = "disabled"
     end
     local installed = false
-    local function install(stage, callback)
-        if telemetry.install(stage:gsub("%.install$", ""), callback) then installed = true end
+    local function install(name, callback)
+        if telemetry.install(name, callback) then installed = true end
     end
-    install("players.install", function() require("dst_server.world_events").install_players() end)
+    install("players", function() require("dst_server.world_events").install_players() end)
     if profile == "off" then return driver.health() end
     if type(GetTick) ~= "function" or type(GetTimeReal) ~= "function" then
         telemetry.report("clocks.install", "installation_failed")
         return driver.health()
     end
-    install("shards.install", function() require("dst_server.world_events").install_shard() end)
-    install("world.install", function() require("dst_server.world_events").install_world() end)
-    install("messages.install", function() require("dst_server.message_events").install() end)
-    install("appearance.install", function() return require("dst_server.input_events").install_appearance() end)
-    install("map_deliveries.install", function() return require("dst_server.gameplay_events").install_deliveries() end)
-    install("vault_trials.install", function() return require("dst_server.gameplay_events").install_vault_trials() end)
+    install("shards", function() require("dst_server.world_events").install_shard() end)
+    install("world", function() require("dst_server.world_events").install_world() end)
+    install("messages", function() require("dst_server.message_events").install() end)
+    install("appearance", function() return require("dst_server.input_events").install_appearance() end)
+    install("map_deliveries", function() return require("dst_server.gameplay_events").install_deliveries() end)
+    install("vault_trials", function() return require("dst_server.gameplay_events").install_vault_trials() end)
     if profile == "history" and next(action_allowlist) ~= nil then
-        install("actions.install", function() require("dst_server.actions").install() end)
+        install("actions", function() require("dst_server.actions").install() end)
     end
     state.telemetry_active = installed
     return driver.health()

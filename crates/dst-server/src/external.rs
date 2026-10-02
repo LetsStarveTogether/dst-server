@@ -725,9 +725,8 @@ fn decode_rows<T: DeserializeOwned>(bytes: &[u8], region: Region) -> Result<Vec<
             let row = value
                 .as_object_mut()
                 .ok_or_else(|| Error::new(ErrorCode::Protocol, "Klei row must be an object"))?;
-            if !row.contains_key("region") {
-                row.insert("region".into(), Value::String(region.as_str().into()));
-            }
+            row.entry("region")
+                .or_insert_with(|| Value::String(region.as_str().into()));
             serde_json::from_value(value)
                 .map_err(|_| Error::new(ErrorCode::Protocol, "Klei row does not match its schema"))
         })

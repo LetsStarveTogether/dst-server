@@ -415,11 +415,8 @@ fn validate_world_values(values: &Value) -> Result<()> {
             "world overrides require scalar values"
         );
     }
-    let values: Map<_, _> = object(values)?
-        .iter()
-        .filter(|(_, value)| !value.is_null())
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
+    let mut values = object(values)?.clone();
+    values.retain(|_, value| !value.is_null());
     lua::render_literal(&Value::Object(values))?;
     Ok(())
 }
@@ -598,7 +595,7 @@ fn validate_mod_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn workshop_id(value: &str) -> Result<u64> {
+pub(crate) fn workshop_id(value: &str) -> Result<u64> {
     ensure!(
         !value.is_empty()
             && !value.starts_with('0')
@@ -728,7 +725,7 @@ pub fn render_ini(model: &str, sparse: &Value, multi: bool) -> Result<String> {
 
 impl ClusterSettings {
     pub fn parse(source: &str) -> Result<Self> {
-        Self::from_value(parse_ini("ClusterSettings", source)?)
+        Ok(Self(parse_ini("ClusterSettings", source)?))
     }
     pub fn render(&self, multi: bool) -> Result<String> {
         render_ini("ClusterSettings", &self.0, multi)
@@ -736,7 +733,7 @@ impl ClusterSettings {
 }
 impl ShardSettings {
     pub fn parse(source: &str) -> Result<Self> {
-        Self::from_value(parse_ini("ShardSettings", source)?)
+        Ok(Self(parse_ini("ShardSettings", source)?))
     }
     pub fn render(&self, multi: bool) -> Result<String> {
         render_ini("ShardSettings", &self.0, multi)

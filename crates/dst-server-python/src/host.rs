@@ -7,32 +7,14 @@ use dst_server::{
     host_operations::{self, HostOperation},
     rooms,
 };
-use pyo3::{
-    exceptions::{PyOSError, PyTimeoutError, PyValueError},
-    prelude::*,
-};
+use pyo3::{exceptions::PyValueError, prelude::*};
 use serde_json::Value;
 
 use crate::{
-    Client, from_python, logs, py_error,
+    Client, anyhow_error as error, from_python, logs,
     settings::{Room, RoomStore},
     to_python,
 };
-
-pub(crate) fn error(error: anyhow::Error) -> PyErr {
-    if let Some(error) = error.downcast_ref::<dst_server::model::Error>() {
-        py_error(error.clone())
-    } else if error
-        .downcast_ref::<tokio::time::error::Elapsed>()
-        .is_some()
-    {
-        PyTimeoutError::new_err(error.to_string())
-    } else if let Some(io) = error.downcast_ref::<std::io::Error>() {
-        PyOSError::new_err((io.raw_os_error().unwrap_or(0), error.to_string()))
-    } else {
-        PyValueError::new_err(error.to_string())
-    }
-}
 
 fn operation(value: &Bound<'_, PyAny>) -> PyResult<HostOperation> {
     let operation: HostOperation = serde_json::from_value(from_python(value, 0, &mut 0)?)

@@ -438,7 +438,7 @@ impl RoomStore {
     }
 }
 
-fn save_policy(guard: &mut RoomLock, room: &Room) -> Result<()> {
+pub(crate) fn save_policy(guard: &mut RoomLock, room: &Room) -> Result<()> {
     guard.update_control(|control| {
         control.insert("template".into(), serde_json::to_value(&room.template)?);
         control.insert("policy".into(), serde_json::to_value(&room.policy)?);

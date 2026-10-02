@@ -126,7 +126,8 @@ pub type SavedRoom = BTreeMap<String, SavedShard>;
 
 /// Only construct LoadFailure after identifying the native loader's failed file
 /// and excluding disk, permission, configuration and Mod failures.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Failure {
     Retryable,
     LoadFailure {
@@ -341,16 +342,14 @@ fn update<T>(
     room: &mut RoomLock,
     change: impl FnOnce(&mut RecoveryState) -> Result<T>,
 ) -> Result<T> {
-    let mut result = None;
     room.update_control(|document| {
         let mut state = decode(document)?;
-        result = Some(change(&mut state)?);
+        let result = change(&mut state)?;
         state.validate()?;
         document.insert("recovery".into(), serde_json::to_value(state)?);
-        Ok(())
-    })?;
-    // update_control synchronizes the file and its directory before returning this decision.
-    result.context("recovery update was not executed")
+        // update_control synchronizes the file and directory before returning this decision.
+        Ok(result)
+    })
 }
 
 fn saved(catalog: &Catalog, snapshot: &Snapshot) -> Result<SavedShard> {
@@ -372,8 +371,7 @@ fn saved(catalog: &Catalog, snapshot: &Snapshot) -> Result<SavedShard> {
 
 fn latest_room(required: &BTreeSet<String>, catalogs: &Catalogs) -> Result<SavedRoom> {
     ensure!(
-        !required.is_empty()
-            && catalogs.keys().collect::<BTreeSet<_>>() == required.iter().collect(),
+        !required.is_empty() && catalogs.keys().eq(required.iter()),
         "required shard catalogs differ"
     );
     required

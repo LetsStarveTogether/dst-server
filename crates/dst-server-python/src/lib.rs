@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use dst_server::{model, rpc};
 use pyo3::{
-    exceptions::{PyException, PyTypeError, PyValueError},
+    exceptions::{PyException, PyOSError, PyTimeoutError, PyTypeError, PyValueError},
     prelude::*,
     types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple},
 };
@@ -28,6 +28,21 @@ pub(crate) fn py_error(error: model::Error) -> PyErr {
         }
         result
     })
+}
+
+pub(crate) fn anyhow_error(error: anyhow::Error) -> PyErr {
+    if let Some(error) = error.downcast_ref::<model::Error>() {
+        py_error(error.clone())
+    } else if error
+        .downcast_ref::<tokio::time::error::Elapsed>()
+        .is_some()
+    {
+        PyTimeoutError::new_err(error.to_string())
+    } else if let Some(io) = error.downcast_ref::<std::io::Error>() {
+        PyOSError::new_err((io.raw_os_error().unwrap_or(0), error.to_string()))
+    } else {
+        PyValueError::new_err(error.to_string())
+    }
 }
 
 pub(crate) fn from_python(
