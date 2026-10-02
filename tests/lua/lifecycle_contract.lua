@@ -37,6 +37,7 @@ if profile == "off" then
     assert(extensions.OnRespawnFromVineSave == original)
     return
 end
+require("dst_server.player_events").install_lifecycle()
 OnSimPaused = function() end
 OnSimUnpaused = function() TheWorld:PushEvent("ms_simunpaused") end
 world_events.install_world()

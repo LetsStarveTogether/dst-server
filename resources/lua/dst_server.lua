@@ -87,7 +87,7 @@ function driver.install(options)
         return original(...)
     end
     state.installed = true
-    for _, name in ipairs({ "players", "shards", "world", "messages", "actions", "votes", "gorge_voter", "lobbyvote",
+    for _, name in ipairs({ "players", "player_lifecycle", "shards", "world", "messages", "actions", "votes", "gorge_voter", "lobbyvote",
         "player_commands", "appearance", "map_deliveries", "vault_trials" }) do
         state.capabilities[name] = "disabled"
     end
@@ -101,6 +101,7 @@ function driver.install(options)
         telemetry.report("clocks.install", "installation_failed")
         return driver.health()
     end
+    install("player_lifecycle", function() require("dst_server.player_events").install_lifecycle() end)
     install("shards", function() require("dst_server.world_events").install_shard() end)
     install("world", function() require("dst_server.world_events").install_world() end)
     install("messages", function() require("dst_server.message_events").install() end)

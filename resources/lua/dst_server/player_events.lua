@@ -194,6 +194,17 @@ local function attach_inventory(player)
     end)
 end
 
+-- Installation also runs before optional telemetry is enabled.
+local attach_optional = telemetry.guard("player.attach", function(player)
+    attach_lifecycle(player)
+    if state.requested_profile == "history" then
+        attach_combat(player)
+        attach_conditions(player)
+        attach_skills_and_fishing(player)
+        attach_inventory(player)
+    end
+end, true)
+
 function player_events.attach(player)
     if player == nil or state.players[player] then
         return
@@ -203,15 +214,8 @@ function player_events.attach(player)
     player:ListenForEvent("ms_skilltreeinitialized", telemetry.guard("player.ms_skilltreeinitialized", function()
         telemetry.emit("dst.player.loaded", { player = values.entity_ref(player) })
     end, true))
-    if state.requested_profile == "off" then
-        return
-    end
-    attach_lifecycle(player)
-    if state.requested_profile == "history" then
-        attach_combat(player)
-        attach_conditions(player)
-        attach_skills_and_fishing(player)
-        attach_inventory(player)
+    if state.requested_profile ~= "off" then
+        attach_optional(player)
     end
 end
 
