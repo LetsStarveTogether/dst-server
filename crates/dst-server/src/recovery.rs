@@ -9,100 +9,15 @@ use serde::{Deserialize, Serialize};
 use crate::{files::RoomLock, lua};
 
 pub const CURRENT_RESTARTS: u8 = 2;
+pub const MAX_SNAPSHOT_GAP: u64 = 3;
 pub const RETRY_DELAY: Duration = Duration::from_secs(30);
 pub const STABLE_RESET: Duration = Duration::from_secs(30 * 60);
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct Clock {
-    pub cycles: u64,
-    pub segs: Segments,
-    pub phase: Phase,
-    pub totaltimeinphase: f64,
-    pub remainingtimeinphase: f64,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct Segments {
-    pub day: u8,
-    pub dusk: u8,
-    pub night: u8,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Phase {
-    Day,
-    Dusk,
-    Night,
-}
-
-impl Clock {
-    /// Parse native .meta data without executing Lua or guessing missing clock values.
-    pub fn from_metadata(source: &str) -> Result<Self> {
-        // Native .meta files may retain the persistent-string terminating NUL.
-        let metadata = lua::parse_return_table(source.strip_suffix('\0').unwrap_or(source))?;
-        let clock: Self = serde_json::from_value(
-            metadata
-                .get("clock")
-                .context("snapshot clock is missing")?
-                .clone(),
-        )
-        .context("invalid snapshot clock")?;
-        clock.fraction()?;
-        Ok(clock)
-    }
-
-    /// Same phase ordering and 16-segment day as native components/clock.lua.
-    pub fn fraction(&self) -> Result<f64> {
-        ensure!(
-            self.cycles <= lua::MAX_SAFE_INTEGER as u64,
-            "invalid cycle count"
-        );
-        let total =
-            u16::from(self.segs.day) + u16::from(self.segs.dusk) + u16::from(self.segs.night);
-        ensure!(total == 16, "unsupported day segments");
-        let (before, active) = match self.phase {
-            Phase::Day => (0, self.segs.day),
-            Phase::Dusk => (u16::from(self.segs.day), self.segs.dusk),
-            Phase::Night => (
-                u16::from(self.segs.day) + u16::from(self.segs.dusk),
-                self.segs.night,
-            ),
-        };
-        ensure!(
-            active > 0
-                && self.totaltimeinphase.is_finite()
-                && self.totaltimeinphase > 0.0
-                && self.remainingtimeinphase.is_finite()
-                && (0.0..=self.totaltimeinphase).contains(&self.remainingtimeinphase),
-            "unprovable snapshot phase time"
-        );
-        Ok((f64::from(before)
-            + f64::from(active) * (1.0 - self.remainingtimeinphase / self.totaltimeinphase))
-            / 16.0)
-    }
-
-    /// Compare each shard against its own latest saved time, including partial days.
-    pub fn loss_to(&self, target: &Self) -> Result<f64> {
-        let latest_fraction = self.fraction()?;
-        let target_fraction = target.fraction()?;
-        let cycles = i128::from(self.cycles) - i128::from(target.cycles);
-        ensure!((-1..=2).contains(&cycles), "rollback exceeds one game day");
-        let loss = cycles as f64 + latest_fraction - target_fraction;
-        ensure!(
-            (0.0..=1.0).contains(&loss),
-            "rollback exceeds one game day or moves time forward"
-        );
-        Ok(loss)
-    }
-}
-
-/// Entries must come from the native catalog; a missing/unreadable .meta remains None.
+/// Entries must come from the native catalog with validated world file paths.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Snapshot {
     pub snapshot_id: u64,
     pub world_file: Option<String>,
-    pub clock: Option<Clock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -119,7 +34,6 @@ pub struct SavedShard {
     pub session_id: String,
     pub snapshot_id: u64,
     pub world_file: String,
-    pub clock: Clock,
 }
 
 pub type SavedRoom = BTreeMap<String, SavedShard>;
@@ -150,15 +64,16 @@ pub enum ClosedReason {
     Configuration,
     Mods,
     UnknownFailure,
+    #[serde(alias = "unproven_rollback_time")]
     UnprovenSnapshots,
     SessionChanged,
-    LatestSnapshotsDiffer,
+    #[serde(alias = "latest_snapshots_differ")]
+    SnapshotGapExceeded,
     CurrentSaveChanged,
     UnprovenLoadFailure,
     CurrentRetriesExhausted,
     RollbackAlreadyUsed,
     NoPreviousCompleteSnapshot,
-    UnprovenRollbackTime,
     RecoveryTargetFailed,
 }
 
@@ -177,8 +92,6 @@ pub struct FixedTarget {
     pub shards: SavedRoom,
     pub applied: BTreeSet<String>,
     pub phase: TargetPhase,
-    /// Current-save retries would have let native shard synchronization discard progress.
-    pub skipped_current_retries: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -247,7 +160,6 @@ fn verify_saved(saved: &SavedShard) -> Result<()> {
         valid_text(&saved.world_file, 4096),
         "invalid native snapshot path"
     );
-    saved.clock.fraction()?;
     Ok(())
 }
 
@@ -360,10 +272,6 @@ fn saved(catalog: &Catalog, snapshot: &Snapshot) -> Result<SavedShard> {
             .world_file
             .clone()
             .context("snapshot world file is missing")?,
-        clock: snapshot
-            .clock
-            .clone()
-            .context("snapshot clock is missing")?,
     };
     verify_saved(&saved)?;
     Ok(saved)
@@ -399,7 +307,7 @@ fn latest_room(required: &BTreeSet<String>, catalogs: &Catalogs) -> Result<Saved
 fn previous_target(
     latest: &SavedRoom,
     catalogs: &Catalogs,
-    skipped: bool,
+    failed_snapshot_id: u64,
 ) -> std::result::Result<FixedTarget, ClosedReason> {
     let newest = latest
         .values()
@@ -417,7 +325,7 @@ fn previous_target(
         .iter()
         .filter(|snapshot| {
             snapshot.snapshot_id > 0
-                && snapshot.snapshot_id < newest
+                && snapshot.snapshot_id < failed_snapshot_id
                 && snapshot.snapshot_id <= oldest
         })
         .filter(|snapshot| {
@@ -430,6 +338,9 @@ fn previous_target(
         .map(|snapshot| snapshot.snapshot_id)
         .max()
         .ok_or(ClosedReason::NoPreviousCompleteSnapshot)?;
+    if newest - selected > MAX_SNAPSHOT_GAP {
+        return Err(ClosedReason::SnapshotGapExceeded);
+    }
     let mut shards = BTreeMap::new();
     for (name, catalog) in catalogs {
         let snapshot = catalog
@@ -437,11 +348,7 @@ fn previous_target(
             .iter()
             .find(|snapshot| snapshot.snapshot_id == selected)
             .unwrap();
-        let target = saved(catalog, snapshot).map_err(|_| ClosedReason::UnprovenRollbackTime)?;
-        latest[name]
-            .clock
-            .loss_to(&target.clock)
-            .map_err(|_| ClosedReason::UnprovenRollbackTime)?;
+        let target = saved(catalog, snapshot).map_err(|_| ClosedReason::UnprovenSnapshots)?;
         shards.insert(name.clone(), target);
     }
     Ok(FixedTarget {
@@ -449,7 +356,6 @@ fn previous_target(
         shards,
         applied: BTreeSet::new(),
         phase: TargetPhase::Preparing,
-        skipped_current_retries: skipped,
     })
 }
 
@@ -477,10 +383,9 @@ fn verify_replay(
         if &found != expected || current.snapshot_id < target.snapshot_id {
             return Err(ClosedReason::CurrentSaveChanged);
         }
-        current
-            .clock
-            .loss_to(&expected.clock)
-            .map_err(|_| ClosedReason::UnprovenRollbackTime)?;
+        if current.snapshot_id - target.snapshot_id > MAX_SNAPSHOT_GAP {
+            return Err(ClosedReason::SnapshotGapExceeded);
+        }
     }
     Ok(())
 }
@@ -522,40 +427,37 @@ fn decide(
     {
         return Ok(state.close(ClosedReason::SessionChanged));
     }
-    let load_failure = if let Failure::LoadFailure {
+    let failed_snapshot_id = if let Failure::LoadFailure {
         shard,
         session_id,
         world_file,
     } = failure
     {
-        if !latest
+        let Some(failed) = latest
             .get(shard)
-            .is_some_and(|saved| &saved.session_id == session_id && &saved.world_file == world_file)
-        {
+            .filter(|saved| &saved.session_id == session_id && &saved.world_file == world_file)
+        else {
             return Ok(state.close(ClosedReason::UnprovenLoadFailure));
-        }
-        true
+        };
+        Some(failed.snapshot_id)
     } else {
-        false
+        None
     };
-    let aligned = latest
+    let newest = latest
         .values()
         .map(|saved| saved.snapshot_id)
-        .collect::<BTreeSet<_>>()
-        .len()
-        == 1;
-    let unchanged = state
-        .latest
-        .as_ref()
-        .is_none_or(|previous| previous == &latest);
-    if !load_failure && !aligned {
-        return Ok(state.close(ClosedReason::LatestSnapshotsDiffer));
-    }
-    if !load_failure && !unchanged {
-        return Ok(state.close(ClosedReason::CurrentSaveChanged));
+        .max()
+        .unwrap();
+    let oldest = latest
+        .values()
+        .map(|saved| saved.snapshot_id)
+        .min()
+        .unwrap();
+    if newest - oldest > MAX_SNAPSHOT_GAP {
+        return Ok(state.close(ClosedReason::SnapshotGapExceeded));
     }
     state.latest = Some(latest.clone());
-    if aligned && unchanged && state.restarts_used < CURRENT_RESTARTS {
+    if state.restarts_used < CURRENT_RESTARTS {
         state.restarts_used += 1;
         let not_before_ms = now_ms
             .checked_add(RETRY_DELAY.as_millis() as u64)
@@ -570,14 +472,13 @@ fn decide(
             shards: latest,
         });
     }
-    if !load_failure {
+    let Some(failed_snapshot_id) = failed_snapshot_id else {
         return Ok(state.close(ClosedReason::CurrentRetriesExhausted));
-    }
+    };
     if state.target.is_some() {
         return Ok(state.close(ClosedReason::RollbackAlreadyUsed));
     }
-    let skipped = state.restarts_used < CURRENT_RESTARTS;
-    let target = match previous_target(&latest, catalogs, skipped) {
+    let target = match previous_target(&latest, catalogs, failed_snapshot_id) {
         Ok(target) => target,
         Err(reason) => return Ok(state.close(reason)),
     };
@@ -774,20 +675,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn clock(cycles: u64, fraction: f64) -> Clock {
-        Clock {
-            cycles,
-            segs: Segments {
-                day: 16,
-                dusk: 0,
-                night: 0,
-            },
-            phase: Phase::Day,
-            totaltimeinphase: 480.0,
-            remainingtimeinphase: 480.0 * (1.0 - fraction),
-        }
-    }
-
     fn path(session: &str, id: u64) -> String {
         format!("save/session/{session}/{id:010}")
     }
@@ -798,12 +685,11 @@ mod tests {
             .into_iter()
             .map(|name| {
                 let session = format!("SESSION_{name}");
-                let snapshots = [12, 11, 10]
+                let snapshots = [12, 11, 10, 9, 8]
                     .into_iter()
                     .map(|id| Snapshot {
                         snapshot_id: id,
                         world_file: Some(path(&session, id)),
-                        clock: Some(clock(id - 2, 0.75)),
                     })
                     .collect();
                 (
@@ -828,22 +714,53 @@ mod tests {
     }
 
     #[test]
-    fn native_clock_proves_partial_day_limits_without_rounding_cycles() {
-        let parsed = Clock::from_metadata("KLEI 1 return {clock={cycles=10,segs={day=10,dusk=4,night=2},phase='dusk',totaltimeinphase=120,remainingtimeinphase=60,mooomphasecycle=2}}\0").unwrap();
-        assert_eq!(parsed.fraction().unwrap(), 0.75);
-        assert_eq!(clock(11, 0.75).loss_to(&parsed).unwrap(), 1.0);
-        assert!(clock(11, 0.875).loss_to(&parsed).is_err());
-        let high = lua::MAX_SAFE_INTEGER as u64;
-        assert_eq!(
-            clock(high, 0.75).loss_to(&clock(high - 1, 0.75)).unwrap(),
-            1.0
-        );
-        assert!(Clock::from_metadata("return {clock={cycles=1}}").is_err());
-        assert!(clock(1, f64::NAN).fraction().is_err());
-        let mut invalid = clock(1, 0.5);
-        invalid.segs.day = 15;
-        assert!(invalid.fraction().is_err());
-        assert!(clock(10, 0.5).loss_to(&clock(10, 0.75)).is_err());
+    fn latest_snapshot_gap_allows_three_and_rejects_four_for_either_shard() {
+        for lagging in ["Master", "Caves"] {
+            for gap in 0..=4 {
+                let (required, mut catalogs) = catalogs();
+                let catalog = catalogs.get_mut(lagging).unwrap();
+                catalog.latest_world_file = path(&catalog.session_id, 12 - gap);
+                for failure in [Failure::Retryable, load_failure(&catalogs)] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let mut room = RoomLock::try_acquire(directory.path()).unwrap();
+                    let decision = on_failure(&mut room, failure, &required, &catalogs, 0).unwrap();
+                    if gap <= 3 {
+                        assert!(matches!(
+                            decision,
+                            Decision::RetryCurrent { attempt: 1, .. }
+                        ));
+                    } else {
+                        assert!(matches!(
+                            decision,
+                            Decision::StayClosed {
+                                reason: ClosedReason::SnapshotGapExceeded
+                            }
+                        ));
+                        assert_eq!(load(&room).unwrap().restarts_used, 0);
+                    }
+                    assert!(load(&room).unwrap().target.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_gap_uses_the_whole_room_range() {
+        let (mut required, mut catalogs) = catalogs();
+        let caves = catalogs.get_mut("Caves").unwrap();
+        caves.latest_world_file = path(&caves.session_id, 8);
+        let mut extra = catalogs["Master"].clone();
+        extra.latest_world_file = path(&extra.session_id, 10);
+        catalogs.insert("Extra".into(), extra);
+        required.insert("Extra".into());
+        let directory = tempfile::tempdir().unwrap();
+        let mut room = RoomLock::try_acquire(directory.path()).unwrap();
+        assert!(matches!(
+            on_failure(&mut room, Failure::Retryable, &required, &catalogs, 0).unwrap(),
+            Decision::StayClosed {
+                reason: ClosedReason::SnapshotGapExceeded
+            }
+        ));
     }
 
     #[test]
@@ -1002,44 +919,93 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_latest_only_allows_a_proven_load_failure_and_one_day() {
+    fn started_retries_accept_native_sync_but_pending_retries_keep_their_saved_room() {
         let (required, mut catalogs) = catalogs();
         let caves = catalogs.get_mut("Caves").unwrap();
-        caves.latest_world_file = path(&caves.session_id, 11);
+        caves.latest_world_file = path(&caves.session_id, 9);
         let directory = tempfile::tempdir().unwrap();
         let mut room = RoomLock::try_acquire(directory.path()).unwrap();
-        let closed = on_failure(&mut room, Failure::Retryable, &required, &catalogs, 0).unwrap();
+        on_failure(&mut room, Failure::Retryable, &required, &catalogs, 0).unwrap();
+        begin_current_retry(&mut room, 30_000).unwrap();
+        let caves = catalogs.get_mut("Caves").unwrap();
+        caves.latest_world_file = path(&caves.session_id, 12);
+        let resumed = resume_pending(&mut room, &required, &catalogs, 31_000)
+            .unwrap()
+            .unwrap();
         assert!(matches!(
-            closed,
-            Decision::StayClosed {
-                reason: ClosedReason::LatestSnapshotsDiffer
+            resumed,
+            Decision::RetryCurrent {
+                attempt: 2,
+                not_before_ms: 61_000,
+                ..
             }
         ));
-        explicit_start(&mut room, true).unwrap();
-        let Decision::Restore { target, .. } =
-            on_failure(&mut room, load_failure(&catalogs), &required, &catalogs, 0).unwrap()
-        else {
-            panic!("load failure may use the prior complete snapshot")
-        };
-        assert_eq!(target.snapshot_id, 11);
-        assert!(target.skipped_current_retries);
-        assert_eq!(load(&room).unwrap().restarts_used, 0);
-        let directory = tempfile::tempdir().unwrap();
-        let mut room = RoomLock::try_acquire(directory.path()).unwrap();
-        catalogs.get_mut("Master").unwrap().snapshots[1].clock = Some(clock(9, 0.5));
-        let too_old =
-            on_failure(&mut room, load_failure(&catalogs), &required, &catalogs, 0).unwrap();
+        let master = catalogs.get_mut("Master").unwrap();
+        master.latest_world_file = path(&master.session_id, 11);
         assert!(matches!(
-            too_old,
+            resume_pending(&mut room, &required, &catalogs, 40_000)
+                .unwrap()
+                .unwrap(),
             Decision::StayClosed {
-                reason: ClosedReason::UnprovenRollbackTime
+                reason: ClosedReason::CurrentSaveChanged
             }
         ));
-        assert!(load(&room).unwrap().target.is_none());
     }
 
     #[test]
-    fn untrusted_metadata_and_known_failures_never_use_retries() {
+    fn rollback_precedes_the_failed_snapshot_and_never_loses_more_than_three() {
+        let (required, mut catalogs) = catalogs();
+        let master = catalogs.get_mut("Master").unwrap();
+        master.latest_world_file = path(&master.session_id, 11);
+        let latest = latest_room(&required, &catalogs).unwrap();
+        assert_eq!(
+            previous_target(&latest, &catalogs, 11).unwrap().snapshot_id,
+            10
+        );
+
+        let master = catalogs.get_mut("Master").unwrap();
+        master.latest_world_file = path(&master.session_id, 9);
+        let latest = latest_room(&required, &catalogs).unwrap();
+        assert!(matches!(
+            previous_target(&latest, &catalogs, 9),
+            Err(ClosedReason::SnapshotGapExceeded)
+        ));
+
+        for catalog in catalogs.values_mut() {
+            catalog.latest_world_file = path(&catalog.session_id, 12);
+            catalog
+                .snapshots
+                .retain(|snapshot| ![10, 11].contains(&snapshot.snapshot_id));
+        }
+        let latest = latest_room(&required, &catalogs).unwrap();
+        let target = previous_target(&latest, &catalogs, 12).unwrap();
+        assert_eq!(target.snapshot_id, 9);
+        verify_replay(&target, &required, &catalogs).unwrap();
+        let master = catalogs.get_mut("Master").unwrap();
+        master.latest_world_file = path(&master.session_id, 13);
+        master.snapshots.push(Snapshot {
+            snapshot_id: 13,
+            world_file: Some(master.latest_world_file.clone()),
+        });
+        assert!(matches!(
+            verify_replay(&target, &required, &catalogs),
+            Err(ClosedReason::SnapshotGapExceeded)
+        ));
+
+        for catalog in catalogs.values_mut() {
+            catalog.latest_world_file = path(&catalog.session_id, 12);
+            catalog
+                .snapshots
+                .retain(|snapshot| snapshot.snapshot_id != 9);
+        }
+        assert!(matches!(
+            previous_target(&latest, &catalogs, 12),
+            Err(ClosedReason::SnapshotGapExceeded)
+        ));
+    }
+
+    #[test]
+    fn missing_world_files_and_known_failures_never_use_retries() {
         let (required, catalogs) = catalogs();
         for failure in [
             Failure::Disk,
@@ -1059,7 +1025,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut room = RoomLock::try_acquire(directory.path()).unwrap();
         let mut invalid = catalogs.clone();
-        invalid.get_mut("Master").unwrap().snapshots[0].clock = None;
+        invalid.get_mut("Master").unwrap().snapshots[0].world_file = None;
         assert!(matches!(
             on_failure(&mut room, load_failure(&invalid), &required, &invalid, 0).unwrap(),
             Decision::StayClosed {
@@ -1068,25 +1034,16 @@ mod tests {
         ));
         assert!(load(&room).unwrap().target.is_none());
 
-        // A broken clock on the immediately preceding complete snapshot is not
-        // permission to choose an older snapshot, even when that one fits the time limit.
-        explicit_start(&mut room, true).unwrap();
-        invalid = catalogs.clone();
-        let master = invalid.get_mut("Master").unwrap();
-        master.snapshots[0].clock = Some(clock(10, 0.25));
-        master.snapshots[1].clock = None;
         for catalog in invalid.values_mut() {
-            catalog.snapshots[2].clock = Some(clock(9, 0.5));
+            catalog
+                .snapshots
+                .retain(|snapshot| snapshot.snapshot_id == 12);
         }
-        let caves = invalid.get_mut("Caves").unwrap();
-        caves.latest_world_file = path(&caves.session_id, 11);
+        let latest = latest_room(&required, &catalogs).unwrap();
         assert!(matches!(
-            on_failure(&mut room, load_failure(&invalid), &required, &invalid, 0).unwrap(),
-            Decision::StayClosed {
-                reason: ClosedReason::UnprovenRollbackTime
-            }
+            previous_target(&latest, &invalid, 12),
+            Err(ClosedReason::NoPreviousCompleteSnapshot)
         ));
-        assert!(load(&room).unwrap().target.is_none());
     }
 
     #[test]

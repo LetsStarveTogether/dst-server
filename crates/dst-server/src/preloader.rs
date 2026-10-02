@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, ensure};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout_at};
@@ -15,9 +14,7 @@ use crate::configuration::{self, Cluster};
 use crate::driver::{Driver, DriverOptions, DriverState};
 use crate::files::RoomLock;
 use crate::model::{Error, ErrorCode, Result};
-use crate::recovery::{
-    self, Catalog, Catalogs, Clock, Failure, FixedTarget, Snapshot, TargetPhase,
-};
+use crate::recovery::{self, Catalog, Catalogs, Failure, FixedTarget, Snapshot, TargetPhase};
 use crate::room::{Room, StoppedOperation};
 
 /// A cancelled caller stops waiting; native children are killed, reaped and drained
@@ -266,12 +263,6 @@ fn validate_result(state: &DriverState) -> Result<Value> {
     Ok(record.clone())
 }
 
-#[derive(Deserialize)]
-struct NativeSnapshot {
-    snapshot_id: u64,
-    world_file: Option<String>,
-}
-
 fn parse_catalog(lock: &RoomLock, shard: &str, record: &Value) -> anyhow::Result<Catalog> {
     ensure!(
         record["event"] == "recovery_catalog" && record["has_more"].is_boolean(),
@@ -285,39 +276,24 @@ fn parse_catalog(lock: &RoomLock, shard: &str, record: &Value) -> anyhow::Result
         .as_str()
         .context("native catalog has no latest world file")?;
     native_path(shard, session, latest)?;
-    let snapshots: Vec<NativeSnapshot> = serde_json::from_value(record["snapshots"].clone())
+    let snapshots: Vec<Snapshot> = serde_json::from_value(record["snapshots"].clone())
         .context("invalid native snapshot entries")?;
     let mut ids = BTreeSet::new();
     let mut paths = BTreeSet::new();
-    let mut values = Vec::with_capacity(snapshots.len());
-    for snapshot in snapshots {
+    for snapshot in &snapshots {
         ensure!(
             snapshot.snapshot_id > 0
                 && snapshot.snapshot_id <= crate::lua::MAX_SAFE_INTEGER as u64
                 && ids.insert(snapshot.snapshot_id),
             "invalid or duplicate native snapshot identity"
         );
-        let clock = if let Some(file) = &snapshot.world_file {
+        if let Some(file) = &snapshot.world_file {
             ensure!(paths.insert(file.clone()), "duplicate native world file");
             let path = native_path(shard, session, file)?;
             // Validate the native world's file type and every parent without following links.
             lock.open_regular(&path)
                 .context("open native world snapshot")?;
-            let metadata = PathBuf::from(format!(
-                "{}.meta",
-                path.to_str().context("invalid native world path")?
-            ));
-            lock.read_text(metadata)
-                .ok()
-                .and_then(|source| Clock::from_metadata(&source).ok())
-        } else {
-            None
-        };
-        values.push(Snapshot {
-            snapshot_id: snapshot.snapshot_id,
-            world_file: snapshot.world_file,
-            clock,
-        });
+        }
     }
     ensure!(
         paths.contains(latest),
@@ -326,7 +302,7 @@ fn parse_catalog(lock: &RoomLock, shard: &str, record: &Value) -> anyhow::Result
     Ok(Catalog {
         session_id: session.into(),
         latest_world_file: latest.into(),
-        snapshots: values,
+        snapshots,
     })
 }
 
@@ -536,14 +512,12 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
                                 session_id: catalog.session_id.clone(),
                                 snapshot_id: snapshot.snapshot_id,
                                 world_file: snapshot.world_file.clone().unwrap(),
-                                clock: snapshot.clock.clone().unwrap(),
                             },
                         )
                     })
                     .collect(),
                 applied: BTreeSet::new(),
                 phase: TargetPhase::Preparing,
-                skipped_current_retries: false,
             };
             self.room
                 .with_lock(|lock| {
@@ -565,7 +539,7 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
     }
 
     #[tokio::test]
-    async fn reads_native_catalog_with_nul_metadata_and_rejects_unsafe_evidence() {
+    async fn reads_native_catalog_without_metadata_and_rejects_unsafe_evidence() {
         let fixture = Fixture::new(&["Master", "Caves"]);
         fs::remove_file(
             fixture
@@ -577,16 +551,11 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
             .await
             .unwrap();
         assert_eq!(catalogs.len(), 2);
+        assert_eq!(catalogs["Master"].snapshots[0].snapshot_id, 1);
         assert_eq!(
-            catalogs["Master"].snapshots[0]
-                .clock
-                .as_ref()
-                .unwrap()
-                .fraction()
-                .unwrap(),
-            0.3125
+            catalogs["Caves"].snapshots[0].world_file.as_deref(),
+            Some("session/SESSION1/0000000001")
         );
-        assert!(catalogs["Caves"].snapshots[0].clock.is_none());
         for scenario in ["empty", "duplicate", "generation", "ready", "refuse"] {
             fixture.scenario("Master", scenario);
             assert!(

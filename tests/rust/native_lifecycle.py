@@ -6,7 +6,7 @@ The output directory must not already exist; no deployed room is inspected.
 
 # The disposable acceptance harness deliberately polls external processes and uses
 # pycapnp dynamic schema values. All executable paths are explicit test inputs.
-# ruff: file-ignore[suspicious-subprocess-import, subprocess-without-shell-equals-true, missing-return-type-special-method, missing-type-function-argument, missing-return-type-undocumented-public-function, missing-return-type-private-function, missing-type-args, async-function-with-timeout, async-busy-wait, blocking-path-method-in-async-function, too-many-nested-blocks, too-many-statements, pytest-composite-assertion, print]
+# ruff: file-ignore[suspicious-subprocess-import, subprocess-without-shell-equals-true, missing-return-type-special-method, missing-type-function-argument, missing-return-type-undocumented-public-function, missing-return-type-private-function, missing-type-args, async-function-with-timeout, async-busy-wait, blocking-path-method-in-async-function, too-many-nested-blocks, pytest-composite-assertion, print]
 
 import argparse
 import asyncio
@@ -414,6 +414,46 @@ async def synthetic_player(client):
     }
 
 
+async def snapshot_gaps(fixture, evidence):
+    names = [shard["name"] for shard in (await fixture.client.call("status"))["shards"]]
+    source = (
+        "DST_ACCEPT_SAVE=false;"
+        "SaveGame(false,function() DST_ACCEPT_SAVE=true end);"
+        "return true"
+    )
+    for gap in (3, 4):
+        for _ in range(gap):
+            await fixture.client.call("execute_json", {"source": source}, "world-2")
+            async with asyncio.timeout(30):
+                while not await fixture.client.call(
+                    "execute_json",
+                    {"source": "return DST_ACCEPT_SAVE"},
+                    "world-2",
+                ):
+                    await asyncio.sleep(0.1)
+        snapshots = {
+            name: (await fixture.client.call("runtime", shard=name))["snapshot"]
+            for name in names
+        }
+        assert max(snapshots.values()) - min(snapshots.values()) == gap, snapshots
+        evidence["kills"].append(await fixture.kill_agent())
+        fixture.close_container()
+        fixture.launch()
+        if gap == 3:
+            state = await fixture.connect()
+            recovery = state["agent"]["recovery"]
+            assert recovery["closed"] is None, state
+        else:
+            state = await fixture.exited()
+            recovery = state["recovery"]
+            assert recovery["closed"] == "snapshot_gap_exceeded", state
+        assert recovery["restarts_used"] == 1, state
+        evidence[f"snapshot_gap_{gap}"] = {
+            "before": snapshots,
+            "recreated": state,
+        }
+
+
 async def check(arguments, report):
     schema = capnp.load(
         str(Path(__file__).resolve().parents[2] / "crates/dst-server/schema/room.capnp")
@@ -462,30 +502,7 @@ async def check(arguments, report):
                         assert recovery["restarts_used"] == min(attempt, 2), state
                         evidence.setdefault("recreated", []).append(state)
                 else:
-                    source = (
-                        "DST_ACCEPT_SAVE=false;"
-                        "SaveGame(false,function() DST_ACCEPT_SAVE=true end);"
-                        "return true"
-                    )
-                    await fixture.client.call(
-                        "execute_json", {"source": source}, "world-2"
-                    )
-                    async with asyncio.timeout(30):
-                        while not await fixture.client.call(
-                            "execute_json",
-                            {"source": "return DST_ACCEPT_SAVE"},
-                            "world-2",
-                        ):
-                            await asyncio.sleep(0.1)
-                    evidence["kills"].append(await fixture.kill_agent())
-                    fixture.close_container()
-                    fixture.launch()
-                    state = await fixture.exited()
-                    assert state["recovery"]["closed"] == "latest_snapshots_differ", (
-                        state
-                    )
-                    assert state["recovery"]["restarts_used"] == 0, state
-                    evidence["mismatched_recreated"] = state
+                    await snapshot_gaps(fixture, evidence)
                 report_path(arguments, report)
                 print(f"{count} native worlds passed lifecycle acceptance", flush=True)
             finally:

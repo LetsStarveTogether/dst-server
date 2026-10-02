@@ -312,8 +312,11 @@ Intentional restart and Mod maintenance use code `76`.
 The generated Quadlet treats it as successful and forces a restart through the same startup path.
 Update existing Quadlets with the [required restart directives](docs/migration.md#container-exit-contract) before using this lifecycle.
 Retryable failures allow two restarts of the current save, 30 seconds apart.
+The latest snapshot numbers across all required shards may differ by at most `MAX_SNAPSHOT_GAP = 3`.
+Native shard synchronization may change these numbers during a restart.
 Only confirmed save-loading failure can then try one previous complete room snapshot.
-The loss must be proven to be at most one game day per world.
+That target must precede the failed snapshot and be no more than three snapshot numbers behind any shard's latest save.
+The limit counts snapshot numbers, including manual saves; it does not measure game days or require `.meta` clock data.
 Targets are fixed before mutation; interrupted recovery resumes those same targets.
 Unknown state, missing targets, unsupported failure causes or failed recovery leave the room closed.
 Thirty minutes of stable operation restores the budget.

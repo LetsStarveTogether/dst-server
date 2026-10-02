@@ -208,8 +208,16 @@ Normal closure exits the Agent and container with code `0`.
 Abnormal exits, forced termination or an IPC fault require a fresh container, with the recovery decision persisted first.
 Known configuration, disk, permission or Mod problems remain closed and report the cause.
 Retryable faults receive two current-save restarts, 30 seconds apart.
+Current saves may differ by at most `MAX_SNAPSHOT_GAP = 3` across all required shards.
+Larger gaps remain closed with `snapshot_gap_exceeded`.
+Snapshot changes during a started attempt do not block the next retry.
+Startup also waits through the world reload caused by native shard synchronization.
+An unstarted retry still requires its recorded saves.
 After those fail, only a proven load failure may try one previous complete room snapshot.
-Every target must exist, retain the same session, and have verifiable loss of no more than one complete game day.
+Every target must exist in the same session and precede the failed snapshot.
+It must be no more than three snapshot numbers behind any shard's latest save.
+This replaces the one-game-day limit and its dependency on `.meta` clock data.
+Snapshot numbers also advance for manual saves, so this limit does not guarantee a particular number of game days.
 Recovery records absolute targets before applying them and resumes those same targets after interruption.
 It never repeatedly reinterprets "previous snapshot".
 
