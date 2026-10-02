@@ -2,9 +2,9 @@
 
 This page inventories StateGraph, Brain, and Behaviour files.
 
-The StateGraph directory contains 264 Lua files.
+The StateGraph directory contains 265 Lua files.
 
-The Brain directory contains 195 Lua files.
+The Brain directory contains 196 Lua files.
 
 The Behaviour directory contains 29 Lua files.
 
@@ -205,6 +205,7 @@ The Behaviour directory contains 29 Lua files.
 - `scripts/stategraphs/SGshark.lua`
 - `scripts/stategraphs/SGsharkboi.lua`
 - `scripts/stategraphs/SGsharkboi_water.lua`
+- `scripts/stategraphs/SGshrouden.lua`
 - `scripts/stategraphs/SGslurper.lua`
 - `scripts/stategraphs/SGslurtle.lua`
 - `scripts/stategraphs/SGsmallbird.lua`
@@ -424,6 +425,7 @@ The Behaviour directory contains 29 Lua files.
 - `scripts/brains/sharkboi_waterbrain.lua`
 - `scripts/brains/sharkboibrain.lua`
 - `scripts/brains/sharkbrain.lua`
+- `scripts/brains/shroudenbrain.lua`
 - `scripts/brains/slurperbrain.lua`
 - `scripts/brains/slurtlebrain.lua`
 - `scripts/brains/slurtlesnailbrain.lua`

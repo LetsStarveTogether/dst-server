@@ -1,6 +1,6 @@
 # `0x82010000` Prefab Catalog
 
-The Prefab directory contains 1,610 Lua files.
+The Prefab directory contains 1,617 Lua files.
 
 ## `0x82011111` Prefab Files
 
@@ -294,6 +294,8 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/charlie_npc.lua`
 - `scripts/prefabs/charlie_stage.lua`
 - `scripts/prefabs/charliearena_lightrays.lua`
+- `scripts/prefabs/charliearena_spike.lua`
+- `scripts/prefabs/charliearena_teleporter.lua`
 - `scripts/prefabs/charlieresidue.lua`
 - `scripts/prefabs/charlierose.lua`
 - `scripts/prefabs/chessjunk.lua`
@@ -627,6 +629,7 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/junk_pile_big.lua`
 - `scripts/prefabs/junk_pile_common.lua`
 - `scripts/prefabs/junkball.lua`
+- `scripts/prefabs/king_cane.lua`
 - `scripts/prefabs/kitcoon.lua`
 - `scripts/prefabs/kitcoon_nametag.lua`
 - `scripts/prefabs/kitcoondecor.lua`
@@ -1047,6 +1050,7 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/quagmire_swampigelder.lua`
 - `scripts/prefabs/quagmire_syrup.lua`
 - `scripts/prefabs/quagmire_traders.lua`
+- `scripts/prefabs/queen_torch.lua`
 - `scripts/prefabs/rabbit.lua`
 - `scripts/prefabs/rabbithole.lua`
 - `scripts/prefabs/rabbithouse.lua`
@@ -1178,6 +1182,8 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/shovel.lua`
 - `scripts/prefabs/shovel_lunarplant.lua`
 - `scripts/prefabs/shroom_skin.lua`
+- `scripts/prefabs/shrouden.lua`
+- `scripts/prefabs/shrouden_optic_blast.lua`
 - `scripts/prefabs/silk.lua`
 - `scripts/prefabs/singingshell.lua`
 - `scripts/prefabs/sisturn.lua`
@@ -1259,6 +1265,7 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/squidherd.lua`
 - `scripts/prefabs/staff.lua`
 - `scripts/prefabs/staff_castinglight.lua`
+- `scripts/prefabs/staff_common.lua`
 - `scripts/prefabs/staff_lunarplant.lua`
 - `scripts/prefabs/staff_projectile.lua`
 - `scripts/prefabs/staff_tornado.lua`

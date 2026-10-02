@@ -1,6 +1,6 @@
 # `0x10010000` BBC Document Tree Specification
 
-This page applies the `~/gh/BBC` convention to this repository's orientation directory.
+This page applies the [BBC convention](https://github.com/WH-2099/BBC) to this repository's orientation directory.
 
 BBC is a tree convention shared by Markdown directories, topic files, and headings, not a numeric filename prefix.
 
@@ -160,7 +160,7 @@ Writing this page's first H2 as `0x100100001` is invalid because a heading code 
 
 `0x10010001` is also invalid for this heading.
 
-It parses as `D1=1 D2=1 D3=0 F-H1=1 H2=0 H3=0 H4=0 H5=1`.
+It parses as `D1=1 D2=0 D3=0 F-H1=1 H2=0 H3=0 H4=0 H5=1`.
 
 That layout creates H5 without H2, H3, or H4.
 
