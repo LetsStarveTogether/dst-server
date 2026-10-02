@@ -19,6 +19,11 @@ on:
         required: false
         default: false
         type: boolean
+      real_game_tests:
+        description: 'Run native probes with 1, 2, and 5 worlds'
+        required: false
+        default: false
+        type: boolean
       no_cache:
         description: 'Rebuild without using cached image layers'
         required: false
@@ -176,7 +181,7 @@ jobs:
     needs: [sync-dst-scripts, detect, test]
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
     strategy:
@@ -201,6 +206,11 @@ jobs:
           printf '%s' "$REGISTRY_PASSWORD" | podman login quay.io \
             --username "$REGISTRY_USERNAME" --password-stdin
 
+      - name: Record pinned native Lua revision
+        if: ${{ matrix.build }}
+        id: source
+        run: printf 'revision=%s\n' "$(git -C dst-scripts/scripts rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Build image
         if: ${{ matrix.build }}
         id: build
@@ -213,6 +223,7 @@ jobs:
           # ponytail: final-image cache aliases persist; strict expiry needs separate publication.
           extra-args: |
             --pull=always
+            --network=host
             --cache-from=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}
             --cache-to=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}
             --layer-label=quay.expires-after=7d
@@ -220,6 +231,8 @@ jobs:
           build-args: |
             BETA=${{ matrix.beta }}
             GAME_VERSION=${{ matrix.version }}
+            SOURCE_REVISION=${{ needs.sync-dst-scripts.outputs.revision }}
+            NATIVE_SCRIPTS_REVISION=${{ steps.source.outputs.revision }}
           labels: |
             org.opencontainers.image.version=${{ matrix.version }}
             org.opencontainers.image.revision=${{ needs.sync-dst-scripts.outputs.revision }}
@@ -228,38 +241,53 @@ jobs:
             org.opencontainers.image.licenses=MIT
             io.github.letsstarvetogether.dst.channel=${{ matrix.channel }}
 
-      - name: Setup uv for image tests
-        if: ${{ matrix.build }}
-        uses: astral-sh/setup-uv@v10.1.0
-
-      - name: Install Python test dependencies
-        if: ${{ matrix.build }}
-        run: uv sync --locked --all-extras --no-default-groups --group dev
-
       - name: Test native contracts from built image
         if: ${{ matrix.build }}
-        env:
-          DST_SERVER_IMAGE: ${{ steps.build.outputs.image-with-tag }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends lua5.1 luajit
-          scripts_bundle=$(mktemp --suffix=.zip)
-          trap 'rm -f "$scripts_bundle"' EXIT
-          native_container=$(podman create "$DST_SERVER_IMAGE")
-          trap 'podman rm --volumes "$native_container"; rm -f "$scripts_bundle"' EXIT
-          podman cp "$native_container:/install/data/databundles/scripts.zip" "$scripts_bundle"
-          uv run --no-sync -- pytest tests -m 'not system' --scripts-zip "$scripts_bundle"
-
-      - name: Test built image with the real game
-        if: ${{ matrix.build }}
-        timeout-minutes: 40
+        id: native
         shell: bash
         env:
           DST_SERVER_IMAGE: ${{ steps.build.outputs.image-with-tag }}
         run: |
-          podman save "$DST_SERVER_IMAGE" | sudo podman load
-          sudo --preserve-env=DST_SERVER_IMAGE \
-            "$(command -v uv)" run --no-sync -- pytest tests/system -m system -vv --durations=20
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends lua5.1 luajit
+          native_dir=$(mktemp -d)
+          printf 'directory=%s\n' "$native_dir" >> "$GITHUB_OUTPUT"
+          native_container=$(podman create "$DST_SERVER_IMAGE")
+          trap 'podman rm --volumes "$native_container"' EXIT
+          podman cp "$native_container:/install/data/databundles/scripts.zip" "$native_dir/scripts.zip"
+          podman cp "$native_container:/usr/local/bin/dst-server" "$native_dir/dst-server"
+          podman cp "$native_container:/usr/local/share/dst-server/build-manifest.json" "$native_dir/build-manifest.json"
+          "$native_dir/dst-server" scripts verify "$native_dir/scripts.zip"
+          python3 -m zipfile -e "$native_dir/scripts.zip" "$native_dir/source"
+          python3 tests/rust/check_lua.py --scripts "$native_dir/source/scripts"
+          podman run --rm --entrypoint /usr/local/bin/dst-server "$DST_SERVER_IMAGE" --version
+
+      - name: Test built image with the real game
+        if: ${{ matrix.build && inputs.real_game_tests }}
+        timeout-minutes: 60
+        shell: bash
+        env:
+          DST_SERVER_IMAGE: ${{ steps.build.outputs.image-with-tag }}
+          NATIVE_DIRECTORY: ${{ steps.native.outputs.directory }}
+        run: |
+          set -euo pipefail
+          podman save --format oci-archive "$DST_SERVER_IMAGE" | sudo podman load
+          sudo -E python3 tests/rust/native_acceptance.py --image "$DST_SERVER_IMAGE" \
+            --binary "$NATIVE_DIRECTORY/dst-server" \
+            --source-scripts "$NATIVE_DIRECTORY/scripts.zip" \
+            --output "$RUNNER_TEMP/native-acceptance"
+
+      - name: Upload native image verification reports
+        if: ${{ always() && matrix.build }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: native-image-${{ matrix.image_tag }}-${{ matrix.version }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.native.outputs.directory }}/build-manifest.json
+            ${{ runner.temp }}/native-acceptance/**/*.json
+            ${{ runner.temp }}/native-acceptance/**/*.log
+          if-no-files-found: warn
 
       - name: Push to registry
         if: ${{ matrix.build }}

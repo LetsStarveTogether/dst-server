@@ -42,8 +42,8 @@ jobs:
             chore
             revert
 
-  python:
-    name: Python
+  sdk:
+    name: Native SDK and bindings
     permissions:
       contents: read
     uses: ./.github/workflows/test.yml
