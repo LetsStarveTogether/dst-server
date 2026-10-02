@@ -51,6 +51,8 @@ flowchart TD
 - `source.event_listeners[event][listener]` finds callbacks during dispatch.
 - `listener.event_listening[event][source]` supports reverse cleanup.
 - `PushEvent_Internal` calls listener callbacks synchronously first.
+- It copies the callbacks before invoking them, so listener-table changes during dispatch do not alter that dispatch list.
+- A callback receives the source entity as its first argument, even when another entity registered the listener.
 - The SG path differs between `PushEvent` and `PushEventImmediate`.
 - The Brain receives `Brain:PushEvent(event, data)` after the SG branch.
 

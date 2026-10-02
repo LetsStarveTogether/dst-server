@@ -24,6 +24,7 @@ Read `StateGraphInstance:UpdateState` to see why the actual side effect often oc
 | `scripts/stategraph.lua` | `StateGraph` | Indexes states, events, and action handlers |
 | `scripts/stategraph.lua` | `StateGraphInstance` | Stores entity state, `statemem`, and `mem` |
 | `scripts/stategraph.lua` | `SoundFrameEvent` | Plays a sound at a frame with optional volume |
+| `scripts/entityscript.lua` | `EntityScript:PushEvent_Internal` | Schedules an SG event or dispatches it immediately |
 
 ### `0x41012111` Main Runtime Anchors
 
@@ -49,8 +50,9 @@ flowchart TD
     G --> H["UpdateState(dt)"]
     H --> I["ontimeout or TimeEvent.fn"]
     I --> J["PerformBufferedAction / GoToState"]
-    B --> K["PushEvent(event, data)"]
-    K --> L["HandleEvents"]
+    N["EntityScript:PushEvent_Internal"] --> O["SGManager:OnPushEvent"]
+    O --> K["StateGraphInstance:PushEvent buffers event"]
+    K --> L["SGManager:UpdateEvents / HandleEvents"]
     L --> M["State:HandleEvent, then sg.events fallback"]
 ~~~
 
@@ -64,7 +66,11 @@ Without `deststate`, it calls `inst:PerformBufferedAction()` directly.
 
 `StateGraphInstance:HandleEvent` first calls the current state's `State:HandleEvent`.
 Only a truthy state-handler result prevents fallback to `self.sg.events[eventname]`.
-`PushEvent` stores the originating state in `data.state` so a later state's local handler ignores the stale event.
+`EntityScript:PushEvent_Internal` first checks `IsListeningForEvent`.
+It registers buffered work through `SGManager:OnPushEvent`, then calls `StateGraphInstance:PushEvent`.
+`PushEventImmediate` instead dispatches through `StateGraphInstance:HandleEvent` without buffering.
+`StateGraphInstance:PushEvent` stores the originating state name in `data.state`.
+A different state's local handler ignores the event; reentering the same named state does not filter it out.
 The graph-level `self.sg.events[eventname]` fallback can still handle it.
 
 ### `0x41013311` Timed Dispatch
@@ -103,6 +109,10 @@ rg -n "StateGraphWrangler:Update|StateGraphInstance:StartAction|StateGraphInstan
   scripts/stategraph.lua
 
 rg -n "StateGraphInstance:UpdateState|State:HandleEvent" \
+  scripts/stategraph.lua
+
+rg -n "PushEvent_Internal|PushEventImmediate|OnPushEvent|UpdateEvents" \
+  scripts/entityscript.lua \
   scripts/stategraph.lua
 
 rg -n "SoundFrameEvent|PlaySound\\(sound_event" \

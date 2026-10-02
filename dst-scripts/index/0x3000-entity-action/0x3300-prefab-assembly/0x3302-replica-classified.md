@@ -7,7 +7,7 @@ Classifieds are hidden network prefabs in `scripts/prefabs/*_classified.lua`.
 
 ## `0x33021111` Component to Replica
 
-`EntityScript:AddComponent(name)` loads the server component and calls `self:ReplicateComponent(name)`.
+`EntityScript:AddComponent(name)` loads the component class and calls `self:ReplicateComponent(name)`.
 It then constructs the component and stores it in `self.components[name]`.
 When `name` belongs to `REPLICATABLE_COMPONENTS`, `ReplicateComponent` loads `components/name_replica.lua`.
 Both server and client can own replica objects, so replicas are not client-only.
@@ -70,7 +70,8 @@ The player prefab uses manual `_health`, `_hunger`, `_sanity`, and similar tags 
 A typical classified stores `_parent`.
 Client `OnEntityReplicated` calls `TryAttachClassifiedToReplicaComponent` on the parent.
 If the target replica does not exist yet, the classified temporarily remains at `parent.<name>_classified`.
-The replica constructor checks that field later and retries `AttachClassified`.
+The replica constructor checks that field later and takes ownership of the classified.
+It assigns the fields directly or calls its attachment helper.
 This two-sided fallback removes any strict construction-order requirement.
 
 ### `0x33022221` Classified Visibility
@@ -195,7 +196,8 @@ They also list `net_ushortint`, `net_float`, and `net_hash`.
 ## `0x33025211` `net_event`
 
 `net_event` wraps `net_bool`.
-Its `push()` method toggles the Boolean value to fire the corresponding dirty event.
+Its `push()` method calls `set_local(true)` and then `set(true)`.
+The local write forces the following server write to be dirty even when the stored value was already `true`.
 Use it for one-shot pulses rather than persistent state.
 Fields such as `buildevent`, `attackedpulseevent`, and `learnrecipeevent` are event pulses.
 
@@ -226,6 +228,10 @@ rg -n "AttachClassified|OnEntityReplicated|net_|SetClassifiedTarget|TryAttachCla
   scripts/prefabs/player_classified.lua \
   scripts/prefabs/inventory_classified.lua \
   scripts/prefabs/container_classified.lua
+rg -n "REPLICATABLE_COMPONENTS|function net_event:push|set_local|GetIdealUnsignedNetVarForCount" \
+  scripts/entityreplica.lua scripts/netvars.lua
+git -C scripts ls-files 'components/*_replica.lua' | wc -l
+git -C scripts ls-files 'prefabs/*_classified.lua' | wc -l
 ~~~
 
 ### `0x33027111` Minimal Trace

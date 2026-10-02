@@ -26,7 +26,7 @@ Master-sim prefab code usually binds both to the same entity as independent deci
 | File | Entry | Purpose |
 | --- | --- | --- |
 | `scripts/entityscript.lua` | `EntityScript:SetBrain` | Saves `brainfn` and conditionally creates a Brain |
-| `scripts/entityscript.lua` | `EntityScript:RestartBrain` | Clears `_brainstopped` reasons before calling `brain:_Start_Internal()` |
+| `scripts/entityscript.lua` | `EntityScript:RestartBrain` | Removes one stop reason and starts after all reasons are cleared |
 | `scripts/entityscript.lua` | `_DisableBrain_Internal` | Stops and discards the Brain while the entity sleeps or is absent |
 | `scripts/entityscript.lua` | `_EnableBrain_Internal` | Recreates the Brain with `brainfn()` when the entity returns |
 | `scripts/brain.lua` | `Brain:_Start_Internal` | Calls `OnStart`, builds the `BT`, and registers with `BrainManager` |
@@ -98,6 +98,8 @@ Each tick restores the current `tickwaiters[current_tick]` entries to `updaters`
 `_Stop_Internal` calls `OnStop`, stops the `BT`, and removes the Brain from `BrainManager`.
 `Pause` removes a running Brain from the scheduler without changing `stopped`.
 `Resume` calls `AddInstance` when the Brain is not stopped.
+`EntityScript:RestartBrain(reason)` removes only the requested `_brainstopped` reason.
+It starts the Brain only when no stop reasons remain.
 
 #### `0x42013311` Wake-up Paths
 

@@ -91,11 +91,15 @@ flowchart TD
 - `ListenForEvent` writes both `source.event_listeners` and `listener.event_listening`.
 - External listeners should call `RemoveEventCallback` from `OnRemoveFromEntity` or `OnRemoveEntity`.
 - `LoadComponent` injects `WatchWorldState`, but subscriptions remain recorded on `inst.worldstatewatching`.
+- Component removal hooks must release their world state subscriptions and event listeners.
+- `RemoveComponent` does not remove them automatically.
 - Entity `Remove` calls `StopAllWatchingWorldStates` and `RemoveAllEventCallbacks` as final cleanup.
 
 ## `0x31024151` Removal Hooks
 
-- `RemoveComponent` calls component `OnRemoveFromEntity`, then unregisters its replica and actions.
+- `RemoveComponent` stops component updates and clears `inst.components[name]` before calling `OnRemoveFromEntity`.
+- It then calls `UnreplicateComponent` and unregisters component actions.
+- On the master simulation, `UnreplicateComponent` hides an existing replica while leaving its object allocated.
 - `EntityScript:Remove` calls global `OnRemoveEntity(self.GUID)` before `PushEvent("onremove")`.
 - After `onremove`, it clears watchers, event callbacks, and pending tasks.
 - Full entity removal calls `OnRemoveEntity` on components and replica components.
