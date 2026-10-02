@@ -27,6 +27,10 @@ It presents status and coordinates map, chat, crafting, wardrobe, and Scrapbook 
 | `scripts/widgets/controls.lua` | `Controls` | Root HUD widget collection |
 | `scripts/widgets/controls.lua` | `Controls:ToggleMap` | Opens or closes the map screen |
 | `scripts/components/playercontroller.lua` | `PlayerController:IsMapControlsEnabled` | Gates map opening |
+| `scripts/components/pointofinterest.lua` | `_CommonIndicator` | Registers local world markers with the HUD |
+| `scripts/screens/mapscreen.lua` | `ProcessRMBDecorations_TOSS_MAP` | Draws previews for the selected map action |
+| `scripts/screens/redux/optionsscreen.lua` | `_BuildSettings` / `_BuildAdvancedSettings` | Platform-dependent settings |
+| `scripts/widgets/redux/modstab.lua` | `ModsTab` / `DoFocusHookups` | Mod buttons and controller focus |
 
 ### `0x71022111` Widget Anchor
 
@@ -69,8 +73,8 @@ It restores a valid `last_focus`, otherwise it tries `default_focus`.
 ### `0x71023311` HUD Controls
 
 The `Controls` constructor creates action hints, toasts, status displays, inventory, and map and crafting roots.
-`Controls:ToggleMap` checks the `quagmire` game mode, `no_minimap`, and `IsMapControlsEnabled()`.
-`MapScreen` or `QuagmireRecipeBookScreen` opens only after those checks.
+`Controls:ToggleMap` selects `QuagmireRecipeBookScreen` for `quagmire` and otherwise checks `no_minimap`.
+Opening either screen requires `IsMapControlsEnabled()`; closing an open map does not repeat that input gate.
 `Controls:OnUpdate` moves `playeractionhint` behind the player when an item has `golfclub_reticule`.
 This keeps the hint clear of the target.
 
@@ -82,6 +86,9 @@ This keeps the hint clear of the target.
 
 The map is not a regular child drawn by `Controls`.
 `Controls:ToggleMap` adds it to the frontend stack through `TheFrontEnd:PushScreen(MapScreen(self.owner))`.
+`PlayerController:PullUpMap` preserves the active inventory item when it is the selected `maptarget`.
+`MapScreen:ProcessRMBDecorations_TOSS_MAP` reads `rmb.invobject` for its decoration callbacks.
+This lets a map action preview follow the actual action item, including one held by the cursor.
 
 ## `0x71024311` Gameplay Boundary
 
@@ -90,6 +97,24 @@ Input consumption depends on `PlayerHud:OnControl` and the screen stack.
 `PlayerController:ShouldPlayerHUDControlBeIgnored` runs before HUD shortcuts.
 It lets higher-priority mapped controller actions win.
 The HUD is not authoritative server state, so gameplay outcomes must be traced to a component or RPC.
+
+## `0x71024411` POI Visibility
+
+`PointOfInterest` creates local marker, stand, and ring entities through `_CommonIndicator`.
+When a local HUD exists, it registers them through `PlayerHud:AddPOIIndicator` and unregisters them on removal.
+`PlayerHud:Toggle` hides or shows these entities with the HUD.
+New indicators also start hidden when the HUD is hidden.
+`PointOfInterest:OnUpdate` additionally checks `Profile:GetPOIDisplay()` and HUD visibility for its marker.
+
+## `0x71024511` Platform Settings and Mod Controls
+
+`OptionsScreen` exposes the crash-report checkbox on Steam or Rail only when outside gameplay.
+Its callback immediately changes `TheSim:SetCrashReportsEnabled` using the current engine setting.
+The automatic-mod-download option appears only when `CanDownloadWorkshopMods()` is true.
+That helper delegates to the engine when available and defaults to true if the engine method is absent.
+`ModsTab` also hides its clean-all button when Workshop downloading is unavailable.
+Controller focus points to the first available item in `allmodsmenu`.
+Both quick-join screens pass the selected server's `row` with its GUID to `TheNet:JoinServerResponse`.
 
 ## `0x71025100` Verification
 
@@ -108,6 +133,17 @@ rg -n "function Controls:OnUpdate|playeractionhint|golfclub_reticule|SetScreenOf
 
 rg -n "function PlayerController:IsMapControlsEnabled" \
   scripts/components/playercontroller.lua
+
+rg -n "AddPOIIndicator|RemovePOIIndicator|poiindicators|Profile:GetPOIDisplay" \
+  scripts/screens/playerhud.lua scripts/components/pointofinterest.lua
+
+rg -n "PullUpMap|maptarget ~= activeitem|ProcessRMBDecorations_TOSS_MAP|rmb.invobject" \
+  scripts/components/playercontroller.lua scripts/screens/mapscreen.lua
+
+rg -n "show_crashreports|GetCrashReportsEnabled|SetCrashReportsEnabled|CanDownloadWorkshopMods|allmodsmenu" \
+  scripts/screens/redux/optionsscreen.lua scripts/widgets/redux/modstab.lua scripts/modindex.lua
+
+rg -n "JoinServerResponse" scripts/screens/quickjoinscreen.lua scripts/screens/redux/quickjoinscreen.lua
 ~~~
 
 ### `0x71025111` Minimal Trace

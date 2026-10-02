@@ -39,6 +39,7 @@ Its entry presentation data comes from `screens/redux/scrapbookdata.lua`.
 | `scripts/components/skinner.lua` | `Skinner:SetSkinMode` | Selects and applies skin modes |
 | `scripts/prefabskin.lua` | `basic_init_fn` / `AddSkinSounds` | Applies prefab appearance and sounds |
 | `scripts/skinsutils.lua` | skin helpers | Skin lookup and display helpers |
+| `scripts/versioning_skins.lua` | `VERSION` | Current account-item release group |
 | `scripts/networking.lua` | `ValidateRecipeSkinRequest` | Validates ownership, base-prefab membership, and event locks |
 | `scripts/skins_defs_data.lua` | `TheInventory:AddRestrictedBuildFromLua` | Registers restricted inventory builds |
 | `scripts/prefabs/waterprojectiles.lua` | `onequip` / `onunequip` | Applies held waterballoon symbols and events |
@@ -106,6 +107,14 @@ The unskinned path and projectile behaviour remain unchanged.
 `skin_gifts.lua` classifies the waterballoon item, portrait, and profile flair as `TWITCH_DROP` entries.
 It classifies `mysterybox_beach` as `DEFAULT`.
 `body_wathgrithr_ancient` now overrides its character-specific `arm_upper_skin` symbol instead of hiding it.
+Release group 185 adds the Loyal `wagdrone_rolling_fire` skin, displayed as "Alit Terramite".
+`versioning_skins.lua` returns a table containing `VERSION = 185`.
+`versioning.lua` reads `.VERSION` when constructing `CURRENTVERSION`.
+`SetSkinsOnAnim` supports `old_skin` and `young_skin` clothing overrides.
+Mode-specific mappings take priority over character-specific or default alternate mappings.
+`thurible_init_fn` updates both the thurible and its dangling `_body`.
+Voidcloth armor and hat effects publish a `skinbuildhash` for local effects to consume through `skinhashdirty`.
+These presentation hooks do not imply that a skin for each item is registered in the current account-item tables.
 
 ### `0x72023311` Scrapbook Snapshot
 
@@ -115,23 +124,41 @@ Runtime unlock, read, and character-inspection state comes from `scrapbookpartit
 Scrapbook data records the `chesspiece_vault_pillar_guard` build and golden pickaxe finite uses.
 It also records Vault object animation names and dependencies.
 `prefabs/vault_key_activator.lua` sets `scrapbook_anim`, which supplies animation data during generation.
+The allowlist and generated snapshot now include the ritual bosses, organs, and rewards.
+Examples include `worm_boss_shadow`, `king_cane`, `queen_torch`, and `shrouden`.
+Their seen, viewed, and inspected keys are registered separately in `skins_defs_data.lua`.
+The snapshot also classifies `shadowhand` as a thing and records the revised Worm Boss damage.
+Compare generation inputs with the snapshot before attributing a displayed change to runtime behaviour.
 
-### `0x72023411` WX-78 Fishing Text
+### `0x72023411` Character Speech Keys
 
 `speech_wx78.lua` contains blue and green spoon-lure descriptions.
 `languages/strings.pot`, `languages/chinese_s.po`, and `languages/chinese_t.po` contain the matching `msgid` values.
 Text investigations must therefore include both character speech files and the translation templates.
+Character speech represents `DESCRIBE.SHROUDEN` as a table with `GENERIC` and `PUDDLE` variants.
+`KING_CANE` similarly has `GENERIC` and `EMPTY` descriptions.
+Follow these full table paths into `languages/strings.pot`; the older scalar `DESCRIBE.SHROUDEN` key is obsolete.
 
 ### `0x72023511` Online and Offline Text
 
 `strings.lua` defines store-login, online/offline world-conversion, and premium-online membership text.
-No tracked Lua file consumes the new keys directly.
-Treat them as a presentation contract rather than evidence of a new in-tree screen flow.
+`STORE_DISABLE` is consumed by the main menu and purchase screen.
+`OFFLINE_MODE_BODY_PROMPT` and the `CONVERT_OFFLINE_TO_ONLINE` / `CONVERT_ONLINE_TO_OFFLINE` groups have no direct consumers.
+The same applies to `PREMIUM_ONLINE` elsewhere in the tracked Lua source.
+
+### `0x72023611` Crash Reporter Text
+
+`STRINGS.EXTERNAL.CRASHREPORTER` defines translated text for export to external tools.
+The in-game `OptionsScreen` consumes the separate `STRINGS.UI.OPTIONS.CRASHREPORTS` label and tooltip.
+The POT contains eleven external reporter keys.
+The current Chinese PO files contain nine, omitting `IDS_DLG_FILES` and `IDS_DLG_INSTRUCTIONS`.
+Template coverage therefore does not establish that every locale has the same translated keys.
 
 ## `0x72024111` Translation Keys
 
 `DoTranslateStringTable` recursively builds a unique key from the table path.
-It first asks `LanguageTranslator:GetTranslatedString(path)` for a replacement.
+It calls `LanguageTranslator:GetTranslatedString(path)`, or `GetLongestTranslatedString(path)` with `use_longest_locs`.
+Only a nonempty translated value replaces the source value.
 
 ## `0x72024211` Scrapbook Filtering
 
@@ -187,10 +214,26 @@ rg -n "mysterybox_beach|playerportrait_bg_waterballoon_insect|profileflair_water
   scripts/skin_gifts.lua
 
 rg -n \
-  -e "STORE_DISABLE_CONSOLE|OFFLINE_MODE_BODY_PROMPT|PREMIUM_ONLINE" \
+  -e "STORE_DISABLE|OFFLINE_MODE_BODY_PROMPT|PREMIUM_ONLINE" \
   -e "CONVERT_OFFLINE_TO_ONLINE|CONVERT_ONLINE_TO_OFFLINE" \
   scripts/strings.lua \
   scripts/languages/strings.pot
+
+rg -n "STORE_DISABLE" scripts/screens/redux/multiplayermainscreen.lua scripts/screens/redux/purchasepackscreen.lua
+
+rg -n "wagdrone_rolling_fire|versioning_skins|VERSION =|GetPrefabSkinsForReleaseGroup" \
+  scripts/prefabs/skinprefabs.lua scripts/prefabskins.lua scripts/skin_assets.lua scripts/skin_strings.lua \
+  scripts/skins_defs_data.lua scripts/versioning_skins.lua scripts/versioning.lua scripts/skinsutils.lua
+
+rg -n "symbol_overrides_young|src_priority_over_alt|thurible_init_fn|skinbuildhash|skinhashdirty" \
+  scripts/components/skinner.lua scripts/prefabskin.lua scripts/prefabs/armor_voidcloth.lua scripts/prefabs/hats.lua
+
+rg -n "SHROUDEN|KING_CANE|CRASHREPORTER|CRASHREPORTS" \
+  scripts/speech_wilson.lua scripts/strings.lua scripts/languages/strings.pot \
+  scripts/languages/chinese_s.po scripts/languages/chinese_t.po scripts/screens/redux/optionsscreen.lua
+
+rg -n "worm_boss_shadow|king_cane|queen_torch|shrouden|AddScrapbook" \
+  scripts/scrapbook_prefabs.lua scripts/screens/redux/scrapbookdata.lua scripts/skins_defs_data.lua
 
 rg -n "ValidateRecipeSkinRequest|CheckClientOwnership|PREFAB_SKINS|SKINS_EVENTLOCK" \
   scripts/networking.lua \

@@ -20,6 +20,8 @@ Trace a visible or audible result back to `AnimState`, `SoundEmitter`, an FX pre
 | `scripts/mainfunctions.lua` | `require("debugsounds")` | Debug audio startup path |
 | `scripts/stategraphs/SGwilson.lua` | `SoundEmitter:PlaySound` | Plays sounds on StateGraph frames |
 | `scripts/stategraphs/SGwilson.lua` | `SpawnPrefab(...)` | Spawns FX on StateGraph frames |
+| `scripts/components/dynamicmusic.lua` | `StartTriggeredDanger` | Selects event music by name and level |
+| `scripts/mixes.lua` | `gateway_dimension_battle` | Defines arena audio levels |
 
 ### `0x72032111` FX Definitions
 
@@ -82,6 +84,15 @@ The surrounding code identifies the animation frame that triggers the effect.
 Sound debugging records call stacks, positions, looping sounds, and UI sounds.
 It observes behaviour without changing gameplay authority.
 
+### `0x72033511` Arena Music and Overlays
+
+Charlie and Shrouden publish `triggeredevent` on the local player with their current music level.
+`DynamicMusic` maps those names and levels to battle tracks or silence.
+Their Prefabs also push or pop `gateway_dimension_battle`, which lowers ambience and mutes the cloud channel.
+Charlie's standby loop is managed by its Prefab so distance can control its sound parameter.
+`ShroudenOver` attaches to `TheFrontEnd.overlayroot` during its transition animation to remain above screen fades.
+It removes itself from that root on `animqueueover`; it has no per-frame `OnUpdate` loop in this snapshot.
+
 ## `0x72034111` Trace Boundary
 
 Trace a `FrameEvent` or prefab call through its `fx.lua` definition, `MakeFx`, and the client-local `startfx` entity.
@@ -109,6 +120,11 @@ rg -n "c_sounddebug|c_sounddebugui|SoundEmitter.SoundDebug|require\\(\"debugsoun
   scripts/consolecommands.lua \
   scripts/debugsounds.lua \
   scripts/mainfunctions.lua
+
+rg -n "StartTriggeredDanger|triggeredevent|gateway_dimension_battle|EnableStandbyLoop" \
+  scripts/components/dynamicmusic.lua scripts/mixes.lua scripts/prefabs/charlie_boss.lua scripts/prefabs/shrouden.lua
+
+rg -n "TriggerShrouden|overlayroot|animqueueover" scripts/widgets/shroudenover.lua
 ~~~
 
 ### `0x72035111` Minimal Trace

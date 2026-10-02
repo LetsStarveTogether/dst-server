@@ -19,8 +19,10 @@ They are diagnostic entry points, not the main gameplay path.
 | `scripts/debughelpers.lua` | `DumpEntity` | Entity and component inspection |
 | `scripts/debugtools.lua` | `DebugArcAttackHitBox` | Debug-render helpers |
 | `scripts/debugkeys.lua` | `AddGameDebugKey` | Shortcuts enabled by `CHEATS_ENABLED` |
-| `scripts/tools/getmissingstrings.lua` | `strings` | Text coverage tool |
+| `scripts/tools/getmissingstrings.lua` | `GetMissingPrefabStrings` | Text coverage tool |
 | `scripts/tools/generate_worldgenoverride.lua` | `worldgen` | World-settings export tool |
+| `scripts/feedback.lua` | `StartFeedback` | Opens feedback after screenshot capture |
+| `scripts/poc_feedback_stack.lua` | `POC` | Manual feedback-call diagnostic module |
 
 ### `0x72042111` Spawn Anchor
 
@@ -73,6 +75,11 @@ It also rejects entities tagged `locomotor`, `NOCLICK`, `FX`, `DECOR`, or `place
 Finite-use calculations in `d_createscrapbookdata()` ignore two actions.
 They are `ACTIONS.REMOVELUNARBUILDUP` and `ACTIONS.TERRAFORM_REMOVE`.
 This keeps special lunar-buildup and golf-terrain removals out of ordinary Scrapbook tool durability.
+The generator exempts `worm_boss_shadow` from the usual unlockability filter.
+Its floating-animation override excludes delayed projectiles such as `king_cane`.
+`d_spawnitemswithskins(releasegroup)` groups skins through `GetPrefabSkinsForReleaseGroup`.
+It defaults to `require("versioning_skins").VERSION` and requires a local player's user ID.
+It spawns base items beside their skins, skips boats and characters, and removes samples without `AnimState`.
 
 ### `0x72043311` Debug Keys
 
@@ -84,6 +91,16 @@ Their shortcuts and some `d_` commands are therefore absent from normal runtime 
 `generate_worldgenoverride.lua` writes `worldgenoverride.lua`.
 `getmissingstrings.lua` checks string coverage.
 Audit each script's input tables, output files, and dependency on the in-game environment.
+
+### `0x72043511` Feedback Diagnostics
+
+`feedback.StartFeedback` waits for a screenshot before opening `screens/redux/feedbackscreen.lua`.
+It returns early when a screenshot is pending or the frontend already has an error widget.
+`FeedbackScreen:SendFeedback` calls the engine's `TheSim:CreateFeedback` method.
+`poc_feedback_stack.lua` is a separate manual diagnostic with no callers elsewhere in the tracked Lua source.
+Its exported functions call the same engine method, so running them can submit feedback.
+The module comments describe native call-stack checks and cooldowns whose implementation is outside this Lua snapshot.
+Read those statements as unverified native claims; the source queries below only inspect the Lua paths.
 
 ## `0x72044111` Tool Boundaries
 
@@ -107,6 +124,9 @@ rg -n \
 rg -n "REMOVELUNARBUILDUP|TERRAFORM_REMOVE|finiteuses|scrapbook_finiteuses_useamount_modifiers" \
   scripts/debugcommands.lua
 
+rg -n "d_spawnitemswithskins|GetPrefabSkinsForReleaseGroup|versioning_skins|worm_boss_shadow|projectiledelay" \
+  scripts/debugcommands.lua scripts/skinsutils.lua
+
 rg -n "DumpEntity|DumpComponent|DumpUpvalues|DebugArcAttackHitBox|AddGameDebugKey" \
   scripts/debughelpers.lua \
   scripts/debugtools.lua \
@@ -114,6 +134,9 @@ rg -n "DumpEntity|DumpComponent|DumpUpvalues|DebugArcAttackHitBox|AddGameDebugKe
 
 rg -n "package.path|generate_worldgenoverride|GetWorldSettingsOptions|GetMissing" \
   scripts/tools
+
+rg -n "StartFeedback|SendFeedback|CreateFeedback|function POC" \
+  scripts/feedback.lua scripts/screens/redux/feedbackscreen.lua scripts/poc_feedback_stack.lua
 ~~~
 
 ### `0x72045111` Minimal Trace
