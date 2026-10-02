@@ -359,7 +359,9 @@ impl Room {
         self.publish_status();
     }
     fn publish_status(&self) {
-        self.events.publish("lifecycle", &json!({"event":"room_status", "status":self.status(), "observed_timestamp_ns":timestamp()}));
+        let record = json!({"event":"room_status", "status":self.status(), "observed_timestamp_ns":timestamp()});
+        self.events
+            .publish("lifecycle", serde_json::to_vec(&record).unwrap().into());
     }
     fn refresh_shard(&self, state: &DriverState) {
         if let Some(observer) = self.observability.lock().unwrap().as_ref() {
@@ -657,10 +659,22 @@ impl Room {
                     _ => "events",
                 };
                 if let Ok(log) = LogEvent::from_driver(&event, &cluster) {
-                    let mut record = serde_json::to_value(&log).unwrap_or(Value::Null);
-                    record["resource"] = json!(resource);
-                    events.publish(kind, &record);
-                    if !output.submit(&record) {
+                    #[derive(Serialize)]
+                    struct Record<'a> {
+                        #[serde(flatten)]
+                        log: &'a LogEvent,
+                        resource: &'a serde_json::Map<String, Value>,
+                    }
+                    if let Ok(encoded) = serde_json::to_vec(&Record {
+                        log: &log,
+                        resource: &resource,
+                    }) {
+                        let encoded: Arc<[u8]> = encoded.into();
+                        events.publish(kind, encoded.clone());
+                        if !output.submit(&encoded) {
+                            losses.record_log_drop(1);
+                        }
+                    } else {
                         losses.record_log_drop(1);
                     }
                     if let Some(exporter) = &exporter {
@@ -2064,12 +2078,10 @@ impl LocalOutput {
         });
         Self { shared, finished }
     }
-    fn submit(&self, record: &Value) -> bool {
-        let Ok(mut encoded) = serde_json::to_vec(record) else {
-            return false;
-        };
-        let mut framed = b"DST_RECORD|".to_vec();
-        framed.append(&mut encoded);
+    fn submit(&self, encoded: &[u8]) -> bool {
+        let mut framed = Vec::with_capacity(b"DST_RECORD|\n".len() + encoded.len());
+        framed.extend_from_slice(b"DST_RECORD|");
+        framed.extend_from_slice(encoded);
         framed.push(b'\n');
         let (queue, available) = self.shared.as_ref();
         let mut queue = queue.lock().unwrap();

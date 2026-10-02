@@ -55,9 +55,9 @@ struct StreamState {
 pub struct EventHub(Arc<Mutex<Vec<Weak<StreamState>>>>);
 
 impl EventHub {
+    /// Publish JSON already encoded by the source for its local and remote sinks.
     /// A slow subscriber never blocks a game pipe or another subscriber.
-    pub fn publish(&self, kind: &str, record: &Value) {
-        let encoded = serde_json::to_vec(record).ok().map(Arc::<[u8]>::from);
+    pub fn publish(&self, kind: &str, record: Arc<[u8]>) {
         let mut streams = self.0.lock().unwrap();
         streams.retain(|weak| {
             let Some(stream) = weak.upgrade() else {
@@ -70,13 +70,12 @@ impl EventHub {
             if queue.closed {
                 return false;
             }
-            if let Some(data) = encoded.as_ref().filter(|data| {
-                data.len() <= MAX_EVENT
-                    && queue.records.len() < STREAM_ITEMS
-                    && queue.bytes + data.len() <= STREAM_BYTES
-            }) {
-                queue.bytes += data.len();
-                queue.records.push_back(data.clone());
+            if record.len() <= MAX_EVENT
+                && queue.records.len() < STREAM_ITEMS
+                && queue.bytes + record.len() <= STREAM_BYTES
+            {
+                queue.bytes += record.len();
+                queue.records.push_back(record.clone());
             } else {
                 queue.dropped = queue.dropped.saturating_add(1);
             }

@@ -381,11 +381,12 @@ async fn observe(process: &GameProcess, proxy: Option<&str>, events: &EventHub) 
             let line = String::from_utf8_lossy(&bytes);
             let line = line.trim_end_matches(['\r', '\n']);
             let line = proxy.map_or_else(|| line.to_owned(), |proxy| line.replace(proxy, "***"));
-            events.publish("logs", &json!({
+            let record = json!({
                 "event_name": "dst.mod_update", "body": line,
                 "severity_text": "INFO", "observed_timestamp_ns": timestamp(),
                 "attributes": {"stream": if event.stream == StreamKind::Stderr {"stderr"} else {"stdout"}},
-            }));
+            });
+            events.publish("logs", serde_json::to_vec(&record).unwrap().into());
             let message = line
                 .split_once("]: ")
                 .map_or(line.as_str(), |(_, message)| message)

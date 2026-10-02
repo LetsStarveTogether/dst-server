@@ -529,6 +529,7 @@ impl Driver {
     pub fn snapshot(&self) -> DriverState {
         self.handle.inner.snapshot()
     }
+    /// Control and loss changes notify; a contiguous telemetry sequence only updates the value.
     pub fn watch(&self) -> watch::Receiver<DriverState> {
         self.handle.inner.snapshots.subscribe()
     }
@@ -1309,25 +1310,9 @@ fn lifecycle(inner: &Inner, line: &[u8]) -> Result<(), String> {
 }
 
 fn telemetry(inner: &Inner, payload: &[u8]) {
-    let record = serde_json::from_slice::<Value>(payload)
-        .ok()
-        .filter(|record| {
-            payload.len() + b"DST_OTEL|".len() <= MAX_PROTOCOL_LINE_BYTES
-                && record.is_object()
-                && record["v"] == 3
-                && safe_integer(&record["generation"]).is_some()
-                && safe_integer(&record["seq"]).is_some_and(|sequence| sequence > 0)
-                && safe_integer(&record["tick"]).is_some()
-                && safe_integer(&record["monotonic_ms"]).is_some()
-                && (record["cycle"].is_null() || safe_integer(&record["cycle"]).is_some())
-                && (record["session_id"].is_null() || record["session_id"].is_string())
-                && record["event"]
-                    .as_str()
-                    .is_some_and(|event| event.starts_with("dst.") && event.len() <= 128)
-                && record["data"].is_object()
-                && crate::events::validate(record).is_ok()
-        });
-    let accepted = inner.change(|shared| {
+    let record = crate::events::parse(payload).ok();
+    let mut shared = inner.shared.lock().expect("driver state lock");
+    let accepted = (|| {
         let Some(record) = &record else {
             shared.state.invalid_telemetry += 1;
             return false;
@@ -1346,8 +1331,74 @@ fn telemetry(inner: &Inner, payload: &[u8]) {
         shared.state.telemetry_gaps += sequence - shared.state.telemetry_sequence - 1;
         shared.state.telemetry_sequence = sequence;
         true
+    })();
+    inner.snapshots.send_if_modified(|snapshot| {
+        let state = &shared.state;
+        let changed = snapshot.telemetry_gaps != state.telemetry_gaps
+            || snapshot.invalid_telemetry != state.invalid_telemetry
+            || snapshot.stale_telemetry != state.stale_telemetry;
+        snapshot.telemetry_sequence = state.telemetry_sequence;
+        snapshot.telemetry_gaps = state.telemetry_gaps;
+        snapshot.invalid_telemetry = state.invalid_telemetry;
+        snapshot.stale_telemetry = state.stale_telemetry;
+        changed
     });
+    drop(shared);
     if accepted {
         inner.publish(DriverEventKind::Telemetry, record.expect("validated event"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn telemetry_sequence_updates_do_not_wake_control_watchers() {
+        let nonce = Ulid::new().to_string();
+        let driver = Driver::attach(
+            ProcessSpec {
+                program: "python3".into(),
+                args: vec!["-c".into(), "import time; time.sleep(60)".into()],
+                cwd: std::env::temp_dir(),
+            },
+            nonce.clone(),
+            "Master".into(),
+        )
+        .unwrap();
+        let inner = &driver.handle.inner;
+        inner.change(|shared| shared.state.generation = Some(1));
+        let mut states = driver.watch();
+        let mut subscription = driver.subscribe();
+        let mut event = json!({
+            "v":3,"nonce":nonce,"generation":1,"session_id":null,"seq":1,
+            "event":"dst.world.state_changed","tick":1,"monotonic_ms":1,"cycle":null,
+            "data":{"name":"cycles","value":1}
+        });
+        telemetry(inner, &serde_json::to_vec(&event).unwrap());
+        assert!(!states.has_changed().unwrap());
+        assert_eq!(states.borrow().telemetry_sequence, 1);
+        assert_eq!(driver.snapshot().telemetry_sequence, 1);
+        assert_eq!(subscription.recv().await.unwrap().data, event);
+
+        telemetry(inner, &serde_json::to_vec(&event).unwrap());
+        assert!(states.has_changed().unwrap());
+        assert_eq!(states.borrow_and_update().stale_telemetry, 1);
+        telemetry(inner, b"{invalid");
+        assert!(states.has_changed().unwrap());
+        assert_eq!(states.borrow_and_update().invalid_telemetry, 1);
+        event["nonce"] = json!(Ulid::new().to_string());
+        telemetry(inner, &serde_json::to_vec(&event).unwrap());
+        assert_eq!(states.borrow_and_update().invalid_telemetry, 2);
+
+        event["nonce"] = json!(nonce);
+        event["seq"] = json!(3);
+        telemetry(inner, &serde_json::to_vec(&event).unwrap());
+        assert!(states.has_changed().unwrap());
+        assert_eq!(states.borrow_and_update().telemetry_gaps, 1);
+        assert_eq!(subscription.recv().await.unwrap().data, event);
+        assert_eq!(driver.snapshot().telemetry_sequence, 3);
+        assert_eq!(subscription.dropped(), 0);
+        driver.kill().await.unwrap();
     }
 }

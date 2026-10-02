@@ -20,10 +20,10 @@ fn frozen_schema_covers_every_producer_and_preserves_values() {
         54
     );
     let value = record();
-    assert_eq!(events::parse(&value.to_string()).unwrap(), value);
+    assert_eq!(events::parse(value.to_string()).unwrap(), value);
     let mut boolean = record();
     boolean["data"] = json!({"name": "israining", "value": false});
-    assert_eq!(events::parse(&boolean.to_string()).unwrap(), boolean);
+    assert_eq!(events::parse(boolean.to_string()).unwrap(), boolean);
 
     let mut migration = record();
     migration["event"] = json!("dst.player.migration_started");
@@ -33,7 +33,7 @@ fn frozen_schema_covers_every_producer_and_preserves_values() {
         "destination_shard_id": "2", "portal_id": null,
         "destination": {"x": 0, "y": 0, "z": 0}
     });
-    assert_eq!(events::parse(&migration.to_string()).unwrap(), migration);
+    assert_eq!(events::parse(migration.to_string()).unwrap(), migration);
 }
 
 #[test]
@@ -65,6 +65,11 @@ fn event_variants_reject_bad_shapes_and_unsafe_native_counters() {
         invalid[field] = value;
         assert_eq!(
             events::validate(&invalid).unwrap_err().code,
+            ErrorCode::Invalid,
+            "{invalid}"
+        );
+        assert_eq!(
+            events::parse(invalid.to_string()).unwrap_err().code,
             ErrorCode::Invalid,
             "{invalid}"
         );
@@ -101,11 +106,19 @@ fn diagnostics_are_sanitized_and_bounded() {
             .message
             .contains("SECRET_TOKEN")
     );
-    assert!(events::parse(&" ".repeat(events::MAX_EVENT_BYTES + 1)).is_err());
+    assert!(events::parse(" ".repeat(events::MAX_EVENT_BYTES + 1)).is_err());
+    let padded = format!(
+        "{:width$}",
+        record().to_string(),
+        width = events::MAX_EVENT_BYTES
+    );
+    assert_eq!(events::parse(&padded).unwrap(), record());
+    assert!(events::parse(&(padded + " ")).is_err());
     let mut large = record();
     large["data"] = json!({"name": "season", "value": "x".repeat(events::MAX_EVENT_BYTES)});
     assert!(events::validate(&large).is_err());
     let mut nonfinite = record();
     nonfinite["data"]["value"] = serde_json::from_str("1e400").unwrap();
     assert!(events::validate(&nonfinite).is_err());
+    assert!(events::parse(nonfinite.to_string()).is_err());
 }
