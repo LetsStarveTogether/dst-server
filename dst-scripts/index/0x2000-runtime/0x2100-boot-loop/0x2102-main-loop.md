@@ -41,9 +41,12 @@ flowchart TD
     R --> S["queues, wall components, audio, camera, input, frontend"]
     A["engine tick"] --> B["update.lua: Update(dt)"]
     B --> C["RunScheduler for each unseen tick"]
-    C --> D["StaticComponentUpdates"]
+    C --> CC{"SimShuttingDown?"}
+    CC -->|yes| CD["return"]
+    CC -->|no| D["StaticComponentUpdates"]
     D --> E["component OnUpdate(dt)"]
-    E --> F["SGManager:Update(i)"]
+    E --> EE["for each unseen simulation tick"]
+    EE --> F["SGManager:Update(i)"]
     F --> G["BrainManager:Update(i)"]
     H["engine static tick"] --> I["StaticUpdate(dt)"]
     I --> J["RunStaticScheduler for each unseen static tick"]
@@ -72,9 +75,15 @@ It uses `TheSim:GetTick()` and `last_tick_seen` to run every unprocessed tick th
 
 Component `OnUpdate(dt)` runs after the scheduler and before StateGraphs and Brains.
 
+If `SimShuttingDown` is true after the scheduler phase, `Update(dt)` returns.
+
+It skips components, StateGraphs, Brains, and the `last_tick_seen` assignment.
+
 ### `0x21023121` StateGraphs and Brains
 
-`SGManager:Update(i)` and `BrainManager:Update(i)` run at the end of the tick loop in `update.lua`.
+`SGManager:Update(i)` and `BrainManager:Update(i)` share a second catch-up loop after component updates.
+
+All unseen scheduler ticks run before that loop begins.
 
 `RunScheduler()` does not call either manager.
 
@@ -96,7 +105,9 @@ It does not call `SGManager:Update()` while paused.
 
 If the engine advances several ticks at once, scheduler, StateGraph, and Brain work catches up per unseen tick.
 
-`StaticComponentUpdates` callbacks and entity component `OnUpdate(dt)` still run once per `Update(dt)` call.
+`StaticComponentUpdates` callbacks and entity component `OnUpdate(dt)` run once per accepted call.
+
+Duplicate ticks and shutdown return before these phases.
 
 ## `0x21024121` Update Sets
 
@@ -116,6 +127,7 @@ rg -n \
   -e "function PostPhysicsWallUpdate" \
   -e "RunScheduler" \
   -e "RunStaticScheduler" \
+  -e "SimShuttingDown" \
   -e "OnUpdate\\(dt\\)" \
   -e "SGManager:Update" \
   -e "BrainManager:Update" \

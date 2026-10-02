@@ -91,9 +91,13 @@ A command definition can include `localfn`, `serverfn`, permission checks, vote 
 
 Both call the local `runcommand` dispatcher.
 
-Commands with `COMMAND_RESULT.ALLOW` queue their permitted functions in `cmdqueue`.
+For `COMMAND_RESULT.ALLOW`, the client queues `localfn` and sends `serverfn` requests through `TheNet:SendSlashCmdToServer`.
+
+The server queues permitted `serverfn` calls in its own `cmdqueue`.
 
 `WallUpdate` drains it through `HandleUserCmdQueue`, while vote commands call `TheNet:StartVote`.
+
+The queue accepts at most ten functions per user between drains.
 
 ### `0x23023311` Frame Updates
 
@@ -147,11 +151,12 @@ A user command can enter a vote instead of immediately running `serverfn`.
 
 `worldvoter.lua` calls `UserCommands.CanUserStartVote` from `OnStartVote`.
 
-Its failure log formats `starteruserid` with `tostring`, so a nil or non-string value cannot break the logging path.
+The permission-failure log formats `starteruserid` with `tostring`, allowing a missing starter ID to be reported.
 
 ## `0x23025100` Verification
 
 ~~~bash
+git -C scripts ls-files tools
 rg -n \
   -e "AddUserCommand" \
   -e "RunUserCommand" \
@@ -159,6 +164,8 @@ rg -n \
   -e "parseinput" \
   -e "runcommand" \
   -e "HandleUserCmdQueue" \
+  -e "SendSlashCmdToServer" \
+  -e "SLASH_CMDS_PER_TICK_LIMIT" \
   -e "StartVote" \
   -e "TestStrings" \
   -e "MISSINGSTRINGS" \
