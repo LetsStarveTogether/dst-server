@@ -226,6 +226,63 @@ function scenarios.loaded_off() player_loaded("off") end
 function scenarios.loaded_critical() player_loaded("critical") end
 function scenarios.loaded_history() player_loaded("history") end
 
+local function complete_load(inst)
+    POSTACTIVATEHANDSHAKE = { NONE = 0, CTS_LOADED = 1, STC_SENDINGSTATE = 2, READY = 3 }
+    inst._PostActivateHandshakeState_Server = POSTACTIVATEHANDSHAKE.NONE
+    require("prefabs/player_common_extensions").OnPostActivateHandshake_Server(inst, POSTACTIVATEHANDSHAKE.READY)
+end
+
+local function player_lifecycle_failure(profile)
+    require("prefabs/player_common_extensions").OnRespawnFromVineSave = nil
+    local driver = require("dst_server")
+    local health = driver.install(options(profile))
+    assert(health.capabilities.players == "active", "optional revival capture must not block readiness")
+    assert(health.capabilities.player_lifecycle == "failed" and health.telemetry_status == "degraded")
+    assert(health.last_error.stage == "player_lifecycle.install")
+    complete_load(player)
+    local joining = entity("willow", 4, "KU_JOINING")
+    TheWorld:PushEvent("ms_playerjoined", joining)
+    complete_load(joining)
+    assert(#records("dst.player.loaded") == 2 and #records("dst.player.shard_entered") == 1)
+    player:PushEvent("ms_becameghost")
+    assert(#records("dst.player.ghosted") == 1, "other lifecycle capture survives")
+end
+
+function scenarios.player_lifecycle_failure_critical() player_lifecycle_failure("critical") end
+function scenarios.player_lifecycle_failure_history() player_lifecycle_failure("history") end
+
+function scenarios.player_listener_failure()
+    local joining = entity("willow", 4, "KU_JOINING")
+    for _, inst in ipairs({ player, joining }) do
+        local listen = inst.ListenForEvent
+        inst.ListenForEvent = function(self, name, callback)
+            if name == "ms_becameghost" then error("SECRET_TOKEN private chat", 0) end
+            return listen(self, name, callback)
+        end
+    end
+    local driver = require("dst_server")
+    assert(driver.install(options()).capabilities.players == "active")
+    complete_load(player)
+    TheWorld:PushEvent("ms_playerjoined", joining)
+    complete_load(joining)
+    local health = driver.call("health")
+    assert(health.capabilities.players == "active" and health.telemetry_status == "degraded")
+    assert(health.errors == 2 and health.last_error.stage == "player.attach")
+    assert(#records("dst.player.loaded") == 2 and #records("dst.player.shard_entered") == 1)
+    assert_safe()
+end
+
+function scenarios.player_activity_failure()
+    local listen = player.ListenForEvent
+    player.ListenForEvent = function(self, name, callback)
+        if name == "ms_skilltreeinitialized" then error("required listener failed", 0) end
+        return listen(self, name, callback)
+    end
+    local health = require("dst_server").install(options())
+    assert(health.capabilities.players == "failed", "required activity still controls readiness")
+    assert(health.last_error.stage == "players.install")
+end
+
 function scenarios.active()
     local driver = install()
     TheWorld.watchers.cycles(TheWorld, 2)

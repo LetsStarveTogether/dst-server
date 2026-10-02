@@ -14,9 +14,6 @@ function world_events.install_players()
     for _, player in ipairs(AllPlayers) do
         player_events.attach(player)
     end
-    if state.requested_profile ~= "off" then
-        player_events.install_lifecycle()
-    end
 end
 
 function world_events.install_world()
