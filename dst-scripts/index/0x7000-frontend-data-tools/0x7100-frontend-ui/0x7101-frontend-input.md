@@ -12,6 +12,8 @@ It calls `self.oncontrol:HandleEvent(...)` only when the frontend does not consu
 
 `FrontEnd:OnControl` maps `CONTROL_PRIMARY` to `CONTROL_ACCEPT` for the top screen.
 It also handles `CONTROL_OPEN_DEBUG_CONSOLE`, `CONTROL_OPEN_DEBUG_MENU`, console logging, and debug-render toggles.
+`CONTROL_SEND_FEEDBACK` calls `feedback.StartFeedback()` when `TheSim:FeedbackEnabled()` permits it.
+This check runs before the disabled-controls and screen-stack branches.
 
 ## `0x71012000` Source Anchors
 
@@ -74,8 +76,10 @@ It also asks `playercontroller:ShouldPlayerHUDControlBeIgnored` whether the HUD 
 ## `0x71014111` `FrontEnd` State
 
 `screenstack` owns screen lifecycle.
-`PushScreen` calls `AddChild`, `MoveToFront`, assigns default focus, and runs `Update(0)`.
-`PopScreen` calls `OnBecomeInactive`, `OnDestroy`, and `RemoveChild`, then restores the new top screen.
+`PushScreen` adds the screen to `screenroot` and moves the console and server-pause overlays to the front.
+It assigns default focus when mouse tracking is inactive, activates the screen, and runs `Update(0)`.
+`PopScreen` calls `OnDestroy` and `RemoveChild` for the removed screen.
+It calls `OnBecomeInactive` only when removing the top screen, then activates the newly exposed screen.
 `PopScreen(screen)` can also remove a non-top screen from `screenstack`.
 
 ## `0x71014211` `Input` Events
@@ -99,7 +103,7 @@ rg -n "function Input:OnControl|not TheFrontEnd:OnControl|self.oncontrol:HandleE
 rg -n "function Input:OnMouseButton|function Input:OnRawKey|AddKeyHandler" \
   scripts/input.lua scripts/frontend.lua
 
-rg -n "function FrontEnd:OnControl|function FrontEnd:PushScreen|function FrontEnd:PopScreen" \
+rg -n "function FrontEnd:OnControl|function FrontEnd:PushScreen|function FrontEnd:PopScreen|CONTROL_SEND_FEEDBACK" \
   scripts/frontend.lua
 
 rg -n "function PlayerHud:OnControl|ShouldPlayerHUDControlBeIgnored|CONTROL_MAP|CONTROL_PAUSE|CONTROL_TOGGLE_SAY" \
