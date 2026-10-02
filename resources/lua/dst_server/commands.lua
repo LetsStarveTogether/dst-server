@@ -77,7 +77,7 @@ function commands.rollback_to_snapshot(args)
 
     local target
     local fetch = 100
-    while target == nil do
+    while true do
         local snapshots, has_more = TheNet:ListSnapshots(session_id, TheNet:IsOnlineMode(), fetch)
         for _, snapshot in ipairs(snapshots) do
             if snapshot.snapshot_id == snapshot_id then
@@ -85,7 +85,8 @@ function commands.rollback_to_snapshot(args)
                 break
             end
         end
-        if target == nil and not has_more then
+        if target ~= nil then break end
+        if not has_more then
             wire.reject()
         end
         if fetch >= 6400 then error("snapshot catalog exceeds 6400 entries") end
