@@ -49,6 +49,7 @@ impl StoppedOperation {
 
 pub struct Room {
     directory: PathBuf,
+    cluster_name: String,
     executable: PathBuf,
     runtime: Mutex<Option<tokio::runtime::Handle>>,
     lock: Mutex<Option<RoomLock>>,
@@ -104,6 +105,17 @@ impl Room {
         let (status, _) = watch::channel(initial);
         let (interrupted, _) = watch::channel(0);
         Ok(Arc::new(Self {
+            cluster_name: std::env::var("DST_SERVER_CLUSTER_NAME")
+                .ok()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| {
+                    cluster
+                        .directory
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                }),
             directory: cluster.directory.clone(),
             executable: executable.as_ref().to_owned(),
             runtime: Mutex::new(tokio::runtime::Handle::try_current().ok()),
@@ -359,14 +371,7 @@ impl Room {
     }
     fn refresh_shard(&self, state: &DriverState) {
         if let Some(observer) = self.observability.lock().unwrap().as_ref() {
-            observer.observe_state(
-                state,
-                &self
-                    .directory
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy(),
-            );
+            observer.observe_state(state, &self.cluster_name);
         }
         self.status.send_modify(|status| {
             if let Some(shard) = status
@@ -500,18 +505,13 @@ impl Room {
                 Target::Shard(name) => Some(name.as_str()),
                 Target::Room => None,
             };
-            let cluster = room
-                .directory
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
             let session = room
                 .drivers()
                 .get(shard.unwrap_or(&room.master()))
                 .and_then(|driver| driver.snapshot().session_id);
             let observation = room.observability.lock().unwrap().as_ref().map(|observer| {
                 observer.begin_operation(
-                    &cluster,
+                    &room.cluster_name,
                     shard,
                     envelope.request.method(),
                     session.as_deref(),
@@ -641,12 +641,7 @@ impl Room {
         let resource = self.resource.lock().unwrap().clone();
         let output = self.output.clone();
         let losses = self.losses.clone();
-        let cluster = self
-            .directory
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        let cluster = self.cluster_name.clone();
         if let Some(observer) = &observer {
             observer.observe_state(&driver.snapshot(), &cluster);
         }

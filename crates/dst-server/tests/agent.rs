@@ -79,6 +79,7 @@ if not prepared.exists():
             .arg(&root)
             .arg("--executable")
             .arg(game)
+            .env("DST_SERVER_CLUSTER_NAME", "dst-fixture")
             .env("OTEL_LOGS_EXPORTER", "none")
             .env("OTEL_METRICS_EXPORTER", "none")
             .env("OTEL_TRACES_EXPORTER", "none")
@@ -282,6 +283,16 @@ async fn closed_agent_serves_queries_and_accepted_work_survives_disconnect() {
     );
     agent.wait(0).await;
     assert!(!agent.root.join(".dst-agent.sock").exists());
+    let records: Vec<Value> = agent
+        .log()
+        .lines()
+        .filter_map(|line| line.strip_prefix("DST_RECORD|"))
+        .map(|record| serde_json::from_str(record).unwrap())
+        .collect();
+    assert!(!records.is_empty());
+    for record in records {
+        assert_eq!(record["attributes"]["dst.cluster.name"], "dst-fixture");
+    }
 }
 
 #[tokio::test]
