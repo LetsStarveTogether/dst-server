@@ -76,6 +76,7 @@ flowchart TD
     I -->|false| J["client returns pristine entity"]
     I -->|true| K["server AddComponent / SetStateGraph / SetBrain"]
     K --> L["PrefabPostInit + entity_spawned"]
+    J --> L
 ~~~
 
 ### `0x33013111` Declaration Fields
@@ -99,9 +100,11 @@ State that must reach remote clients initially needs a tag, netvar, or network c
 
 ### `0x33013221` After `SetPristine`
 
-Place server components, SG, Brain, and persistence in the master simulation branch.
+Place authoritative components, SG, Brain, and persistence in the master simulation branch.
 Authoritative event listeners belong there too.
 The client path cannot depend on server-only components after returning.
+Client components and prediction SGs have their own setup paths.
+`player_common.lua:OnSetOwner` adds `playercontroller` and `playeractionpicker` for the local player and on the server.
 Documentation that treats a server component as directly client-readable crosses this boundary incorrectly.
 
 ## `0x33014111` Creature Example: `scripts/prefabs/rabbit.lua`
@@ -162,6 +165,7 @@ rg -n "SetPristine|TheWorld\\.ismastersim|SetStateGraph|SetBrain|return Prefab" 
   scripts/prefabs/rabbit.lua \
   scripts/prefabs/player_common.lua \
   scripts/prefabutil.lua
+rg -n "OnSetOwner|playercontroller|playeractionpicker|SGwilson_client" scripts/prefabs/player_common.lua
 rg -n "MakeDeployableKitItem|deployable_data\\.ondeploy" scripts/prefabutil.lua
 rg -n "MakeGolfObstaclePhysics|GolfObstacle_OnEntityWake|MakeFumaroleTool|fumarole_UpdateTemperatureModifier" \
   scripts/standardcomponents.lua

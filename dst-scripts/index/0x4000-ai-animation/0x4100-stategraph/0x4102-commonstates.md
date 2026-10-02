@@ -23,6 +23,8 @@ Event entry points often come from `CommonHandlers.On*`, while transitions still
 | `scripts/stategraphs/commonstates.lua` | `CommonStates.AddFrozenStates` | Adds `frozen` and `thaw` |
 | `scripts/stategraphs/commonstates.lua` | `CommonStates.AddCombatStates` | Adds `hit`, `attack`, and `death` |
 | `scripts/stategraphs/commonstates.lua` | `CommonStates.AddInitState` | Adds the default `init` entry state |
+| `scripts/stategraphs/commonstates.lua` | `CommonStates.AddStalkerCorruptionStates` | Adds corruption stun, transformation, and recovery states |
+| `scripts/components/corruption.lua` | `Corruption:OnUntargetCorruptable` | Sends `interruptcorruption` when targeting ends |
 | `scripts/stategraphs/SGrabbit.lua` | `CommonStates.Add*` | Shows the helpers in a small creature graph |
 
 ### `0x41022111` Helper Anchors
@@ -67,7 +69,7 @@ The concrete SG puts them in its global `events` table, where `StateGraphInstanc
 
 `CommonStates.AddRunStates` adds `run_start`, `run`, and `run_stop`.
 `animover` moves `run_start` into `run`.
-Its `onenter` calls `locomotor:RunForward()` and sets a timeout from the animation length.
+`run.onenter` calls `locomotor:RunForward()` and sets a timeout from the animation length.
 `run_stop` stops movement and returns to idle after `animqueueover`.
 
 ## `0x41024211` Combat States
@@ -81,12 +83,29 @@ It saves the target in `inst.sg.statemem.target` for the timeline's attack.
 `CommonStates.AddInitState` adds `init`.
 It enters `corpse_idle` when `inst.is_corpse` is set and otherwise enters the default state.
 
+## `0x41024411` Corruption Cancellation
+
+`CommonHandlers.OnStalkerCorrupt()` routes `stalker_corruption_stun` into the state added by `AddStalkerCorruptionStates`.
+While stunned, `startcorruption` enters `stalker_corruption_pre`.
+That state transforms the entity into its shadow prefab after the animation.
+`interruptcorruption` instead plays `stun_pst`, records `statemem.exitstate`, and returns to `idle` on `animover`.
+`Corruption:OnUntargetCorruptable` sends that cancellation event when the casting staff releases its target.
+`SGbat.lua` and `SGrocky.lua` use the shared helper.
+`SGworm_boss_head.lua` implements equivalent stun handlers and clears worm invincibility on exit.
+
 ## `0x41025100` Verification
 
 ~~~bash
 rg -n "CommonStates.AddRunStates|CommonStates.AddCombatStates|CommonStates.AddInitState|CommonHandlers.On" \
   scripts/stategraphs/commonstates.lua \
   scripts/stategraphs/SGrabbit.lua
+
+rg -n "AddStalkerCorruptionStates|OnStalkerCorrupt|interruptcorruption|OnUntargetCorruptable" \
+  scripts/stategraphs/commonstates.lua \
+  scripts/stategraphs/SGbat.lua \
+  scripts/stategraphs/SGrocky.lua \
+  scripts/stategraphs/SGworm_boss_head.lua \
+  scripts/components/corruption.lua
 ~~~
 
 ### `0x41025111` Minimum Trace

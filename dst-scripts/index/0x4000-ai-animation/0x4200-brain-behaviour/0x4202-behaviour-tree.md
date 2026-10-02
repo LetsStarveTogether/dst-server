@@ -24,13 +24,14 @@ Each Brain update runs `Visit`, `SaveStatus`, and `Step` in that order.
 | File | Entry | Purpose |
 | --- | --- | --- |
 | `scripts/behaviourtree.lua` | `BT:Update` | Runs `Visit()`, `SaveStatus()`, then `Step()` |
-| `scripts/behaviourtree.lua` | `PriorityNode:Visit` | Selects the highest-priority successful or running child |
+| `scripts/behaviourtree.lua` | `PriorityNode:Visit` | Selects by child order with exceptions for event priority |
 | `scripts/behaviourtree.lua` | `SequenceNode:Visit` | Stops at the first failed or running child |
 | `scripts/behaviourtree.lua` | `ParallelNode:Visit` | Fails on any failure and succeeds when all children finish |
-| `scripts/behaviourtree.lua` | `EventNode:OnEvent` | Triggers the node, wakes the Brain, and resets parent priority timing |
+| `scripts/behaviourtree.lua` | `EventNode:OnEvent` | Triggers the node, wakes the Brain, and resets ancestor priority timing |
 | `scripts/behaviours/doaction.lua` | `DoAction:Visit` | Gets a `BufferedAction`, installs callbacks, and calls `PushAction` |
 | `scripts/behaviours/chaseandattack.lua` | `ChaseAndAttack:Visit` | Drives `combat` and `locomotor` directly |
 | `scripts/behaviours/runaway.lua` | `RunAway:Visit` | Finds a threat, moves away, and sets a sleep time |
+| `scripts/brains/braincommon.lua` | `BrainCommon.RunAwayFromQueenTorch` | Builds a shared escape node for shadow creatures |
 
 ### `0x42022110` Base Node
 
@@ -66,19 +67,23 @@ flowchart TD
 ### `0x42023110` PriorityNode
 
 After its `period` expires, `PriorityNode` visits children in order.
-It stores the first `SUCCESS` or `RUNNING` child index in `self.idx`.
+It normally stores the first `SUCCESS` or `RUNNING` child index in `self.idx`.
+If the previous selection was an `EventNode`, later event children can still replace the selection.
+Those events must have at least the previous event's priority.
 Before the next evaluation time, it visits only the currently running child.
 
 #### `0x42023111` Priority Conditions
 
 - A Brain with `period = 0` can reevaluate every update.
-- `EventNode` can clear its parent `PriorityNode.lasttime` for high-priority reevaluation on the next Brain update.
+- `EventNode` clears `lasttime` on every ancestor `PriorityNode` for reevaluation on the next Brain update.
 - A running `PriorityNode:GetSleepTime` returns the next reevaluation interval.
 
 ### `0x42023210` Sequence, Selector, and Parallel Nodes
 
 `SequenceNode` stops on `FAILED` or `RUNNING`, while `SelectorNode` stops on `SUCCESS` or `RUNNING`.
 `ParallelNode` visits multiple children, fails when any child fails, succeeds when all finish, and otherwise remains running.
+`ParallelNodeAny` uses the same failure rule.
+It succeeds when any child finishes successfully, provided no visited child fails.
 
 #### `0x42023211` WhileNode Structure
 
@@ -122,6 +127,15 @@ The directional branch returns `SUCCESS` after reaching a safe distance.
 - An invalid threat stops movement and produces `FAILED`.
 - Continued escape calls `self:Sleep(.25)`.
 
+### `0x42023340` Queen Torch Escape
+
+`BrainCommon.RunAwayFromQueenTorch(inst)` supplies `RunAway` with a custom target getter.
+It sets a detection distance of 10 and a safe distance of 15.
+The getter calls `FindClosestQueenTorch` in `scripts/prefabs/queen_torch.lua`.
+That function searches registered torch lights within `TUNING.QUEEN_TORCH_RADIUS_SQ`.
+Brains such as `shadowcreaturebrain.lua`, `hostedbrain.lua`, and `charlie_boss_runnerbrain.lua` place this node before pursuit.
+`oceanshadowcreaturebrain.lua` pairs it with an `ActionNode` in a `ParallelNode` to detach from a boat while escaping.
+
 ## `0x42024110` Sleep-Time Propagation
 
 `BT:GetSleepTime` delegates to the root's `GetTreeSleepTime`, unless `BT.forceupdate` makes it return `0`.
@@ -139,7 +153,7 @@ When no sleep time exists, it returns `nil` and `BrainManager` moves the Brain t
 
 `EventNode` listens to an entity event from construction time.
 On an event, it stores `triggered` and `data`, then calls `brain:ForceUpdate()`.
-It also forces its parent `PriorityNode` to reevaluate.
+It also forces every ancestor `PriorityNode` to reevaluate through `DoToParents`.
 
 ### `0x42024211` Event Check
 
@@ -155,6 +169,14 @@ rg -n "DoAction:Visit|ChaseAndAttack:Visit|RunAway:Visit|Sleep\\(|PushAction|Try
   scripts/behaviours/doaction.lua \
   scripts/behaviours/chaseandattack.lua \
   scripts/behaviours/runaway.lua
+
+rg -n "RunAwayFromQueenTorch|FindClosestQueenTorch|_detach_from_boat_fn" \
+  scripts/brains/braincommon.lua \
+  scripts/brains/shadowcreaturebrain.lua \
+  scripts/brains/hostedbrain.lua \
+  scripts/brains/charlie_boss_runnerbrain.lua \
+  scripts/brains/oceanshadowcreaturebrain.lua \
+  scripts/prefabs/queen_torch.lua
 ~~~
 
 ### `0x42025110` Reading Order

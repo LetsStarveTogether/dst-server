@@ -31,6 +31,7 @@ Side effects occur later through `bufferedaction.lua` and `actions.lua`.
 | `scripts/componentactions.lua` | `EntityScript:CollectActions` | Call matching component collectors. |
 | `scripts/componentactions.lua` | `EntityScript:IsActionValid` | Check candidate visibility through `ISVALID`. |
 | `scripts/actions.lua` | `ACTIONS` | Define the actions referenced by candidates. |
+| `scripts/components/corruption.lua` | `CorruptEnt` | Execute the corruption action on the server. |
 
 ### `0x32012111` PlayerActionPicker Anchor
 
@@ -122,7 +123,8 @@ Network entities synchronize these IDs through `actionreplica.actioncomponents` 
 The `Action` constructor normalizes `data.rmb = false` to `nil`.
 The function then runs validators from `COMPONENT_ACTIONS.ISVALID`.
 At least one built-in or mod validator must return `true`; otherwise the default is `false`.
-This checks whether an action can appear as a candidate, not the execution-time rules in `BufferedAction:IsValid()`.
+Tool collectors and SG states that repeat work call this target check.
+It is not a universal gate for all candidates and does not replace `BufferedAction:IsValid()`.
 
 ## `0x32014411` Sorting, Filtering, and Wrapping
 
@@ -174,6 +176,28 @@ The `nopet` tag does not filter `ACTIONS.PET` candidates.
 Temporary crafting entries such as a Carnival golf tee need both stages.
 Candidates come from `componentactions.lua`, while execution guards remain in `actions.lua`.
 
+## `0x32014911` Magic and Corruption Actions
+
+`USEITEM.spellcaster` now collects targeted spells for the active item, alongside the existing equipped-item path.
+The `spellcaster` collectors for `USEITEM`, `POINT`, `EQUIPPED`, and `INVENTORY` return early for an item tagged `nomagiccast`.
+The point `blinkstaff` collector applies the same restriction.
+`ACTIONS.CASTSPELL.fn` and `ACTIONS.BLINK.fn` check it again during execution.
+
+`EQUIPPED.corruption` adds `CORRUPTNIGHTMARE` on right click when the item has `corrupted` and the target has `nightmarecorruptable`.
+The item must lack `nomagiccast`, and the target must lack `nomagic`.
+`ACTIONS.CORRUPTNIGHTMARE.fn` rejects `nomagiccast` and checks `ShouldItemMimicBeRevealedFor`.
+It then calls `corruption:CorruptEnt(target, doer)` to choose the target's corruption event or fissure operation.
+Success discharges the item's rechargeable component when present.
+The player SG path is covered in [SGwilson](../../0x4000-ai-animation/0x4100-stategraph/0x4103-sgwilson.md).
+
+## `0x32014921` Fire Interaction Candidates
+
+`SCENE.inventoryitem` allows a burning pickup candidate when the item has either `lighter` or `torch`.
+`ACTIONS.PICKUP.fn` accepts a burning item with a `lighter` component or a `torch` tag, subject to its other pickup checks.
+The controller's `GetPickupAction` applies the same tag exception.
+In `USEITEM.weapon`, container and construction candidates take precedence over fire interaction.
+The following branch adds `ATTACK` when `CanExtinguishTarget` succeeds, or on right click when `CanLightTarget` succeeds.
+
 ## `0x32015100` Verification
 
 ~~~bash
@@ -197,6 +221,10 @@ rg -n "ACTIONS\\.PET|OPEN_CRAFTING|hideprototyperaction|nopet" \
   scripts/componentactions.lua \
   scripts/actions.lua \
   scripts/prefabs/critters.lua
+rg -n "nomagiccast|CORRUPTNIGHTMARE|nightmarecorruptable|CorruptEnt" \
+  scripts/componentactions.lua scripts/actions.lua scripts/components/corruption.lua
+rg -n "torch|CanExtinguishTarget|CanLightTarget|GetPickupAction" \
+  scripts/componentactions.lua scripts/actions.lua scripts/components/playercontroller.lua scripts/components/combat_replica.lua
 ~~~
 
 ### `0x32015111` Minimal Trace
