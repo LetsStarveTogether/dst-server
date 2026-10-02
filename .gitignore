@@ -7,3 +7,5 @@ __pycache__/
 dist/
 ref/
 cluster_token.txt
+/target/
+/python/dst_server/_native*.so

@@ -32,13 +32,13 @@ jobs:
         uses: astral-sh/setup-uv@v10.1.0
 
       - id: verify
-        name: Verify tag matches pyproject.toml and main
+        name: Verify tag matches Cargo.toml and main
         run: |
           set -euo pipefail
 
           tag="${GITHUB_REF_NAME}"
           version="${tag#v}"
-          project_version="$(uv version --short)"
+          project_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
 
           if [[ "${version}" != "${project_version}" ]]; then
             echo "::error::Tag ${tag} does not match project version ${project_version}."
@@ -61,9 +61,9 @@ jobs:
     uses: ./.github/workflows/test.yml
 
   build:
-    name: Build release distributions
+    name: Build Linux x86_64 binary, CPython 3.14 wheel and source distribution
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    timeout-minutes: 60
     needs: test
     permissions:
       contents: read
@@ -72,21 +72,52 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+          submodules: true
 
       - name: Setup Python and uv
         uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: '3.14'
 
-      - name: Build distributions
-        run: uv build --clear --out-dir dist --no-create-gitignore --no-sources
+      - name: Build distributions against the game image libc
+        shell: bash
+        run: |
+          set -euo pipefail
+          podman build --target distributions --file Containerfile \
+            --build-arg SOURCE_REVISION="$GITHUB_SHA" \
+            --build-arg NATIVE_SCRIPTS_REVISION="$(git -C dst-scripts/scripts rev-parse HEAD)" \
+            --tag dst-server-distributions .
+          container=$(podman create dst-server-distributions /bin/true)
+          trap 'podman rm "$container"' EXIT
+          mkdir dist
+          podman cp "$container:/out/." dist/
 
-      - name: Verify installed wheel
-        run: uv run --isolated --no-project --no-config --with dist/dst_server-*.whl -- python -I tests/distribution.py
+      - name: Verify isolated release wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends capnproto lua5.1 luajit
+          cargo build --locked -p dst-server --example rpc_fixture
+          uv venv .wheel-check --python 3.14
+          uv pip install --python .wheel-check/bin/python --no-deps dist/python/*.whl
+          .wheel-check/bin/python -I tests/rust/check_binding.py "$PWD/target/debug/examples/rpc_fixture" "$PWD/dist/native/dst-server-linux-x86_64"
+          for check in tests/rust/check_*.py; do
+            case "$check" in */check_binding.py|*/check_lua.py) continue ;; esac
+            .wheel-check/bin/python -I "$check"
+          done
+          for check in tests/rust/check_*_cli.py; do
+            .wheel-check/bin/python -I "$check" "$PWD/dist/native/dst-server-linux-x86_64"
+          done
+          .wheel-check/bin/dst-server --version
+          dist/native/dst-server-linux-x86_64 --version
+          dist/native/dst-server-linux-x86_64 describe > /dev/null
 
-      - name: Upload distributions
+      - name: Upload release distributions and manifest
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: python-package-distributions
-          path: dist/*
+          name: release-distributions
+          path: dist/
           if-no-files-found: error
 
   publish-github-draft:
@@ -102,7 +133,7 @@ jobs:
       - name: Download distributions
         uses: actions/download-artifact@v8.0.1
         with:
-          name: python-package-distributions
+          name: release-distributions
           path: dist
 
       - name: Create or update GitHub draft release
@@ -112,12 +143,11 @@ jobs:
           name: ${{ needs.verify-tag.outputs.tag }}
           draft: true
           allowUpdates: true
-          artifacts: dist/*
+          artifacts: dist/python/*,dist/native/*,dist/build-manifest.json
           artifactErrorsFailBuild: true
           generateReleaseNotes: true
           makeLatest: false
           removeArtifacts: true
-          skipIfReleaseExists: true
           updateOnlyUnreleased: true
 
   publish-testpypi:
@@ -130,20 +160,21 @@ jobs:
       - publish-github-draft
     environment:
       name: testpypi
-      url: https://test.pypi.org/project/dst-server/${{ needs.verify-tag.outputs.version }}/
+      url: https://test.pypi.org/project/dst-server/
     permissions:
       id-token: write
     steps:
       - name: Download distributions
         uses: actions/download-artifact@v8.0.1
         with:
-          name: python-package-distributions
+          name: release-distributions
           path: dist
 
       - name: Publish package distributions to TestPyPI
         uses: pypa/gh-action-pypi-publish@v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/python
           skip-existing: true
 
   publish-pypi:
@@ -156,7 +187,7 @@ jobs:
       - publish-testpypi
     environment:
       name: pypi
-      url: https://pypi.org/project/dst-server/${{ needs.verify-tag.outputs.version }}/
+      url: https://pypi.org/project/dst-server/
     permissions:
       contents: write
       id-token: write
@@ -164,11 +195,13 @@ jobs:
       - name: Download distributions
         uses: actions/download-artifact@v8.0.1
         with:
-          name: python-package-distributions
+          name: release-distributions
           path: dist
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          packages-dir: dist/python
 
       - name: Publish GitHub draft release
         uses: ncipollo/release-action@v1.21.0
@@ -179,5 +212,4 @@ jobs:
           makeLatest: legacy
           omitBodyDuringUpdate: true
           omitNameDuringUpdate: true
-          skipIfReleaseExists: true
           updateOnlyUnreleased: true

@@ -7,14 +7,29 @@ on:
         description: 'Commit to test; defaults to the triggering commit'
         required: false
         type: string
+      real_game_tests:
+        description: 'Build the current game and run native acceptance checks'
+        required: false
+        default: false
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      real_game_tests:
+        description: 'Build the current game and run native acceptance checks'
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   test:
-    name: Test
+    name: Native SDK and Python bindings
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -27,36 +42,135 @@ jobs:
 
       - name: Setup uv and Python
         uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: '3.14'
 
-      - name: Install Lua test dependencies
+      - name: Install native build and Lua dependencies
         run: |
           sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends capnproto lua5.1 luajit
+          rustup show
+          printf 'PYO3_PYTHON=%s\n' "$(uv python find 3.14)" >> "$GITHUB_ENV"
+
+      - name: Check Rust formatting and lints
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Test native SDK
+        run: |
+          cargo test --locked -p dst-server --all-targets
+          cargo build --locked -p dst-server --bin dst-server --example rpc_fixture
+
+      - name: Check Python facade and build tools
+        run: |
+          uv sync --locked --only-group dev
+          uv run --locked --no-sync ruff format --check .
+          uv run --locked --no-sync ruff check .
+          uv run --locked --no-sync ty check python
+
+      - name: Test Lua 5.1 and LuaJIT contracts
+        run: uv run --no-project --python 3.14 -- python tests/rust/check_lua.py
+
+      - name: Build wheel from source distribution
+        run: uv build --python 3.14 --clear --out-dir dist --no-sources -C 'maturin.build-args=--compatibility pypi'
+
+      - name: Check isolated wheel and native process ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv venv .wheel-check --python 3.14
+          uv pip install --python .wheel-check/bin/python --no-deps dist/*.whl
+          .wheel-check/bin/python -I tests/rust/check_binding.py "$PWD/target/debug/examples/rpc_fixture" "$PWD/target/debug/dst-server"
+          for check in tests/rust/check_*.py; do
+            case "$check" in */check_binding.py|*/check_lua.py) continue ;; esac
+            .wheel-check/bin/python -I "$check"
+          done
+          for check in tests/rust/check_*_cli.py; do
+            .wheel-check/bin/python -I "$check" "$PWD/target/debug/dst-server"
+          done
+          .wheel-check/bin/dst-server --version
+          .wheel-check/bin/dst-server describe > /dev/null
+
+      - name: Verify release manifest generation
+        run: |
+          uv run --no-project --python 3.14 -- python tools/build_manifest.py \
+            --output "$RUNNER_TEMP/build-manifest.json" \
+            --python "$(uv python find 3.14)" \
+            --artifact target/debug/dst-server --artifact dist/*.whl --artifact dist/*.tar.gz
+
+  native-game:
+    name: Native game acceptance
+    if: ${{ inputs.real_game_tests }}
+    needs: test
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      DST_SERVER_IMAGE: localhost/dst-native-acceptance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+          persist-credentials: false
+          submodules: true
+
+      - name: Resolve current native game version
+        id: game
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import urllib.request
+          with urllib.request.urlopen("https://s3.amazonaws.com/dstbuilds/builds.json", timeout=30) as response:
+              builds = json.load(response)
+          versions = [int(value) for value in builds["release"] if str(value).isascii() and str(value).isdigit()]
+          print(f"version={max(versions)}")
+          PY
+
+      - name: Build native game image
+        env:
+          GAME_VERSION: ${{ steps.game.outputs.version }}
+        run: |
+          sudo podman build --layers --network host --target game --file Containerfile \
+            --build-arg GAME_VERSION="$GAME_VERSION" \
+            --build-arg SOURCE_REVISION="$(git rev-parse HEAD)" \
+            --build-arg NATIVE_SCRIPTS_REVISION="$(git -C dst-scripts/scripts rev-parse HEAD)" \
+            --tag "$DST_SERVER_IMAGE" .
+
+      - name: Verify native image Lua contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
           sudo apt-get install --yes --no-install-recommends lua5.1 luajit
+          native_directory="$RUNNER_TEMP/native-image"
+          mkdir "$native_directory"
+          native_container=$(sudo podman create "$DST_SERVER_IMAGE")
+          trap 'sudo podman rm --volumes "$native_container"' EXIT
+          sudo podman cp "$native_container:/install/data/databundles/scripts.zip" "$native_directory/scripts.zip"
+          sudo podman cp "$native_container:/usr/local/bin/dst-server" "$native_directory/dst-server"
+          sudo podman cp "$native_container:/usr/local/share/dst-server/build-manifest.json" "$native_directory/build-manifest.json"
+          "$native_directory/dst-server" scripts verify "$native_directory/scripts.zip"
+          python3 -m zipfile -e "$native_directory/scripts.zip" "$native_directory/source"
+          python3 tests/rust/check_lua.py --scripts "$native_directory/source/scripts"
 
-      - name: Install Python test dependencies
-        run: uv sync --locked --all-extras --no-default-groups --group dev
+      - name: Run native recovery, player and 1, 2, 5 world acceptance checks
+        timeout-minutes: 60
+        run: |
+          sudo -E python3 tests/rust/native_acceptance.py --image "$DST_SERVER_IMAGE" \
+            --binary "$RUNNER_TEMP/native-image/dst-server" \
+            --source-scripts "$RUNNER_TEMP/native-image/scripts.zip" \
+            --output "$RUNNER_TEMP/native-acceptance"
 
-      - name: Check repository files
-        # The local aggregate hook uses just; its checks run explicitly below.
-        run: uv run --no-sync -- prek run --all-files --show-diff-on-failure --skip just-check
-
-      - name: Check Python formatting
-        run: uv run --no-sync -- ruff format --check .
-
-      - name: Lint Python
-        run: uv run --no-sync -- ruff check --no-fix .
-
-      - name: Check types
-        run: uv run --no-sync -- ty check
-
-      - name: Check Markdown
-        run: uv run --no-sync -- rumdl check .
-
-      - name: Run tests
-        run: uv run --no-sync -- pytest tests -m 'not system'
-
-      - name: Build distributions
-        run: uv build --clear --out-dir dist --no-create-gitignore --no-sources
-
-      - name: Verify installed wheel
-        run: uv run --isolated --no-project --no-config --with dist/dst_server-*.whl -- python -I tests/distribution.py
+      - name: Upload native acceptance reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: native-acceptance-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/native-image/build-manifest.json
+            ${{ runner.temp }}/native-acceptance/**/*.json
+            ${{ runner.temp }}/native-acceptance/**/*.log
+          if-no-files-found: warn
