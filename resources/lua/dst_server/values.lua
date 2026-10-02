@@ -66,7 +66,8 @@ function values.position(value)
 end
 
 function values.entity_position(inst)
-    if inst == nil or inst.Transform == nil or inst.Transform.GetWorldPosition == nil then
+    if inst == nil or inst.Transform == nil or not inst:IsValid()
+        or inst.Transform.GetWorldPosition == nil then
         return json.null
     end
     return position(inst.Transform:GetWorldPosition())
