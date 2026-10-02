@@ -88,7 +88,7 @@ function driver.install(options)
     end
     state.installed = true
     for _, name in ipairs({ "players", "player_lifecycle", "shards", "world", "messages", "actions", "votes", "gorge_voter", "lobbyvote",
-        "player_commands", "appearance", "map_deliveries", "vault_trials" }) do
+        "player_commands", "appearance", "map_deliveries", "vault_trials", "container_transfers", "teleporters" }) do
         state.capabilities[name] = "disabled"
     end
     local installed = false
@@ -108,6 +108,10 @@ function driver.install(options)
     install("appearance", function() return require("dst_server.input_events").install_appearance() end)
     install("map_deliveries", function() return require("dst_server.gameplay_events").install_deliveries() end)
     install("vault_trials", function() return require("dst_server.gameplay_events").install_vault_trials() end)
+    install("teleporters", function() require("dst_server.gameplay_events").install_teleporters() end)
+    if profile == "history" then
+        install("container_transfers", function() require("dst_server.container_events").install() end)
+    end
     if profile == "history" and next(action_allowlist) ~= nil then
         install("actions", function() require("dst_server.actions").install() end)
     end

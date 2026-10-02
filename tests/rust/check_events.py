@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main() -> None:
     schema = event_schema()
-    assert len(schema["discriminator"]["mapping"]) == 54
+    assert len(schema["discriminator"]["mapping"]) == 56
     schema["discriminator"]["mapping"].clear()
-    assert len(event_schema()["discriminator"]["mapping"]) == 54
+    assert len(event_schema()["discriminator"]["mapping"]) == 56
 
     count = 0
     for name in ("lua5.1", "luajit"):
@@ -28,7 +28,7 @@ def main() -> None:
         fixtures = [
             ("event_contract.lua", ROOT / "resources/lua", ROOT / "tests/lua", scripts),
             ("input_events_spec.lua", ROOT, scripts, "critical"),
-            ("gameplay_events_spec.lua", ROOT, scripts, "critical"),
+            ("gameplay_events_spec.lua", ROOT, scripts, "history"),
             ("mode_votes_spec.lua", ROOT, scripts, "forge"),
         ]
         for fixture, *arguments in fixtures:

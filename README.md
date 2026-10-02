@@ -331,6 +331,8 @@ Interrupted observations or changed worlds restart the retention period; clean s
 The default game event profile is `history`; `agent --profile` also accepts `critical` and `off`.
 History keeps work completion and item activity, omitting individual tool swings and ordinary PvE hits.
 Combat details cover players and entities attributed to players; deaths and spell actions remain recorded.
+History records container transfers as changes to the selected slot; failed attempts and automatic inventory churn are omitted.
+Local portals, including wormholes and temporary map exits, emit `dst.player.teleport_started` when native activation succeeds.
 Events are bounded and best effort.
 Source gaps, subscriber overflow, output loss and export rejection have separate counters.
 A subscription is not a replay log or a durable task trigger.

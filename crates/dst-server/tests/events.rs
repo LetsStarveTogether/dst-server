@@ -17,7 +17,7 @@ fn frozen_schema_covers_every_producer_and_preserves_values() {
             .as_object()
             .unwrap()
             .len(),
-        54
+        56
     );
     let value = record();
     assert_eq!(events::parse(value.to_string()).unwrap(), value);
