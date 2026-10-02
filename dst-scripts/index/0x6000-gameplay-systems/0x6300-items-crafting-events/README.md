@@ -5,6 +5,8 @@ This directory covers items, crafting, boats, special events, and faction-like r
 ## `0x63001111` Scope
 
 It follows crafting output into inventory, world placement, boats, and event-driven relationships.
+The item guide also covers the king cane and queen torch spawned by the ritual.
+It follows their shared spells, corruption, and light behaviour.
 
 ## `0x63002111` Pages
 

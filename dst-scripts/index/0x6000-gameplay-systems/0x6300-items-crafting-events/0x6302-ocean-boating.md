@@ -48,7 +48,7 @@ It also adds `boatphysics`, `boatdrifter`, `health`, and `SGboat`.
 `WalkablePlatform:SetEntitiesOnPlatform` scans the platform radius.
 It attaches each match through `EntityScript:AddPlatformFollower` (`AddPlatformFollower`).
 On the server, `WalkablePlatformPlayer:TestForPlatform` uses `inst:GetCurrentPlatform()`.
-On the client, it uses `TheWorld.Map:GetPlatformAtPoint(...)`.
+For the local player on the client, it uses `TheWorld.Map:GetPlatformAtPoint(...)`.
 
 ## `0x63023000` Runtime Flow
 
@@ -75,8 +75,8 @@ Inspect the recipe, deploy kit, and final prefab together.
 
 ### `0x63023211` Platform Coordinates
 
-On the master simulation, `EntityScript:GetCurrentPlatform` reads `self.platform`.
-On the client, it reads the engine-level `entity:GetPlatform()`.
+`EntityScript:GetCurrentPlatform` first follows the entity's parent to inherit its platform.
+Without a parent platform, the master simulation reads `self.platform` and clients read the engine's `entity:GetPlatform()`.
 `EntityScript:GetSaveRecord` stores platform-relative coordinates and `walkableplatform:GetUID()`.
 Saving, movement, and departure for boat occupants cannot use ordinary world positions alone.
 
@@ -115,7 +115,7 @@ In `components/mast.lua`, `Mast:SetBoat` calls `RemoveMast` on the old boat and 
 `scripts/prefabs/player_common.lua` adds `walkableplatformplayer` before pristine setup.
 Its lifecycle methods live in `scripts/components/walkableplatformplayer.lua`.
 `GetOnPlatform` calls `Transform:SetIsOnPlatform(true)`.
-It registers the player through `platform.components.walkableplatform:AddPlayerOnPlatform`.
+On the master simulation, it registers the player through `platform.components.walkableplatform:AddPlayerOnPlatform`.
 `GetOffPlatform` unregisters the player, stops boat camera and music checks, and clears `self.platform`.
 
 ## `0x63024311` Building Restrictions

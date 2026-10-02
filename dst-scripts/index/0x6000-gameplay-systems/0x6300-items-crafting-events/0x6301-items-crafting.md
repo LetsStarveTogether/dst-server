@@ -33,10 +33,17 @@ It follows `builder_replica`, RPCs, `Builder:MakeRecipe*`, `Builder:DoBuild`, an
 | `scripts/components/builder.lua` | `MakeRecipe` / `DoBuild` | Executes authoritative crafting |
 | `scripts/actions.lua` | `ACTIONS.BUILD.fn` | Connects a `BufferedAction` to `DoBuild` |
 | `scripts/components/inventory.lua` | `GiveItem` | Stores or routes crafted items |
+| `scripts/prefabs/atrium_gate.lua` | `SpawnShroudenLootSetPiece` | Creates the cane and torch during the ritual |
+| `scripts/prefabs/king_cane.lua` | `OnGemGiven` / `SetGem` | Selects shared staff behaviour through gem trading |
+| `scripts/prefabs/staff_common.lua` | `fns` / `cleargemstaff` | Shares spell behaviour between staffs and the cane |
+| `scripts/components/corruption.lua` | `DoDelta` / `MakeCorrupted` | Tracks the cane's corruption state |
+| `scripts/prefabs/moonbase.lua` | `OnStaffGiven` / `OnTimerDone` | Holds and purifies a corrupted cane |
+| `scripts/prefabs/queen_torch.lua` | `FindClosestQueenTorchAtXZ` / `IgniteTossed` | Tracks torch lights and equips or throws the torch |
 
 ### `0x63012111` Recipe Data
 
 `Recipe2` extends `Recipe` and writes the object to `AllRecipes[name]`.
+`GetValidRecipe` first checks that networking exists and the recipe is valid in the current game mode.
 `GetValidRecipe` rejects deconstruction recipes and checks `require_special_event` with `IsSpecialEventActive`.
 A recipe declaration alone does not make an event recipe available.
 
@@ -124,6 +131,34 @@ Premade course kits carry `_available_courses`, and redeployment removes the las
 Custom tee crafting uses `OPEN_CRAFTING` and `prototyper.redirect_to_prototyper`.
 The tee removes its own `prototyper` tag so it does not appear as a standard research station.
 
+## `0x63014511` King Cane and Shared Staff Spells
+
+`SpawnShroudenLootSetPiece` in `atrium_gate.lua` creates `king_cane` and `queen_torch` before the boss is defeated.
+It runs in the arena-morph callback during `ritualstate_OnSummoned`.
+These items enter the world through the ritual's `SpawnPrefab` calls.
+`staff.lua` and `king_cane.lua` both load gem behaviours and dependencies from `prefabs/staff_common.lua`.
+The cane's `ItemTradeTest` accepts supported gems and rejects precious gems.
+`OnGemGiven` clears the previous spell components, returns the previous gem, and calls `SetGem` to install the new behaviour.
+`SetGem` publishes the gem through `_gem`; client `OnGemDirty` refreshes the reticule for the new spell.
+Spell, blink, and projectile launch events call `DoCorruption` with an amount determined by the gem.
+At maximum corruption, `OnCorruptedFn` disables gem trading and adds `shadowdominance`.
+It also enables cooldowns for the shared purple, orange, green, and yellow spell paths.
+`Corruption:MakeCorrupted` stops natural decay, so reaching maximum is a distinct state from accumulating partial corruption.
+`moonbase.lua` keeps the cane instance when it is inserted and calls `MakeUncorrupted` when the `mooncharge` timer completes.
+
+## `0x63014611` Queen Torch Light and Throwing
+
+`queen_torch.lua` creates a networked `queen_torchlight` while equipped or burning on the ground.
+Equipping parents the light to the holder; dropping or throwing parents it to the torch.
+`OnThrown` disables pickup until `OnHit`, and `OnPutInInventory` removes the light and extinguishes the torch.
+Wilson's torch skills adjust the light radius through `RefreshAttunedSkills`.
+Throwing preserves the thrower's brightness modifier.
+`FindClosestQueenTorchAtXZ` searches the registered light entities using `TUNING.QUEEN_TORCH_RADIUS_SQ`.
+That gameplay distance is separate from the visual light radius changed by skills.
+`BrainCommon.RunAwayFromQueenTorch` uses the shared lookup to make creatures flee.
+Checks in specific shadow prefabs also use it to change targeting behaviour.
+The prefab's save callbacks restore a lit ground torch and its saved thrower brightness data.
+
 ## `0x63015100` Verification
 
 ~~~bash
@@ -149,6 +184,23 @@ rg -n "MakeRecipe|DoBuild|ACTIONS.BUILD|GiveItem|SpawnPrefab" \
   scripts/components/builder.lua \
   scripts/actions.lua \
   scripts/components/inventory.lua
+
+rg -n -e "SpawnShroudenLootSetPiece|ItemTradeTest|OnGemGiven|SetGem|OnGemDirty" \
+  -e "DoCorruption|OnCorruptedFn|OnStaffGiven|OnTimerDone|MakeUncorrupted" \
+  scripts/prefabs/atrium_gate.lua \
+  scripts/prefabs/king_cane.lua \
+  scripts/components/corruption.lua \
+  scripts/prefabs/moonbase.lua
+
+rg -n "staff_common|cleargemstaff|dodischarge|KING_CANE_.*COOLDOWN" \
+  scripts/prefabs/staff.lua \
+  scripts/prefabs/staff_common.lua \
+  scripts/prefabs/king_cane.lua
+
+rg -n -e "FindClosestQueenTorch|QUEEN_TORCH_RADIUS_SQ|RefreshAttunedSkills|IgniteTossed" \
+  -e "OnThrown|OnPutInInventory|OnSave|OnLoad" \
+  scripts/prefabs/queen_torch.lua \
+  scripts/brains/braincommon.lua
 ~~~
 
 ### `0x63015111` Reading Order
@@ -159,3 +211,5 @@ For an event sample, inspect `carnivalgame_golfgame_kit_easy` and the props unde
 Follow the recipe's `rpc_id` from `builder_replica` through `networkclientrpc`.
 Finish in `Builder:DoBuild`.
 Verify whether the product reaches inventory, equipment, world space, or a crafting station.
+For the ritual items, follow `SpawnShroudenLootSetPiece` into `king_cane.lua` and `queen_torch.lua`.
+Then inspect shared spells and the light lookup's callers.

@@ -55,7 +55,7 @@ It neither reads `map/layouts.lua` nor calls `ReserveAndPlaceLayout`.
 
 ### `0x51032211` Static Layout Search
 
-Search `ConvertStaticLayoutToLayout` and `return { Get =` to find the Tiled-to-layout conversion path.
+Search `ConvertStaticLayoutToLayout` and `Get = ConvertStaticLayoutToLayout` to find the Tiled-to-layout conversion path.
 
 ### `0x51032212` Static Layout Conversion
 
@@ -69,7 +69,7 @@ It loads them through `StaticLayout.Get("map/static_layouts/...")`.
 
 `GROUND_TYPES` maps Tiled tile indexes to `WORLD_TILES`.
 
-Ground meaning therefore also depends on registration in `tiledefs.lua` and `worldtiledefs.lua`.
+Ground meaning therefore also depends on tile registration in `tiledefs.lua` and the properties exposed by `worldtiledefs.lua`.
 
 ### `0x51032311` Object Layout Search
 

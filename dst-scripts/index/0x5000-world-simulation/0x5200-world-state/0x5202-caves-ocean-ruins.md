@@ -38,7 +38,11 @@ Surface `forest.lua` adds `WaveComponent`, `wavemanager`, and `oceanicemanager`.
 | `scripts/components/oceanicemanager.lua` | `CreateIceAtPoint` | Creates and breaks ocean ice and fixes displaced objects |
 | `scripts/components/dockmanager.lua` | `DestroyDockAtPoint` | Fixes objects displaced by dock removal |
 | `scripts/components/walkableplatform.lua` | `DestroyObjectsOnPlatform` | Cleans up objects when a platform is destroyed |
-| `scripts/components/virtualroomset.lua` | `_GetEntUnloadAction` | Selects entity persistence behaviour when a virtual room unloads |
+| `scripts/components/virtualroomset.lua` | `_GetEntUnloadAction` / `TryStartTeleportSequence` | Preserves room entities and coordinates room transitions |
+| `scripts/prefabs/atrium_markers.lua` | `centerfn` / `OnShowRoom` | Configures the Atrium room set and resets it on return to the lobby |
+| `scripts/prefabs/charliearena_teleporter.lua` | `OnDepart` | Flags the Atrium for reset when players use its exit |
+| `scripts/prefabs/vault_markers.lua` | `resetvault` listener | Flags the Vault room set for reset |
+| `scripts/components/atriumritualorgantracker.lua` | `OnDefeatedShrouden` / `Enable` | Tracks ritual organs and schedules worm-boss waves |
 | `scripts/map/tasks/ruins.lua` | `AddTask` | Defines ruins task structure |
 | `scripts/map/rooms/cave/ruins.lua` | `AddRoom` | Defines ruins rooms, distributions, and static layouts |
 | `scripts/prefabs/atrium_gate.lua` | `OnDestabilizeExplode` | Pushes `resetruins` after gate destabilization |
@@ -178,13 +182,29 @@ Ocean-ice logic adjusts floaters, fishable objects, and objects on platforms, so
 
 Search `ruinsrespawner.lua` for `resetruins`, `objectspawner`, and `onprefabswaped`.
 
-`OnDestabilizeExplode` in `atrium_gate.lua` pushes `resetruins`.
+`OnDestabilizeExplode` in `atrium_gate.lua` pushes both `resetruins` and `resetvault`.
 
 The respawner recreates its owned ruins objects at runtime.
 
 `cave_hole.lua`, `treasurechest.lua`, and `chest_mimic.lua` also listen directly on `TheWorld` for `resetruins`.
 
 Each runs its own reset path without rerunning cave worldgen.
+
+### `0x52023531` Vault and Atrium Reset Events
+
+`vault_markers.lua` listens for `resetvault` and calls its room set's `FlagForReset`.
+The event also comes from the Shrouden victory callback in `charlie_boss_trial.lua`, alongside `ms_defeated_shrouden`.
+`atriumritualorgantracker` refreshes its organ table on `ms_defeated_shrouden`.
+A Vault reset caused by gate destabilization does not by itself refresh that tracker.
+Enabling the ritual when the worm organ is missing schedules a worm-boss wave through `hounded_forceplannewattack`.
+Defeating Shrouden also schedules that wave when the tracker is enabled.
+
+The Atrium room set uses its exit teleporter and lobby transition to reset.
+The local `OnDepart` in `charliearena_teleporter.lua` receives the room set and calls its `FlagForReset`.
+On returning to the lobby, `atrium_markers.lua` calls `TryToReset`.
+Its `SetKeepInventoryItemsthroughReset(true)` preserves eligible inventory items during that reset.
+`virtualroomteleporter` supplies `atrium_portal_fx`.
+`VirtualRoomSet:TryStartTeleportSequence` passes it to each player's `vault_teleport` event.
 
 ## `0x52024111` Cave State Fields
 
@@ -222,7 +242,17 @@ These components affect water and platform rules across worlds.
 
 The cave gel spawn in `prefabs/cave.lua` excludes topology ids containing `Vault`.
 
-When a virtual room unloads, `virtualroomset.lua` keeps an owner with a migration pet unless it is tagged `forcedtosavethroughvirtualrooms`.
+When a virtual room unloads, `_GetEntUnloadAction` first excludes invalid, parented, and `staysthroughvirtualrooms` entities.
+
+It follows spell targets, formation leaders, followers, and inventory owners to determine the effective owner.
+
+Players are kept; eligible owners with migration pets, `irreplaceable`, or `followsthroughvirtualrooms` are also kept.
+
+Inventory-item owners are additionally kept during reset when `keepinventoryitemsthroughreset` is enabled.
+
+For non-player owners, `forcedtosavethroughvirtualrooms` overrides those keep rules.
+
+A visual `Follower:IsFollowing()` alone no longer excludes an entity from room unloading.
 
 `minotaur.lua` disables minimap revealability after `ATRIUM_KEY_FOUND`.
 
@@ -264,6 +294,20 @@ rg -n \
   scripts/prefabs/cave_hole.lua \
   scripts/prefabs/treasurechest.lua \
   scripts/prefabs/chest_mimic.lua
+
+rg -n \
+  -e "resetvault|ms_defeated_shrouden|FlagForReset|TryToReset" \
+  -e "SetKeepInventoryItemsthroughReset|hounded_forceplannewattack" \
+  scripts/prefabs/atrium_gate.lua \
+  scripts/prefabs/charlie_boss_trial.lua \
+  scripts/prefabs/atrium_markers.lua \
+  scripts/prefabs/vault_markers.lua \
+  scripts/prefabs/charliearena_teleporter.lua \
+  scripts/components/atriumritualorgantracker.lua
+
+rg -n "_GetEntUnloadAction|keepinventoryitemsthroughreset|OnDepart|GetTeleportFXPrefab|fxprefab" \
+  scripts/components/virtualroomset.lua \
+  scripts/components/virtualroomteleporter.lua
 
 rg -n \
   -e "Vault|migrationpetowner|ATRIUM_KEY_FOUND|childdeployblocker" \

@@ -66,7 +66,9 @@ Fields such as `tasks`, `optionaltasks`, `valid_start_tasks`, and `numoptionalta
 
 ### `0x51022211` Task Contract
 
-Search `scripts/map/tasks.lua` for `AddTask`, `room_choices`, `background_room`, `locks`, and `keys_given`.
+`scripts/map/tasks.lua` defines `AddTask` and loads task definitions from `scripts/map/tasks`.
+
+Search that directory for `room_choices`, `background_room`, `locks`, and `keys_given`.
 
 These fields are primary inputs to `Story:GenerateNodesFromTask`.
 
@@ -78,7 +80,9 @@ These fields are primary inputs to `Story:GenerateNodesFromTask`.
 
 ### `0x51022221` Room Contract
 
-Search `scripts/map/rooms.lua` for `AddRoom` and `contents`; storygen copies `contents` into node `terrain_contents`.
+`scripts/map/rooms.lua` defines `AddRoom` and loads room definitions from `scripts/map/rooms`.
+
+Search that directory for `contents`; storygen assigns it to node `terrain_contents` after copying the room.
 
 ### `0x51022222` Room Instances
 
@@ -126,7 +130,9 @@ The final task list is therefore not purely static preset data.
 
 ### `0x51023212` Task Fields
 
-`room_choices` sets explicit room counts, and `background_room` supplies the background node template.
+`room_choices` supplies room counts as numbers or functions evaluated during generation.
+
+`background_room` supplies the background node template.
 
 `room_bg` supplies the task graph's default ground.
 
@@ -211,13 +217,19 @@ rg -n "AddTaskSet|GetGenTasks|AddTask|AddRoom|GenerateNodesFromTask|GenerateNode
   scripts/map/task.lua \
   scripts/map/rooms.lua \
   scripts/map/storygen.lua
+
+rg -n "AddWorldGenLevel|task_set|Make a pick|AddRoom|room_choices|contents" \
+  scripts/map/levels/forest.lua \
+  scripts/map/tasksets/forest.lua \
+  scripts/map/tasks/dst_tasks_forestworld.lua \
+  scripts/map/rooms/forest/terrain_forest.lua
 ~~~
 
 ### `0x51025111` Minimum Trace
 
-Find a preset in `map/levels.lua`, then follow its `task_set` through `ChooseTasks`.
+Find a preset in `map/levels/forest.lua`, then follow its `task_set` through `ChooseTasks`.
 
-Inspect the task's `room_choices` in `map/tasks.lua`.
+For the `default` task set, inspect `Make a pick` in `map/tasks/dst_tasks_forestworld.lua` and its `Forest` room in `map/rooms/forest/terrain_forest.lua`.
 
 Finish at `task_node:AddNode` in `map/storygen.lua`.
 
