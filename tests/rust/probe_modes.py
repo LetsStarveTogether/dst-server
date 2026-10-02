@@ -227,10 +227,14 @@ async def connect_ready(
     return client, state
 
 
-async def exercise(arguments: argparse.Namespace, root: Path, report: dict) -> None:
-    client, state = await connect_ready(arguments, root, report)
-    report["ready_at"] = datetime.now(UTC).isoformat()
-    save_report(root, report)
+async def exercise(
+    arguments: argparse.Namespace,
+    root: Path,
+    report: dict,
+    command: list[str],
+    process: subprocess.Popen,
+) -> None:
+    client = None
     operations = report["operations"]
 
     async def call(
@@ -292,6 +296,9 @@ async def exercise(arguments: argparse.Namespace, root: Path, report: dict) -> N
         return result
 
     try:
+        client, state = await connect_ready(arguments, root, report)
+        report["ready_at"] = datetime.now(UTC).isoformat()
+        save_report(root, report)
         for shard in state["shards"]:
             name = shard["name"]
             runtime = await call("runtime", shard=name)
@@ -326,12 +333,16 @@ async def exercise(arguments: argparse.Namespace, root: Path, report: dict) -> N
         report["pause"]["resume"] = await call("pause", {"paused": False})
         await call("save")
         await call("stop", {"notice": None})
-        stopped = await call("status")
-        assert stopped["phase"] == "stopped"
-        assert all(shard["pid"] is None for shard in stopped["shards"])
-        await call("start")
-        restarted = await call("status")
-        assert restarted["phase"] == "running"
+        assert await asyncio.to_thread(process.wait, timeout=390) == 0
+        await client.close()
+        assert not (root / "cluster/.dst-agent.sock").exists()
+        stopped = json.loads((root / "cluster/.dst-control.json").read_text())
+        assert stopped["agent_run"]["active"] is False
+        with (root / "agent-2.log").open("w", encoding="utf-8") as log:
+            process = await asyncio.to_thread(
+                subprocess.Popen, command, stdout=log, stderr=log
+            )
+        client, restarted = await connect_ready(arguments, root, report)
         assert {
             shard["name"]: shard["identity"]["session_id"]
             for shard in restarted["shards"]
@@ -340,11 +351,15 @@ async def exercise(arguments: argparse.Namespace, root: Path, report: dict) -> N
         }
         await call("save")
         await call("stop", {"notice": None})
-        final = await call("status")
-        assert final["phase"] == "stopped"
+        assert await asyncio.to_thread(process.wait, timeout=390) == 0
+        assert not (root / "cluster/.dst-agent.sock").exists()
+        report["container_exits"] = [0, 0]
         report["passed"] = True
     finally:
-        await client.close()
+        if client is not None:
+            await client.close()
+        await asyncio.to_thread(stop, f"dst-rust-mode-{arguments.template}-game")
+        await asyncio.to_thread(process.wait, timeout=390)
 
 
 def main() -> None:
@@ -429,11 +444,7 @@ def main() -> None:
         ]
         with (root / "agent.log").open("w", encoding="utf-8") as log:
             process = subprocess.Popen(command, stdout=log, stderr=log)
-            try:
-                asyncio.run(exercise(args, root, report))
-            finally:
-                stop(f"dst-rust-mode-{args.template}-game")
-                process.wait(timeout=390)
+            asyncio.run(exercise(args, root, report, command, process))
     except (Exception, KeyboardInterrupt) as error:
         report["error"] = repr(error)
     finally:

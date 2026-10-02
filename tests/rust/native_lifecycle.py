@@ -113,7 +113,8 @@ class Fixture:
         command = (
             "/test/dst-server agent --cluster /cluster --offline --profile history "
             f">/cluster/acceptance-agent-{self.boot}.log 2>&1 & "
-            "wait $!; exec sleep infinity"
+            f"wait $!; printf '%s\\n' $? >/cluster/acceptance-exit-{self.boot}; "
+            "exec sleep infinity"
         )
         run(
             "podman",
@@ -151,7 +152,7 @@ class Fixture:
             run("podman", "inspect", "--format", "{{.State.Pid}}", self.name)
         )
 
-    async def connect(self, phase="running"):
+    async def connect(self):
         async with asyncio.timeout(180):
             while self.client is None:
                 try:
@@ -162,24 +163,41 @@ class Fixture:
                     await asyncio.sleep(0.1)
             while True:
                 state = await self.client.call("status")
-                if state["agent"]["ready"] and state["phase"] == phase:
-                    if phase == "running":
-                        assert len(state["shards"]) == self.count, state
-                        assert all(
-                            shard["readiness"]["world_loaded"]
-                            and shard["readiness"]["control_ready"]
-                            and not shard["readiness"]["missing_shards"]
-                            for shard in state["shards"]
-                        ), state
+                if state["agent"]["ready"] and state["phase"] == "running":
+                    assert len(state["shards"]) == self.count, state
+                    assert all(
+                        shard["readiness"]["world_loaded"]
+                        and shard["readiness"]["control_ready"]
+                        and not shard["readiness"]["missing_shards"]
+                        for shard in state["shards"]
+                    ), state
+                    if self.arguments.game_version is not None:
                         for shard in state["shards"]:
                             runtime = await self.client.call(
                                 "runtime", shard=shard["name"]
                             )
-                            assert runtime["app_version"] == "756039", runtime
+                            assert (
+                                runtime["app_version"] == self.arguments.game_version
+                            ), runtime
                     return state
-                if state["phase"] == "failed" and phase != "failed":
+                if state["phase"] == "failed":
                     raise AssertionError(state)
                 await asyncio.sleep(0.2)
+
+    async def exited(self, code=0):
+        marker = self.cluster / f"acceptance-exit-{self.boot}"
+        async with asyncio.timeout(180):
+            while True:
+                if marker.exists() and (exit_code := marker.read_text().strip()):
+                    break
+                await asyncio.sleep(0.1)
+        assert int(exit_code) == code
+        assert native_processes(self.init_pid) == {}
+        assert not (self.cluster / ".dst-agent.sock").exists()
+        if self.client is not None:
+            self.client.close()
+            self.client = None
+        return json.loads((self.cluster / ".dst-control.json").read_text())
 
     async def kill_agent(self):
         processes = native_processes(self.init_pid)
@@ -327,6 +345,8 @@ class Fixture:
             and shard["result"]["value"]["output_drained"]
             for shard in stopped["shards"]
         ), stopped
+        control = await self.exited()
+        assert control["agent_run"]["active"] is False, control
         return {
             "before": before,
             "after": after,
@@ -429,20 +449,17 @@ async def check(arguments, report):
                         )
                         fixture.close_container()
                         fixture.launch()
-                        state = await fixture.connect(
-                            "running" if attempt <= 2 else "failed"
-                        )
-                        recovery = state["agent"]["recovery"]
-                        assert recovery["restarts_used"] == min(attempt, 2), state
                         if attempt <= 2:
+                            state = await fixture.connect()
+                            recovery = state["agent"]["recovery"]
                             assert recovery["closed"] is None, state
                         else:
+                            state = await fixture.exited()
+                            recovery = state["recovery"]
                             assert recovery["closed"] == "current_retries_exhausted", (
                                 state
                             )
-                            assert all(
-                                shard["pid"] is None for shard in state["shards"]
-                            ), state
+                        assert recovery["restarts_used"] == min(attempt, 2), state
                         evidence.setdefault("recreated", []).append(state)
                 else:
                     source = (
@@ -463,13 +480,11 @@ async def check(arguments, report):
                     evidence["kills"].append(await fixture.kill_agent())
                     fixture.close_container()
                     fixture.launch()
-                    state = await fixture.connect("failed")
-                    assert (
-                        state["agent"]["recovery"]["closed"]
-                        == "latest_snapshots_differ"
-                    ), state
-                    assert state["agent"]["recovery"]["restarts_used"] == 0, state
-                    assert all(shard["pid"] is None for shard in state["shards"]), state
+                    state = await fixture.exited()
+                    assert state["recovery"]["closed"] == "latest_snapshots_differ", (
+                        state
+                    )
+                    assert state["recovery"]["restarts_used"] == 0, state
                     evidence["mismatched_recreated"] = state
                 report_path(arguments, report)
                 print(f"{count} native worlds passed lifecycle acceptance", flush=True)
@@ -502,6 +517,7 @@ def main():
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--seed", type=Path, required=True)
     parser.add_argument("--image", default="localhost/dst-rust-native:756039")
+    parser.add_argument("--game-version")
     arguments = parser.parse_args()
     arguments.directory.mkdir(exist_ok=False, parents=True)
     for source, name in [
@@ -511,7 +527,7 @@ def main():
         shutil.copy2(source, arguments.directory / name)
     report = {
         "passed": False,
-        "native_build": "756039",
+        "native_build": arguments.game_version,
         "image": arguments.image,
         "binary_sha256": hashlib.sha256(arguments.binary.read_bytes()).hexdigest(),
         "bundle_sha256": hashlib.sha256(arguments.bundle.read_bytes()).hexdigest(),
