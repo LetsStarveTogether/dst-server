@@ -406,6 +406,108 @@ function scenarios.action_truthiness()
     end
 end
 
+function scenarios.coarse_work_history()
+    ACTIONS = { CHOP = { id = "CHOP" } }
+    GetTime = function() return 1 end
+    target.AddTag = function() end
+    target.RemoveTag = function() end
+    local workable = require("components/workable")(target)
+    workable:SetWorkLeft(10)
+    local configuration = options()
+    configuration.actions = { "CASTSPELL" }
+    require("dst_server").install(configuration)
+    for _ = 1, 10 do
+        assert(action("CHOP", function()
+            workable:WorkedBy_Internal(player, 1)
+            return true
+        end):Do())
+    end
+    assert(#records() == 1 and #records("dst.player.finished_work") == 1)
+    assert(action("CASTSPELL", function() return true end):Do())
+    assert(#records("dst.player.action") == 1)
+end
+
+function scenarios.semantic_action_history()
+    require("vector3")
+    EntityScript = { is_instance = function(value) return value.GUID ~= nil end }
+    GetTime = function() return 1 end
+    target.GetPosition = function() return Vector3(1, 0, 2) end
+    local loot = entity("twigs", 4)
+    loot.components.inventoryitem = { InheritWorldWetnessAtTarget = function() end }
+    SpawnPrefab = function() return loot end
+    player.components.inventory = { GiveItem = function() end }
+    local configuration = options()
+    configuration.actions = { "PICK", "HARVEST" }
+    require("dst_server").install(configuration)
+    local pickable = setmetatable({
+        inst = target, product = "twigs", numtoharvest = 1, canbepicked = true, caninteractwith = true,
+    }, { __index = require("components/pickable") })
+    target.components.pickable = pickable
+    assert(action("PICK", function() return pickable:Pick(player) end):Do())
+    assert(#records("dst.player.picked") == 1 and #records("dst.player.action") == 0)
+    target.components.pickable = nil
+    local harvestable = setmetatable({ inst = target, enabled = true, produce = 1, product = "twigs" }, {
+        __index = require("components/harvestable"),
+    })
+    target.components.harvestable = harvestable
+    assert(action("HARVEST", function() return harvestable:Harvest(player) end):Do())
+    assert(#records("dst.player.harvested") == 1 and #records("dst.player.action") == 0)
+    target.components.harvestable = nil
+    -- Searching and harvesting cooked food do not emit the player component events.
+    assert(action("PICK", function() return true, "searched" end):Do())
+    assert(action("HARVEST", function() return true, "cooked" end):Do())
+    local events = records("dst.player.action")
+    assert(#events == 2 and events[1].data.reason == "searched" and events[2].data.reason == "cooked")
+end
+
+function scenarios.combat_history()
+    GetTime = function() return 1 end
+    IsRangedWeapon = function() return false end
+    install()
+    local opponent = entity("wendy", 4, "KU_OPPONENT")
+    TheWorld:PushEvent("ms_playerjoined", opponent)
+    outputs = {}
+    local Combat = require("components/combat")
+    local function combat(inst)
+        inst.components.health = {
+            IsDead = function() return false end,
+            IsInvincible = function() return false end,
+            DoDelta = function(_, amount) return amount end,
+        }
+        local component = setmetatable({
+            inst = inst,
+            externaldamagetakenmultipliers = { Get = function() return 1 end },
+            ShouldRecoil = function(_, _, _, damage) return false, damage end,
+        }, { __index = Combat })
+        inst.components.combat = component
+        return component
+    end
+    local player_combat, target_combat = combat(player), combat(target)
+    combat(opponent)
+    -- Filter before reading positions or constructing event payloads.
+    target.Transform.GetWorldPosition = function() error("ordinary combat was captured") end
+    for _ = 1, 30 do
+        target_combat:GetAttacked_Internal(player, 10)
+        player_combat:GetAttacked_Internal(target, 10)
+    end
+    player.components.health.IsInvincible = function() return true end
+    player_combat:GetAttacked_Internal(target, 10)
+    player:PushEvent("blocked")
+    assert(#records() == 0)
+    player_combat:GetAttacked_Internal(opponent, 10)
+    assert(#records("dst.player.combat_blocked") == 1)
+    player.components.health.IsInvincible = function() return false end
+    player_combat:GetAttacked_Internal(opponent, 10, nil, nil, nil, true)
+    assert(#records("dst.player.combat_received") == 1 and #records("dst.player.combat_hit") == 1)
+    local summon = entity("abigail", 5)
+    summon.components.follower = { GetLeader = function() return opponent end }
+    player_combat:GetAttacked_Internal(summon, 10)
+    local received = records("dst.player.combat_received")
+    assert(#received == 2 and received[1].data.from_doattack == true)
+    assert(received[2].data.attacker.prefab == "abigail")
+    assert(require("dst_server").health().errors == 0)
+end
+
 function scenarios.important_deaths()
     install()
     local victim = entity("wendy", 4, "KU_WENDY")

@@ -208,13 +208,14 @@ player_listeners.newstate(player, { statename = "sink" })
 player_listeners.newstate(player, { statename = "sink_fast" })
 player_listeners.newstate(player, { statename = "abyss_fall" })
 
+local opponent = entity("wendy", 47, "KU_OPPONENT", 3, 4)
 local combat = {
     damage = 12.5,
     weapon = spear,
     stimuli = "electric",
     spdamage = { planar = 1.25, shadow = 2 },
-    target = target,
-    attacker = target,
+    target = opponent,
+    attacker = opponent,
     damageresolved = 10,
     original_damage = 14,
     redirected = redirected,
@@ -271,4 +272,4 @@ player_listeners.unequip(player, { item = spear, eslot = "hands", slip = true })
 player_listeners.dropitem(player, { item = spear })
 
 health = driver.health()
-assert(health.events_emitted == 81 and health.errors == 0)
+assert(health.events_emitted == 80 and health.errors == 0)

@@ -37,6 +37,7 @@ end
 
 local function attach_combat(player)
     listen(player, "onhitother", function(_, data)
+        if data == nil or values.player_for(data.target) == nil then return end
         local event = values.combat_data(player, data)
         event.target = values.entity_ref(data.target)
         event.damage_resolved = values.optional_json_number(data.damageresolved)
@@ -44,7 +45,7 @@ local function attach_combat(player)
         telemetry.emit("dst.player.combat_hit", event)
     end)
     listen(player, "attacked", function(_, data)
-        data = data or {}
+        if data == nil or values.player_for(data.attacker) == nil then return end
         local event = values.combat_data(player, data)
         event.attacker = values.entity_ref(data.attacker)
         event.damage_resolved = values.optional_json_number(data.damageresolved)
@@ -53,7 +54,7 @@ local function attach_combat(player)
         telemetry.emit("dst.player.combat_received", event)
     end)
     listen(player, "blocked", function(_, data)
-        data = data or {}
+        if data == nil or values.player_for(data.attacker) == nil then return end
         local event = values.combat_data(player, data)
         event.attacker = values.entity_ref(data.attacker)
         event.original_damage = values.optional_json_number(data.original_damage)

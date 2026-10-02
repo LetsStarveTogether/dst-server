@@ -33,9 +33,16 @@ function actions.install()
     end)
     BufferedAction.Do = function(...)
         local action = ...
+        local action_id = action.action ~= nil and action.action.id or nil
         if not state.telemetry_active
-            or not state.action_allowlist[action.action ~= nil and action.action.id or nil]
+            or not state.action_allowlist[action_id]
             or action.doer == nil or not action.doer:HasTag("player") then
+            return original(...)
+        end
+        -- Other PICK/HARVEST branches (searching, cooked food) lack these completion events.
+        local components = action.target ~= nil and action.target.components or nil
+        if components ~= nil and (action_id == "PICK" and components.pickable ~= nil
+            or action_id == "HARVEST" and components.harvestable ~= nil) then
             return original(...)
         end
         local snapshot = capture_action(action)
