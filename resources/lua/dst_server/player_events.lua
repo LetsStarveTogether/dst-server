@@ -126,7 +126,13 @@ local function attach_skills_and_fishing(player)
             active = false,
         })
     end)
+    local last_warning, last_warning_time
     listen(player, "houndwarning", function(_, warning_type)
+        local now = GetTime()
+        -- shortcut: 30 seconds of silence separates warnings; use wave IDs if exact boundaries become necessary.
+        local repeated = warning_type == last_warning and now - last_warning_time < 30
+        last_warning, last_warning_time = warning_type, now
+        if repeated then return end
         telemetry.emit("dst.player.hound_warning", {
             player = values.entity_ref(player),
             warning_type = warning_type,

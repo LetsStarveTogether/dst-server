@@ -80,6 +80,7 @@ string.utf8len = function(value) return #value end
 Ents = { [42] = player }
 REMOTESHARDSTATE = { READY = 1 }
 GetTick = function() return 10 end
+GetTime = function() return 1 end
 GetTimeReal = function() return 20 end
 
 local driver = require("dst_server")
