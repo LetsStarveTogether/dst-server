@@ -6,7 +6,8 @@
 English | [简体中文](README.zh-Hans.md)
 
 A Rust SDK, Agent and CLI for Don't Starve Together, with Python bindings.
-Each room runs in one container: one Agent supervises every configured shard and remains available while the games are closed.
+Each room runs in one container: one Agent supervises every configured shard and exits with the games when the room closes.
+An external scheduler starts the container at each opening.
 Published binaries and Python wheels support Linux x86_64 and CPython 3.14.
 The control socket is for trusted callers on the same host.
 
@@ -133,9 +134,14 @@ dst-server call get_player '{"userid":"KU_example"}' --socket /srv/dst/299/.dst-
 dst-server subscribe lifecycle --socket /srv/dst/299/.dst-agent.sock
 ```
 
-`call stop` stops games while leaving the Agent available; the opening schedule can start them again.
+`call stop` gracefully closes every shard, then exits the Agent and container with code `0`.
 `host stop --room 299` stops the container service, including its Agent.
-Use the latter before offline configuration changes:
+Either stop permits the independent external scheduler to start the service at its next trigger.
+`call restart` confirms the stop and requests container replacement; its reply does not confirm the next startup.
+Use `host start` or `host restart` to wait for all shards to become ready.
+Outside opening hours, startup exits successfully with the room closed.
+Recovery that remains exhausted is reported as an error.
+Stop the service before offline configuration changes:
 
 ```sh
 dst-server host stop --room 299
@@ -143,8 +149,7 @@ dst-server host edit --room 299 --set '/cluster/settings/max_players=9'
 dst-server host start --room 299
 ```
 
-A closed game can still have a live Agent holding the room lock.
-Use Agent operations for maintenance while it is running.
+After container exit, `host status` reads the saved policy, current schedule, maintenance and recovery state.
 Changing world-generation settings preserves existing saves; `regenerate` creates new worlds.
 
 ## Rust and Python SDKs
@@ -190,8 +195,10 @@ Entity references contain world session and runtime generation; old references b
 Each room permits one mutation at a time and returns `busy` for a conflicting operation.
 Accepted mutations belong to the Agent.
 Cancellation, disconnection and caller timeouts stop waiting without undoing the operation.
-Check `status` after an unknown result before deciding whether to retry.
+Check `status`, or `host status` after container exit, before deciding whether to retry an unknown result.
 Save success requires native completion on every shard.
+Graceful shutdown sends one native `c_shutdown()` to each shard and lets the game perform its final save.
+The game may save more than once within its native shutdown path.
 Normal shutdown requires exit code zero, process reaping and output drainage, with no force or protocol fault.
 Failed shutdown retains each shard's exit status and confirmed saved snapshot.
 Signal termination uses the negative signal number.
@@ -284,16 +291,25 @@ dst-server call set_policy - --socket /srv/dst/299/.dst-agent.sock <<'JSON'
 JSON
 ```
 
-The Agent checks schedules every 30 seconds, including windows across midnight.
-At closing time it stops all games and stays available for the next opening.
-Pending Mod maintenance runs before reopening.
+The Agent checks opening hours at startup and every 30 seconds while running, including windows across midnight.
+At closing time it stops all games and exits the container with code `0`.
+Startup outside opening hours also exits with code `0` before starting games.
+Configure an independent host scheduler to activate the service at each opening; see the [systemd timer example](docs/migration.md#external-opening-timer).
+Update that scheduler separately when changing policy times or timezone.
+Stopping a room leaves the external scheduler active; manage the scheduler separately when its next trigger should be suppressed.
+Pending Mod maintenance runs in the next container's startup before opening games.
+`call update_mods` queues maintenance and returns before the next container performs it.
+With `restart: false`, that container closes after the update.
+Explicit Mod maintenance may run outside opening hours, but games still follow the schedule.
 The default maintenance countdown is 60 seconds with announcements every 30 seconds.
 Failed downloads or validation receive two additional attempts, five minutes apart, then leave games closed.
 An explicit maintenance request or a later opening can retry.
 
 A required shard crash or sustained control failure stops the whole room.
-Abnormal process exits, forced termination and IPC faults require container replacement.
-Recovery state persists across that replacement.
+Abnormal process exits, forced termination and IPC faults persist recovery state and exit with code `75` for container replacement.
+Intentional restart and Mod maintenance use code `76`.
+The generated Quadlet treats it as successful and forces a restart through the same startup path.
+Update existing Quadlets with the [required restart directives](docs/migration.md#container-exit-contract) before using this lifecycle.
 Retryable failures allow two restarts of the current save, 30 seconds apart.
 Only confirmed save-loading failure can then try one previous complete room snapshot.
 The loss must be proven to be at most one game day per world.
@@ -341,7 +357,7 @@ Compression uses 7z with Zstd level 3 by default and one concurrent compressor.
 Uploads use the native object-store implementation and explicitly abort incomplete multipart uploads on failure or cancellation.
 Cleanup failures remain visible in the result and logs.
 Python exposes `dst_server.archive.export_cluster` and `ClusterArchive.save/upload`.
-Export requires stopped games and uses the live Agent or an exclusive offline lock.
+Export requires stopped games and an exclusive room lock.
 For an offline local export:
 
 ```sh
