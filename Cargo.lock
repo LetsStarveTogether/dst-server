@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "dst-server"
-version = "0.4.0-dev.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "capnp",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "dst-server-python"
-version = "0.4.0-dev.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dst-server",

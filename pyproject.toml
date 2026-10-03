@@ -1,6 +1,6 @@
 [project]
 name = "dst-server"
-version = "0.4.0.dev1"
+version = "0.4.0"
 description = "Native SDK and room agent for Don't Starve Together."
 readme = "README.md"
 license = "MIT"
