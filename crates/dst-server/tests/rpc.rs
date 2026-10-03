@@ -10,6 +10,58 @@ use tokio::sync::{Notify, mpsc, oneshot};
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
+async fn final_response_is_delivered_before_server_shutdown() {
+    let _test = TEST_LOCK.lock().await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for size in [0, 768 * 1024] {
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("agent.sock");
+                let (dispatch, mut incoming) = mpsc::channel::<Incoming>(1);
+                let (shutdown, stop) = oneshot::channel();
+                let path = socket.clone();
+                let server = tokio::task::spawn_local(async move {
+                    rpc::serve(&path, dispatch, EventHub::default(), stop).await
+                });
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !socket.exists() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                let client = Client::connect(&socket).await.unwrap();
+                let stream = client.subscribe("lifecycle").await.unwrap();
+                let clone = client.clone();
+                let request = tokio::spawn(async move {
+                    clone
+                        .call(Envelope::new(Target::Room, Request::Stop { notice: None }).unwrap())
+                        .await
+                });
+                let accepted = incoming.recv().await.unwrap();
+                let expected = json!({"stopped":true,"details":"x".repeat(size)});
+                accepted.reply.send(Ok(expected.clone())).unwrap();
+                shutdown.send(()).unwrap();
+                server.await.unwrap().unwrap();
+                assert!(!socket.exists());
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(2), request)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap(),
+                    expected
+                );
+                stream.close().await.unwrap();
+                stream.close().await.unwrap();
+                client.close().await.unwrap();
+                client.close().await.unwrap();
+            }
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss() {
     let _test = TEST_LOCK.lock().await;
     tokio::task::LocalSet::new()

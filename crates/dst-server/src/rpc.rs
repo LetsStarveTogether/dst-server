@@ -1,16 +1,18 @@
 //! Local Cap'n Proto transport. Accepted operations belong to the room dispatcher.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
 use futures::AsyncReadExt;
 use serde_json::{Value, json};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::model::{Envelope, Error, ErrorCode, Scope};
@@ -21,6 +23,7 @@ const MAX_EVENT: usize = 64 * 1024;
 const STREAM_ITEMS: usize = 1024;
 const STREAM_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SUBSCRIPTIONS: usize = 128;
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -121,6 +124,7 @@ impl EventHub {
 struct SubscriptionServer {
     state: Arc<StreamState>,
     reading: std::cell::Cell<bool>,
+    pending: Rc<PendingCalls>,
 }
 
 impl subscription::Server for SubscriptionServer {
@@ -129,6 +133,7 @@ impl subscription::Server for SubscriptionServer {
         params: subscription::NextParams,
         mut results: subscription::NextResults,
     ) -> capnp::Result<()> {
+        let _pending = self.pending.enter();
         let count = usize::from(params.get()?.get_max_items());
         if !(1..=512).contains(&count) {
             return Err(capnp::Error::failed("max_items must be in 1..=512".into()));
@@ -191,9 +196,41 @@ impl subscription::Server for SubscriptionServer {
     }
 }
 
+#[derive(Default)]
+struct PendingCalls {
+    count: Cell<usize>,
+    closing: Cell<bool>,
+    idle: Notify,
+}
+
+impl PendingCalls {
+    fn enter(self: &Rc<Self>) -> PendingCall {
+        self.count.set(self.count.get() + 1);
+        PendingCall(self.clone())
+    }
+
+    async fn drain(&self) {
+        while self.count.get() != 0 {
+            self.idle.notified().await;
+        }
+    }
+}
+
+struct PendingCall(Rc<PendingCalls>);
+
+impl Drop for PendingCall {
+    fn drop(&mut self) {
+        self.0.count.set(self.0.count.get() - 1);
+        if self.0.count.get() == 0 {
+            self.0.idle.notify_one();
+        }
+    }
+}
+
 struct RoomServer {
     dispatch: mpsc::Sender<Incoming>,
     events: EventHub,
+    pending: Rc<PendingCalls>,
 }
 
 fn set_outcome(
@@ -226,6 +263,13 @@ impl room::Server for RoomServer {
         params: room::CallParams,
         mut results: room::CallResults,
     ) -> capnp::Result<()> {
+        if self.pending.closing.get() {
+            return set_outcome(
+                results.get().init_result(),
+                Err(Error::new(ErrorCode::NotReady, "room server is closing")),
+            );
+        }
+        let _pending = self.pending.enter();
         let bytes = params.get()?.get_request()?;
         let request = if bytes.len() > MAX_MESSAGE {
             Err(Error::new(ErrorCode::Invalid, "RPC request exceeds 1 MiB"))
@@ -272,6 +316,9 @@ impl room::Server for RoomServer {
         params: room::SubscribeParams,
         mut results: room::SubscribeResults,
     ) -> capnp::Result<()> {
+        if self.pending.closing.get() {
+            return Err(capnp::Error::disconnected("room server is closing".into()));
+        }
         let state = self
             .events
             .subscribe(params.get()?.get_kind()?.to_str()?)
@@ -281,6 +328,7 @@ impl room::Server for RoomServer {
             .set_subscription(capnp_rpc::new_client(SubscriptionServer {
                 state,
                 reading: std::cell::Cell::new(false),
+                pending: self.pending.clone(),
             }));
         Ok(())
     }
@@ -335,10 +383,13 @@ pub async fn serve(
         inode: metadata.ino(),
         device: metadata.dev(),
     };
+    let pending = Rc::new(PendingCalls::default());
     let endpoint: room::Client = capnp_rpc::new_client(RoomServer {
         dispatch,
         events: events.clone(),
+        pending: pending.clone(),
     });
+    let (disconnect, _) = watch::channel(false);
     let mut connections = tokio::task::JoinSet::new();
     let result = loop {
         tokio::select! {
@@ -356,11 +407,32 @@ pub async fn serve(
                 let (reader, writer) = stream.compat().split();
                 let options = capnp::message::ReaderOptions { traversal_limit_in_words: Some(2 * MAX_MESSAGE / 8), nesting_limit: 64 };
                 let network = twoparty::VatNetwork::new(reader, writer, rpc_twoparty_capnp::Side::Server, options);
-                connections.spawn_local(RpcSystem::new(Box::new(network), Some(endpoint.clone().client)));
+                let rpc = RpcSystem::new(Box::new(network), Some(endpoint.clone().client));
+                let disconnected = rpc.get_disconnector();
+                let mut closing = disconnect.subscribe();
+                connections.spawn_local(async move {
+                    tokio::pin!(rpc);
+                    tokio::select! {
+                        result = &mut rpc => result,
+                        _ = closing.changed() => tokio::select! {
+                            result = &mut rpc => result,
+                            result = disconnected => result,
+                        },
+                    }
+                });
             }
         }
     };
+    drop(listener);
+    pending.closing.set(true);
     events.close();
+    // Complete handlers before Cap'n Proto flushes their queued return messages.
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, pending.drain()).await;
+    disconnect.send_replace(true);
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
     connections.abort_all();
     while connections.join_next().await.is_some() {}
     result
@@ -473,8 +545,15 @@ impl Client {
 
     pub async fn close(&self) -> Result<()> {
         let (reply, response) = oneshot::channel();
-        self.send(ClientMessage::Close(reply))?;
-        response.await.map_err(transport)
+        if self
+            .requests
+            .send(ClientMessage::Close(reply))
+            .await
+            .is_ok()
+        {
+            let _ = response.await;
+        }
+        Ok(())
     }
 
     fn send(&self, message: ClientMessage) -> Result<()> {
@@ -573,7 +652,13 @@ async fn connect(path: PathBuf) -> Result<Client> {
                 }
             }
         }
-        incoming.close();
+        if rpc_finished {
+            // A peer can close immediately after its final successful response.
+            let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
+                while calls.join_next().await.is_some() {}
+            })
+            .await;
+        }
         calls.abort_all();
         while calls.join_next().await.is_some() {}
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), disconnect).await;
@@ -638,11 +723,15 @@ impl Subscription {
 
     pub async fn close(&self) -> Result<()> {
         let (reply, response) = oneshot::channel();
-        self.requests
+        if self
+            .requests
             .send(SubscriptionMessage::Close(reply))
             .await
-            .map_err(transport)?;
-        response.await.map_err(transport)?
+            .is_ok()
+        {
+            return response.await.unwrap_or(Ok(()));
+        }
+        Ok(())
     }
 }
 
@@ -691,7 +780,6 @@ fn subscription_client(endpoint: subscription::Client) -> Subscription {
                     }));
                 }
                 SubscriptionMessage::Close(reply) => {
-                    incoming.close();
                     let result = close_subscription(&endpoint).await;
                     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
                         while reads.join_next().await.is_some() {}
@@ -719,7 +807,13 @@ async fn close_subscription(endpoint: &subscription::Client) -> Result<()> {
     .await
     .map_err(|_| Error::new(ErrorCode::Timeout, "subscription close timed out"))?
     .map(|_| ())
-    .map_err(transport)
+    .or_else(|failure| {
+        if failure.kind == capnp::ErrorKind::Disconnected {
+            Ok(())
+        } else {
+            Err(transport(failure))
+        }
+    })
 }
 
 #[cfg(test)]
