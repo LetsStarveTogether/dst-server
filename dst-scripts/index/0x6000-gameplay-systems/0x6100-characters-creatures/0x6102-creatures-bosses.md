@@ -31,7 +31,7 @@ Both connect to shared systems through components such as `health`, `combat`, an
 | `scripts/prefabs/rabbit.lua` | `Prefab("rabbit", fn, ...)` | Ordinary creature example |
 | `scripts/prefabs/deerclops.lua` | `Prefab("deerclops", normalfn, ...)` | Boss and variant example |
 | `scripts/prefabs/charlie_boss_trial.lua` | `TrackCharlieBoss` / `SpawnExitCrack` | Owns the encounter, hazards, boss replacement, and victory effects |
-| `scripts/stategraphs/SGcharlie_boss.lua` | `death` / `track_charlie_boss` | Spawns Shrouden and transfers arena tracking |
+| `scripts/stategraphs/SGcharlie_boss.lua` | `death_spawn_shrouden` / `track_charlie_boss` | Spawns Shrouden and transfers arena tracking |
 | `scripts/prefabs/shrouden.lua` | `TryReset` / `OnSave` | Assembles the boss and restores its encounter state |
 | `scripts/brains/shroudenbrain.lua` | `ShroudenBrain:OnStart` | Chooses chase, distant attacks, and devoured-target behavior |
 | `scripts/stategraphs/SGshrouden.lua` | `death_final` / `ms_charlie_boss_defeated` | Completes the encounter after the final death sequence |
@@ -129,7 +129,9 @@ It composes the remaining trait, combat, hungry, nuzzle, pet, sleep, and wake st
 ### `0x61023230` Arena Encounter: Charlie and Shrouden
 
 `charlie_boss_trial.lua` creates `charlie_boss` and tracks it through `TrackCharlieBoss`.
-In `SGcharlie_boss`, frame 69 of `death` spawns `shrouden`, transfers the AOE tag set, and pushes `track_charlie_boss`.
+In `SGcharlie_boss`, the death and transformation states lead to `death_spawn_shrouden`.
+That state's timeout spawns `shrouden`, transfers the AOE tag set, and pushes `track_charlie_boss` inside the arena.
+The saved `looted` flag lets a restored Charlie boss skip directly to that spawn state.
 The arena then follows the new boss through the same tracking callbacks.
 `shrouden.lua` installs `shroudenbrain`, `SGshrouden`, retargeting, and phase-dependent attacks.
 Its Brain handles chasing, `dofarattack`, and facing devoured players; its StateGraph performs the attacks.
@@ -138,12 +140,36 @@ Its Brain handles chasing, `dofarattack`, and facing devoured players; its State
 The arena callback pushes `resetvault` and `ms_defeated_shrouden`, synchronizes Charlie defeat, and opens `charliearena_teleporter`.
 The arena therefore completes after the final StateGraph sequence rather than at the initial health-zero event.
 The gate creates `king_cane` and `queen_torch` during ritual arena entry, before boss defeat.
+It also creates `mask_charlie_bosshat` while Charlie has not yet been defeated.
 See [Items and Crafting](../0x6300-items-crafting-events/0x6301-items-crafting.md) for those items.
 
 Both boss prefabs use `TryReset` after losing targets.
 The ordinary reset waits until the Atrium room set has no players, then restores health and the first phase.
+Both bosses return to `spawn_loop`.
+While a disengage reset is pending, their retarget functions can consider players across the arena.
 Shrouden saves `looted` to distinguish its two death-loot stages and `changearena` to restore an arena transition.
+The latter flag lives in `sg.mem`, and `OnLoadPostPass` schedules the arena change after load.
 Room and Vault reset rules are covered in [Caves, Ocean, and Ruins](../../0x5000-world-simulation/0x5200-world-state/0x5202-caves-ocean-ruins.md).
+
+### `0x61023240` Hallowed Nights Creature Forms
+
+The event transforms existing creature prefabs and swaps their Brains, targeting, health, movement, and loot settings.
+Their StateGraphs remain the shared pig, merm, and bunnyman graphs, which branch on `franken`, `mummy`, or `vampire`.
+
+| Prefab source | Transformation | Brain source | StateGraph source |
+| --- | --- | --- | --- |
+| `scripts/prefabs/pigman.lua` | `MakeFrankenPig` | `scripts/brains/frankenpigbrain.lua` | `scripts/stategraphs/SGpig.lua` |
+| `scripts/prefabs/merm.lua` | `MakeMummyMerm` | `scripts/brains/mummymermbrain.lua` | `scripts/stategraphs/SGmerm.lua` |
+| `scripts/prefabs/bunnyman.lua` | `MakeVampireBunny` | `scripts/brains/vampirebunnybrain.lua` | `scripts/stategraphs/SGbunnyman.lua` |
+
+Each Brain pauses its decision subtree while the SG has `jumping`.
+It then chooses walking or running `ChaseAndAttack` branches before wandering.
+The transformations disable trading and clear the follower's leader, changing the usual creature alliance rules.
+Follow the corresponding house prefabs for spawn and home behavior.
+`OnPreLoad` restores saved forms according to the event switch.
+`NAUGHTY_VALUE` in `constants.lua` uses functions for pigmen and bunnymen.
+Frankenpigs, werepigs, and vampire bunnies contribute zero through those entries.
+`components/kramped.lua` calls `OnNaughtyAction` only for a positive result.
 
 ## `0x61024110` Assembly Responsibilities
 
@@ -184,7 +210,8 @@ rg -n "SetMaxHealth|SetVal|DoDelta|death" \
 rg -n "MakeCharacterPhysics|Make.*BurnableCharacter|Make.*FreezableCharacter" \
   scripts/standardcomponents.lua
 
-rg -n "TrackCharlieBoss|track_charlie_boss|ms_charlie_boss_defeated|TryReset|looted|changearena" \
+rg -n -e "TrackCharlieBoss|death_spawn_shrouden|track_charlie_boss|ms_charlie_boss_defeated" \
+  -e "TryReset|looted|changearena|spawn_loop" \
   scripts/prefabs/charlie_boss_trial.lua \
   scripts/prefabs/charlie_boss.lua \
   scripts/prefabs/shrouden.lua \
@@ -200,6 +227,15 @@ rg -n "MakeCritter|critter_eets|SGCritterStates\\.AddEat|QueueStateAfterEat|OnTr
   scripts/prefabs/critters.lua \
   scripts/stategraphs/SGcritter_common.lua \
   scripts/stategraphs/SGcritter_eets.lua
+
+rg -n "MakeFrankenPig|MakeMummyMerm|MakeVampireBunny|HN_MONSTER|OnPreLoad|SetBrain" \
+  scripts/prefabs/pigman.lua scripts/prefabs/merm.lua scripts/prefabs/bunnyman.lua \
+  scripts/prefabs/pighouse.lua scripts/prefabs/mermhouse.lua scripts/prefabs/rabbithouse.lua
+
+rg -n "OnStart|jumping|hn_walk_t0|ChaseAndAttack|GoHomeAction" \
+  scripts/brains/frankenpigbrain.lua scripts/brains/mummymermbrain.lua scripts/brains/vampirebunnybrain.lua
+
+rg -n "NAUGHTY_VALUE|naughty_val|franken|vampire" scripts/constants.lua scripts/components/kramped.lua
 ~~~
 
 ### `0x61025110` Reading Order

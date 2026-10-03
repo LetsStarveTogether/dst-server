@@ -37,6 +37,8 @@ Trace actual call sites instead of searching only for `faction`.
 | `scripts/components/golfclub.lua` | `StartAiming` / `OnSwingHit` | Handles aiming and swings |
 | `scripts/components/golfable.lua` | `OnHit` / `OnExternalPhysics` | Handles ball hits and external force |
 | `scripts/components/yoth_knightmanager.lua` | `IsKnightShrineActive` | Demonstrates a Year of the Horse manager |
+| `scripts/components/leafpilemanager.lua` | `TryToEnable` / `OnUpdate` / `LoadPostPass` | Spawns, retires, and restores registered Hallowed Nights leaf piles |
+| `scripts/prefabs/leafpile.lua` | `OnSweepedFn` / `DropLootFor` | Resolves sweeping rewards and removes the pile |
 | `scripts/components/leader.lua` | `AddFollower` | Stores followers |
 | `scripts/components/follower.lua` | `SetLeader` | Maintains leadership and loyalty |
 | `scripts/components/combat.lua` | `TryRetarget` / `SetTarget` | Selects hostile targets |
@@ -44,6 +46,7 @@ Trace actual call sites instead of searching only for `faction`.
 ### `0x63032111` Event Switches
 
 `IsSpecialEventActive(event)` returns true when `WORLD_SPECIAL_EVENT == event` or `WORLD_EXTRA_EVENTS[event] == true`.
+The current snapshot initializes `WORLD_SPECIAL_EVENT` to `SPECIAL_EVENTS.HALLOWED_NIGHTS`.
 `GetValidRecipe`, prefab assembly, menu skins, world components, and loot logic call it directly.
 Events therefore affect recipes, loot, spawners, and prefab behaviour as well as frontend themes.
 
@@ -125,6 +128,20 @@ For any event prefab, find world-component registration before reading its State
 `IsKnightShrineActive` requires both a shrine and `IsSpecialEventActive(SPECIAL_EVENTS.YOTH)`.
 Event managers commonly combine a world entity with an active event switch.
 
+## `0x63034411` Hallowed Nights Leaf Piles
+
+`forest.lua` adds `leafpilemanager` on the master simulation.
+`LeafpileManager:TryToEnable` checks Hallowed Nights before enabling spawning according to `isautumn`.
+Its placement test requires `DECIDUOUS` ground, free space, and room in the local density grid.
+`OnUpdate` attempts both random world placement and placement near players.
+When disabled, it gradually decays registered piles except during winter, then stops updating after the final pile is removed.
+`OnSave` stores registered pile GUIDs, and `LoadPostPass` rebuilds the grid from restored entities.
+
+`leafpile.lua` owns growth stages and the reward selection in `DropLootFor`.
+The `SWEEP` action reaches `OnSweepedFn`, which drops loot, plays the shatter effect, and removes the pile.
+Follow the tool and action through [ComponentActions](../../0x3000-entity-action/0x3200-action-pipeline/0x3201-component-actions.md).
+The event also enables creature transformations described in [Creatures and Bosses](../0x6100-characters-creatures/0x6102-creatures-bosses.md).
+
 ## `0x63035100` Verification
 
 ~~~bash
@@ -161,6 +178,9 @@ rg -n "AddFollower|SetLeader|TryRetarget|SetTarget|leaderchanged" \
   scripts/components/leader.lua \
   scripts/components/follower.lua \
   scripts/components/combat.lua
+
+rg -n "leafpilemanager|TryToEnable|NoLeafpileTest|TryToCreateLeafpile|LoadPostPass|OnSweepedFn|DropLootFor" \
+  scripts/prefabs/forest.lua scripts/components/leafpilemanager.lua scripts/prefabs/leafpile.lua
 ~~~
 
 ### `0x63035111` Reading Order
@@ -168,5 +188,5 @@ rg -n "AddFollower|SetLeader|TryRetarget|SetTarget|leaderchanged" \
 Confirm the event name and switch in `constants.lua`.
 Read the apply functions in `simutil.lua`.
 Then verify prefab loading in `mainfunctions.lua` and `gamelogic.lua`.
-Use Carnival, Carnival golf, or YOTH as the sample.
+Use Hallowed Nights, Carnival, Carnival golf, or YOTH as the sample.
 Continue through its world component, prefab, and relationship logic.

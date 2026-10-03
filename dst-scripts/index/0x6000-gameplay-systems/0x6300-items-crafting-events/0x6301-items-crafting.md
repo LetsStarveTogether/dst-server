@@ -39,6 +39,10 @@ It follows `builder_replica`, RPCs, `Builder:MakeRecipe*`, `Builder:DoBuild`, an
 | `scripts/components/corruption.lua` | `DoDelta` / `MakeCorrupted` | Tracks the cane's corruption state |
 | `scripts/prefabs/moonbase.lua` | `OnStaffGiven` / `OnTimerDone` | Holds and purifies a corrupted cane |
 | `scripts/prefabs/queen_torch.lua` | `FindClosestQueenTorchAtXZ` / `IgniteTossed` | Tracks torch lights and equips or throws the torch |
+| `scripts/componentutil.lua` | `ShouldItemMimicBeRevealedFor` | Decides revelation using the item, user, and action |
+| `scripts/components/itemmimicconfig.lua` | `DoesActionForceMimicReveal` / `SetLastAction` | Records forced actions and deferred action context |
+| `scripts/prefabs/witchbroom.lua` | `MakeLiving` / `SetLiving` | Configures sweeping and the living broom's movement wear |
+| `scripts/prefabs/livingtree_root.lua` | `OnUsedOnTargetedItem` | Consumes one root to transform a broom |
 
 ### `0x63012111` Recipe Data
 
@@ -134,6 +138,7 @@ The tee removes its own `prototyper` tag so it does not appear as a standard res
 ## `0x63014511` King Cane and Shared Staff Spells
 
 `SpawnShroudenLootSetPiece` in `atrium_gate.lua` creates `king_cane` and `queen_torch` before the boss is defeated.
+It also creates `mask_charlie_bosshat` when the tracker has not recorded Charlie's defeat.
 It runs in the arena-morph callback during `ritualstate_OnSummoned`.
 These items enter the world through the ritual's `SpawnPrefab` calls.
 `staff.lua` and `king_cane.lua` both load gem behaviours and dependencies from `prefabs/staff_common.lua`.
@@ -158,6 +163,28 @@ That gameplay distance is separate from the visual light radius changed by skill
 `BrainCommon.RunAwayFromQueenTorch` uses the shared lookup to make creatures flee.
 Checks in specific shadow prefabs also use it to change targeting behaviour.
 The prefab's save callbacks restore a lit ground torch and its saved thrower brightness data.
+`SetKeepOnDeflect(true)` preserves a deflected torch.
+`OnDeflect` relaunches it along a short arc before restoring the usual projectile settings.
+
+## `0x63014711` Item Mimic Action Context
+
+`ShouldItemMimicBeRevealedFor(item, user, action)` checks the item's `itemmimicconfig`.
+This lets selected interactions force revelation despite `socket_shadow_mimicry`.
+The component stores forced actions and the last action for deferred callbacks that later pass `nil`.
+`king_cane.lua` registers `ACTIONS.GIVE`.
+`ACTIONS.GIVE.fn` checks the target and calls `itemmimic:TurnEvil` immediately before rejecting a mimicked cane.
+The green staff initializer registers `ACTIONS.CASTSPELL`, and `cleargemstaff` removes that rule when the cane changes spells.
+This replaces the previous generic `castonrecipes` tag check with rules attached to each item's actions.
+
+## `0x63014811` Hallowed Nights Broom
+
+`recipes.lua` registers `witchbroom` under `TECH.HALLOWED_NIGHTS`, alongside `pumpkinhat`, with the event hint `NEEDSHALLOWED_NIGHTS`.
+The broom adds `sweeper` and consumes one finite use per `ACTIONS.SWEEP`.
+`livingtree_root.lua` accepts a broom without `flyingbroom`, calls `MakeLiving`, and consumes one root from its stack.
+`MakeLiving` repairs the broom and calls `SetLiving`, which adds its speed multiplier, appearance, and movement listener.
+While the equipped owner wants to move forward, a periodic task consumes finite uses; unequipping cancels the task and listener.
+The prefab saves `living` and restores it through `SetLiving` on load.
+The sweep candidate and target callback are traced in [ComponentActions](../../0x3000-entity-action/0x3200-action-pipeline/0x3201-component-actions.md).
 
 ## `0x63015100` Verification
 
@@ -198,9 +225,17 @@ rg -n "staff_common|cleargemstaff|dodischarge|KING_CANE_.*COOLDOWN" \
   scripts/prefabs/king_cane.lua
 
 rg -n -e "FindClosestQueenTorch|QUEEN_TORCH_RADIUS_SQ|RefreshAttunedSkills|IgniteTossed" \
-  -e "OnThrown|OnPutInInventory|OnSave|OnLoad" \
+  -e "OnThrown|OnPutInInventory|OnSave|OnLoad|OnDeflect|SetKeepOnDeflect" \
   scripts/prefabs/queen_torch.lua \
   scripts/brains/braincommon.lua
+
+rg -n "ShouldItemMimicBeRevealedFor|itemmimicconfig|ActionForceMimicReveal|GetLastAction|SetLastAction" \
+  scripts/componentutil.lua scripts/actions.lua \
+  scripts/components/itemmimic.lua scripts/components/itemmimicconfig.lua \
+  scripts/prefabs/staff_common.lua scripts/prefabs/king_cane.lua
+
+rg -n "witchbroom|HALLOWED_NIGHTS|SetConsumption|MakeLiving|SetLiving|OnConsumeFueled|OnUsedOnTargetedItem" \
+  scripts/recipes.lua scripts/prefabs/witchbroom.lua scripts/prefabs/livingtree_root.lua
 ~~~
 
 ### `0x63015111` Reading Order

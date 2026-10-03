@@ -24,6 +24,8 @@ Event entry points often come from `CommonHandlers.On*`, while transitions still
 | `scripts/stategraphs/commonstates.lua` | `CommonStates.AddCombatStates` | Adds `hit`, `attack`, and `death` |
 | `scripts/stategraphs/commonstates.lua` | `CommonStates.AddInitState` | Adds the default `init` entry state |
 | `scripts/stategraphs/commonstates.lua` | `CommonStates.AddStalkerCorruptionStates` | Adds corruption stun, transformation, and recovery states |
+| `scripts/stategraphs/commonstates.lua` | `CommonHandlers.OnKnockback` / `CommonStates.AddKnockbackStates` | Routes knockback events and supplies airborne and landed states |
+| `scripts/componentutil.lua` | `IsPointInWalledOffVRS` | Keeps knockback inside enclosed virtual rooms |
 | `scripts/components/corruption.lua` | `Corruption:OnUntargetCorruptable` | Sends `interruptcorruption` when targeting ends |
 | `scripts/stategraphs/SGrabbit.lua` | `CommonStates.Add*` | Shows the helpers in a small creature graph |
 
@@ -63,6 +65,7 @@ The concrete SG puts them in its global `events` table, where `StateGraphInstanc
 ### `0x41023311` Timed States
 
 `AddIdle` uses the current animation length as its timeout when it does not push an animation.
+Its animation-completion handler listens for `animqueueover`.
 `AddSimpleActionState` defaults to `TimeEvent(time, performbufferedaction)`.
 
 ## `0x41024111` Movement States
@@ -93,6 +96,21 @@ That state transforms the entity into its shadow prefab after the animation.
 `SGbat.lua` and `SGrocky.lua` use the shared helper.
 `SGworm_boss_head.lua` implements equivalent stun handlers and clears worm invincibility on exit.
 
+## `0x41024511` Shared Knockback
+
+`CommonHandlers.OnKnockback()` handles the `knockback` event and rejects dead entities.
+It also rejects `nointerrupt` or `noknockback` state tags and `sg.mem.noknockback`.
+When the graph has `knockbacklanded`, swimming, heavy bodies, heavy armor, or `data.forcelanded` select that state.
+Otherwise, a non-swimming entity can enter `knockback` when the graph defines it.
+`CommonStates.AddKnockbackStates(states, timelines, anims, fns, speedmult)` supplies both states.
+Its arguments allow presentation and callback overrides.
+The airborne state temporarily relaxes limit collisions only outside enclosed virtual rooms and for entities without `companion`.
+Its timeline checks drowning and swimming, then restores landing state and collision limits.
+`AmphibiousCreature:CheckSwimming` reconciles water state and is disabled in worlds without an ocean.
+Its enter and exit callbacks publish immediate `ms_enterwater` and `ms_exitwater` events.
+The exit helper also restores motor velocity, collision limits, and inventory-item landing state after interruption.
+`SGrabbit.lua` supplies the shared handler and states; graphs with their own knockback behavior can retain local handlers.
+
 ## `0x41025100` Verification
 
 ~~~bash
@@ -106,6 +124,12 @@ rg -n "AddStalkerCorruptionStates|OnStalkerCorrupt|interruptcorruption|OnUntarge
   scripts/stategraphs/SGrocky.lua \
   scripts/stategraphs/SGworm_boss_head.lua \
   scripts/components/corruption.lua
+
+rg -n "OnKnockback|AddKnockbackStates|knockbacklanded|_knockback_onexit|IsPointInWalledOffVRS" \
+  scripts/stategraphs/commonstates.lua scripts/stategraphs/SGrabbit.lua scripts/componentutil.lua
+
+rg -n "CheckSwimming|has_ocean|ms_enterwater|ms_exitwater" \
+  scripts/components/amphibiouscreature.lua scripts/stategraphs/commonstates.lua
 ~~~
 
 ### `0x41025111` Minimum Trace

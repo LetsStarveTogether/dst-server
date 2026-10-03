@@ -29,6 +29,7 @@ Shard updates use `Shard_SyncWorldSettings` and the `SyncWorldSettings` RPC hand
 | `scripts/gamelogic.lua` | `WorldSettings_Overrides.Post` | Apply overrides before saved entities load |
 | `scripts/worldsettings_overrides.lua` | `Pre` / `Post` / `Sync` | Export load and shard-sync override tables |
 | `scripts/worldsettings_overrides.lua` | `ms_setworldsetting` | Synchronize a setting to the world component |
+| `scripts/map/customize.lua` | `frequency_descriptions` / `petrification_descriptions` | Define option-specific setting values |
 | `scripts/shardnetworking.lua` | `Shard_SyncWorldSettings` | Send master overrides through a shard RPC |
 | `scripts/networkclientrpc.lua` | `SyncWorldSettings` | Apply a Sync override or fall back to Pre and Post |
 | `scripts/components/worldsettings.lua` | `WorldSettings:SetSetting` | Store the current value of a world setting |
@@ -66,6 +67,13 @@ The Pre phase runs before the world prefab spawns for both generated and loaded 
 It can change configuration needed during world initialization.
 
 Start at the loop over `WorldSettings_Overrides.Pre` in `gamelogic.lua`.
+
+Population overrides such as `hound_mounds` and `bats_setting` now use `rare` and `often` instead of `few` and `many`.
+These names match `frequency_descriptions` in `map/customize.lua`.
+Value names remain specific to each option; `petrification_descriptions` still uses `few` and `many`.
+The Pre table also contains `cave_vent_mite`, `lightninggoat_setting`, `beefalo_setting`, and `buzzard_setting` handlers.
+Inspect assigned tuning values as well as their labels.
+For example, `lightninggoat_setting.never` currently sets `LIGHTNING_GOAT_ENABLED = true`.
 
 ### `0x22053211` Post Phase
 
@@ -128,6 +136,12 @@ rg -n "Shard_SyncWorldSettings|SyncWorldSettings|WorldSettings_Overrides\\.Sync"
 rg -n "ms_setworldsetting|SetSetting|applyoverrides_(pre|post|sync)" \
   scripts/worldsettings_overrides.lua \
   scripts/components/worldsettings.lua
+
+rg -n -e "hound_mounds|bats_setting|cave_vent_mite|lightninggoat_setting|beefalo_setting|buzzard_setting" \
+  -e "LIGHTNING_GOAT_ENABLED" \
+  scripts/worldsettings_overrides.lua
+
+rg -n "frequency_descriptions|petrification_descriptions" scripts/map/customize.lua
 
 rg -n "WorldSettings_.*PreLoad|WorldSettings_.*Spawn|WorldSettings_.*Regen|worldsettingstimer" \
   scripts/worldsettingsutil.lua \

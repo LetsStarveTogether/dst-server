@@ -1,6 +1,6 @@
 # `0x81010000` Complete File Inventory
 
-This page lists all 4,099 paths returned by `git ls-files --recurse-submodules scripts`.
+This page lists all 4,110 paths returned by `git ls-files --recurse-submodules scripts`.
 
 ## `0x81011111` Inventory Source
 
@@ -111,6 +111,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/brains/eyeofterror_minibrain.lua`
 - `scripts/brains/eyeofterrorbrain.lua`
 - `scripts/brains/eyeturretbrain.lua`
+- `scripts/brains/frankenpigbrain.lua`
 - `scripts/brains/friendlyfruitflybrain.lua`
 - `scripts/brains/frogbrain.lua`
 - `scripts/brains/fruitdragonbrain.lua`
@@ -159,6 +160,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/brains/moosebrain.lua`
 - `scripts/brains/mosquitobrain.lua`
 - `scripts/brains/mosslingbrain.lua`
+- `scripts/brains/mummymermbrain.lua`
 - `scripts/brains/mushgnomebrain.lua`
 - `scripts/brains/nightmarecreaturebrain.lua`
 - `scripts/brains/nightmaremonkeybrain.lua`
@@ -218,6 +220,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/brains/ticoonbrain.lua`
 - `scripts/brains/toadstoolbrain.lua`
 - `scripts/brains/tornadobrain.lua`
+- `scripts/brains/vampirebunnybrain.lua`
 - `scripts/brains/vault_crawlerbrain.lua`
 - `scripts/brains/vault_pillar_guardbrain.lua`
 - `scripts/brains/wagboss_robotbrain.lua`
@@ -607,6 +610,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/inventoryitemtemperature.lua`
 - `scripts/components/itemaffinity.lua`
 - `scripts/components/itemmimic.lua`
+- `scripts/components/itemmimicconfig.lua`
 - `scripts/components/itemstore.lua`
 - `scripts/components/itemweigher.lua`
 - `scripts/components/joustsource.lua`
@@ -626,6 +630,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/lavaarenamusic.lua`
 - `scripts/components/leader.lua`
 - `scripts/components/leaderrollcall.lua`
+- `scripts/components/leafpilemanager.lua`
 - `scripts/components/lighter.lua`
 - `scripts/components/lightningblocker.lua`
 - `scripts/components/lightpostpartner.lua`
@@ -954,6 +959,8 @@ git ls-files --recurse-submodules scripts
 - `scripts/components/stunnable.lua`
 - `scripts/components/submersible.lua`
 - `scripts/components/summoningitem.lua`
+- `scripts/components/sweepable.lua`
+- `scripts/components/sweeper.lua`
 - `scripts/components/symbolswapdata.lua`
 - `scripts/components/tackler.lua`
 - `scripts/components/tacklesketch.lua`
@@ -1869,6 +1876,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/cane.lua`
 - `scripts/prefabs/cane_ancient_fx.lua`
 - `scripts/prefabs/cane_candy_fx.lua`
+- `scripts/prefabs/cane_chess_fx.lua`
 - `scripts/prefabs/cane_harlequin_fx.lua`
 - `scripts/prefabs/cane_rose_fx.lua`
 - `scripts/prefabs/cane_sharp_fx.lua`
@@ -2344,6 +2352,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/lavae_pet.lua`
 - `scripts/prefabs/lavae_tooth.lua`
 - `scripts/prefabs/lavalight.lua`
+- `scripts/prefabs/leafpile.lua`
 - `scripts/prefabs/leif.lua`
 - `scripts/prefabs/leif_idol.lua`
 - `scripts/prefabs/lichen.lua`
@@ -2644,6 +2653,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/preparedfoods.lua`
 - `scripts/prefabs/primemate.lua`
 - `scripts/prefabs/propsign.lua`
+- `scripts/prefabs/pumpkin_bomb.lua`
 - `scripts/prefabs/pumpkin_lantern.lua`
 - `scripts/prefabs/pumpkincarver.lua`
 - `scripts/prefabs/punchingbag.lua`
@@ -3177,6 +3187,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/prefabs/wintersfeastfood.lua`
 - `scripts/prefabs/wintersfeastfuel.lua`
 - `scripts/prefabs/wintersfeastoven.lua`
+- `scripts/prefabs/witchbroom.lua`
 - `scripts/prefabs/wobster.lua`
 - `scripts/prefabs/wobster_den.lua`
 - `scripts/prefabs/woby_commands_classified.lua`
@@ -3784,7 +3795,6 @@ git ls-files --recurse-submodules scripts
 - `scripts/stategraphs/SGwx78_drone_scout.lua`
 - `scripts/stategraphs/SGwx78_drone_zap.lua`
 - `scripts/stategraphs/SGwx78_possessedbody.lua`
-- `scripts/stategraphs/SGwx78_possessedbody_no_package.lua`
 - `scripts/stategraphs/SGwx78_scanner.lua`
 - `scripts/stategraphs/SGwx78_shadowdrone_debuffer.lua`
 - `scripts/stategraphs/SGwx78_shadowdrone_harvester.lua`
@@ -3824,6 +3834,7 @@ git ls-files --recurse-submodules scripts
 - `scripts/vector3.lua`
 - `scripts/vecutil.lua`
 - `scripts/versioning.lua`
+- `scripts/versioning_prefabs.lua`
 - `scripts/versioning_skins.lua`
 - `scripts/voteutil.lua`
 - `scripts/widgets/animbutton.lua`

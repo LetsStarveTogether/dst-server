@@ -1,6 +1,6 @@
 # `0x82010000` Prefab Catalog
 
-The Prefab directory contains 1,617 Lua files.
+The Prefab directory contains 1,621 Lua files.
 
 ## `0x82011111` Prefab Files
 
@@ -214,6 +214,7 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/cane.lua`
 - `scripts/prefabs/cane_ancient_fx.lua`
 - `scripts/prefabs/cane_candy_fx.lua`
+- `scripts/prefabs/cane_chess_fx.lua`
 - `scripts/prefabs/cane_harlequin_fx.lua`
 - `scripts/prefabs/cane_rose_fx.lua`
 - `scripts/prefabs/cane_sharp_fx.lua`
@@ -689,6 +690,7 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/lavae_pet.lua`
 - `scripts/prefabs/lavae_tooth.lua`
 - `scripts/prefabs/lavalight.lua`
+- `scripts/prefabs/leafpile.lua`
 - `scripts/prefabs/leif.lua`
 - `scripts/prefabs/leif_idol.lua`
 - `scripts/prefabs/lichen.lua`
@@ -989,6 +991,7 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/preparedfoods.lua`
 - `scripts/prefabs/primemate.lua`
 - `scripts/prefabs/propsign.lua`
+- `scripts/prefabs/pumpkin_bomb.lua`
 - `scripts/prefabs/pumpkin_lantern.lua`
 - `scripts/prefabs/pumpkincarver.lua`
 - `scripts/prefabs/punchingbag.lua`
@@ -1522,6 +1525,7 @@ System pages cite representative Prefabs; this page keeps the complete inventory
 - `scripts/prefabs/wintersfeastfood.lua`
 - `scripts/prefabs/wintersfeastfuel.lua`
 - `scripts/prefabs/wintersfeastoven.lua`
+- `scripts/prefabs/witchbroom.lua`
 - `scripts/prefabs/wobster.lua`
 - `scripts/prefabs/wobster_den.lua`
 - `scripts/prefabs/woby_commands_classified.lua`

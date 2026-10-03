@@ -36,7 +36,7 @@ Shrouden shows simultaneous pursuit and attack events, then delegates summoned a
 | `scripts/prefabs/deerclops.lua` | `fn` | Binds `SGdeerclops` before the Deerclops Brain |
 | `scripts/brains/deerclopsbrain.lua` | `DeerclopsBrain:OnStart` | Mixes events, combat, structure destruction, and wandering |
 | `scripts/stategraphs/SGdeerclops.lua` | `ActionHandler(ACTIONS.HAMMER, "attack")` | Routes the hammer action from `DoAction(BaseDestroy)` into `attack` |
-| `scripts/stategraphs/SGcharlie_boss.lua` | `name = "death"` | Spawns Shrouden at the end of the first boss phase |
+| `scripts/stategraphs/SGcharlie_boss.lua` | `death_spawn_shrouden` | Spawns Shrouden after the death and transformation states |
 | `scripts/prefabs/shrouden.lua` | `SetStateGraph`, `SetBrain` | Binds Shrouden's server systems |
 | `scripts/brains/shroudenbrain.lua` | `ShroudenBrain:OnStart` | Combines pursuit, far-attack checks, and devoured-target events |
 | `scripts/stategraphs/SGshrouden.lua` | `ChooseAttack`, `DoPortalSummon` | Selects attacks and initializes summoned thralls |
@@ -162,8 +162,12 @@ Structure destruction therefore crosses Brain, `DoAction`, `locomotor`, the SG a
 
 ### `0x43013410` Shrouden Boss Transition
 
-At frame 69 of Charlie's `death` state, `SGcharlie_boss.lua` spawns `shrouden` and transfers its AOE attack tag set.
-It enters the new entity's `spawn` state and emits `track_charlie_boss` with that entity.
+`SGcharlie_boss.lua` enters `death`, then `death2`, where frame 176 drops loot and records `inst.looted`.
+After that animation, `charlie_tracker:IsCharlieDefeated()` selects `death_charlie` or `death_no_charlie` for an arena encounter.
+Both lead to `death_spawn_shrouden`; an already-looted boss enters that state directly from `death`.
+Its timeout spawns `shrouden`, transfers the AOE attack tag set, and enters the new entity's `spawn` state.
+Inside the arena it also emits `track_charlie_boss` with the new entity.
+The older frame-69 transition remains only in a commented `death_beta` state.
 `prefabs/shrouden.lua` creates `combat`, `timer`, `grouptargeter`, and `locomotor` on the master sim.
 It then binds `SGshrouden` and its Brain.
 `ShroudenBrain:OnInitializationComplete` remembers `spawnpoint` for wandering and arena movement.
@@ -228,7 +232,8 @@ rg -n "SetStateGraph|SetBrain|PriorityNode|DoAction|ChaseAndAttack|ActionHandler
   scripts/brains/deerclopsbrain.lua \
   scripts/stategraphs/SGdeerclops.lua
 
-rg -n "track_charlie_boss|SetStateGraph|SetBrain|ParallelNodeAny|dofarattack|targetdevoured|DoPortalSummon" \
+rg -n -e "death_spawn_shrouden|track_charlie_boss|SetStateGraph|SetBrain|ParallelNodeAny" \
+  -e "dofarattack|targetdevoured|DoPortalSummon" \
   scripts/stategraphs/SGcharlie_boss.lua \
   scripts/prefabs/shrouden.lua \
   scripts/brains/shroudenbrain.lua \

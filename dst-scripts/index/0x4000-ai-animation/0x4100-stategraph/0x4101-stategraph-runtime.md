@@ -96,6 +96,10 @@ Construction also applies `ModManager:GetPostInitData` and `StategraphPostInit`.
 `GoToState` copies state tags into `self.tags`.
 Server entities and entities without Network also mirror SG tags such as `busy`, `moving`, and `attack` to entity tags.
 
+In the `dev` branch, `HasStateTag` asserts that it received one non-table argument.
+`HasAnyStateTag` requires multiple arguments or a table.
+`HasState(name)` instead checks whether the graph defines a state with that name.
+
 ## `0x41014311` Timeline Sound Helper
 
 `SoundFrameEvent(frame, sound_event, vol)` wraps `TimeEvent(frame * FRAMES, ...)`.
@@ -110,6 +114,8 @@ rg -n "StateGraphWrangler:Update|StateGraphInstance:StartAction|StateGraphInstan
 
 rg -n "StateGraphInstance:UpdateState|State:HandleEvent" \
   scripts/stategraph.lua
+
+rg -n "HasStateTag|HasAnyStateTag|function StateGraphInstance:HasState" scripts/stategraph.lua
 
 rg -n "PushEvent_Internal|PushEventImmediate|OnPushEvent|UpdateEvents" \
   scripts/entityscript.lua \

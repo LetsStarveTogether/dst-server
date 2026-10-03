@@ -32,6 +32,8 @@ Side effects occur later through `bufferedaction.lua` and `actions.lua`.
 | `scripts/componentactions.lua` | `EntityScript:IsActionValid` | Check candidate visibility through `ISVALID`. |
 | `scripts/actions.lua` | `ACTIONS` | Define the actions referenced by candidates. |
 | `scripts/components/corruption.lua` | `CorruptEnt` | Execute the corruption action on the server. |
+| `scripts/components/sweepable.lua` | `SetEnabled` / `Sweep` | Publish the target tag and dispatch sweeping callbacks. |
+| `scripts/components/sweeper.lua` | `OnSweep` | Play the tool's sweeping sound. |
 
 ### `0x32012111` PlayerActionPicker Anchor
 
@@ -179,6 +181,7 @@ Candidates come from `componentactions.lua`, while execution guards remain in `a
 ## `0x32014911` Magic and Corruption Actions
 
 `USEITEM.spellcaster` now collects targeted spells for the active item, alongside the existing equipped-item path.
+It returns early when the target's inventory-item replica reports `IsHeld()`.
 The `spellcaster` collectors for `USEITEM`, `POINT`, `EQUIPPED`, and `INVENTORY` return early for an item tagged `nomagiccast`.
 The point `blinkstaff` collector applies the same restriction.
 `ACTIONS.CASTSPELL.fn` and `ACTIONS.BLINK.fn` check it again during execution.
@@ -197,6 +200,17 @@ The player SG path is covered in [SGwilson](../../0x4000-ai-animation/0x4100-sta
 The controller's `GetPickupAction` applies the same tag exception.
 In `USEITEM.weapon`, container and construction candidates take precedence over fire interaction.
 The following branch adds `ATTACK` when `CanExtinguishTarget` succeeds, or on right click when `CanLightTarget` succeeds.
+
+## `0x32014A11` Sweeping
+
+The `sweeper` collectors under `USEITEM` and `EQUIPPED` add `ACTIONS.SWEEP` for a right-clicked target tagged `sweepable`.
+`PlayerController:GetActionButtonAction` also scans for that tag.
+`GetPickupAction` selects `SWEEP` when the tool has the `sweeper` action component.
+The action has distance `2.5`, disallows mounted use, and sets `invalid_hold_action`.
+`ACTIONS.SWEEP.fn` checks item mimic revelation before calling the target's `sweepable:Sweep(doer, invobject)`.
+`Sweepable:Sweep` invokes the tool's `sweeper:OnSweep` and then the target's registered callback.
+The leaf pile's callback drops loot, plays its shatter effect, and removes the entity.
+Both player StateGraphs route the action through `doswipeaction`; see [SGwilson](../../0x4000-ai-animation/0x4100-stategraph/0x4103-sgwilson.md).
 
 ## `0x32015100` Verification
 
@@ -225,6 +239,9 @@ rg -n "nomagiccast|CORRUPTNIGHTMARE|nightmarecorruptable|CorruptEnt" \
   scripts/componentactions.lua scripts/actions.lua scripts/components/corruption.lua
 rg -n "torch|CanExtinguishTarget|CanLightTarget|GetPickupAction" \
   scripts/componentactions.lua scripts/actions.lua scripts/components/playercontroller.lua scripts/components/combat_replica.lua
+rg -n "sweeper =|ACTIONS.SWEEP|sweepable|OnSweep|OnSweepedFn|IsHeld" \
+  scripts/componentactions.lua scripts/actions.lua scripts/components/playercontroller.lua \
+  scripts/components/sweepable.lua scripts/components/sweeper.lua scripts/prefabs/leafpile.lua
 ~~~
 
 ### `0x32015111` Minimal Trace

@@ -2,9 +2,9 @@
 
 This page inventories StateGraph, Brain, and Behaviour files.
 
-The StateGraph directory contains 265 Lua files.
+The StateGraph directory contains 264 Lua files.
 
-The Brain directory contains 196 Lua files.
+The Brain directory contains 199 Lua files.
 
 The Behaviour directory contains 29 Lua files.
 
@@ -269,7 +269,6 @@ The Behaviour directory contains 29 Lua files.
 - `scripts/stategraphs/SGwx78_drone_scout.lua`
 - `scripts/stategraphs/SGwx78_drone_zap.lua`
 - `scripts/stategraphs/SGwx78_possessedbody.lua`
-- `scripts/stategraphs/SGwx78_possessedbody_no_package.lua`
 - `scripts/stategraphs/SGwx78_scanner.lua`
 - `scripts/stategraphs/SGwx78_shadowdrone_debuffer.lua`
 - `scripts/stategraphs/SGwx78_shadowdrone_harvester.lua`
@@ -339,6 +338,7 @@ The Behaviour directory contains 29 Lua files.
 - `scripts/brains/eyeofterror_minibrain.lua`
 - `scripts/brains/eyeofterrorbrain.lua`
 - `scripts/brains/eyeturretbrain.lua`
+- `scripts/brains/frankenpigbrain.lua`
 - `scripts/brains/friendlyfruitflybrain.lua`
 - `scripts/brains/frogbrain.lua`
 - `scripts/brains/fruitdragonbrain.lua`
@@ -387,6 +387,7 @@ The Behaviour directory contains 29 Lua files.
 - `scripts/brains/moosebrain.lua`
 - `scripts/brains/mosquitobrain.lua`
 - `scripts/brains/mosslingbrain.lua`
+- `scripts/brains/mummymermbrain.lua`
 - `scripts/brains/mushgnomebrain.lua`
 - `scripts/brains/nightmarecreaturebrain.lua`
 - `scripts/brains/nightmaremonkeybrain.lua`
@@ -446,6 +447,7 @@ The Behaviour directory contains 29 Lua files.
 - `scripts/brains/ticoonbrain.lua`
 - `scripts/brains/toadstoolbrain.lua`
 - `scripts/brains/tornadobrain.lua`
+- `scripts/brains/vampirebunnybrain.lua`
 - `scripts/brains/vault_crawlerbrain.lua`
 - `scripts/brains/vault_pillar_guardbrain.lua`
 - `scripts/brains/wagboss_robotbrain.lua`
