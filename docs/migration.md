@@ -3,7 +3,9 @@
 This guide describes the `0.4.0` Rust rewrite.
 [English README](../README.md) · [简体中文 README](../README.zh-Hans.md)
 
-Schedules, Mod maintenance and idle regeneration run in the resident Agent.
+An external scheduler opens room containers.
+Each Agent enforces closing hours, performs maintenance and supervises one game run.
+Closing the room exits its Agent and container.
 Existing installations require the deployment procedure below.
 
 ## Interface and Deployment Changes
@@ -18,10 +20,11 @@ Existing installations require the deployment procedure below.
 | Quadlet | One `dst-NNN.container` produces `dst-NNN.service`; `RunInit=true` handles container signal forwarding and orphan reaping. |
 | Ports | Allocate the actual required UDP publications from a locked host pool, then persist them; explicit mappings are supported. |
 | Configuration | Native INI/Lua remain authoritative; `.dst-control.json` holds policy, activity, maintenance and recovery state. |
-| Ownership | The Agent holds `.dst-room.lock` for its lifetime, including closure; offline writers require exclusive ownership. |
+| Ownership | The Agent holds `.dst-room.lock` until container exit; offline writers require exclusive ownership. |
 | Socket | `/cluster/.dst-agent.sock` in the container, normally `/srv/dst/NNN/.dst-agent.sock` on the host. |
-| Host lifecycle | `host start/stop/restart` operate the whole systemd service. |
-| Game lifecycle | `call start/stop/restart` operate games through the resident Agent. |
+| Host lifecycle | `host start/stop/restart` operate the whole systemd service; start/restart normally wait for game readiness. |
+| Agent lifecycle | `call stop` exits the container; `call restart` requests a fresh container; `call start` only reports an already running room. |
+| Offline status | `host status` exposes saved `policy`, current `schedule`, `maintenance` and `recovery` after Agent exit, with `game: null`. |
 | CLI | Native and Python entry points share Rust parsing and dispatch; `describe` provides the current operation schemas. |
 
 The release targets Linux x86_64, CPython 3.14 and trusted callers on the same host.
@@ -80,9 +83,9 @@ A policy now has this shape:
 ```
 
 `.dst-control.json` stores it under `policy` alongside the Agent's durable state.
-Translate legacy `schedule`, `recycle` and paused-state assumptions explicitly.
-Manual game closure shares scheduled closure semantics, and a later policy check may reopen games.
-For a lasting administrative stop, stop the host service.
+Translate legacy `schedule` and `recycle` settings explicitly.
+The external scheduler can start the service after any stop, including `host stop`.
+Manage that scheduler separately when its next trigger should be suppressed.
 Never delete the new recovery state to force a retry; use the supported start or maintenance operations.
 
 Later deployment of an existing room requires these steps:
@@ -97,11 +100,76 @@ Later deployment of an existing room requires these steps:
 This repository does not automatically replace an existing Pod installation.
 Validate the generated services and each room's readiness during deployment.
 
+## Container Exit Contract
+
+Before upgrading an existing room, stop its service and confirm the container has exited.
+In the existing `dst-NNN.container` file, add these two lines to `[Service]`, keeping its existing `Restart=on-failure`:
+
+```ini
+SuccessExitStatus=76
+RestartForceExitStatus=76
+```
+
+Review the updated Quadlet and run `systemctl daemon-reload`.
+Then start the room, for example with `dst-server host start --room 299`.
+Newly generated Quadlets already contain both directives.
+Existing files without both `76` directives fail deployment validation.
+Code `0` closes the container; the external scheduler can start it later.
+Code `76` requests an intentional replacement.
+The new container follows the complete startup path for readiness, pending maintenance and recovery.
+Code `75` records a runtime fault for recovery in a fresh container.
+
+`call restart` replies after stopping the current games and requesting replacement.
+`call update_mods` persists the maintenance request and replies with `queued: true`.
+The next container runs the updater and then starts games if requested and currently permitted.
+With `restart: false`, it exits after completing maintenance.
+These replies do not confirm that the next container is ready.
+Use `host start`, `host restart` or `host wait` when game readiness is required.
+Startup outside opening hours exits normally before launching games, and Host reports the closed schedule.
+Host reports recovery that remains exhausted or unsafe as an error.
+
+## External Opening Timer
+
+For the `18:00–00:00` policy above, create `/etc/systemd/system/dst-299-opening.timer` on the host:
+
+```ini
+[Unit]
+Description=Open DST room 299
+
+[Timer]
+OnCalendar=*-*-* 18:00:00 Asia/Shanghai
+Unit=dst-299.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+The timer activates the existing Quadlet service directly.
+Enable and inspect it with:
+
+```sh
+systemd-analyze calendar '*-*-* 18:00:00 Asia/Shanghai'
+systemctl daemon-reload
+systemctl enable --now dst-299-opening.timer
+systemctl list-timers dst-299-opening.timer
+```
+
+For user services, place the timer in `~/.config/systemd/user/` and use `systemctl --user`.
+Configure an `OnCalendar` entry for each opening and update the timer separately whenever policy times or timezone change.
+Calendar expressions accept an IANA timezone, as documented in [systemd.time](https://www.freedesktop.org/software/systemd/man/latest/systemd.time.html).
+`Persistent=true` catches up a missed activation when the timer becomes active again.
+The Agent still checks the current opening hours before starting games.
+A timer trigger leaves an already active service running, as documented in [systemd.timer](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html).
+Either `call stop` or `host stop` leaves this timer enabled for its next activation.
+To suspend future openings, manage the timer directly with `systemctl disable --now dst-299-opening.timer`.
+Enabling it again may catch up a missed activation.
+
 ## Operations, Closure and Recovery
 
 | Operation | Confirmation required |
 | --- | --- |
-| Start or restart | Every configured shard loaded, control available, expected shard links ready. |
+| Host start or restart | Every configured shard loaded, control available, expected shard links ready; outside opening hours, successful exit with the room closed. |
 | Save | Each shard's native final save callback and the corresponding target snapshot. |
 | Stop | Every child exited with code zero, was reaped without forced termination, and drained its output without a protocol fault. |
 | Reset or rollback | Requested worlds reloaded and the new runtime generation is ready. |
@@ -112,7 +180,11 @@ Validate the generated services and each room's readiness during deployment.
 
 The Agent owns accepted operations independently of client waiters.
 The default stop wait is 220 seconds, including its 60-second notice; a different notice delay adjusts that budget.
+Shutdown sends one native `c_shutdown()` per shard, allowing the game to perform its final save.
+It then waits for exit, process reaping and output drainage.
 Clean shutdown can return `saved_snapshot: null` when a Mod disables saving.
+Game build `756039` performed two native saves after one `c_shutdown()` in isolated lifecycle checks.
+The Agent records the last confirmed save and issues no separate save request before shutdown.
 An abnormal exit or forced termination fails normal Stop.
 Its error details retain every shard's exit status and confirmed saved snapshot.
 Signal termination uses the negative signal number, such as `-6` for SIGABRT.
@@ -129,7 +201,7 @@ Unban changes a local list, so writing independent cached lists could replace ne
 The SDK routes these operations through the master even when the request names a secondary.
 
 A required shard failure stops the entire room.
-Normal closure can reopen within the same container.
+Normal closure exits the Agent and container with code `0`.
 Abnormal exits, forced termination or an IPC fault require a fresh container, with the recovery decision persisted first.
 Known configuration, disk, permission or Mod problems remain closed and report the cause.
 Retryable faults receive two current-save restarts, 30 seconds apart.
@@ -141,16 +213,18 @@ It never repeatedly reinterprets "previous snapshot".
 Thirty stable minutes restore the recovery budget.
 An exhausted scheduled room gets a new opportunity at the next opening.
 Repeated checks within the same opening do not reset it.
-An always-open room requires explicit start after exhaustion.
-The Agent remains available while games are closed.
+An always-open room requires an explicit Host start after exhaustion.
+Container startup reads the persisted recovery state and preserves its remaining budget.
+After container exit, use Host status to inspect that state and the current schedule.
 
-Schedules are checked every 30 seconds with an explicit IANA timezone.
+Schedules are checked at startup and every 30 seconds while running, with an explicit IANA timezone.
 Clock baselines persist between policy ticks and reset when the Agent restarts.
 With automatic Mod maintenance enabled, setup code queues a download before the first opening.
 Changing the Mod setup through Configure also queues maintenance before reopening.
 Default Mod announcements use a 60-second countdown and 30-second intervals.
 One native download attempt has a 30-minute budget; policy permits two extra attempts five minutes apart.
-Closing takes precedence over pending maintenance, which remains queued for the next opening.
+Closing takes precedence over automatic maintenance, which remains queued for the next opening.
+Explicit maintenance may run outside opening hours and exits after updating if games cannot open.
 Only `DST_SERVER_MOD_PROXY` supplies the native updater proxy.
 Idle regeneration is off by default and requires an open, ready, reliably empty room.
 Its world-age retention periods are 6, 24, 36, 72 and 168 hours.

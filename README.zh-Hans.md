@@ -6,7 +6,8 @@
 [English](README.md) | 简体中文
 
 通过 Rust SDK、Agent、CLI 和 Python 绑定管理饥荒联机版服务端。
-每个房间使用一个容器，由一个 Agent 管理全部配置分片；闭馆期间游戏进程停止，Agent 继续运行。
+每个房间使用一个容器，由一个 Agent 管理全部配置分片；闭馆时游戏、Agent 和容器一起退出。
+外部调度器在每次开放时启动容器。
 发布的二进制和 Python wheel 支持 Linux x86_64、CPython 3.14 和同机可信调用。
 
 `0.4.0` 使用 Rust 重写了原有 Python 实现。
@@ -129,9 +130,13 @@ dst-server call get_player '{"userid":"KU_example"}' --socket /srv/dst/299/.dst-
 dst-server subscribe lifecycle --socket /srv/dst/299/.dst-agent.sock
 ```
 
-`call stop` 关闭游戏并保留 Agent，日程可以再次开服。
+`call stop` 正常关闭全部分片，随后 Agent 和容器以退出码 `0` 结束。
 `host stop --room 299` 停止整个容器服务，包括 Agent。
-离线修改配置之前使用后者：
+两种停止方式都允许独立的外部调度器在下次触发时启动服务。
+`call restart` 确认停服并请求更换容器；返回时下一次启动尚未确认就绪。
+使用 `host start` 或 `host restart` 等待全部分片就绪。
+非开放时段启动会正常退出并保持闭馆，恢复额度仍然耗尽则报告错误。
+离线修改配置之前停止服务：
 
 ```sh
 dst-server host stop --room 299
@@ -139,7 +144,7 @@ dst-server host edit --room 299 --set '/cluster/settings/max_players=9'
 dst-server host start --room 299
 ```
 
-游戏停止时，常驻 Agent 仍持有房间锁；此时的维护应通过 Agent 接口协调。
+容器退出后，`host status` 直接读取已保存的策略、当前日程、维护和恢复状态，无需 Agent socket。
 修改世界生成参数会保留已有存档；`regenerate` 才会生成新世界。
 
 ## Rust 与 Python SDK
@@ -183,7 +188,9 @@ asyncio.run(main())
 
 每个房间同时执行一个修改操作，冲突返回 `busy`。
 已受理操作由 Agent 持有；调用方超时、断线或取消 Python 等待，不会撤销操作。
-结果未知时先查询 `status`，再决定是否重试。
+结果未知时先查询 `status`；容器已退出则使用 `host status`，再决定是否重试。
+正常停服向每个分片发送一次原生 `c_shutdown()`，由游戏完成最终保存。
+原生退出流程内部可能执行多次保存。
 保存成功要求全部分片完成原生保存流程；正常停服要求退出码为零、进程已回收、输出已排空，且没有强制终止或协议故障。
 停服失败仍保留各分片的退出状态与已确认存档；信号终止使用负信号编号表示。
 停服默认等待 220 秒，包含公告倒计时；调整公告延时会同步调整等待预算。
@@ -271,13 +278,22 @@ dst-server call set_policy - --socket /srv/dst/299/.dst-agent.sock <<'JSON'
 JSON
 ```
 
-Agent 每 30 秒检查日程，支持跨午夜窗口。
-闭馆时停止全部游戏，保留 Agent 等待下一次开放；待处理的 Mod 维护在开门前执行。
+Agent 在启动时及运行期间每 30 秒检查开放时间，支持跨午夜窗口。
+闭馆时停止全部游戏，容器以退出码 `0` 结束。
+非开放时段启动也会在启动游戏前以退出码 `0` 结束。
+配置独立的宿主调度器，在每次开放时启动服务，参见 [systemd timer 示例](docs/migration.md#external-opening-timer)。
+修改策略时间或时区后，单独更新外部调度器。
+停止房间会保留外部调度；如需取消下次启动，单独管理调度器。
+待处理的 Mod 维护由新容器在启动游戏前执行。
+`call update_mods` 排入维护请求并返回，下一容器执行更新；`restart: false` 会在更新后退出该容器。
+显式 Mod 维护可以在非开放时段执行，游戏启动仍遵循日程。
 默认维护倒计时 60 秒，每 30 秒公告一次。
 下载或校验失败最多额外尝试两次，间隔五分钟；仍失败则保持关闭，等待明确维护请求或下个开放期。
 
 必需分片崩溃或持续失控会停止整个房间。
-异常退出、强制终止和 IPC 故障需要重建容器，恢复状态跨容器保留。
+异常退出、强制终止和 IPC 故障会保存恢复状态，并以退出码 `75` 结束，交给宿主更换容器。
+主动重启和 Mod 维护使用退出码 `76`；生成的 Quadlet 将其视为成功并强制重启，统一执行完整启动流程。
+使用新的生命周期前，按 [必要的重启指令](docs/migration.md#container-exit-contract) 更新已有 Quadlet。
 可重试故障最多使用当前存档重启两次，间隔 30 秒。
 只有确认的存档加载失败，才允许再尝试一次前一个完整房间快照；每个世界的额外回退须能证明不超过一个游戏日。
 修改前固定全部目标，中断后继续同一目标。
@@ -318,7 +334,7 @@ dst-server logs telemetry '{"since":1790899200,"until":1790985600,"limit":100}'
 默认使用 7z、Zstd 3，同一时间只运行一个压缩器。
 上传通过原生对象存储实现，失败或取消时显式终止分段上传；清理失败进入结果和日志。
 Python 提供 `dst_server.archive.export_cluster` 和 `ClusterArchive.save/upload`。
-导出要求游戏停止，并通过常驻 Agent 或离线独占锁协调。
+导出要求游戏停止并独占房间锁。
 离线导出到本地文件：
 
 ```sh
