@@ -1,7 +1,10 @@
-# Rust Migration
+# Migration Guide
 
-This guide describes the `0.4.0` Rust rewrite.
+This guide covers the `0.4.0` Rust rewrite and the `0.5.0` container lifecycle changes.
 [English README](../README.md) · [简体中文 README](../README.zh-Hans.md)
+
+Upgrading from `0.4.x` requires the [container exit configuration](#container-exit-contract).
+Scheduled rooms also require an [external opening timer](#external-opening-timer).
 
 An external scheduler opens room containers.
 Each Agent enforces closing hours, performs maintenance and supervises one game run.

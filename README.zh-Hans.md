@@ -11,11 +11,12 @@
 发布的二进制和 Python wheel 支持 Linux x86_64、CPython 3.14 和同机可信调用。
 
 `0.4.0` 使用 Rust 重写了原有 Python 实现。
+`0.5.0` 在关服时退出整个容器，由外部调度负责下一次开服。
 接口变化、验证方法及已知限制见 [迁移指南](docs/migration.md)。
 内部就绪不代表公网可达。
 
-在 CPython 3.14 环境中执行 `pip install dst-server==0.4.0`，安装 Python SDK。
-[GitHub Release](https://github.com/LetsStarveTogether/dst-server/releases/tag/v0.4.0) 同时提供独立的 Linux x86_64 CLI。
+在 CPython 3.14 环境中执行 `pip install dst-server==0.5.0`，安装 Python SDK。
+[GitHub Release](https://github.com/LetsStarveTogether/dst-server/releases/tag/v0.5.0) 同时提供独立的 Linux x86_64 CLI。
 
 ## 构建并创建房间
 

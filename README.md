@@ -11,12 +11,13 @@ An external scheduler starts the container at each opening.
 Published binaries and Python wheels support Linux x86_64 and CPython 3.14.
 The control socket is for trusted callers on the same host.
 
-Version `0.4.0` replaces the earlier Python implementation.
+Version `0.4.0` replaced the earlier Python implementation.
+Version `0.5.0` exits each container when its room closes and uses external scheduling for the next opening.
 See the [migration guide](docs/migration.md) for API changes, verification and known limitations.
 Internal readiness does not establish public network reachability.
 
-Install the Python SDK with `pip install dst-server==0.4.0` in a CPython 3.14 environment.
-The [GitHub release](https://github.com/LetsStarveTogether/dst-server/releases/tag/v0.4.0) also includes a standalone Linux x86_64 CLI.
+Install the Python SDK with `pip install dst-server==0.5.0` in a CPython 3.14 environment.
+The [GitHub release](https://github.com/LetsStarveTogether/dst-server/releases/tag/v0.5.0) also includes a standalone Linux x86_64 CLI.
 
 ## Build and Create a Room
 
