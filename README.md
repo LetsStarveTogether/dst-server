@@ -5,180 +5,212 @@
 
 English | [简体中文](README.zh-Hans.md)
 
-Deploy and manage Don't Starve Together (DST) servers with Podman, systemd, and a Python SDK.
-Each room uses one Pod; an Agent in each container manages its shard, and the master coordinates the cluster.
+A Rust SDK, Agent and CLI for Don't Starve Together, with Python bindings.
+Each room runs in one container: one Agent supervises every configured shard and remains available while the games are closed.
+Published binaries and Python wheels support Linux x86_64 and CPython 3.14.
+The control socket is for trusted callers on the same host.
 
-- **Deploy**: generate game configuration and Quadlet units for forests, caves, and shared Mods.
-- **Manage**: query players and worlds, save, roll back, restart, and administer games through local RPC.
-- **Record**: collect game events as needed, using local logs or OTLP Logs export.
+Version `0.4.0` replaces the earlier Python implementation.
+See the [migration guide](docs/migration.md) for API changes, verification and known limitations.
+Internal readiness does not establish public network reachability.
 
-Default image: `quay.io/wh2099/dst-server:latest`; beta channel: `:beta`.
+Install the Python SDK with `pip install dst-server==0.4.0` in a CPython 3.14 environment.
+The [GitHub release](https://github.com/LetsStarveTogether/dst-server/releases/tag/v0.4.0) also includes a standalone Linux x86_64 CLI.
 
-## Contents
+## Build and Create a Room
 
-Start with [Quick start](#quick-start), then jump to the task you need.
+Install Rust 1.99, a C/C++ build toolchain, Cap'n Proto, and [uv](https://docs.astral.sh/uv/).
+Host deployment additionally requires Podman with Quadlet and systemd.
+From this checkout:
 
-| Module | Common tasks |
-| --- | --- |
-| [Configuration and deployment](#configuration-and-deployment) | [Directory layout](#directory-layout) · [Ports](#shards-and-ports) · [World settings](#world-settings) · [Configuration SDK](#configuration-sdk) · [Permissions](#container-users-and-directory-permissions) · [DNS](#container-dns) |
-| [Unified CLI](#unified-cli) | Room creation, configuration, templates, selection, and JSON output |
-| [Routine maintenance](#routine-maintenance) | Image updates, console and logs, schedules, and maintenance tasks |
-| [Runtime](#runtime) | [Components and communication](#components-and-communication) · [Lifecycle](#lifecycle-and-failure-recovery) · [Saving and reloads](#saving-and-world-reloads) · [Timeouts](#default-timeouts) |
-| [RPC and game SDK](#rpc-and-game-sdk) | [Connection example](#connecting-to-a-cluster) · [Shared requests](#shared-requests-and-validation) · [API index](#api-index) · [Emoji and Emote](#emoji-and-emote-enums) |
-| [Saves and exports](#saves-and-exports) | [File reference](#save-files) · [Snapshots and rollback](#snapshot-queries-and-rollback-by-day) · [Exports and R2](#exports-and-r2-uploads) |
-| [Mod management](#mod-management) | [Native updates](#native-mod-updates) · [Downloads and activation](#declaring-downloads-and-activation) |
-| [Telemetry and historical logs](#telemetry-and-historical-logs) | [Collection scope](#collection-scope) · [OTLP](#otlp-configuration) · [Delivery](#in-memory-delivery) · [Log boundaries](#log-boundaries) · [Netdata](#netdata-deployment-and-queries) · [Troubleshooting](#telemetry-troubleshooting) |
-| [Utilities](#utilities) | Klei services, player path encoding, Lua annotations |
-| [Development and validation](#development-and-validation) | [Module boundaries](#module-boundaries), dependencies, check commands, source index |
+```sh
+cargo build --locked --release -p dst-server --bin dst-server
+export PATH="$PWD/target/release:$PATH"
+uv sync --python 3.14
+dst-server --help
+uv run python -m dst_server --help
+```
 
-## Quick Start
+The native binary and the Python entry point call the same Rust CLI.
+Build the game image from this revision, supplying the exact game build that SteamCMD will install:
 
-Requires Linux, Podman with Quadlet, systemd, and [uv](https://docs.astral.sh/uv/getting-started/installation/).
-Python `>=3.14.7` includes the [process-wait fix](https://github.com/python/cpython/pull/154171) needed by Mod cleanup.
-Run host CLI deployment commands as root on the server, locally or over SSH.
+```sh
+podman build --target game --build-arg GAME_VERSION=756039 \
+  -t localhost/dst-server:rust .
+```
 
-1. Install the package with host management support and create a token on the [Klei server page](https://accounts.klei.com/account/game/servers?game=DontStarveTogether).
+The build checks the installed game version and packages the matching SDK Lua bundle.
+Use the matching published image when creating rooms, or select your locally built image.
 
-   ```shell
-   uv tool install --python 3.14 'dst-server[host]'
-   export DST_SERVER_CLUSTER_TOKEN='replace-with-cluster-token'
-   dst-server --help
-   ```
+The default deployment image is `quay.io/wh2099/dst-server:latest`.
+Set `deployment.image` or `--image` to `quay.io/wh2099/dst-server:beta` for beta.
+Generated Quadlets keep these tags and set `AutoUpdate=registry` for both published channels.
+Quadlets use `Pull=never`; pull the selected image before the first start.
+Run `systemctl enable --now podman-auto-update.timer` on the host to enable periodic checks.
+The timer updates containers and restarts them when a new image is available.
 
-2. Create one room, choosing its template independently of its number.
+Create a Klei server token and store it in `/run/secrets/dst_cluster_token`.
+Run the following with the account that owns the host room directories and systemd services:
 
-   ```shell
-   dst-server template list
-   dst-server room create 299 --template forge --max-players 9 \
-     --volume-idmap 'uids=0-1000-1;gids=0-1000-1'
-   ```
+```python
+import asyncio
+from pathlib import Path
 
-   This creates `/srv/dst/299` and its Quadlet units without starting or overwriting a room.
+from dst_server import Host
+from dst_server.settings import Room, build_template
 
-   - Use `pure_survival` for forest and caves; see `template list` for other templates.
-   - `--token-file /run/secrets/dst_cluster_token` reads the token from a file.
-   - Volume mapping is unset by default; the mapping above lets container UID `1000` use root-owned files.
 
-3. Start the room and inspect its logs.
+async def main():
+    cluster = build_template(
+        "pure_survival",
+        number=299,
+        token=Path("/run/secrets/dst_cluster_token").read_text().strip(),
+    )
+    room = Room(
+        number=299,
+        template="pure_survival",
+        cluster=cluster,
+        deployment={
+            "image": "localhost/dst-server:rust",
+            "volume_idmap": "uids=0-1000-1;gids=0-1000-1",
+        },
+    )
+    await Host("/srv/dst", "/etc/containers/systemd").create(room)
 
-   ```shell
-   dst-server room start 299
-   dst-server room status 299
-   dst-server logs --room 299 --lines 100 --follow
-   ```
 
-   Startup checks the image, prepares Mods, generates missing worlds, and waits for game readiness.
-   Use `--no-wait` to submit a start without waiting, or `room wait 299` to wait separately.
+asyncio.run(main())
+```
 
-   Rooms created this way use local journald logs; the LST fleet preset additionally configures Netdata export.
+This creates `/srv/dst/299` and `dst-299.container` without starting the service.
+The illustrated ID mapping gives image UID/GID 1000 access to root-owned room files.
+Choose ownership or mapping for your host.
+Then start the service:
 
-From a checkout, use `uv run --extra host dst-server ...` or `uv run --extra host python -m dst_server ...`.
-Both installed entry points expose the same CLI; no subcommand displays help.
-See [permissions](#container-users-and-directory-permissions) for rootless generation with the SDK.
+```sh
+dst-server host start --room 299
+dst-server host status --room 299
+dst-server call list_players --socket /srv/dst/299/.dst-agent.sock
+journalctl -u dst-299.service -n 100 -f
+```
 
-### Unified CLI
+Use `host --root PATH --quadlet-dir PATH` for alternate directories, and `host --user` for the user systemd manager.
+Room numbers range from `000` to `299` independently of gameplay templates.
+The packaged fleet contains `000–099` and `200–219`:
+
+```sh
+dst-server template list
+dst-server host fleet --room 000,030,209 \
+  --token-file /run/secrets/dst_cluster_token --image localhost/dst-server:rust \
+  --volume-idmap 'uids=0-1000-1;gids=0-1000-1'
+```
+
+## CLI
 
 | Command | Purpose |
 | --- | --- |
-| `room` | Create, inspect, edit, start, stop, restart, wait, and diagnose rooms. |
-| `template`, `deployment` | Inspect or apply gameplay templates, create the LST fleet, and install automation units. |
-| `schedule`, `maintenance` | Opening hours, idle recycling, and in-service countdown restarts. |
-| `announce`, `player`, `world`, `mod` | Announcements, players and permissions, saves and worlds, and Mod configuration. |
-| `console`, `logs`, `rpc` | Lua evaluation, retained journal logs, method discovery, direct calls, and live subscriptions. |
-| `scripts` | Build and verify managed native script bundles. |
-| `agent`, `annotations`, `completion` | Container process entry points, Lua annotations, and shell completion output. |
+| `host` | Create, provision, edit, inspect and operate host services; batch by room, template or all rooms. |
+| `call` | Invoke a room or shard operation through its Agent socket. |
+| `describe` | Print method names, scope, argument schemas and default timeouts. |
+| `subscribe` | Read bounded `logs`, `lifecycle` or `events` batches and their discarded counts. |
+| `logs`, `archive` | Query or follow historical logs; export and upload consistent room archives. |
+| `console` | Execute trusted Lua on an explicit shard, from text, a file or interactive input. |
+| `config`, `template`, `inspect` | Validate configuration, inspect schemas and templates, discover native topology. |
+| `scripts`, `annotations`, `completion` | Build or verify script bundles, generate Lua annotations and shell completion. |
+| `agent` | Run the room supervisor, normally as the container entry point. |
 
-The default directories are `/srv/dst` and `/etc/containers/systemd`.
-Override them with `--cluster-root` / `--quadlet-dir` or `DST_SERVER_CLUSTER_ROOT` / `DST_SERVER_QUADLET_DIR`.
-Place global options before the command:
+Commands print JSON; `--json` uses compact JSON and structured errors.
+A batch preserves individual results and fails its exit status when any target fails.
+JSON arguments accept inline text, `@filename`, or `-` for stdin.
 
-```shell
-dst-server --cluster-root /srv/dst --quadlet-dir /etc/containers/systemd --json room list
-dst-server room stop 000-029,060-069,299
-dst-server room edit 000-029,060-069 --max-players 9
-dst-server room edit 299 --set '/cluster/settings/cluster_description="Friday games"'
-dst-server room start 000-029,060-069,299
-dst-server room show 299 --field /cluster/settings/max_players
-dst-server room schema
-dst-server announce 'Maintenance starts in eight minutes.' --room 299
-dst-server world snapshots --room 299 --limit 10
-dst-server world save --room 299
+```sh
+dst-server --json host list
+dst-server host show 299 --field /cluster/settings/max_players
+dst-server host schema
+dst-server host diagnose --room 299
+dst-server describe
+dst-server call save --socket /srv/dst/299/.dst-agent.sock
+dst-server call get_player '{"userid":"KU_example"}' --socket /srv/dst/299/.dst-agent.sock
+dst-server subscribe lifecycle --socket /srv/dst/299/.dst-agent.sock
 ```
 
-#### Targets and Output
+`call stop` stops games while leaving the Agent available; the opening schedule can start them again.
+`host stop --room 299` stops the container service, including its Agent.
+Use the latter before offline configuration changes:
 
-- `room` takes positional numbers; other groups use `--room`.
-  Select comma-separated numbers, inclusive ranges, or supported `--template` / `--all` options.
-- `room list` finds three-digit directories containing `cluster.ini`; operations require explicit targets.
-  Batches return per-room results and a nonzero exit status if any room fails.
-- Non-terminal stdout uses single-line JSON; `--json` selects it in a terminal.
-  Streams emit one object per record; diagnostics use stderr and escape embedded newlines in non-terminal output.
-
-#### Editing
-
-- Stop rooms before `room edit`, `template apply`, `mod enable/disable/set`, or `schedule set`, including policy changes.
-  Start them explicitly afterward.
-- `room edit --set` takes JSON Pointer paths and JSON values; `--unset` removes a setting.
-- World-generation changes leave existing maps intact; use `world regenerate` to replace them.
-
-### LST Fleet Layout
-
-The LST deployment preset contains 120 rooms: `000–099` and `200–219`.
-
-```shell
-dst-server deployment lst --room 000,030,209 \
-  --volume-idmap 'uids=0-1000-1;gids=0-1000-1'
-dst-server room stop 299
-dst-server template apply forge --room 299
-dst-server room start 299
+```sh
+dst-server host stop --room 299
+dst-server host edit --room 299 --set '/cluster/settings/max_players=9'
+dst-server host start --room 299
 ```
 
-Use `deployment lst --all` for all preset rooms; creation refuses existing rooms.
-Daily windows use host local time: 白饭 10:00–18:00, 晚宴 18:00–00:00, and 夜饮 00:00–08:00.
+A closed game can still have a live Agent holding the room lock.
+Use Agent operations for maintenance while it is running.
+Changing world-generation settings preserves existing saves; `regenerate` creates new worlds.
 
-| Gameplay | Always open | 白饭 | 晚宴 | 夜饮 |
-| --- | --- | --- | --- | --- |
-| Pure survival | `000–015` | `016–019` | `020–027` | `028–029` |
-| Pure endless | `030–045` | `046–049` | `050–057` | `058–059` |
-| Semi-vanilla survival | `060–065` | `066` | `067–068` | `069` |
-| Semi-vanilla endless | `070–085` | `086–089` | `090–097` | `098–099` |
+## Rust and Python SDKs
 
-All special rooms are always open:
+The native API exposes typed requests without exposing Cap'n Proto generated types:
 
-| Room numbers | Gameplay | Max players |
-| --- | --- | --- |
-| `200–204` | AFK skin drops | 64 |
-| `205` | Adventure | 9 |
-| `206` | Gorge | 9 |
-| `207–209` | Forge | 6 |
-| `210–212` | Island Adventure | 6 |
-| `213–215` | Hamlet | 6 |
-| `216–217` | Lights-out survival | 9 |
-| `218–219` | Lights-out endless | 9 |
+```rust
+use dst_server::{model::{Envelope, Request, Target}, rpc::Client};
 
-Generic templates support any slot in `000–299`, including `lights_out_survival` and `lights_out_endless`.
-Existing rooms are read from native files and never inherit template changes automatically.
+async fn inspect_room() -> dst_server::model::Result<serde_json::Value> {
+    let client = Client::connect("/srv/dst/299/.dst-agent.sock").await?;
+    let result = client.call(Envelope::new(Target::Room, Request::Status {})?).await;
+    client.close().await?;
+    result
+}
+```
 
-Applying a template replaces gameplay, world, and Mod settings.
-It preserves the number, name, description, password, token, shared key, and deployment settings.
-Generation and maintenance are also available through the packaged async SDK.
+Python exposes asynchronous calls and explicit connection and subscription cleanup:
 
-## Configuration and Deployment
+```python
+import asyncio
+from dst_server import Client
 
-Game configuration and Quadlet units jointly define directories, shards, and networking.
-Keep them consistent when making changes.
 
-### Directory Layout
+async def main():
+    async with await Client.connect("/srv/dst/299/.dst-agent.sock") as client:
+        print(await client.call("status"))
+        print(await client.call("save"))
+        async with await client.subscribe("events") as events:
+            print(await events.next(max_items=100))
 
-Each cluster uses one host directory, mounted as `/cluster` in every shard container.
-The game is installed at `/install` inside the image.
+
+asyncio.run(main())
+```
+
+Use `describe()` or `dst-server describe --shard` for the exact method contract.
+Operations cover world queries, saves, rollback, regeneration, pause and player control.
+They also cover migration, permissions, Mods and exports.
+Player operations locate `userid` across shards and verify its identity before execution.
+Pass `shard="forest"` when an operation needs an explicit shard.
+Entity references contain world session and runtime generation; old references become invalid after reload.
+
+Each room permits one mutation at a time and returns `busy` for a conflicting operation.
+Accepted mutations belong to the Agent.
+Cancellation, disconnection and caller timeouts stop waiting without undoing the operation.
+Check `status` after an unknown result before deciding whether to retry.
+Save success requires native completion on every shard.
+Normal shutdown requires exit code zero, process reaping and output drainage, with no force or protocol fault.
+Failed shutdown retains each shard's exit status and confirmed saved snapshot.
+Signal termination uses the negative signal number.
+The default stop wait is 220 seconds, including its notice; changing the notice delay adjusts that budget.
+Mods that disable saving can stop cleanly with `saved_snapshot: null`.
+An explicit save returns an error when no new snapshot is confirmed.
+Migration success requires confirmation in the destination world.
+Console success means the Lua code returned; an asynchronous effect started by that code may still be running.
+
+## Configuration and Files
 
 ```text
-cluster/
-├── .dst-control.json  (optional)
+/srv/dst/299/
 ├── cluster.ini
 ├── cluster_token.txt
 ├── adminlist.txt / blocklist.txt / whitelist.txt
+├── .dst-control.json
+├── .dst-room.lock
+├── .dst-agent.sock
 ├── mods/
 │   ├── dedicated_server_mods_setup.lua
 │   ├── modsettings.lua
@@ -189,1684 +221,165 @@ cluster/
 │   ├── modoverrides.lua
 │   └── save/
 └── cave/
-    └── Same shard files as forest
+    └── server.ini, world overrides, Mods and saves
 ```
 
-| File or path | Contents |
-| --- | --- |
-| `cluster.ini` | Cluster name, access restrictions, player count, gameplay, and shard connections. |
-| `cluster_token.txt` | Klei dedicated server token. |
-| The three permission lists | Administrators, bans, and whitelist entries, one identifier per line. |
-| `<shard>/server.ini` | Shard identity, player and Steam query ports, and player save path encoding. |
-| `<shard>/worldgenoverride.lua` | World generation and world setting overrides. |
-| `<shard>/leveldataoverride.lua` | Optional full level baseline, required for event worlds. |
-| `<shard>/modoverrides.lua` | Mods enabled on the shard and their options. |
-| `<shard>/save/` | World and player snapshots plus supporting data; see [Save files](#save-files). |
-| `mods/` | Shared download list, Mod content, and cache; see [Mod management](#mod-management). |
-| `.dst-control.json` | Room policy (`template`, `schedule`, `recycle`, `paused`) and the latest activity checkpoint; no game or deployment configuration. |
-| `.dst-server.sock` | Cluster RPC socket, created at runtime. |
-| `.dst-operation.lock` | One short-lived host operation lock; its empty file remains after unlocking. |
-| `<shard>/dst_server_driver.json` | Per-process Lua startup parameters, including the nonce and telemetry settings. |
+Native INI/Lua files define game configuration; the Quadlet defines deployment.
+`.dst-control.json` stores the template label, policy, activity and recovery state.
+It is not a second copy of game settings.
+Keep it across container replacement to retain recovery limits and maintenance progress.
+Never remove or replace `.dst-room.lock` while a room exists.
 
-**Configuration** comes from native INI/Lua files and Quadlet units, including systemd drop-ins.
-There is no second room definition.
-Startup reads these files, prepares Mods, and creates missing permission lists and Mod support files.
+Every directory with `server.ini` is an enabled shard.
+Names are arbitrary, with exactly one master.
+Keys and IDs must be consistent, with conflict-free game, query and shard ports.
+Port allocation uses the actual shard set, an allocation lock and a persistent map; the previous four-shard limit is removed.
+The default host allocation pool is `30000–65535`.
+All shards share the container network and room Mods; each process has separate control pipes and readers.
 
-- Require `cluster.ini`, `cluster_token.txt`, and each enabled shard's `server.ini`, with exactly one master.
-- Only directories containing `server.ini` are enabled shards.
-  Removing a shard keeps its other files and saves for reuse.
-- Configuration and shard directories cannot be symlinks.
+Python configuration factories validate through Rust:
 
-**Activity** is observed inside each game independently of optional telemetry.
-The recycling timer queries every shard.
-It saves world IDs, observation identities, `last_active_at` and clean-shutdown continuity under `activity` in `.dst-control.json`.
-Without this file, a room defaults to all-day opening with automatic recycling disabled.
+```python
+from dst_server.settings import ClusterSettings, RoomStore, build_template
 
-Unreachable shards or unreliable observations prevent automatic recycling.
-Missing checkpoints, changed worlds or interrupted observations receive a full new retention period.
-A verified clean scheduled shutdown preserves idle time across the closure; a failed query alone does not reset the clock.
+settings = ClusterSettings(max_players=9, cluster_name="Friday games")
+cluster = build_template("pure_endless", number=299, settings=settings)
+print(cluster.dump(defaults=True))
+print(settings.schema())
 
-### Shards and Ports
+store = RoomStore("/srv/dst")
+room = store.load(299)
+updated = room.edit("/cluster/settings/cluster_description", "Friday games")
+# After stopping the entire service:
+# store.save(updated)
+```
 
-Shards in the same Pod share a network namespace.
-Multi-shard deployments must meet these requirements at runtime:
+`dump()` redacts token, shared key and password; `secrets=True` explicitly returns them.
+Rendered native files and `files()` contain real credentials and must be handled accordingly.
+Defaults are applied on demand; omitted fields and explicit `None` remain distinct.
+Frozen schemas, defaults and presets are packaged with Rust, including 12 templates and all 120 fleet rooms.
+Rust owns validation and file operations; Python provides bindings, conversion and asynchronous wrappers.
 
-- Enable `shard_enabled` and use the same nonempty `cluster_key` and `master_port` across all shards.
-- Explicitly declare `is_master` in every `server.ini`.
-  Secondaries also need a name and reachable `master_ip`, which can be inherited from cluster settings.
-- Deployments within one Pod usually use `master_ip = 127.0.0.1`.
-- When assigning shard IDs explicitly, use `1` for the master and unique IDs starting at `2` for secondaries.
-- `master_port` and every shard's `server_port` and `master_server_port` must not conflict.
+Offline writes use the shared room lock, reject symlinks and commit recoverable file transactions with synchronization.
+General configuration saves preserve live admin, ban and whitelist files.
+Use permission operations for online changes.
+Structured Lua reads parse Lua 5.1 literals without execution.
+Dynamic configurations can be loaded by the game; this API cannot structurally edit them.
 
-| Port allocation | Rule |
-| --- | --- |
-| Host range | `30000–32999`, with one ten-port slot per room. |
-| Room slots | Any template supports `000–299`; the LST fleet preset covers `000–099` and `200–219`. |
-| Shard count | Up to four shards per room; only UDP ports actually used are published. |
-| Player connections | `-external_port` advertises the mapped host port; the container still listens on the internal port from `server.ini`. |
+## Opening Hours, Maintenance and Recovery
 
-Rooms running at the same time must use different slots.
-When changing the shard set, master identity, or published ports, regenerate the configuration and Quadlet units.
-Then recreate the Pod.
+The default policy uses `Asia/Shanghai`, opens all day, enables automatic Mod maintenance and disables idle world regeneration.
+A policy can be sent to a running Agent:
 
-In `cluster.ini`, `[NETWORK]` controls the name and access restrictions.
-`[GAMEPLAY]` controls player count, PVP, and pausing when empty.
-See [ClusterSettings / ShardSettings](src/dst_server/configuration/models.py) for all fields, ranges, and defaults.
-
-The SDK defaults to `encode_user_path=True` and always writes its current value to `server.ini`.
-It preserves an explicit `False`.
-With existing saves, changing this value also requires updating the [player directories](#player-path-encoding).
-
-### World Settings
-
-`worldgenoverride.lua` requires `override_enabled = true` to take effect.
-For a standard forest:
-
-```lua
-return {
-    override_enabled = true,
-    worldgen_preset = "SURVIVAL_TOGETHER",
-    settings_preset = "SURVIVAL_TOGETHER",
-    overrides = {},
+```sh
+dst-server call set_policy - --socket /srv/dst/299/.dst-agent.sock <<'JSON'
+{
+  "policy": {
+    "timezone": "Asia/Shanghai",
+    "schedule": [{"start": "18:00", "end": "00:00"}],
+    "mod_auto_update": true,
+    "idle_regeneration": false
+  }
 }
+JSON
 ```
 
-| World | Settings |
-| --- | --- |
-| Caves | Set both presets to `DST_CAVE`. |
-| Endless | Keep `game_mode = survival`, with the forest `ENDLESS` preset and corresponding cave overrides. |
-| Forge / Gorge | `lavaarena` / `quagmire` also require full `leveldataoverride.lua` data, included in the built-in event presets. |
+The Agent checks schedules every 30 seconds, including windows across midnight.
+At closing time it stops all games and stays available for the next opening.
+Pending Mod maintenance runs before reopening.
+The default maintenance countdown is 60 seconds with announcements every 30 seconds.
+Failed downloads or validation receive two additional attempts, five minutes apart, then leave games closed.
+An explicit maintenance request or a later opening can retry.
 
-Prefer composing the [built-in configuration presets](src/dst_server/configuration/presets.py).
-`leveldataoverride.lua` supplies the level baseline, then `worldgenoverride.lua` applies overrides.
-Changing generation settings does not rebuild an existing map.
-Game saves can also rewrite settings, so stop the games before editing.
+A required shard crash or sustained control failure stops the whole room.
+Abnormal process exits, forced termination and IPC faults require container replacement.
+Recovery state persists across that replacement.
+Retryable failures allow two restarts of the current save, 30 seconds apart.
+Only confirmed save-loading failure can then try one previous complete room snapshot.
+The loss must be proven to be at most one game day per world.
+Targets are fixed before mutation; interrupted recovery resumes those same targets.
+Unknown state, missing targets, unsupported failure causes or failed recovery leave the room closed.
+Thirty minutes of stable operation restores the budget.
+Exhausted rooms get another opportunity at the next opening, or explicit start for an always-open room.
 
-### Configuration SDK
+Idle regeneration runs only when enabled, during opening hours, with every shard ready and reliably empty.
+Its retention periods are 6, 24, 36, 72 and 168 hours according to world age.
+Interrupted observations or changed worlds restart the retention period; clean scheduled closure preserves it.
 
-Import `ClusterConfig`, `ClusterSettings`, `ShardConfig`, and `ShardSettings` from `dst_server.configuration`.
+## Logs, Exports and Utilities
 
-| API | Purpose |
-| --- | --- |
-| `ClusterConfig.load()` / `.save()` | Read, validate, and save the configuration tree. |
-| `.replace()` | Update only supplied fields. |
-| `RoomPreset` | Combine configuration fragments. |
-| `QuadletApplication.for_cluster(..., allocation=RoomPortAllocation(...))` | Generate matching Pod/container units, ports, and startup arguments. |
+The default game event profile is `history`; `agent --profile` also accepts `critical` and `off`.
+Events are bounded and best effort.
+Source gaps, subscriber overflow, output loss and export rejection have separate counters.
+A subscription is not a replay log or a durable task trigger.
 
-World options follow the pinned game source; beta-only options need a compatible game version.
-Only explicit overrides are written.
-For an endless forest-and-caves room:
+OTLP uses gRPC for logs, metrics and traces.
+Signal-specific settings override common `OTEL_EXPORTER_OTLP_*` settings.
+Their prefixes are `OTEL_EXPORTER_OTLP_LOGS_*`, `OTEL_EXPORTER_OTLP_METRICS_*` and `OTEL_EXPORTER_OTLP_TRACES_*`.
+Configure endpoint, headers, TLS certificates, compression and timeout explicitly; timeout values are milliseconds.
+Set a signal's `OTEL_*_EXPORTER=none`, or `OTEL_SDK_DISABLED=true` for all signals, to disable export.
+Structured log transport preserves null, integers, floats, arrays and objects.
+Netdata's flattened query projection has separate type limitations.
 
-```python
-import os
-from pathlib import Path
+`dst_server.logs` provides `JournalLogs`, `JournalQuery`, `JournalStream`, `NetdataLogs` and `NetdataLogQuery`.
+The CLI accepts those same query fields, including cursors, direction and filters:
 
-from pydantic import SecretStr
-
-from dst_server.configuration.presets import ENDLESS, FOREST_CAVES, compose
-
-config = compose(FOREST_CAVES, ENDLESS).build(
-    token=SecretStr(os.environ["DST_SERVER_CLUSTER_TOKEN"]),
-)
-config.save(Path("cluster"))
+```sh
+dst-server logs journal --unit dst-299.service --query '{"limit":100,"since":"today"}'
+dst-server logs journal --unit dst-299.service --follow
+dst-server logs telemetry '{"since":1790899200,"until":1790985600,"limit":100}'
 ```
 
-Room creation has three layers:
+A follow stream emits one record at a time; interrupting a log query waits for its reader process to exit.
+`dst_server.events` exposes the native event schema and validation through `event_schema()` and `validate_event()`.
+`dst_server.KleiClient` provides bounded build, region, lobby and room requests with per-query batch failures.
+HTTP failures are distinct from successful empty results.
 
-- **Define:** build a `ClusterConfig`, then `Room(number=..., cluster=...)`.
-  `presets.lst.fleet_room(...)` supplies an LST room definition.
-- **Write files offline:** `room.save(directory, quadlet_dir=...)` uses explicit absolute paths.
-  `RoomStore(root, quadlet_dir).save(room)` places it in `root/NNN`.
-- **Manage a deployment:** `Host.create(room)` rejects existing rooms.
-  `Host.edit(room)` requires a stopped room and handles deployment changes.
+Archive export prepares all shards while games are stopped and preserves native world/player data and Mod progress.
+It removes credentials, permission lists and SDK runtime files.
+Compression uses 7z with Zstd level 3 by default and one concurrent compressor.
+Uploads use the native object-store implementation and explicitly abort incomplete multipart uploads on failure or cancellation.
+Cleanup failures remain visible in the result and logs.
+Python exposes `dst_server.archive.export_cluster` and `ClusterArchive.save/upload`.
+Export requires stopped games and uses the live Agent or an exclusive offline lock.
+For an offline local export:
 
-Custom `Room` definitions use slots `000–299` and have no telemetry export by default.
-LST definitions consistently include their preset telemetry settings; customize `room.deployment.environment` before saving.
-
-Offline saves preserve game progress and permission lists, but reject changes to shard names or master roles.
-Use `Host.edit()` for those changes.
-
-For a batch, construct all definitions before writing, so invalid room numbers fail before any files are created:
-
-```python
-from dst_server.rooms import Room, RoomStore
-
-store = RoomStore(Path("/srv/dst"), Path("/etc/containers/systemd"))
-rooms = [Room(number=number, cluster=config) for number in (0, 1)]
-for room in rooms:
-    store.save(room)
+```sh
+dst-server host stop --room 299
+dst-server archive export 299 --output /tmp/room-299.7z
 ```
 
-#### Shared Keys
+The output path must not already exist.
+See [the migration guide](docs/migration.md) for entry points and evidence.
 
-Constructing a configuration, `load()`, and `files()` allow an omitted `cluster_key` without generating one or writing files.
-`save(path)` honors explicit keys, otherwise reuses the target directory's key or generates one in `cluster.ini`.
-Each new directory gets its own key, including single-shard rooms.
-
-#### Editing Existing Rooms
-
-`Room` combines game configuration, deployment settings, and policy in memory.
-`RoomStore.load(number)` reads current files each time, including game-written changes.
-Load before editing: saving applies the complete definition, including schedules and recycling policy.
-
-- Use `room edit` or `Host.edit()` after stopping every shard service; editing does not start or stop services.
-- Field edits through `room edit` and offline `Room.save()` require readable game configuration.
-  Configuration edits parse declarative Lua without executing it and reject unsupported dynamic Lua.
-  Startup and schedule `show` / `pause` / `resume` / `run` do not parse world Lua.
-- `Host.edit(target)` applies the complete target to managed native files and Quadlet base units, then reloads systemd.
-  Files that differ from the target text are reformatted and lose their comments; identical native files are not rewritten.
-  Files are replaced individually, without a cross-file transaction.
-  Saves, permission lists, and unrelated files remain intact.
-- Put local changes in systemd drop-ins; the target replaces handwritten changes in base units.
-  Edits reject fields still overridden by a drop-in.
-
-A write or reload failure can leave partial updates; keep the room stopped and fix the cause.
-Retain the complete target `Room` and repeat `await host.edit(target)` to finish applying it.
-This does not require loading the partially updated room first.
-CLI field edits still read the old configuration; use a complete SDK target if that configuration no longer parses.
-Omitted shared keys reuse a confirmed existing key; provide an explicit target key if the existing key cannot be established.
-
-[ClusterClient](#connecting-to-a-cluster).`read_configuration()` returns a validated `ClusterConfig` or raises an error.
-Persistent edits use host operations.
-
-### Container Users and Directory Permissions
-
-The image runs as `steam`, with UID and GID `1000`.
-The generator does not select mappings based on the calling user; `volume_idmap` and `userns` both default to `None`.
-
-| Deployment | Generator argument | Generated setting and effect |
-| --- | --- | --- |
-| Rootless | `--userns 'keep-id:uid=1000,gid=1000'` | Writes `UserNS` under `[Pod]` in the `.pod`, mapping the deployment user to container `1000:1000`. |
-| Rootful | `--volume-idmap 'uids=0-1000-1;gids=0-1000-1'` | Uses idmap on each `.container` volume; host files remain `root:root` and appear as `1000:1000` in the container. |
-
-The host CLI's service operations use the system manager.
-For rootless deployment, generate files with the packaged SDK as the regular deployment user, then use `systemctl --user`:
-
-```python
-import os
-from pathlib import Path
-
-from pydantic import SecretStr
-
-from dst_server.presets.lst import fleet_room
-
-fleet_room(
-    0,
-    token=SecretStr(os.environ["DST_SERVER_CLUSTER_TOKEN"]),
-    userns="keep-id:uid=1000,gid=1000",
-).save(
-    Path.home() / ".local/share/dst/000",
-    quadlet_dir=Path.home() / ".config/containers/systemd",
-)
+```sh
+dst-server scripts build /path/to/native/scripts.zip --output /tmp/scripts.zip
+dst-server scripts verify /tmp/scripts.zip --source /path/to/native/scripts.zip
+dst-server annotations components /path/to/scripts/components --output /tmp/components.lua
+dst-server annotations modutil /path/to/scripts/modutil.lua --output /tmp/modutil.lua
 ```
-
-```shell
-systemctl --user daemon-reload
-systemctl --user start dst-000-pod.service
-journalctl --user -u dst-000-forest.service -f
-```
-
-For rootful deployment, follow [Quick start](#quick-start).
-The kernel and data filesystem must support [idmapped mounts](https://docs.podman.io/en/latest/markdown/podman-run.1.html#volume-v-source-volume-host-dir-container-dir-options) when using `volume_idmap`.
-
-The deployment user must own the cluster directory, with group and other-user writes disabled to pass RPC socket checks.
-Mapping changes require recreating the Pod.
-
-### Container DNS
-
-Rootful Podman can use the [DNS policy](deploy/containers/podman-dns.json) to forward default-network queries to the host's systemd-resolved.
-The `127.0.0.53` stub must work; if the host uses DNS over TLS, containers reuse its upstream policy.
-This affects every container on the default network.
-
-Generate a candidate configuration on the target host, preserving its network identity and addresses:
-
-```shell
-podman network inspect podman |
-  jaq --slurpfile dns deploy/containers/podman-dns.json \
-    '.[0] | del(.containers) | . + $dns[0]'
-```
-
-1. Back up the network configuration and gracefully stop the games.
-   Stop every container on the network, including infra and non-DST containers.
-2. Confirm that the candidate changes only DNS fields.
-   Install it as `/etc/containers/networks/podman.json` with mode `0644`.
-3. Restart affected Pods and services, then verify DNS inside the containers.
-
-The policy file cannot be installed directly as a complete network configuration.
-Restarting only the games or running `podman network reload` does not fully apply the change.
-
-[Back to contents](#contents)
-
-## Routine Maintenance
-
-```shell
-dst-server room status 299
-dst-server room diagnose 299
-dst-server world save --room 299
-dst-server room restart 299
-dst-server room stop 299
-```
-
-Shutdown, restart, and Mod maintenance rely on native graceful shutdown saving without an extra save command.
-Use `world save` or [cluster `save()`](#saving-and-world-reloads) only for an independent save while continuing to run.
-Restart reuses prepared resources; explicit updates and automatic maintenance own Mod updates.
-
-### Player Announcements
-
-[`dst_server.announcements`](src/dst_server/announcements.py) provides:
-
-| Type | Behavior |
-| --- | --- |
-| `Repeat` | Sends fixed text `count` times at `interval`, using native `c_announce` and game simulation time. |
-| `Countdown` | Uses the SDK's monotonic clock, so it advances even while the game is paused. |
-| `maintenance()` | Chinese templates for shutdown, restart, Mod updates, deployment, and scheduled closing. |
-
-Each world has one repeat slot; a new repeat replaces it.
-One-shot notices (`count=1`), including countdown notices, leave it intact.
-
-Countdown placeholders include `{remaining}` seconds, `{minutes}` rounded up, `{when}`, and custom names.
-Attribute access, indexing, conversions, and format specifications are rejected.
-
-```python
-from dst_server.announcements import Countdown, Repeat, Template, maintenance
-
-
-async def notify(cluster):
-    await cluster.announce(Repeat(message="Welcome to the room.", count=3, interval=30))
-    await cluster.announce(
-        Countdown(
-            template="{destination} opens in {remaining} seconds.",
-            delay=60,
-            interval=10,
-            parameters={"destination": "The next room"},
-        )
-    )
-    await cluster.restart(notice=maintenance(Template.RESTART, estimated_duration=600))
-```
-
-Templates accept delay, interval, estimated downtime, room/shard names, and next opening time for scheduled closing.
-Use a custom `Countdown` for other wording or languages.
-
-- SDK lifecycle defaults: a 60-second countdown, notices every 30 seconds, and a five-minute downtime estimate where applicable.
-- Empty rooms skip the countdown; `notice=None` skips notices and waiting but still performs the operation.
-- Host `room start` / `stop` / `restart` manage systemd directly, without a countdown.
-- Announcements do not confirm saved progress.
-
-```shell
-dst-server announce 'Welcome!' --room 299 --count 3 --interval 30
-dst-server announce '{destination} opens in {remaining} seconds.' --room 299 \
-  --countdown 60 --interval 10 --parameter destination=Lobby
-dst-server maintenance restart --room 299 --delay 2m --estimated-duration 10m
-dst-server room stop 299
-```
-
-### Image Updates
-
-- `:latest` follows the stable channel; use `--image quay.io/wh2099/dst-server:beta` when creating a beta room.
-- `Pull=always` checks the registry on container start; `TimeoutStartSec=1800` allows 30 minutes for startup.
-- Existing rooms: run `room stop`, edit `/deployment/image` with `room edit --set`, then run `room start`.
-- Host `room restart` recreates containers and applies their image/environment settings.
-- RPC `restart()` and `maintenance restart` restart games and prepare Mods inside existing containers.
-  They do not apply new images.
-
-#### Builds and Cache
-
-| Setting | Behavior |
-| --- | --- |
-| Game layer | Cached by game version and channel; reusable when only the SDK changes. |
-| Intermediate cache | New images carry `quay.expires-after=7d`; Quay expires their tags after seven days. |
-| Final image | No expiration for `latest`, `beta`, version tags, or the hash cache alias. |
-| `force_build` | Rebuild an already published game version. |
-| `no_cache` | Disable cached layers; combine with `force_build` for a fresh rebuild of a published version. |
-
-Expired tags do not immediately free shared layers; Quay garbage collection handles that.
-Version tags use `:<version>` for stable and `:beta-<version>` for beta.
-
-The workflow publishes from `main` only and does not deploy rooms.
-GitHub concurrency cancels earlier runs on the same ref, so rerunning an old commit can interrupt a newer commit's run.
-
-### Console and Logs
-
-`console` evaluates Lua through the room's Agent RPC and defaults to the master shard:
-
-```shell
-dst-server console 'TheWorld.state.cycles + 1' --room 299
-dst-server console 'print("hello"); return 1, nil, true' --room 299
-dst-server console --file commands.lua --room 299
-printf '%s\n' 'return TheWorld.state.cycles + 1' | dst-server console --room 299
-dst-server console --room 299 --interactive
-dst-server console --room 299 --interactive --follow
-```
-
-A single call returns captured print output, typed textual return values, and any compile or runtime error, then exits.
-Lua executes once; expressions and statements are distinguished during compilation.
-
-Interactive mode requires one room; add `--shard NAME` to target a secondary and `--follow` to display background logs.
-Use Ctrl+D to close the prompt; Ctrl+C clears an input line.
-Lua execution remains a trusted administrative operation and does not imply save confirmation.
-
-```shell
-dst-server logs --room 299 --lines 100
-dst-server logs --room 299 --since yesterday --until now
-dst-server --json logs --room 299 --cursor 's=...' --direction forward
-dst-server logs --room 299 --follow
-```
-
-#### History and Pagination
-
-Quadlet uses `LogDriver=journald`; history follows journal retention across game runs and host reboots.
-Queries use fixed deployment names and still work for stopped rooms, damaged configuration, and deleted shards.
-
-| Option or result | Behavior |
-| --- | --- |
-| `--follow` | Reads 100 historical records by default, then follows new records in the same reader. |
-| Finite `--json` | Returns `records`, `next_cursor`, `has_more`, and bounded diagnostics. |
-| `backward` / `forward` | Newest first (default) / oldest first; human-readable pages always display chronologically. |
-| `next_cursor` | Continue with the same direction and filters, replacing `since` if present. |
-
-`cursor` and `since` are mutually exclusive.
-For bounded time ranges, paginate forward and keep `until`; backward pagination loses the lower bound when `since` is removed.
-Unavailable cursors raise `JournalCursorError` and cannot recover expired records.
-
-#### SDK Readers
-
-`Host.journal()`, `Host.follow_journal()`, and `Host.telemetry()` accept one room or a sequence.
-They do not load configuration, contact systemd, or open RPC.
-`Host.log_units()` returns their historical unit selection.
-
-- `shard=` takes the original directory name, including deleted shards.
-  An explicit shard subscription can wait for its first record.
-- Whole-room follow resolves units at startup; subscribe again to include newly created shards.
-- For custom units or service identities, use `dst_server.logs.JournalLogs` or `NetdataLogs` directly.
-
-```python
-import asyncio
-
-from dst_server.host import Host
-from dst_server.logs import JournalQuery
-
-
-async def main():
-    host = Host()
-    page = await host.journal(299, JournalQuery(limit=50))
-    print(page.model_dump_json())
-    if page.has_more:
-        older = await host.journal(299, JournalQuery(cursor=page.next_cursor, limit=50))
-        print(older.model_dump_json())
-
-    async with host.follow_journal(299, shard="forest") as stream:
-        async for record in stream:
-            print(record.message)
-            break
-    print(stream.diagnostics)
-
-
-asyncio.run(main())
-```
-
-SDK follow reads forward, with no initial history by default.
-Use `JournalQuery(direction="forward", limit=100)` to include history.
-A cursor reads all retained subsequent records, regardless of the initial-history limit.
-`JournalQuery(grep=r"DST_RECORD\|")` filters `MESSAGE` with journalctl's native PCRE expression before pagination or follow.
-Matching follows journalctl's case rules: all-lowercase patterns ignore case; other patterns are case-sensitive.
-Keep the same pattern when resuming from a cursor so the anchor remains in the selected records.
-No matches return an empty page; native failures with diagnostics still raise an error.
-`JournalLogs.query(None, request)` and `follow(None, request)` explicitly select the whole accessible journal.
-An empty unit sequence remains invalid; explicit unit patterns retain journalctl's native unit-matching semantics.
-Use `None` with native time and `grep` filters for a broad scan without expanding hundreds of retained unit names.
-This still applies `limit` to matching records and preserves namespace, cursor, and follow behavior.
-
-Invalid follow cursors are reported on the first record or reader exit.
-Leaving the context always closes and reaps the reader.
-
-`JournalRecord.fields` preserves raw metadata, repeated values, and binary arrays.
-`message`, `unit`, `timestamp`, and `cursor` are derived views that leave raw fields unchanged.
-
-| Limit | Default |
-| --- | --- |
-| Per record, both readers | 4 MiB; adjustable in the constructor. |
-| Finite response | 64 MiB; adjustable, with no cumulative limit on follow. |
-| Diagnostics | Last 64 KiB; `diagnostics_truncated` indicates truncation, and empty results retain warnings. |
-
-RPC subscriptions are live-only; Netdata queries separately exported structured events.
-
-### Schedules and Maintenance Tasks
-
-```shell
-dst-server room stop 299
-dst-server schedule set 09:00-12:00 22:00-05:00 --room 299
-dst-server room start 299
-dst-server schedule show --room 299
-dst-server schedule pause --room 299
-dst-server schedule resume --room 299
-dst-server deployment install
-systemctl enable --now dst-room-schedule.timer
-```
-
-Daily windows use host local time and may cross midnight.
-`schedule set` requires a stopped room; `show`, `pause`, `resume`, and `run` work while it runs.
-
-| Action | Effect |
-| --- | --- |
-| `room stop` / `schedule pause` | Pause scheduled transitions and recycling; a running room can still record activity. |
-| `room start` / `room restart` / `schedule resume` | Resume automatic management. |
-| `schedule set --always` | Remove opening windows. |
-| `schedule run` | Check once; repeating within a minute can repeat the closing notice. |
-
-Scheduled closing announces every minute for eight minutes.
-The installed timer checks every minute, then runs recycling even if a schedule check fails.
-Policy comes from each room's `.dst-control.json`.
-Without it, the scheduler treats the room as open all day and may start its stopped service.
-Automatic recycling remains disabled by default.
-Use `room stop` or `schedule pause` to pause automatic management; deleting the control file restores the defaults.
-The scheduler owns opening hours and announcements; systemd owns failure recovery.
-RPC errors do not trigger scheduled restarts, and the scheduler neither retries failed rooms nor clears systemd start limits.
-
-#### Install Automation
-
-`deployment install` writes the [packaged systemd units](src/dst_server/host/systemd); enable the timer separately.
-Units run `python -m dst_server schedule run` and `python -m dst_server maintenance recycle`.
-They use the current Python executable and deployment paths.
-
-After changing those paths or the Python environment, reinstall the units and enable the timer.
-
-```shell
-dst-server maintenance recycle --dry-run
-dst-server maintenance restart --room 299 --delay 8m --estimated-duration 10m
-```
-
-`maintenance restart` calls the running SDK service once per room and returns per-room results.
-The service owns the countdown and game restart; rooms must already have a reachable service.
-Use `room restart` when containers themselves need restarting.
-
-The recycling thresholds are based on the world's current game day:
-
-| Game day | Retain since the latest observed activity |
-| --- | --- |
-| 1–8 | 6 hours |
-| 9–30 | 24 hours |
-| 31–70 | 36 hours |
-| 71–280 | 72 hours |
-| 281+ | 168 hours |
-
-A reset requires elapsed time beyond the limit, all shards ready, and no players present.
-Rooms are checked independently; busy rooms are skipped.
-World identity and the empty-room condition are checked again before resetting.
-Closed time counts toward inactivity after a verified clean scheduled shutdown; resets run only during opening hours.
-Submitting a reset renews the idle window before dispatch, including when the response is lost.
-Recycling does not track reset completion or immediately retry an uncertain result.
-
-## Runtime
-
-Cluster control, shard supervision, and game processes each have their own lifecycle.
-
-### Components and Communication
-
-```mermaid
-flowchart LR
-    Client[Python client] -->|Cap'n Proto Unix socket| Controller
-    subgraph Pod[One room's Pod]
-        subgraph Master[Master container]
-            Controller[ClusterController] --> MainAgent[Master ShardAgent]
-            MainAgent --> MainGame[Master game process]
-        end
-        subgraph Secondary[Secondary container]
-            Agent[Secondary ShardAgent] --> Game[Secondary game process]
-        end
-        Agent -->|Registration and management RPC| Controller
-    end
-    MainAgent -.-> Storage[Shared /cluster]
-    Agent -.-> Storage
-```
-
-| Component | Responsibility and source |
-| --- | --- |
-| [daemon](src/dst_server/cluster/daemon.py) | Runs management services, registration connections, and systemd notifications. |
-| [Controller](src/dst_server/cluster/controller.py) | Tracks expected shards and coordinates shared preparation and cluster operations. |
-| [Mods](src/dst_server/mods/__init__.py) | Prepares shared Mod files, runs the native updater, and tracks outdated reports for one room's maintenance. |
-| [Agent](src/dst_server/cluster/agent.py) | Owns one shard's process resources, consumes logs, lifecycle records, and events, and handles telemetry. |
-| [Supervisor](src/dst_server/runtime/supervisor.py) | Starts, stops, and explicitly restarts game processes; reports unexpected failures. |
-| [Server](src/dst_server/runtime/server.py) | Manages one DST subprocess and its communication channels; single use. |
-
-The master container runs `dst-server agent master`; secondaries run `dst-server agent serve <shard>`.
-The master Agent registers in-process; secondary Agents register through the Pod's abstract Unix socket, `dst-server-registry`.
-
-| Channel | Purpose |
-| --- | --- |
-| `/cluster/.dst-server.sock` | Public Cap'n Proto RPC. |
-| Game FD 3 | Single-line `DST_RPC` JSON requests: version, process nonce, request ID, Lua generation, method, and arguments. |
-| Game FD 4 | Correlated JSON acceptance and result records; native Busy / Done are transport markers. |
-| Game FD 5 | Native lifecycle events such as Ready, Session, Saved, and Stopping. |
-| Game stdout | Ordinary logs and game domain events; stderr is merged into this channel. |
-
-[`-cloudserver` and the launch wrapper](src/dst_server/runtime/fds.py) establish FD 3–5.
-Each shard sends commands serially and waits for native code to consume the preceding input.
-
-- **Requests:** strict JSON, at most 4 KiB including framing; only `evaluate` and `execute_script` compile Lua source.
-- **Responses:** at most 64 KiB, matched by nonce, request ID, and Lua generation; native Done alone does not confirm success.
-- **Retries:** only proven native Busy rejections; accepted or uncertain mutations are never replayed.
-- **Timeouts:** the FD 4 reader keeps running and discards late replies; telemetry uses a separate stdout queue.
-
-The public socket has mode `0600`.
-Its parent directory must belong to the current user and disallow group and other-user writes.
-The internal abstract socket relies on Pod network namespace isolation and has no filesystem permission boundary.
-
-### Lifecycle and Failure Recovery
-
-The controller waits up to 60 seconds for all Agents to register with stopped games, then prepares and starts the cluster.
-It does not adopt games left running by another Controller.
-
-```mermaid
-sequenceDiagram
-    participant A as All shard Agents
-    participant C as Controller
-    participant M as Shared Mods
-    participant G as Game processes
-    A->>C: Complete registration
-    C->>C: Validate native INI topology
-    C->>M: Update once all games are stopped
-    M-->>C: Update succeeds, mark prepared
-    C->>A: Activate resources and start concurrently
-    A->>G: Create each shard's process
-    G->>G: Native script bundle starts the Lua driver
-    G-->>A: Native Ready and driver readiness
-    Note over A,G: Core failure prevents startup#59; optional telemetry may degrade
-```
-
-| Operation | Shared Mods and game processes |
-| --- | --- |
-| Cluster `start()` | Prepares shared files and updates Mods when automatic updates are enabled, then starts the required shards; repeated calls reuse valid preparation. |
-| Cluster `stop()` / `kill()` | Stops games while retaining successfully prepared shared resources. |
-| Cluster `restart()` | Announces, gracefully stops all games, reuses installed Mods, then activates and starts every shard. |
-| `stop()` → `update_mods()` → `start()` | Manual refresh; the final step reuses the successful update. |
-| `update_mods(restart=True)` | Gracefully stops running games, updates and activates once, then starts them inside the existing containers. |
-| Native outdated-Mod report | Schedules one internal room maintenance operation, using the same graceful stop, update, and start steps. |
-| Explicit single-shard restart | Reuses installed Mods without a shared update. |
-
-Shared updates require all Agents connected and all game processes stopped, including any PID left in a failed state.
-Update failures leave games stopped; automatic maintenance retries after 300 seconds.
-
-The in-memory `prepared` flag avoids duplicate preparation within one service run.
-Preparation does not rewrite world settings.
-
-This diagram shows the main states of one shard's game process, using the public RPC state names:
-
-```mermaid
-stateDiagram-v2
-    [*] --> stopped
-    stopped --> starting: start
-    starting --> running: Startup completes
-    starting --> failed: Startup fails
-    running --> failed: Unexpected exit
-    running --> stopping: stop
-    stopping --> stopped: Exit and cleanup
-    failed --> starting: Explicit start
-```
-
-The Supervisor tries once per start or restart request.
-Startup failure, unexpected exit, or Agent disconnection stops all games and fails the management service.
-Unexpected exit includes status zero.
-Requested stops, restarts, and Mod maintenance are expected exits.
-Graceful shutdown uses the game's native saving; no extra save is sent.
-A stop timeout is recorded and followed by forced termination.
-Maintenance continues only after every affected process has exited.
-Explicit `kill()` interrupts an ongoing graceful stop immediately, and cleanup attempts every step before reporting errors.
-
-| Recovery | Behavior |
-| --- | --- |
-| Standalone SDK | Reports failure; the caller decides when to start again. |
-| Master container | `Restart=on-failure`, a 30-second delay, at most three starts per 600 seconds. |
-| Secondary containers | `Restart=no`; `Wants`, `BindsTo`, and `PartOf` tie them to the master. |
-| Pod restart | Restarts all shards through the master's `PartOf` relationship. |
-| Start limit reached | Fix the cause, then run `room start` or `room restart` to clear it. |
-
-Shard services start and stop in parallel; Agent registration coordinates game startup.
-Cluster startup waits for every shard's command interface and game connection.
-Shutdown sends TERM before Quadlet waits for and removes the containers.
-Clients must reconnect RPC and subscriptions after recovery.
-
-With `NOTIFY_SOCKET`, the daemon sends `READY=1`, then `WATCHDOG=1` every 60 seconds.
-Quadlet's `WatchdogSec=300` triggers room recovery after five minutes without a notification.
-The Controller checks game runtime state and required shard connections to confirm room readiness.
-Five consecutive minutes without that confirmation during normal operation cause it to report failure.
-Brief probe failures have time to recover; simulation pauses and degraded optional telemetry do not themselves cause recovery.
-Startup and world loading have a 900-second limit; maintenance uses its own operation deadline.
-Caller timeout or cancellation ends the wait; the room continues supervising startup and loading already in progress.
-Conflicting changes remain blocked until readiness is confirmed; stopping is allowed.
-Intentionally stopped shards are excluded; Mod preparation and retry waits do not count as game connection failures.
-The Controller reports failures; systemd performs restarts and enforces its retry limit.
-
-- **Watchdog:** confirms the management event loop is active.
-- **`status.ready`:** confirms a live game reported native readiness.
-- **`driver_health` / `driver_error`:** describe typed API readiness; use `health()` to investigate failures.
-
-FD 4 EOF or write failure closes the control channel; a malformed response fails only its request.
-Critical observation failures can terminate the Agent and trigger container recovery.
-
-### Managed Native Script Bundle
-
-The image builds and verifies `data/databundles/scripts.zip` after installing the SDK.
-Upgrade the host SDK, Agent image and Lua bundle together; the current driver protocol is version 3.
-Standalone installations must prepare it before `Server.start()` using `scripts.zip` from the same game version.
-The SDK does not download native scripts or build them from the game-source submodule.
-
-```bash
-dst-server scripts build /install/data/databundles/scripts.zip --output /tmp/scripts.managed.zip
-dst-server scripts verify /tmp/scripts.managed.zip --source /install/data/databundles/scripts.zip
-```
-
-- **Build:** validates the native entrypoint, replaces obsolete SDK modules, and verifies the output before publishing it.
-  Use the source path as `--output` for atomic replacement while games are stopped.
-- **Verify:** checks file hashes, SDK version, and source digest in the manifest.
-  `--source` compares with an independent native archive.
-- **Update:** rebuild after a game or SDK update.
-  Packaging tools can use [build_bundle / verify_bundle](src/dst_server/scripts.py) directly.
-
-Only the empty `scripts/globalvariableoverrides.lua` is replaced; other native files retain their contents.
-Native `main.lua` loads it before Mods, and `SpawnPrefabFromSim` attaches a world component that reports readiness at `OnPostInit`.
-This requires neither Mod loading nor Console injection.
-
-Before each process starts, Python writes a fresh nonce and telemetry settings to `<shard>/dst_server_driver.json`.
-Lua reads it on every VM startup, including resets and rollbacks.
-Startup waits for driver readiness even with profile `off`; optional telemetry failures remain visible in driver health.
-
-Direct `Server` users must continuously consume lifecycle and game-event notifications; the Agent does this automatically.
-Diagnostics go to the Recorder for local logging and optional OTLP export.
-Full notification queues report losses without blocking readiness or command replies.
-
-### Saving and World Reloads
-
-`await cluster.save()` submits one native coordinated save through the master.
-It returns after the native command acknowledges the request.
-Lua rejects saving while paused; saving never unpauses the game.
-There is no cross-shard save confirmation, snapshot inference or extra save during shutdown.
-Empty servers may overwrite the preceding snapshot without increasing its number.
-
-Reset, rollback and regeneration also return after native acknowledgement, not after world loading finishes.
-`rollback_to_day()` returns the selected `Snapshot`, not a completion receipt.
-The Controller remains busy until the affected shards report readiness in a new Lua generation.
-Conflicting mutations are rejected while loading.
-Stop and kill can interrupt loading, and the 900-second loading deadline still applies after the request returns.
-
-Native reloads create a new Lua generation within the same process.
-The bootstrap tracks it through `TheSim:GetNumLaunches()` and single-line `DST_DRIVER|` records.
-FD 5 Session notifications do not control generations.
-Hooks install once per VM; typed requests use the current generation's driver.
-A generation change before writing can wait and retry; an uncertain mutation after writing is never automatically replayed.
-`Server.execute()` uses the same generation-aware JSON RPC and bounded Lua evaluator as typed Console requests.
-
-Timeout or disconnection can leave a submitted operation running.
-Query current status before deciding on another action.
-See the [driver](src/dst_server/runtime/driver.py) and [native commands](src/dst_server/lua/dst_server/commands.lua).
-
-### Default Timeouts
-
-| Operation | Default budget |
-| --- | --- |
-| Ordinary commands and typed game requests | 120 seconds. |
-| Save submission and acknowledgement | 300 seconds. |
-| Reset, rollback, rollback by day, and regeneration | 900 seconds. |
-| One game startup and native driver readiness | 900 seconds. |
-| Graceful game stop | 120 seconds; forced exit and output cleanup have separate budgets. |
-| RPC connection and handshake | 60 seconds. |
-
-Command deadlines cover readiness checks, target selection, forwarding and acknowledgement.
-World loading is monitored separately for up to 900 seconds after submission.
-Concurrent mutations are rejected while the room is executing an operation or loading a world.
-Start, stop, restart and Mod updates retain their lifecycle waits.
-
-RPC budgets are declared in [commands.py](src/dst_server/commands.py).
-`Start`, `Restart`, and `UpdateMods` allow three hours; `Stop` and `Kill` allow 120 seconds.
-The server adds 30 seconds around the workflow; the client adds 60 seconds in total.
-The extra time allows the operation result to reach the client.
-
-RPC preserves the operation's error; a transport timeout leaves an unconfirmed mutation `indeterminate`.
-Subscription `next()` uses long polling.
-Quadlet allows 360 seconds for container stops and 420 seconds for systemd stops.
-See [timeouts.py](src/dst_server/timeouts.py) for defaults.
-
-### Game Launch Arguments
-
-The Agent builds the command in standard deployments, so you do not need to supply these arguments yourself.
-
-| Argument | Purpose |
-| --- | --- |
-| `-persistent_storage_root`, `-conf_dir`, `-cluster`, `-shard` | Locate the cluster and shard; containers ultimately read `/cluster`. |
-| `-external_port` | Advertise the host's player port. |
-| `-ugc_directory` | Shared UGC cache. |
-| `-only_update_server_mods` / `-skip_update_server_mods` | Separate Mod updates from normal game startup. |
-| `-monitor_parent_process` | Close the game when its parent exits. |
-| `-cloudserver` | Establish local process communication. |
-
-When managing game processes yourself, configure paths and `extra_args` through [ServerConfig](src/dst_server/runtime/config.py).
-See [Klei's command-line guide](https://support.klei.com/hc/en-us/articles/360029556192-Dedicated-Server-Command-Line-Options-Guide) for other native arguments.
-
-[Back to contents](#contents)
-
-## RPC and Game SDK
-
-RPC provides typed interfaces for deployed clusters.
-The game SDK can also be embedded in applications that manage their own processes.
-
-### Connecting to a Cluster
-
-Install the package to use its SDK outside the repository, or run `uv run python your_script.py` from a checkout.
-This example connects from the host to the room created in Quick start:
-
-```python
-import asyncio
-from pathlib import Path
-
-from dst_server.rpc import ClusterClient, rpc_runtime
-
-
-async def main() -> None:
-    socket = Path("/srv/dst/299/.dst-server.sock")
-    async with rpc_runtime():
-        async with await ClusterClient.connect(socket) as cluster:
-            status = await cluster.status()
-            print(status)
-            print(await cluster.shard(status.master).status())
-
-
-asyncio.run(main())
-```
-
-The host path is `/srv/dst/<room>/.dst-server.sock`; inside containers it is `/cluster/.dst-server.sock`.
-`connect()` requires a path and must run within a `rpc_runtime()` context.
-
-### Shared Requests and Validation
-
-[commands.py](src/dst_server/commands.py) defines `Request[T]`: arguments, result types, scope, timeout, and world-reload behavior.
-Python and Lua share command names.
-Local controllers, game clients, and RPC clients validate the same Pydantic requests before execution.
-Invalid values and commands outside the endpoint's scope are rejected.
-
-[api.py](src/dst_server/api.py) wraps `invoke(request)` with `ClusterAPI`, `ShardAPI`, and `PlayerAPI` methods.
-After `from dst_server import commands as c`, `shard.world()` and `shard.invoke(c.World())` use the same contract.
-Pass a request to override its timeout, such as `c.World(timeout=30)`.
-
-Cap'n Proto carries commands through `call` and observations through subscriptions.
-Read-only `ClusterConfig` preserves omitted fields, explicit `False`, and world override types.
-Results and statuses are in [models.cluster](src/dst_server/models/cluster.py); `DriverHealth` is in [models.driver](src/dst_server/models/driver.py).
-
-| Failure | Result |
-| --- | --- |
-| Domain error | `RemoteError`. |
-| Submitted mutation loses its reply | `IndeterminateError` for RPC; `IndeterminateCommandError` at the game boundary. |
-| Caller cancels | `asyncio.CancelledError`; submitted mutations may continue, cancelled queries release their work. |
-
-Accepted mutations continue after disconnection and are never automatically replayed when unconfirmed.
-See [errors.py](src/dst_server/errors.py) for shared exceptions and codes.
-
-### Direct RPC and Console Results
-
-Discover methods on the running endpoint before calling them:
-
-```shell
-dst-server rpc list --room 299
-dst-server rpc describe evaluate --room 299 --shard xforge
-dst-server --json rpc call status --room 299
-dst-server rpc call execute_json --room 299 --shard xforge \
-  -f 'source=return TheWorld.state.cycles + 1'
-dst-server rpc subscribe events --room 299
-```
-
-- `rpc describe`: argument/result schemas, scope, timeouts, and side effects from the running server.
-- `rpc call`: `--input request.json` reads JSON; `--input -` reads stdin; repeated `-f name=value` accepts JSON or strings.
-- `--shard`: targets a shard; omit it to target the cluster.
-- `rpc subscribe`: live `logs`, `lifecycle`, or `events`, without history replay.
-
-The typed SDK exposes the same console result:
-
-```python
-from dst_server.models.console import ConsoleResult
-from dst_server.rpc import ShardClient
-
-
-async def inspect_console(shard: ShardClient) -> None:
-    result: ConsoleResult = await shard.evaluate('print("hello"); return 1, nil, true')
-    print(result.output)
-    print([(value.type, value.text) for value in result.values])
-    print(result.error, result.truncated)
-```
-
-`error.kind` distinguishes compilation from runtime failures; `truncated` marks output limits.
-Arbitrary Lua values are represented as bounded text; use `execute_json()` when a program needs JSON values.
-
-### API Index
-
-| Object | Common interfaces |
-| --- | --- |
-| `cluster` lifecycle | `status()`, `start()`, `stop()`, `restart()`, `kill()`, `update_mods()`. |
-| `cluster` configuration and world | `read_configuration()`, `save()`, `pause()`, `reset()`, `rollback()`, `rollback_to_day()`, `regenerate()`, `list_snapshots()`. |
-| `cluster` players and administration | `list_players()`, `get_player()`, `announce()`, `whitelist()`, `unwhitelist()`, `is_whitelisted()`, `execute_all()`. |
-| `cluster.shard(name)` | Shard lifecycle, `status()`, `room()`, `world()`, `runtime()`, `health()`, `mods()`, `connected_shards()`, `presence()`, `list_snapshots()`, `regenerate_shard()`. |
-| `shard.players` | Player and inventory queries, kicks, bans, unbans, admin status, vitals, teleportation, shard migration, and adding or removing items. |
-| `cluster` / `shard` subscriptions | `subscribe("logs")`, `subscribe("lifecycle")`, `subscribe("events")`; manage subscriptions with `async with`, then call `await subscription.next()`. |
-| `shard.evaluate(lua)` | Evaluate expressions or statements once; return print output, typed textual values, and errors as `ConsoleResult`. |
-| `shard.execute(lua)` | Execute Lua and return explicitly printed text. |
-| `shard.execute_json(lua)` | Return JSON through the typed driver, for example `"return TheWorld.state.cycles + 1"`. |
-
-Reference: [methods](src/dst_server/api.py), [requests](src/dst_server/commands.py), [RPC schema](src/dst_server/rpc/schema/rpc.capnp), and [return models](src/dst_server/models).
-For history, use [journal logs](#console-and-logs) for process output and [Netdata](#netdata-deployment-and-queries) for exported events.
-
-Use `ClusterClient` for standard Pod deployments.
-To manage a process directly, use `dst_server.runtime.Server`, consume its notifications, and clean up the process yourself.
-Pass a running `server.game` to SDK functions:
-
-```python
-from dst_server import commands as c
-from dst_server.game import GameClient
-
-
-async def inspect_game(game: GameClient) -> None:
-    world = await game.invoke(c.World())
-    day = await game.invoke(c.ExecuteJson(source="return TheWorld.state.cycles + 1"))
-    players = await game.players.list()
-    print(world, day, players)
-```
-
-`GameClient.invoke(Save())` is an internal native request; the public `cluster.save()` likewise returns after acknowledgement.
-`shard.presence()` reports connections, players, inactivity and observation identity independently of optional telemetry.
-Recycling requires reliable observations from every shard; gaps and world changes receive a full grace period.
-Verified clean scheduled closures preserve idle time.
-Protocol version 3 separates current capabilities and faults from historical error counts.
-Vote capture supports standard, Gorge and Forge components without changing native vote behavior.
-
-### Emoji and Emote Enums
-
-`dst_server.game` provides static enums for native emoji characters and emote commands.
-The SDK does not read game Lua files at runtime.
-
-| Enum | Values and additional fields |
-| --- | --- |
-| `Emoji` | 50 native emoji characters, with `chat_token` and account item type `item_type`. |
-| `Emote` | 32 native emote command names, with `slash_command`, `category`, `item_type`, and `aliases`. |
-| `EmoteType` | Wheel categories: `EMOTION=0`, `ACTION=1`, `UNLOCKABLE=2`. |
-
-```python
-from dst_server.game import Emoji, Emote, EmoteType
-
-assert Emoji.BEEFALO == "\U000f0001"
-assert Emoji.BEEFALO.chat_token == ":beefalo:"
-assert Emoji.ALCHEMY.item_type == "emoji_alchemyengine"
-assert Emote.WAVE.slash_command == "/wave"
-assert Emote.WAVE.category is EmoteType.EMOTION
-assert Emote.WAVE.aliases == ("waves", "hi", "bye", "goodbye")
-```
-
-`Emoji` and `Emote` are `StrEnum` types usable as strings and JSON values.
-Constructors accept native values such as `Emote("wave")`; tokens, slash forms, aliases, and unknown values raise `ValueError`.
-
-- `item_type` is an account item type, not an inventory item ID; ordinary emotes may have `None`.
-- Emoji use U+F0000–U+F0031 and require the game font.
-- The wheel sends names without `/`; `EmoteType` is a category, not a network action number.
-- Ownership, posture, localized aliases, and Mod additions depend on the running game.
-
-Native mappings: [emoji_items.lua](dst-scripts/scripts/emoji_items.lua), [emotes.lua](dst-scripts/scripts/emotes.lua), and [emote_items.lua](dst-scripts/scripts/emote_items.lua).
-
-## Saves and Exports
-
-Snapshots restore game progress; exports package configuration and saves into a shareable archive.
-
-### Save Files
-
-Each shard saves its world and player state separately.
-`shardindex.session_id` identifies that shard's generated world, not one player login.
-This is a typical layout with player path encoding enabled; files and directories are created as needed:
-
-```text
-<shard>/save/
-├── shardindex
-├── shardindex_time
-├── session/
-│   └── <session-id>/
-│       ├── 0000000001
-│       ├── 0000000001.meta
-│       └── <encoded-user-id>/
-│           ├── 0000000001
-│           ├── 0000000001.meta
-│           └── savelocation
-├── profile
-├── modindex / boot_modindex
-├── cached_userid
-├── server_temp/server_save
-├── client_temp/
-├── event_match_stats/
-├── world_presets/
-└── mod_config_data/
-```
-
-| File | Contents |
-| --- | --- |
-| `shardindex` | `world` options, `server` settings, `session_id` world ID, `enabled_mods` and their configuration, and index format `version`. |
-| `shardindex_time` | `created` and `saved`: creation and latest-save Unix timestamps in seconds; saves preserve the creation time. |
-| Numbered world snapshots | Map, roads, topology, persistent entities, world and network component state, Mod records, and an optional online player list. |
-| World `.meta` | `clock` and `seasons` summaries used by rollback lists to read the day, phase, and season. |
-| Numbered player snapshots | Character, position, age, skins, health, hunger, sanity, inventory, equipment, backpack, recipes, and other component state. |
-| Player `.meta` | The base game writes only `character = player.prefab`. |
-| Player `savelocation` | Optional native binary history of snapshots and shards, used to locate player saves when loading. |
-
-- Snapshot IDs are not days: the day is `clock.cycles + 1`, and a day may contain several saves.
-- Player snapshot IDs can have gaps and need not match every world snapshot.
-  World saves include `AllPlayers`; some player events save separately, and the engine chooses files on load.
-- Internal `savedata.meta` stores build version, seed, world type, and save version; it differs from the `.meta` summary.
-
-| Supporting path | Purpose |
-| --- | --- |
-| `profile` | Runtime preferences, logically JSON, including controls, startup information, favorite Mods, presets, and hint state. |
-| `modindex` / `boot_modindex` | A Lua table of Mod management state / a `loading` or `done` startup marker. |
-| `cached_userid` | The server account's Klei ID, saved by the engine; not a token or player snapshot. |
-| `server_temp/server_save` | A reduced map copy for world initialization, omitting entities, snapshots, tiles, navigation, and more; insufficient to restore the full world. |
-| `client_temp/` | Engine-managed temporary client data. |
-| `event_match_stats/` | Event statistics CSV files; the base game's writing branch excludes dedicated servers. |
-| `world_presets/` | `.wsp` world settings and `.wgp` generation settings, containing base presets, overrides, names, descriptions, and versions. |
-| `mod_config_data/` | Mod configuration and selected values, often named `modconfiguration_<modname>`; Mods can also write additional data. |
-
-Servers without Mods may still create Mod management files.
-Mods can extend `OnSave()` data or write separate files; disk files may use KLEI wrapping, compression, or trailing NULs.
-
-Native source: [indexes](dst-scripts/scripts/shardindex.lua), [world saves](dst-scripts/scripts/mainfunctions.lua),
-[players](dst-scripts/scripts/networking.lua), [entities](dst-scripts/scripts/entityscript.lua),
-and [loading](dst-scripts/scripts/saveindex.lua).
-
-### Player Path Encoding
-
-With `encode_user_path` enabled, online players use 12-character directory names encoded from their Klei IDs.
-When changing encoding for existing saves, update all three:
-
-1. Player directory names.
-2. `[ACCOUNT].encode_user_path` in `server.ini`.
-3. `shardindex.server.encode_user_path`.
-
-Preserve every player snapshot, `.meta` file, and `savelocation`.
-Encoding changes paths only; Klei IDs in files such as `cached_userid` stay unchanged.
-See [Utilities](#utilities) for SDK conversion functions.
-
-### Snapshot Queries and Rollback by Day
-
-`cluster.list_snapshots(limit=100, before=None)` queries the master shard's current session.
-`cluster.shard(name).list_snapshots()` queries a specific shard.
-Run this code inside the [cluster connection](#connecting-to-a-cluster) context:
-
-```python
-catalog = await cluster.list_snapshots(limit=100)
-for snapshot in catalog.snapshots:
-    day = snapshot.metadata.day if snapshot.metadata is not None else None
-    print(snapshot.snapshot_id, day)
-
-if catalog.has_more and catalog.snapshots:
-    older = await cluster.list_snapshots(before=catalog.snapshots[-1].snapshot_id)
-```
-
-| Return value or parameter | Meaning |
-| --- | --- |
-| `SnapshotCatalog` | `session_id`, `snapshots` in descending snapshot ID order, and `has_more`. |
-| `limit` / `before` | 1–100 per page; `before` is exclusive, so pass the last ID from the previous page. |
-| `Snapshot` | Native `snapshot_id`, `world_file` relative to `save/`, and typed `metadata`. |
-| `metadata=None` | A world file, metadata file, or native path is missing. |
-| `metadata.day=None` | The metadata cannot determine the day. |
-
-The Agent rejects path escapes, symlinks, invalid metadata, and session changes during a query.
-For standalone reads, [models.snapshot](src/dst_server/models/snapshot.py) provides:
-
-- `WorldSnapshotMetadata.load(path)`: `clock`, `seasons`, and nested fields; days use `clock.cycles + 1`.
-- `PlayerSnapshotMetadata.load(path)`: `character`, including Mod characters.
-
-Loaders accept UTF-8 Lua literals, native text headers, and trailing NULs.
-They ignore extra Mod fields in `clock` / `seasons`, but reject other unknown fields, wrong types, and dynamic expressions.
-They do not interpret Mod calendars.
-
-`cluster.reset()` and `cluster.rollback(0)` load the latest saved snapshot.
-`cluster.rollback(1)` loads the preceding save; the count follows the saved snapshot list, independent of elapsed time.
-All shards must have the selected snapshot before rollback begins.
-
-`await cluster.rollback_to_day(day, timeout=900)` verifies sessions and submits the coordinated rollback.
-It returns the chosen `Snapshot` after acknowledgement.
-It selects the **earliest** snapshot that day with a complete match on every shard; unknown days are excluded.
-No complete match means failure, without guessing days from IDs.
-
-Retention and rollback truncate history; query the catalog again afterward.
-
-### Exports and R2 Uploads
-
-The exporting process needs the `export` extra; the image includes only `otel` by default:
-
-```shell
-uv sync --extra export
-```
-
-Wait for graceful game shutdown, then package configuration and saves as `.7z`:
-
-```python
-import shutil
-from pathlib import Path
-
-from dst_server.archive import export_cluster
-
-with export_cluster(Path("/srv/dst/000")) as archive:
-    destination = Path("/path/to/exports") / archive.filename
-    with destination.open("xb") as output:
-        shutil.copyfileobj(archive.stream, output)
-```
-
-Use an existing destination directory; the caller manages the exported file.
-The SDK's readable, seekable temporary stream is cleaned up when the `with` block ends.
-
-- **Filename:** `DST-<room-id>-<UTC timestamp>.7z`, e.g. `DST-000-20260909T010203Z.7z`.
-  `room_id` defaults to the source directory name.
-- **Settings:** `configuration=` changes only the archive, preserving shard names and master roles.
-  The source directory is required.
-- **Compression:** ZSTD level 22; use `py7zr` or `7-Zip-zstd`, since standard `7z` may not support it.
-
-| Archive contents | Handling |
-| --- | --- |
-| SDK-supported game configuration | Preserves world and Mod declarations; removes passwords and all deployment `cluster_key` values. |
-| `save/session/` | Preserves game and Mod progress, including player snapshots, `.meta`, and `savelocation`; excludes SDK files and directories. |
-| Existing `save/shardindex` | Preserves world, session, and Mod information and removes credentials; missing indexes are not created. |
-| Additional progress | Preserves `save/recipebook`, `save/reforged_achievements_server`, and `save/mod_config_data/mod_worldjump_data_*`. |
-| Excluded | Token, permission lists, logs, Mod content, UGC caches, SDK control files, locks, sockets, driver configuration, and other supporting indexes. |
-
-Exports omit Steam group settings, empty `[STEAM]` sections, and saved `clan` data.
-Clan-only privacy becomes public; other visibility settings remain unchanged.
-Recipients supply their own `cluster_token.txt`.
-Then `ClusterConfig.load(path)` and `save(path)` create a shared key for their deployment.
-
-`encode_user_path=True` converts player paths when needed and synchronizes configuration and `shardindex` flags.
-Pass `False` to preserve source names and settings.
-Saves with only `saveindex`, or a corrupt/unsupported `shardindex`, cannot be exported.
-
-Export scans once: stop games or use an unchanged copy.
-It checks file types, paths, collisions, and credentials, without monitoring concurrent writes.
-Scanning is best effort: directory read errors can omit saves, so success does not guarantee completeness.
-Keep the source saves; do not delete them solely because export succeeded.
-
-Pass S3 connection settings and credentials directly when uploading to R2:
-
-```python
-from pathlib import Path
-
-from pydantic import SecretStr
-
-from dst_server.archive import export_cluster
-
-with export_cluster(Path("/srv/dst/000")) as archive:
-    result = archive.upload(
-        endpoint="https://<account-id>.r2.cloudflarestorage.com",
-        bucket="your-bucket",
-        access_key_id=SecretStr("your-access-key-id"),
-        secret_access_key=SecretStr("your-secret-access-key"),
-        object_prefix="rooms/exports/",
-        url_prefix="https://downloads.example.com/",
-    )
-
-print(result.key)
-print(result.url)
-```
-
-| Upload argument | Type | Default | Environment fallback |
-| --- | --- | --- | --- |
-| `bucket` | `str \| None` | `None` | `AWS_BUCKET` |
-| `endpoint` | `str \| None` | `None` | `AWS_ENDPOINT_URL_S3`, then `AWS_ENDPOINT` |
-| `region` | `str` | `"auto"` | None; the argument overrides `AWS_REGION` |
-| `access_key_id` | `SecretStr \| None` | `None` | `AWS_ACCESS_KEY_ID` |
-| `secret_access_key` | `SecretStr \| None` | `None` | `AWS_SECRET_ACCESS_KEY` |
-| `session_token` | `SecretStr \| None` | `None` | `AWS_SESSION_TOKEN` |
-| `object_prefix` | `str` | `""` | None |
-| `url_prefix` | `str \| None` | `None` | None |
-
-Credentials require `SecretStr`; they are unwrapped only for `S3Store` and never enter the archive.
-Explicit values override the environment.
-`None` uses [obstore's per-field defaults](https://developmentseed.org/obstore/latest/api/store/aws/#obstore.store.S3Config).
-An omitted `session_token` can therefore come from the environment even when both keys are explicit.
-
-`upload()` reads from the stream's start and returns `ArchiveUploadResult`:
-
-| Field | Value |
-| --- | --- |
-| `key` | `object_prefix + archive.filename`; uploading the same key replaces the object. |
-| `url` | `None`, or `url_prefix + key.rsplit("/", 1)[-1]` when a prefix is supplied. |
-
-Both prefixes concatenate literally: include separators such as `/` or `?file=` yourself.
-`object_prefix` cannot start with `/`; neither prefix has an environment fallback, and URLs are not inferred from endpoints.
-
-`region="auto"` matches [R2](https://developers.cloudflare.com/r2/api/s3/api/#bucket-region); set it for other S3 regions.
-[obstore handles multipart uploads](https://developmentseed.org/obstore/latest/api/put/).
-Errors propagate to the caller; local temporary files are still cleaned up.
-
-Failed uploads may leave remote parts, which R2 removes after seven days by default.
-Adjust this with [lifecycle rules](https://developers.cloudflare.com/r2/buckets/object-lifecycles/).
-
-[Back to contents](#contents)
-
-## Mod Management
-
-The cluster shares Mod files and updates them before starting games.
-Automatic updates are enabled by default:
-
-- Startup downloads Mods; outdated reports from any running shard trigger room maintenance.
-- Concurrent reports become one update; occupied rooms receive a countdown before stopping.
-- Failed updates or continued outdated reports retry after 300 seconds.
-
-Detection uses the game's callbacks, including their limits around required client Mods and paused simulation.
-It does not poll Workshop or depend on telemetry.
-A successful download does not guarantee that every Mod is current; detection continues after restart.
-
-Inspect `await cluster.status()`:
-
-| Field | Contents |
-| --- | --- |
-| `mod_update` | `enabled`, `pending`, `updating`, `retry_in_seconds`, `error` |
-| `shards[*].outdated_mods` | Mod display names reported during that shard's `game_attempt` |
-
-### Native Mod Updates
-
-The SDK only uses the game's `-only_update_server_mods` downloader.
-
-| Environment variable | Purpose |
-| --- | --- |
-| `DST_SERVER_MOD_AUTO_UPDATE` | `true` by default; `false` disables startup downloads and automatic updates for outdated Mods. |
-| `DST_SERVER_MOD_PROXY` | Optional HTTP(S) download proxy; subprocesses clear inherited common proxy variables. |
-
-Set these in room deployment settings or a Quadlet drop-in, then recreate the containers.
-Disabling automatic updates leaves startup preparation enabled; explicit `update_mods()` and `agent prepare` still download.
-
-Each update tries once, reuses the game's download cache, and times out after 30 minutes.
-A nonzero exit, missing completion marker, setup error, or download failure fails the attempt.
-Manual calls return the failure; automatic maintenance retries after 300 seconds.
-
-### Declaring Downloads and Activation
-
-The shared list is `mods/dedicated_server_mods_setup.lua`; use static calls with double quotes:
-
-```lua
-ServerModSetup("1803285852")
--- ServerModCollectionSetup("1234567890") -- Replace with a collection ID, then uncomment.
-```
-
-Room creation and editing add enabled Workshop Mods and `modsettings.lua`'s `ForceEnableMod` items to the download list.
-Startup reads the list without rewriting it.
-
-For manual edits, declare downloads in `dedicated_server_mods_setup.lua`.
-Set activation and options in each shard's `modoverrides.lua`.
-Downloading and enabling are separate operations.
-
-- Configuration editing accepts supported declarative Lua, double-quoted IDs, and at most one final return.
-- Low-level `dst_server.mods` functions preserve dynamic scripts and let the game execute them.
-  `mods.prepare()` and `cluster.service.prepare_shared()` support this path.
-- The game executes Mod code; Python does not use Lua version fields to determine updates.
-
-See the [lifecycle table](#lifecycle-and-failure-recovery) for shared update timing.
-
-| Operation | Behavior |
-| --- | --- |
-| `cluster.update_mods(restart=True)` | Gracefully stops, updates, and restarts games in the existing containers |
-| `cluster.update_mods()` | Requires stopped games; the next `start()` reuses the successful update |
-| `mod update --room 000` | Requires stopped room services; uses the room lock and a temporary container, then leaves the room stopped |
-
-Cancellation stops the downloader and waits for temporary-container cleanup.
-
-[Back to contents](#contents)
-
-## Telemetry and Historical Logs
-
-OpenTelemetry uses Logs for game events and runtime diagnostics, Traces for management operations, and Metrics for counts.
-Collection, export, and retention are configured separately; a shard's `ready` status does not indicate telemetry health.
-
-### Collection Scope
-
-The CLI uses `DST_SERVER_TELEMETRY_PROFILE`, which defaults to `critical`.
-The SDK uses `TelemetrySettings(profile=..., actions=...)`, passed through `ServerConfig.telemetry` or Agent startup arguments.
-
-| Profile | Collected data |
-| --- | --- |
-| `off` | Local activity observation and native Mod-update detection; management RPC remains available |
-| `critical` | Player chat, emote and rescue requests, spawn appearance, announcements, skins, dice, votes, joins, departures, spawns, deaths, revivals, migration, drowning, and falls; significant entity deaths, shard connections, bosses, rifts, world state, pauses, map deliveries, and vault trials |
-| `history` | Adds combat hits, damage received, blocking, equipment changes, hound warnings, crafting, gathering, eating, item operations, player state, skills, fishing, planting, and allowlisted Action results |
-
-Game event collectors read native notifications and current game state.
-They maintain no action causality, vote sessions, or delivery progress, and write no collector state to saves.
-Combat, equipment changes, and hound warnings record each native notification, including repeats.
-Default `history` Actions include attacks, tool work, pickup, cooking, fueling, and fertilizing.
-Each Action records its inputs and return values.
-Collectors do not wrap frame updates.
-Drowning/falling still observes player state transitions, filtering by state name before building a record.
-
-#### Login and Activity
-
-- `dst.client.authenticated` / `disconnected` include clients without a player entity.
-  `dst.connection.closed` preserves native reason codes without guessing player IDs or treating migration as login failure.
-- `dst.server.presence` records clients, shard entities, capacity, and driver health.
-  It runs at startup and every 60 seconds, even while paused.
-  Snapshots deduplicate player IDs and correct counts; migration and missing events prevent exact session-duration estimates.
-- `spawned` precedes positioning (`position=null`); `shard_entered` records shard entry.
-  `loaded` records the completed client handshake.
-  With `off`, `loaded` only updates in-memory activity.
-
-#### Other Event Semantics
-
-- Chat retains sender details, message text, whisper/emote flags, and available entity data within native length limits.
-  Observations from different shards are not deduplicated by message text.
-- Announcements retain their native kind and rendered text; system messages, skins, and dice have separate events.
-  Skin notifications identify a name, not an account ID.
-- `emote_requested` and `rescue_requested` record requests when the game executes each command.
-  They do not claim a completed animation or rescue.
-  `appearance_requested` retains the requested and game-validated character, skin, and clothing without an extra game save.
-- `dst.world.map_delivery_started` records successful dispatches with the entity, sender, origin, and destination.
-  Arrival, stopping, and save restoration remain native game behavior without additional tracking.
-- `dst.world.vault_trial_progress` records socket and spark progress with its observation source.
-  `vault_trial_guards_defeated` records when native guard clearance enables bonus loot.
-  It does not claim that a player collected the loot.
-  Trial capture attaches at trial creation and reads native components without listening for all entity spawns.
-- Standard voting emits `dst.vote.updated` for each native master-shard notification: command, countdown, and ballots.
-  Repeats and pending ballot values are retained.
-  `dst.vote.result` independently records the native result function's return.
-  No correlation IDs or cancellation reasons are inferred.
-  Gorge and Forge emit `dst.vote.submitted` for vote requests accepted for native processing.
-  Forge also emits `closed` without inferring success or cancellation.
-- Deaths cover players, `epic` entities, and ordinary creatures whose deaths are attributable to players.
-  Causes, item owners, and follower leaders are read from game state at the time of the event.
-  Revivals distinguish `ghost`, `corpse`, and `charlie`.
-  Combat fields preserve native values; unknown damage or attack-origin flags remain `null`.
-- Pause events distinguish server flags (`domain=server`) from simulation transitions (`domain=simulation`).
-  World-state names accept Mod identifiers; world-generation configuration remains separately constrained.
-- Incidents record actual drowning/falling; eating includes food and Wortox souls.
-
-See [telemetry configuration](src/dst_server/telemetry/config.py) for the default `history` Action list; `actions=()` disables only Action wrappers.
-Action records contain inputs and return values from one native call.
-Native exceptions continue to appear in underlying logs.
-Protocol sequences, collector health, and installation bookkeeping remain runtime state.
-They have no responsibility for game-state restoration.
-Profiles do not disable Python diagnostics, Metrics, or Traces, or delete history.
-Optional collector failures report their stage and leave healthy collectors running.
-Successful callbacks and event output clear only their own current faults; historical error counts remain.
-Health revisions prevent delayed diagnostics from overwriting a newer recovered state.
-
-### OTLP Configuration
-
-The image includes OTLP dependencies; standalone SDK users install `dst-server[otel]`.
-All signals use the OpenTelemetry SDK's gRPC exporters.
-Agents initialize export when any of these variables is set:
-
-- `OTEL_EXPORTER_OTLP_ENDPOINT`
-- `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`
-- `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
-- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
-
-`OTEL_SDK_DISABLED=true` skips initialization; game events still follow the profile and appear in local logs.
-Compression supports unset or `gzip`; Logs default to 128 attributes per record.
-For mTLS, set the CA certificate and client key/certificate through the SDK environment variables.
-
-| Setting | Behavior |
-| --- | --- |
-| `OTEL_LOGS_EXPORTER`, `OTEL_METRICS_EXPORTER`, `OTEL_TRACES_EXPORTER` | Support only `otlp` and `none`; default to `otlp` |
-| `OTEL_EXPORTER_OTLP_*` | Configure endpoints, headers, certificates, compression, and timeouts; transport always uses gRPC |
-| All export modes | Accepted events and diagnostics first become local single-line `DST_RECORD\|...` logs; enabled Logs also export them through OTLP |
-| Dependency or initialization failure after export is explicitly enabled | The Agent exits with an error; no automatic fallback to local logs |
-
-Place the Logs and Metrics configuration for Netdata on the same host under Quadlet's `[Container]`:
-
-```ini
-Environment=DST_SERVER_TELEMETRY_PROFILE=history
-Environment=OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://10.255.255.254:4317
-Environment=OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://10.255.255.254:4317
-Environment=OTEL_TRACES_EXPORTER=none
-```
-
-Put manual changes in a `.container.d/*.conf` drop-in, then reload and restart room services.
-Host-shell `export` does not override the container environment.
-
-`deployment lst` sets both endpoints, including SDK queue/export metrics.
-Rooms `000–099` and `216–219` use `history`; `200–215` use `critical`.
-Without Netdata, use `room edit --set` to set both fields to `"none"`:
-
-- `/deployment/environment/OTEL_LOGS_EXPORTER`
-- `/deployment/environment/OTEL_METRICS_EXPORTER`
-
-Individually created rooms have no export endpoint by default.
-When calling `QuadletApplication.for_cluster()` directly, pass environment variables through `telemetry_environment`.
-
-### In-Memory Delivery
-
-```mermaid
-flowchart LR
-    Lua["Lua game events"] --> Validate["Validation, nonce, generation and sequence"]
-    Validate --> Recorder["Recorder: local record then OTel submission"]
-    Runtime["Runtime and collection diagnostics"] --> Recorder
-    Recorder -->|"Logs enabled"| Queue["SDK bounded memory queue"]
-    Queue -->|"Background batch export"| Receiver["OTLP receiver"]
-    Recorder --> Local["Single-line local logs"]
-    Recorder --> Notifications["Bounded game notification queue"]
-    Notifications --> Live["ShardAgent live subscriptions"]
-```
-
-See [events](src/dst_server/events) for event models.
-Recognized diagnostics are in [operational.py](src/dst_server/runtime/operational.py).
-Python validates types, fields, UTF-8, and the process nonce.
-`DST_OTEL|` plus JSON is limited to 64 KiB, excluding the native timestamp.
-
-Accepted events are logged locally and submitted to OTel before live notification delivery.
-Health and presence update immediately, independently of consumers; duplicate or stale records are discarded.
-
-| Input counter | Meaning |
-| --- | --- |
-| `telemetry_invalid` | Event validation failures |
-| `telemetry_dropped` | Dropped live notifications; does not affect records already submitted to OTel |
-| `telemetry_gaps` | Missing source sequences; presence snapshots correct counts without inventing login/logout times |
-
-Collection diagnostics report rejections, sequence gaps, dropped notifications, and oversized lines with rate-limited counts.
-They bypass the notification queue and never echo rejected payloads.
-
-| Boundary | Behavior and limits |
-| --- | --- |
-| Submission | Synchronously adds records to memory; event consumption and live subscriptions do not wait for network export |
-| Live notifications | 1,024 entries; drops the oldest when full; queued entries remain readable after closure |
-| SDK queue | Defaults to 2,048 records, batches of up to 512, and a one-second schedule delay; a full queue discards the oldest records |
-| Export failures | The SDK retries transient errors within the export timeout, which defaults to ten seconds; failed or rejected records are discarded |
-| Shutdown and restart | Shutdown asks the SDK to finish pending export; records may be lost, and restarting does not replay them |
-
-Local `DST_RECORD` logs retain event name, body, time, severity, and UID, plus source and OTel resource attributes.
-They follow journal retention/rate limits and are not replayed when the receiver recovers.
-
-SDK queue/export metrics are enabled by default; `OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED=false` disables them.
-Their export requires Metrics; SDK export losses are separate from the input counters above.
-
-Game `log.record.uid` values use `nonce:generation:seq`; backend deduplication is not guaranteed.
-Lua's `events_emitted` is the highest allocated sequence, not a delivery confirmation.
-
-### Log Boundaries
-
-Python reads merged game stdout/stderr; commands, responses, and lifecycle events use separate FDs 3, 4, and 5.
-Stdout markers cannot complete commands, advance Sessions, or confirm saves.
-
-The CLI writes Agent logs to container stderr, escaping embedded CR, LF, and NUL.
-Each Python record, including a traceback, stays on one line.
-Podman's journald driver forwards it through conmon; ordinary Python logs do not automatically go to OTLP.
-
-| Input | Handling |
-| --- | --- |
-| Ordinary logs, unknown errors, and stack traces | Preserves text, including the original logs for recognized diagnostics |
-| Accepted events and diagnostics | Writes single-line `DST_RECORD\|...` and submits to optional OTLP before game notifications; frequent events increase journal volume |
-| Recognized but invalid events | Emits structured rejection diagnostics limited by reason, without echoing the payload |
-| `DST_OTEL` embedded in chat, source locations, or error bodies | Preserves it as an ordinary log |
-| Native `DST_Stats` | Discards it at ingestion |
-
-- Only `DST_OTEL|` at the start of a line is recognized, optionally preceded by a native timestamp.
-  The nonce associates a process attempt; it does not authenticate Mods within the same Lua VM.
-- Events cannot always be recovered when writers interleave output on one physical line.
-  Corrupt events are rejected, unrecognized fragments are preserved, and later complete lines are processed normally.
-- Physical lines over 1 MiB are discarded before event validation and produce structured diagnostics and Metrics.
-  They do not count toward the event-validation counter `telemetry_invalid`.
-- Diagnostic severity comes from explicit signatures and exit results.
-  Arbitrary `ERROR`, `PANIC`, or stack trace text is not treated as proof of a crash.
-- [conmon][conmon-logging] splits container output on LF and may mark long lines as partial messages.
-  Journal priority cannot reconstruct game stderr.
-
-**Text preservation:** structured events and typed RPC reject invalid UTF-8; ordinary logs replace invalid bytes with U+FFFD.
-Valid Unicode, including game [Emoji](dst-scripts/scripts/emoji_items.lua), remains unchanged; see the [Unicode notes][unicode-utf8].
-
-Truncation preserves complete code points, not necessarily complete grapheme clusters.
-Only LF splits physical records; ordinary logs retain NUL at the SDK boundary, before CLI escaping.
-Terminal and journal rendering may differ.
-
-#### Log Test Corpus and Sources
-
-[Mixed-stream tests](tests/runtime/test_operational.py) combine short signatures with varied timestamps, line endings, chunks, and corruption.
-The sources below supply test cases, not diagnoses for current failures.
-
-| Corpus | Source and classification boundary |
-| --- | --- |
-| Lua / Mod traceback | [Original error][lua-error]; recognizes known headers without classifying each frame |
-| Missing optional Mod files | Successful skip branch in [mods.lua](dst-scripts/scripts/mods.lua) |
-| Game Workshop / SteamCMD timeout | [Game error][game-workshop] and [SteamCMD error][steamcmd-timeout]; the latter is a similar-output negative case |
-| Worldgen | [Original error][worldgen-error] and [native implementation](dst-scripts/scripts/worldgen_main.lua); a retry is not an exit |
-| Steam SDK / segmentation fault | [Original error][native-error]; supervisor text is a negative case, with exit confirmed by return code or signal |
-| Missing shared library | [Original report][loader-error]; dynamic loader stderr before Lua starts |
-| Authentication / DNS | [Token error][token-error] and [DNS error][dns-error], plus constructed current-CURL examples |
-| Port bind failure | [Original error][bind-error]; one failed attempt does not prove final startup failure |
-
-[Parser](tests/telemetry/test_stream.py), [RPC](tests/game/test_protocol.py), Lua, and [CLI](tests/telemetry/test_integration.py) tests cover validation, capture, encoding, and routing.
-Verify actual journald storage and rendering in the deployment environment.
-
-**Access control:** events may contain player IDs, names, chat (including whispers), coordinates, and activity history.
-Strings are not redacted.
-Protect local logs and receiver storage alike; disabling OTLP or changing profiles does not delete stored history.
-
-### Netdata Deployment and Queries
-
-Install Netdata on the host, place the repository's configuration files at the matching paths, then start the service.
-
-| Repository configuration | Host path and purpose |
-| --- | --- |
-| [otel.yaml](deploy/netdata/otel.yaml) | `/etc/netdata/otel.yaml`: listens on `10.255.255.254:4317`, storing logs at `/srv/otel` |
-| [netdata.conf](deploy/netdata/netdata.conf) | `/etc/netdata/netdata.conf`: binds the web UI only to localhost |
-| [Loopback address](deploy/networkd/10-netdata-loopback.network) | `/etc/systemd/network/10-netdata-loopback.network`: adds a dedicated address to `lo` |
-| [Service dependencies](deploy/netdata/netdata.service.d/dependencies.conf) | `/etc/systemd/system/netdata.service.d/dependencies.conf`: waits for network and storage mounts |
-
-This example requires systemd-networkd to be enabled, with the listed `.network` file managing `lo`.
-After installing the configuration:
-
-1. Prepare `/srv/otel` and make it writable by the user running Netdata.
-2. Run `networkctl reload` and `networkctl reconfigure lo`.
-   Check that `ip address show dev lo` includes `10.255.255.254/32`.
-3. Run `systemctl daemon-reload` and `systemctl restart netdata`.
-   Confirm that the receiver is listening before starting rooms.
-
-Retention is bounded by nine years, 1 TB, and 500,000 files, so individual logs are not guaranteed nine years of retention.
-The dedicated address does not provide authentication.
-Across hosts or when isolating untrusted containers, configure TLS, authentication, and network access controls.
-
-`NetdataLogs` runs `/usr/lib/netdata/plugins.d/otel-plugin` directly on the host, reading `/etc/netdata/otel.yaml`.
-The calling process needs access to the plugin, configuration, and storage; this interface is separate from Cluster RPC.
-
-```shell
-dst-server logs telemetry --room 299 --since 2026-09-12T00:00:00Z --limit 100
-dst-server --json logs telemetry --room 299 --since 2026-09-12T00:00:00Z --filter event_name=dst.player.shard_entered
-```
-
-Use repeated `--filter FIELD=VALUE` and `--field FIELD` options for matching and projection.
-OTel CLI times must include a timezone; source diagnostics are also written to stderr.
-
-```python
-import asyncio
-from datetime import UTC, datetime, timedelta
-
-from dst_server.host import Host
-from dst_server.logs import NetdataLogQuery
-
-
-async def main():
-    result = await Host().telemetry(
-        0,
-        NetdataLogQuery(
-            since=datetime.now(UTC) - timedelta(minutes=15),
-            limit=100,
-        ),
-        shard="forest",
-    )
-    print(result.model_dump_json())
-
-
-asyncio.run(main())
-```
-
-| Query setting | Semantics |
-| --- | --- |
-| `since` / `until` | Whole UTC seconds in `[since, until)`; omitted `until` is captured before queueing, including the current second |
-| `service_name` / `limit` | Defaults to no service restriction / `200`; Host scopes by stable room attributes |
-| `service_namespace` | Requires a service name; omitted or empty selects its empty namespace, not every namespace |
-| `filters` / `query` / `fields` | Exact matches / regex over `key=value` / returned fields; use `body.player.userid` for players |
-| Concurrency / timeout | Defaults to 1 / 120 seconds, including the wait for a concurrency slot; timeout cleans up the query process |
-| Results | Newest limited records, reported `matched`, actual window, `truncated`, and bounded diagnostics; no cursor or follow |
-
-**Filtering:** values for the same field are ORed; different fields are ANDed.
-`Host.telemetry()` controls room/shard filters and rejects caller conflicts.
-It includes previous service names and worlds using the same room number; narrow these with event, session, or attempt filters.
-
-**Records:** `NetdataLogRecord.fields` preserves ordered duplicate fields; `values(key)` returns all values for a key.
-Flattened fields do not restore original OTel value types.
-
-**Completeness:** `matched` reports the backend's count; skipped files can return warnings alongside results.
-If truncated diagnostics hide the summary, `matched` and `truncated` are `None`.
-Offline queries may miss active writes and cannot read offloaded files without local copies.
-
-### Telemetry Troubleshooting
-
-`await cluster.shard(name).status()` returns driver status and input counters.
-`health()` actively queries the current Lua driver.
-
-| Observation | Action |
-| --- | --- |
-| `driver_health.telemetry_status=disabled` | The profile is `off`; change configuration and restart if game events are needed |
-| `active` | Hooks are installed; check the SDK export logs and receiver next |
-| `degraded` / `failed` | Inspect current `faults` and `capabilities`; `last_error` and `errors` retain history after recovery. Installation is not retried within the same Lua module state |
-| Rising `telemetry_invalid` / `telemetry_dropped` / `telemetry_gaps` | Check schema, nonce, input sequence gaps, queue saturation, and shutdown; use local event logs to compare with OTLP |
-| SDK export errors or missing receiver records | Check the endpoint, receiver, TLS, credentials, and SDK logs; failed records are not retained for recovery |
-| Agent startup failure after enabling export | Check OTLP dependencies and SDK configuration |
-
-Shard status does not expose export delivery counters.
-
-[Back to contents](#contents)
-
-## Utilities
-
-| Module | Entry point and purpose |
-| --- | --- |
-| [Klei services](src/dst_server/klei) | Install `dst-server[klei]`; use `KleiClient` to query builds, update pages, regions, lobbies, and room details |
-| [Account directory encoding](src/dst_server/klei_id.py) | `encode_klei_id()` / `decode_klei_id()` convert between Klei IDs and 12-character save directory encodings |
-| [Lua annotations](src/dst_server/annotations) | `dst-server annotations`, or Python's `generate_components()` / `generate_modutil()` |
-
-Use `KleiClient` with `async with`.
-
-- `get_latest_build()` reads the build list; `get_versions()` reads only the current update page.
-- `get_regions()` and `get_lobbies()` query public lists; `get_rooms()` requires `access_token`.
-- Lobby and room concurrency defaults to 8 and 24.
-  Failed requests return an empty tuple or `None`, respectively; bulk results omit failed rooms.
-  Invalid response structures raise errors.
-- Callers close injected HTTP clients; the default client ignores proxy environment variables.
-
-Klei ID conversion accepts `KU_[0-9A-Za-z_-]{8}` and 12-character encodings using `0–9` and `A–V`.
-Invalid input raises `ValueError`.
-
-For Lua annotations, first initialize the game source submodule as described in [Development and validation](#development-and-validation).
-
-```console
-uv run dst-server annotations dst-scripts/scripts/components --output components_def.lua
-uv run dst-server annotations dst-scripts/scripts/modutil.lua --output modutil_def.lua
-```
-
-The tool generates LSP type annotations and empty function declarations from Lua syntax.
-
-- Input type is detected automatically; use `--mode components|modutil` to choose explicitly.
-- Directory scans include nested Lua files; `--max-workers 1` disables parallel processing.
-- Parse errors stop generation and preserve existing output.
-
-Start reading game source at the [DST Lua index](dst-scripts/index/README.md).
 
 ## Development and Validation
 
-Controllers share requests, state, and errors with remote callers; they do not import RPC clients or wire schemas.
-Pydantic validates and serializes configuration and deployment models.
+The workspace contains [`crates/dst-server`](crates/dst-server) and [`crates/dst-server-python`](crates/dst-server-python).
+Python wrappers live under [`python/dst_server`](python/dst_server), with Lua resources under [`resources/lua`](resources/lua).
+The container runs the Rust binary directly.
 
-### Module Boundaries
-
-| Module | Responsibility |
-| --- | --- |
-| [models](src/dst_server/models) / [events](src/dst_server/events) | Values, state, driver health, cursors, and events |
-| [commands.py](src/dst_server/commands.py) / [api.py](src/dst_server/api.py) / [errors.py](src/dst_server/errors.py) | Shared requests, results, call scopes, interfaces, and errors |
-| [configuration](src/dst_server/configuration) | Configuration models and INI/Lua file access |
-| [cli](src/dst_server/cli) | Arguments, text output, and JSON output |
-| [host](src/dst_server/host) / [rooms](src/dst_server/rooms.py) | systemd, room views, journals, schedules, and maintenance |
-| [presets](src/dst_server/presets) | Gameplay templates and LST deployment defaults |
-| [deployment](src/dst_server/deployment) | Quadlet models, ports, and deployment units |
-| [mods](src/dst_server/mods) | Mod configuration, files, updates, and scheduling |
-| [lua_codec.py](src/dst_server/lua_codec.py) / [json_codec.py](src/dst_server/json_codec.py) | Lua/JSON conversion and validation, without file I/O |
-| [process.py](src/dst_server/process.py) | Subprocess output and process-group cleanup |
-| [runtime](src/dst_server/runtime) | Game processes, FD protocols, readiness, and command acknowledgements |
-| [cluster](src/dst_server/cluster) | Agent topology, coordinated operations, subscriptions, and daemon setup |
-| [rpc](src/dst_server/rpc) | Cap'n Proto connections, payloads, and remote subscriptions |
-| [telemetry](src/dst_server/telemetry) | Collection and OpenTelemetry export |
-| [archive.py](src/dst_server/archive.py) | Credential-free save exports, 7z archives, and uploads |
-| [concurrency.py](src/dst_server/concurrency.py) / [timeouts.py](src/dst_server/timeouts.py) | Cancellation cleanup and deadlines |
-| [klei](src/dst_server/klei) / [annotations](src/dst_server/annotations) / [logs](src/dst_server/logs) | External queries, Lua annotations, and historical logs |
-
-Logbook handles logs, `python-ulid` generates IDs, and HTTPX2 handles HTTP/2.
-Optional dependencies are grouped into `klei` (HTML), `otel` (OTLP/gRPC), and `export` (7z/object storage).
-
-### Tests and Checks
-
-Install Lua 5.1, LuaJIT, and just.
-The game source submodule requires GitHub SSH access.
-
-```console
-git submodule update --init
-uv sync --all-extras --all-groups
-uv run prek install
-just verify
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked -p dst-server --all-targets
+uv run ruff check python tests/rust tools
+uv run ty check python
+uv run python tests/rust/check_lua.py
+uv build --python 3.14 --out-dir dist --no-sources
 ```
 
-#### Local Commands
-
-The dependency chain is `fmt → lint → tc → test → build → verify`.
-Each command runs its prerequisites first.
-
-| Command | Action |
-| --- | --- |
-| `just fmt` | Format Python and Markdown |
-| `just lint` | Apply lint fixes |
-| `just tc` | Check types |
-| `just test` | Run tests with locked dependencies; exclude `system` |
-| `just build` | Build the Python package |
-| `just verify` | Add repository hooks and an isolated wheel installation check |
-| `just check` | Independently check the lockfile, formatting, lint, types, and Markdown without edits |
-
-The prek hook runs `just check`; builtin whitespace and file-format hooks may edit files.
-
-#### CI
-
-PR, image, and release workflows share the explicit commands in [test.yml](.github/workflows/test.yml).
-They install test dependencies with `uv sync --locked`, then reuse the environment with `uv run --no-sync`.
-
-Releases verify the tag, run shared tests, then build and check the distributions.
-The isolated wheel check uses package metadata, without the project's extras or lockfile.
-
-#### Native and System Tests
-
-Lua tests use the game source submodule by default; image CI uses each built image's script bundle.
-To select an installed game version:
-
-```console
-uv run --locked --all-extras pytest tests --scripts-zip /path/to/scripts.zip
-```
-
-Missing Lua 5.1 or LuaJIT skips the affected tests locally and fails CI.
-
-| Opt-in system validation | Prerequisites |
-| --- | --- |
-| `just test-system IMAGE` | An explicitly selected local image and rootful Podman; Quadlet tests also need systemd |
-| `just test-netdata-system IMAGE` | Also requires local Netdata to verify the full OTLP round trip |
-
-System tests are opt-in: they start games or contact external services.
-Missing images, permissions, or runtimes cause these tests to fail.
-
-Tests are grouped by behavior.
-Configuration tests cover pinned-source fields and selected scripts; Hypothesis checks Lua, byte streams, and event order.
-Process and transport tests use local pipes, sockets, and HTTP/gRPC services, with explicit gates for cancellation races.
-
-Keep both READMEs' sections, examples, and links synchronized.
-Diagrams use Mermaid [flowcharts](https://mermaid.js.org/syntax/flowchart.html), [sequence diagrams](https://mermaid.js.org/syntax/sequenceDiagram.html), and [state diagrams](https://mermaid.js.org/syntax/stateDiagram.html).
-
-[Back to contents](#contents)
-
-[conmon-logging]: https://github.com/containers/conmon/blob/44136f533e0bbb6810f3b5272273e1c932d980f4/src/ctr_logging.c
-[unicode-utf8]: https://unicode.org/faq/utf_bom.html
-[lua-error]: https://steamcommunity.com/app/322330/discussions/0/610573009235763156/
-[game-workshop]: https://steamcommunity.com/workshop/filedetails/discussion/3490072866/599653921546396863/#c599658601187030609
-[steamcmd-timeout]: https://discourse.cubecoders.com/t/customization-with-application-deployment-steamcmd-mods-timeout/24828
-[worldgen-error]: https://steamcommunity.com/app/322330/discussions/0/2968393780771713862/#c2968393780771779261
-[native-error]: https://steamcommunity.com/app/322330/discussions/0/351659808477347616/
-[loader-error]: https://prinsss.github.io/deploy-dont-starve-together-dedicated-server/
-[token-error]: https://steamcommunity.com/app/322330/discussions/0/3051633726587393889/#c3051633726589638324
-[dns-error]: https://forums.kleientertainment.com/forums/topic/72877-curl-error-lobbyckleientertainmentcom-could-not-resolve-host-lobbyckleientertainmentcom-unknown-error/
-[bind-error]: https://steamcommunity.com/app/322330/discussions/0/2564160288793879918/#c2564160288793897483
+CI builds a wheel from the source distribution and installs it in an isolated environment.
+It then runs native binding and process tests.
+Lua contracts run under Lua 5.1 and LuaJIT.
+Game build `756039` has an unresolved [native shutdown failure](docs/migration.md#known-native-shutdown-failure) observed with five connected shards.
+Gorge and Forge deliberately disable saving; the SDK reports an unconfirmed save and can still close them cleanly.
+Real game probes use disposable directories and containers; they must not target live rooms.
+Build manifests record SDK, Lua, protocol, native game and artifact identities.
+See the [migration guide](docs/migration.md) for verification and the deployment procedure.
