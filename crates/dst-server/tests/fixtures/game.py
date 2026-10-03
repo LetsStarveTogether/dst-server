@@ -50,8 +50,14 @@ def migration() -> dict[str, str] | None:
         return None
 
 
+def record_lifecycle(event: str) -> None:
+    with (root / name / "native-lifecycle").open("a") as output:
+        output.write(event + "\n")
+
+
 def control(shutdown: bool = False, failed: bool = False) -> None:
     global save_id, snapshot
+    record_lifecycle("shutdown_save" if shutdown else "save")
     save_id += 1
     emit(
         4,
@@ -88,6 +94,7 @@ def bootstrap() -> None:
     )
 
 
+record_lifecycle("start")
 bootstrap()
 while True:
     if pending_migration is not None and time.monotonic() >= pending_migration[1]:
@@ -120,6 +127,7 @@ while True:
     if not encoded:
         break
     if encoded == b"c_shutdown()\n":
+        record_lifecycle("shutdown")
         if (root / "hang-shutdown").exists():
             time.sleep(5)
         time.sleep(0.08)

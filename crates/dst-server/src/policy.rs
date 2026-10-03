@@ -632,8 +632,13 @@ impl PolicyState {
     }
 
     pub fn request_mod_update(&mut self) -> Result<()> {
+        self.queue_mod_update(true)
+    }
+
+    pub fn queue_mod_update(&mut self, resume_game: bool) -> Result<()> {
         self.mods.request()?;
         self.mods.manual = true;
+        self.mods.resume_game = resume_game;
         Ok(())
     }
 
@@ -784,14 +789,28 @@ impl PolicyState {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModMaintenance {
     pub phase: ModPhase,
     pub attempts: u8,
     pub manual: bool,
+    pub resume_game: bool,
     pub observed_outdated: bool,
     pub error: Option<String>,
+}
+
+impl Default for ModMaintenance {
+    fn default() -> Self {
+        Self {
+            phase: ModPhase::Idle,
+            attempts: 0,
+            manual: false,
+            resume_game: true,
+            observed_outdated: false,
+            error: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -844,11 +863,13 @@ impl ModMaintenance {
         );
         self.phase = ModPhase::Pending;
         self.attempts = 0;
+        self.manual = false;
+        self.resume_game = true;
         self.error = None;
         Ok(())
     }
 
-    fn action(&mut self, now: DateTime<Utc>, inputs: &Inputs) -> Result<Option<Action>> {
+    pub(crate) fn action(&mut self, now: DateTime<Utc>, inputs: &Inputs) -> Result<Option<Action>> {
         match self.phase {
             ModPhase::Idle | ModPhase::Updating | ModPhase::Failed => return Ok(None),
             ModPhase::Retry { not_before } if now < not_before => return Ok(None),
@@ -1064,5 +1085,35 @@ mod tests {
             next_notice(deadline, Duration::from_secs(15), Duration::from_secs(30)),
             deadline
         );
+    }
+
+    #[test]
+    fn a_new_maintenance_request_resets_the_previous_continuation() {
+        let mut state = PolicyState::default();
+        state.queue_mod_update(false).unwrap();
+        state.mods.request().unwrap();
+        assert!(state.mods.resume_game);
+        assert!(!state.mods.manual);
+        state.queue_mod_update(false).unwrap();
+        assert!(!state.mods.resume_game);
+    }
+
+    #[test]
+    fn queued_maintenance_keeps_its_continuation_until_completion() {
+        let mut state = PolicyState::default();
+        state.queue_mod_update(false).unwrap();
+        let mut state: PolicyState =
+            serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
+        state.resume_after_restart(Utc::now()).unwrap();
+        assert!(state.mods.manual);
+        assert!(!state.mods.resume_game);
+        assert_eq!(
+            state.mods.action(Utc::now(), &Inputs::default()).unwrap(),
+            Some(Action::UpdateMods { attempt: 1 })
+        );
+        state.finish_mod_update(Utc::now(), Ok(())).unwrap();
+        assert_eq!(state.mods.phase, ModPhase::Idle);
+        assert!(!state.mods.manual);
+        assert!(state.mods.resume_game);
     }
 }

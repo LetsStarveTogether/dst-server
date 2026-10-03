@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -16,7 +16,8 @@ use crate::{
     files::{self, PermissionFiles, RoomLock},
     logs::{JournalLogs, JournalQuery, JournalResult, JournalStream},
     model::{Envelope, Request, Target},
-    policy::Policy,
+    policy::{ModPhase, Policy, PolicyState},
+    recovery,
     rooms::{Room, RoomStore},
     rpc::Client,
     settings::ClusterConfig,
@@ -286,15 +287,46 @@ impl Host {
     }
     pub async fn status(&self, number: u16, game: bool) -> Result<Value> {
         let directory = self.rooms.path(number)?;
-        let state = self.systemd.status(&Self::unit(number)).await?;
+        let mut state = self.systemd.status(&Self::unit(number)).await?;
         let mut error = None;
         let mut configuration_error = None;
         let mut desired = None;
+        let mut policy = Value::Null;
+        let mut schedule = Value::Null;
+        let mut maintenance = Value::Null;
+        let mut recovery = Value::Null;
         if !state.running() {
-            match self.rooms.load(number) {
-                Ok(room) => desired = Some(room.policy.schedule_at(chrono::Utc::now())?.open),
+            if self.rooms.load(number).is_err() {
+                configuration_error = Some("room configuration could not be loaded".to_owned());
+            }
+            let durable = (|| -> Result<_> {
+                let lock = RoomLock::try_acquire(&directory)?;
+                let policy = Policy::load(&lock)?;
+                let schedule = policy.schedule_at(chrono::Utc::now())?;
+                Ok((
+                    policy,
+                    schedule,
+                    PolicyState::load(&lock)?,
+                    recovery::load(&lock)?,
+                ))
+            })();
+            match durable {
+                Ok((saved_policy, saved_schedule, saved_state, saved_recovery)) => {
+                    desired = Some(saved_schedule.open);
+                    policy = serde_json::to_value(saved_policy)?;
+                    schedule = serde_json::to_value(saved_schedule)?;
+                    maintenance = serde_json::to_value(saved_state.mods)?;
+                    recovery = serde_json::to_value(saved_recovery)?;
+                }
                 Err(_) => {
-                    configuration_error = Some("room configuration could not be loaded".to_owned())
+                    configuration_error = Some("room control state could not be loaded".into())
+                }
+            }
+            if configuration_error.is_some() {
+                let current = self.systemd.status(&Self::unit(number)).await?;
+                if current.running() {
+                    state = current;
+                    configuration_error = None;
                 }
             }
         }
@@ -306,9 +338,26 @@ impl Host {
             )
             .await
             {
-                Ok(Ok(value)) => agent = value,
+                Ok(Ok(value)) => {
+                    policy = value["agent"]["policy"].clone();
+                    schedule = value["agent"]["schedule"].clone();
+                    maintenance = value["agent"]["maintenance"].clone();
+                    recovery = value["agent"]["recovery"].clone();
+                    desired = schedule["open"].as_bool();
+                    agent = value;
+                }
                 Ok(Err(failure)) => error = Some(failure.to_string()),
                 Err(_) => error = Some("Agent status timed out".into()),
+            }
+        }
+        if !state.running() {
+            if !recovery["closed"].is_null() {
+                error = Some(format!(
+                    "room recovery is exhausted or unsafe: {}",
+                    recovery["closed"]
+                ));
+            } else if maintenance["phase"]["state"] == "failed" {
+                error = Some("Mod maintenance exhausted three attempts".into());
             }
         }
         // Native configuration failures do not hide service state or diagnostic access.
@@ -316,7 +365,7 @@ impl Host {
             configuration_error = Some("room directory is missing".into());
         }
         Ok(
-            json!({"number":number,"desired":desired,"running":state.running(),"load":state.load,"active":state.active,"sub":state.sub,"job_id":state.job_id,"units":{Self::unit(number):state},"game":agent,"error":error.or_else(||configuration_error.clone()),"configuration_error":configuration_error}),
+            json!({"number":number,"desired":desired,"running":state.running(),"load":state.load,"active":state.active,"sub":state.sub,"job_id":state.job_id,"units":{Self::unit(number):state},"game":agent,"policy":policy,"schedule":schedule,"maintenance":maintenance,"recovery":recovery,"error":error.or_else(||configuration_error.clone()),"configuration_error":configuration_error}),
         )
     }
     pub async fn list(&self) -> Result<Vec<Value>> {
@@ -501,7 +550,17 @@ impl Host {
             if action != "stop" {
                 ContainerUnit::load(self.quadlet_dir.join(format!("dst-{number:03}.container")))?;
                 self.systemd.reload().await?;
-                if self.systemd.status(&unit).await?.active == "failed" {
+                let state = self.systemd.status(&unit).await?;
+                if !state.running() {
+                    let mut lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
+                    self.require_inactive(number).await?;
+                    let all_day = Policy::load(&lock)?
+                        .schedule_at(chrono::Utc::now())?
+                        .next_change
+                        .is_none();
+                    recovery::explicit_start(&mut lock, all_day)?;
+                }
+                if state.active == "failed" {
                     self.systemd.reset_failed(&unit).await?;
                 }
             }
@@ -526,11 +585,6 @@ impl Host {
                 ensure!(!state.running(), "room service did not stop");
                 return self.status(number, false).await;
             }
-            ensure!(
-                state.active == "active",
-                "room service failed to start: {}",
-                state.result
-            );
             self.wait_ready(number, deadline.saturating_duration_since(Instant::now()))
                 .await
         })
@@ -544,7 +598,18 @@ impl Host {
         timeout(duration, async {
             loop {
                 let status = self.status(number, true).await?;
-                ensure!(status["active"] != "failed", "room service failed");
+                require_no_failure(&status)?;
+                ensure!(
+                    status["recovery"]["closed"].is_null(),
+                    "room recovery is exhausted or unsafe: {}",
+                    status["recovery"]["closed"]
+                );
+                if status["running"] == false {
+                    if status["desired"] == false {
+                        return Ok(status);
+                    }
+                    bail!("room service stopped before games became ready");
+                }
                 if !status["game"].is_null() {
                     let game = &status["game"];
                     ensure!(game["phase"] != "failed", "room games failed to start");
@@ -552,12 +617,6 @@ impl Host {
                         serde_json::from_value(game["shards"].clone())?;
                     if !shards.is_empty() && shards.iter().all(|shard| shard.readiness.ready()) {
                         return Ok(status);
-                    }
-                    if game["phase"] == "stopped" {
-                        let room = self.load(number).await?;
-                        if !room.policy.schedule_at(chrono::Utc::now())?.open {
-                            return Ok(status);
-                        }
                     }
                 }
                 sleep(Duration::from_millis(200)).await;
@@ -589,8 +648,65 @@ impl Host {
         restart: bool,
         notice: Option<crate::model::Countdown>,
     ) -> Result<Value> {
-        self.call(number, Request::UpdateMods { restart, notice })
-            .await
+        self.rooms.path(number)?;
+        let request = Request::UpdateMods { restart, notice };
+        request.validate()?;
+        timeout(request.completion_timeout()?, async {
+            let unit = Self::unit(number);
+            let state = self.systemd.status(&unit).await?;
+            if state.running() {
+                self.call(number, request).await?;
+            } else {
+                ContainerUnit::load(self.quadlet_dir.join(format!("dst-{number:03}.container")))?;
+                {
+                    let mut lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
+                    self.require_inactive(number).await?;
+                    let mut policy_state = PolicyState::load(&lock)?;
+                    ensure!(
+                        matches!(policy_state.mods.phase, ModPhase::Idle | ModPhase::Failed),
+                        "Mod maintenance is already pending"
+                    );
+                    policy_state.queue_mod_update(restart)?;
+                    policy_state.save(&mut lock)?;
+                }
+                self.systemd.reload().await?;
+                if state.active == "failed" {
+                    self.systemd.reset_failed(&unit).await?;
+                }
+                self.systemd.start(&unit).await?;
+            }
+            loop {
+                let status = self.status(number, true).await?;
+                require_no_failure(&status)?;
+                if status["maintenance"]["phase"]["state"] == "idle" {
+                    if status["running"] == false {
+                        ensure!(
+                            !restart
+                                || status["desired"] == false
+                                || status["recovery"]["closed"].is_null(),
+                            "Mods updated, but room recovery remains closed: {}",
+                            status["recovery"]["closed"]
+                        );
+                        ensure!(
+                            !restart || status["desired"] == false,
+                            "room service stopped after Mod maintenance before games became ready"
+                        );
+                        return Ok(json!({"updated":true,"restarted":false}));
+                    }
+                    if restart && !status["game"].is_null() {
+                        let shards: Vec<crate::model::ShardStatus> =
+                            serde_json::from_value(status["game"]["shards"].clone())?;
+                        if !shards.is_empty() && shards.iter().all(|shard| shard.readiness.ready())
+                        {
+                            return Ok(json!({"updated":true,"restarted":true}));
+                        }
+                    }
+                }
+                sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .context("Mod maintenance wait timed out; the accepted update may still complete")?
     }
     pub async fn set_policy(&self, number: u16, policy: &Policy) -> Result<()> {
         policy.validate()?;
@@ -667,10 +783,209 @@ impl Host {
     }
 }
 
+fn require_no_failure(status: &Value) -> Result<()> {
+    if let Some(error) = status["configuration_error"].as_str() {
+        bail!("{error}");
+    }
+    ensure!(status["active"] != "failed", "room service failed");
+    ensure!(
+        status["maintenance"]["phase"]["state"] != "failed",
+        "Mod maintenance exhausted three attempts"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
     use std::os::unix::fs::PermissionsExt;
+
+    async fn offline_host() -> (tempfile::TempDir, Host) {
+        let temporary = tempfile::tempdir().unwrap();
+        let script = temporary.path().join("systemctl");
+        std::fs::write(&script, "#!/bin/sh\ncase \"$*\" in *show*) printf 'Id=dst-001.service\\nLoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nJob=0\\nResult=success\\n';; esac\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut host = Host::new(
+            temporary.path().join("rooms"),
+            temporary.path().join("units"),
+        );
+        host.systemd.executable = script;
+        let cluster =
+            crate::rooms::build_template("pure_survival", 1, "token", None, None).unwrap();
+        host.create(&Room::new(1, cluster).unwrap()).await.unwrap();
+        (temporary, host)
+    }
+
+    fn closed_policy() -> Policy {
+        let hour = chrono::Utc::now().hour();
+        Policy {
+            timezone: "UTC".into(),
+            schedule: vec![crate::policy::DailyWindow {
+                start: chrono::NaiveTime::from_hms_opt((hour + 6) % 24, 0, 0).unwrap(),
+                end: chrono::NaiveTime::from_hms_opt((hour + 7) % 24, 0, 0).unwrap(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_schedule_start_returns_validated_durable_status_without_an_agent() {
+        let (_temporary, host) = offline_host().await;
+        host.set_policy(1, &closed_policy()).await.unwrap();
+        let status = host.start(1, true, Duration::from_secs(2)).await.unwrap();
+        assert_eq!(status["running"], false);
+        assert_eq!(status["desired"], false);
+        assert!(status["game"].is_null());
+        assert_eq!(status["policy"]["timezone"], "UTC");
+        assert_eq!(status["schedule"]["open"], false);
+        assert_eq!(status["maintenance"]["phase"]["state"], "idle");
+        assert_eq!(status["recovery"]["version"], 1);
+        assert!(status["configuration_error"].is_null());
+        assert!(host.wait_ready(1, Duration::from_secs(1)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn starting_agent_lock_is_not_reported_as_corrupt_configuration() {
+        let (temporary, host) = offline_host().await;
+        let marker = temporary.path().join("starting");
+        std::fs::write(
+            &host.systemd.executable,
+            format!(
+                "#!/usr/bin/env python3\nimport pathlib\nmarker = pathlib.Path({})\nactive = 'active' if marker.exists() else 'inactive'\nmarker.touch()\nprint(f'Id=dst-001.service\\nLoadState=loaded\\nActiveState={{active}}\\nSubState=running\\nJob=0\\nResult=success')\n",
+                serde_json::to_string(&marker).unwrap(),
+            ),
+        )
+        .unwrap();
+        let _agent = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
+        let status = host.status(1, false).await.unwrap();
+        assert_eq!(status["running"], true);
+        assert!(status["configuration_error"].is_null());
+        assert!(status["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn offline_failures_remain_visible_and_only_explicit_all_day_start_resets_recovery() {
+        let (_temporary, host) = offline_host().await;
+        let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
+        recovery::on_failure(
+            &mut lock,
+            recovery::Failure::Configuration,
+            &Default::default(),
+            &Default::default(),
+            0,
+        )
+        .unwrap();
+        drop(lock);
+        let status = host.status(1, true).await.unwrap();
+        assert_eq!(status["recovery"]["closed"], "configuration");
+        assert!(status["error"].as_str().unwrap().contains("configuration"));
+        assert!(
+            host.wait_ready(1, Duration::from_secs(1))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("configuration")
+        );
+        host.start(1, false, Duration::from_secs(2)).await.unwrap();
+        assert!(host.status(1, true).await.unwrap()["recovery"]["closed"].is_null());
+        host.set_policy(1, &closed_policy()).await.unwrap();
+        let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
+        recovery::on_failure(
+            &mut lock,
+            recovery::Failure::Configuration,
+            &Default::default(),
+            &Default::default(),
+            0,
+        )
+        .unwrap();
+        drop(lock);
+        host.start(1, false, Duration::from_secs(2)).await.unwrap();
+        assert_eq!(
+            host.status(1, true).await.unwrap()["recovery"]["closed"],
+            "configuration"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_and_invalid_offline_maintenance_do_not_look_like_a_clean_closure() {
+        let (_temporary, host) = offline_host().await;
+        host.set_policy(1, &closed_policy()).await.unwrap();
+        let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
+        let mut state = PolicyState::default();
+        state.mods.phase = ModPhase::Failed;
+        state.mods.attempts = crate::policy::MOD_ATTEMPTS;
+        state.save(&mut lock).unwrap();
+        drop(lock);
+        let status = host.status(1, true).await.unwrap();
+        assert_eq!(status["maintenance"]["phase"]["state"], "failed");
+        assert!(status["error"].as_str().unwrap().contains("exhausted"));
+        assert!(
+            host.wait_ready(1, Duration::from_secs(1))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("exhausted three attempts")
+        );
+        let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
+        lock.update_control(|control| {
+            control.get_mut("policy_state").unwrap()["mods"]["attempts"] = json!(4);
+            Ok(())
+        })
+        .unwrap();
+        drop(lock);
+        let status = host.status(1, true).await.unwrap();
+        assert!(status["configuration_error"].is_string());
+        assert!(status["maintenance"].is_null());
+        assert!(host.wait_ready(1, Duration::from_secs(1)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn offline_mod_updates_persist_intent_before_start_and_finish_outside_open_hours() {
+        let (temporary, host) = offline_host().await;
+        host.set_policy(1, &closed_policy()).await.unwrap();
+        let control = host.rooms.path(1).unwrap().join(files::CONTROL_FILE);
+        let observed = temporary.path().join("observed.json");
+        let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
+        recovery::on_failure(
+            &mut lock,
+            recovery::Failure::Mods,
+            &Default::default(),
+            &Default::default(),
+            0,
+        )
+        .unwrap();
+        drop(lock);
+        std::fs::write(
+            &host.systemd.executable,
+            format!(
+                "#!/usr/bin/env python3\nimport json, pathlib, sys\ncontrol = pathlib.Path({})\nif 'start' in sys.argv:\n    state = json.loads(control.read_text())\n    mods = state['policy_state']['mods']\n    assert mods['phase']['state'] == 'pending' and mods['manual']\n    pathlib.Path({}).write_text(json.dumps(mods))\n    state['policy_state']['mods'] = {{}}\n    control.write_text(json.dumps(state))\nif 'show' in sys.argv:\n    print('Id=dst-001.service\\nLoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nJob=0\\nResult=success')\n",
+                serde_json::to_string(&control).unwrap(),
+                serde_json::to_string(&observed).unwrap(),
+            ),
+        )
+        .unwrap();
+        for restart in [false, true] {
+            assert_eq!(
+                host.update_mods(1, restart, None).await.unwrap(),
+                json!({"updated":true,"restarted":false})
+            );
+            let intent: Value = serde_json::from_slice(&std::fs::read(&observed).unwrap()).unwrap();
+            assert_eq!(intent["resume_game"], restart);
+        }
+        let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
+        let mut state = PolicyState::default();
+        state.queue_mod_update(false).unwrap();
+        state.save(&mut lock).unwrap();
+        drop(lock);
+        assert!(
+            host.update_mods(1, false, None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("already pending")
+        );
+    }
 
     #[tokio::test]
     async fn native_permission_metadata_survives_configuration_and_targeted_edits() {

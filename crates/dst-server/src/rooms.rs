@@ -565,7 +565,7 @@ pub fn fleet_room(number: u16, token: &str, cluster_key: Option<&str>) -> Result
     let definition = fleet_definition(number)?;
     let mut deployment: DeploymentOptions =
         serde_json::from_value(definition["deployment"].clone())?;
-    // The resident Agent evaluates opening hours, including after host reboot.
+    // On host boot, the Agent opens the room only during its scheduled hours.
     deployment.start_on_boot = true;
     let mut policy = json!({});
     if let Some((_, start, end)) = room_schedule(number)? {
