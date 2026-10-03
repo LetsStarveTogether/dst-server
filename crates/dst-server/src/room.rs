@@ -806,66 +806,88 @@ impl Room {
     async fn wait_ready(&self, duration: Duration) -> Result<()> {
         let deadline = Instant::now() + duration;
         let drivers = self.drivers();
-        for driver in drivers.values() {
-            driver
-                .wait_ready(deadline.saturating_duration_since(Instant::now()))
-                .await
-                .map_err(driver_error)?;
-        }
         loop {
-            let mut ids = BTreeMap::new();
-            for (name, driver) in &drivers {
-                let runtime = driver
-                    .request(
-                        "runtime",
-                        json!({}),
-                        COMMAND.min(deadline.saturating_duration_since(Instant::now())),
-                    )
+            for driver in drivers.values() {
+                driver
+                    .wait_ready(deadline.saturating_duration_since(Instant::now()))
                     .await
                     .map_err(driver_error)?;
-                let id = runtime["shard_id"].as_str().ok_or_else(|| {
-                    Error::new(ErrorCode::Protocol, "runtime has no shard identity")
-                })?;
-                if ids.insert(id.to_owned(), name.clone()).is_some() {
-                    return Err(Error::new(
-                        ErrorCode::Conflict,
-                        "shards report duplicate native identities",
-                    ));
-                }
             }
-            let mut connected = true;
-            for (name, driver) in &drivers {
-                let peers = driver
-                    .request(
-                        "connected_shards",
-                        json!({"current_name":name}),
-                        COMMAND.min(deadline.saturating_duration_since(Instant::now())),
-                    )
-                    .await
-                    .map_err(driver_error)?;
-                let peers = peers.as_array().ok_or_else(|| {
-                    Error::new(ErrorCode::Protocol, "invalid native shard connections")
-                })?;
-                let missing: Vec<_> = ids
-                    .iter()
-                    .filter(|(id, _)| {
-                        !peers.iter().any(|peer| {
-                            peer["id"].as_str() == Some(id.as_str()) && peer["ready"] == true
-                        })
-                    })
-                    .map(|(_, name)| name.clone())
-                    .collect();
-                connected &= missing.is_empty();
-                self.refresh_shard(&driver.snapshot());
-                self.status.send_modify(|status| {
-                    if let Some(shard) = status.shards.iter_mut().find(|shard| &shard.name == name)
-                    {
-                        shard.readiness.missing_shards = missing.clone();
+            let generations: Vec<_> = drivers
+                .values()
+                .map(|driver| driver.snapshot().generation)
+                .collect();
+            let connected = async {
+                let mut ids = BTreeMap::new();
+                for (name, driver) in &drivers {
+                    let runtime = driver
+                        .request(
+                            "runtime",
+                            json!({}),
+                            COMMAND.min(deadline.saturating_duration_since(Instant::now())),
+                        )
+                        .await
+                        .map_err(driver_error)?;
+                    let id = runtime["shard_id"].as_str().ok_or_else(|| {
+                        Error::new(ErrorCode::Protocol, "runtime has no shard identity")
+                    })?;
+                    if ids.insert(id.to_owned(), name.clone()).is_some() {
+                        return Err(Error::new(
+                            ErrorCode::Conflict,
+                            "shards report duplicate native identities",
+                        ));
                     }
-                });
+                }
+                let mut connected = true;
+                for (name, driver) in &drivers {
+                    let peers = driver
+                        .request(
+                            "connected_shards",
+                            json!({"current_name":name}),
+                            COMMAND.min(deadline.saturating_duration_since(Instant::now())),
+                        )
+                        .await
+                        .map_err(driver_error)?;
+                    let peers = peers.as_array().ok_or_else(|| {
+                        Error::new(ErrorCode::Protocol, "invalid native shard connections")
+                    })?;
+                    let missing: Vec<_> = ids
+                        .iter()
+                        .filter(|(id, _)| {
+                            !peers.iter().any(|peer| {
+                                peer["id"].as_str() == Some(id.as_str()) && peer["ready"] == true
+                            })
+                        })
+                        .map(|(_, name)| name.clone())
+                        .collect();
+                    connected &= missing.is_empty();
+                    self.refresh_shard(&driver.snapshot());
+                    self.status.send_modify(|status| {
+                        if let Some(shard) =
+                            status.shards.iter_mut().find(|shard| &shard.name == name)
+                        {
+                            shard.readiness.missing_shards = missing.clone();
+                        }
+                    });
+                }
+                Ok(connected)
             }
-            if connected {
-                return Ok(());
+            .await;
+            let stable = drivers
+                .values()
+                .zip(generations)
+                .all(|(driver, generation)| {
+                    let state = driver.snapshot();
+                    state.ready && state.generation == generation
+                });
+            match connected {
+                Ok(true) if stable => return Ok(()),
+                // Native snapshot synchronization can reload a shard during these read-only checks.
+                Err(error)
+                    if error.code == ErrorCode::NotReady
+                        || error.code == ErrorCode::Unknown && !stable => {}
+                Err(error) => return Err(error),
+                _ => {}
             }
             if Instant::now() >= deadline {
                 return Err(Error::new(

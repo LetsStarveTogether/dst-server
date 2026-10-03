@@ -74,6 +74,29 @@ async fn until(room: &Arc<Room>, condition: impl Fn() -> bool) {
 }
 
 #[tokio::test]
+async fn start_waits_for_native_sync_during_runtime_and_connection_checks() {
+    for method in ["runtime", "connected_shards"] {
+        let (temp, room) = room();
+        let caves = temp.path().join("cluster/Caves");
+        fs::write(caves.join(format!("reload-during-{method}")), "").unwrap();
+        timeout(Duration::from_secs(5), invoke(&room, Request::Start {}))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(room.status().phase, Phase::Running);
+        assert!(!room.requires_container_restart());
+        let states = room.driver_states();
+        assert!(states.values().all(|state| state.ready));
+        assert_eq!(states["Caves"].generation, Some(2));
+        assert_eq!(
+            fs::read_to_string(caves.join("native-lifecycle")).unwrap(),
+            "start\nreload\n"
+        );
+        room.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn save_uses_master_snapshot_and_rejects_ahead_secondaries_before_writing() {
     let (temp, room) = room();
     fs::write(temp.path().join("cluster/Master/initial-snapshot"), "7").unwrap();

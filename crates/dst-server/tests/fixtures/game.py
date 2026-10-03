@@ -149,6 +149,23 @@ while True:
     method, params = request["method"], request["arguments"]
     header = {key: request[key] for key in ("v", "nonce", "id", "generation")}
     emit(4, b"DST_RPC|", {**header, "accepted": True})
+    reload_during = root / name / ("reload-during-" + method)
+    if reload_during.exists():
+        reload_during.unlink()
+        record_lifecycle("reload")
+        generation += 1
+        emit(
+            4,
+            b"DST_CONTROL|",
+            {
+                "v": 1,
+                "nonce": nonce,
+                "generation": generation,
+                "event": "world_load_started",
+            },
+        )
+        bootstrap()
+        continue
     if (root / name / ("hold-" + method)).exists():
         (root / name / (method + "-waiting")).touch()
         while (root / name / ("hold-" + method)).exists():
