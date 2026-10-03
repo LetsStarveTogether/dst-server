@@ -214,10 +214,16 @@ impl ContainerUnit {
     pub fn render(&self) -> Result<String> {
         self.validate()?;
         let mut source = format!(
-            "{OWNER}\n[Unit]\nDescription=Don't Starve Together {}\n\n[Container]\nImage={}\nRunInit=true\nExec=/usr/local/bin/dst-server agent --cluster /cluster\nStopTimeout=360\n",
+            "{OWNER}\n[Unit]\nDescription=Don't Starve Together {}\n\n[Container]\nImage={}\nPull=never\nRunInit=true\nExec=/usr/local/bin/dst-server agent --cluster /cluster\nStopTimeout=360\n",
             escape(&self.name),
             quote(&self.options.image)
         );
+        if matches!(
+            self.options.image.as_str(),
+            DEFAULT_IMAGE | "quay.io/wh2099/dst-server:beta"
+        ) {
+            source.push_str("AutoUpdate=registry\n");
+        }
         let suffix = self
             .options
             .volume_idmap
@@ -281,6 +287,7 @@ impl ContainerUnit {
             Ok(values[0].clone())
         };
         for (section, key, value) in [
+            ("Container", "Pull", "never"),
             ("Container", "RunInit", "true"),
             (
                 "Container",
@@ -1125,26 +1132,37 @@ mod tests {
         assert_eq!(ContainerUnit::load(path).unwrap(), unit);
         let generator = Path::new("/usr/lib/systemd/system-generators/podman-system-generator");
         if generator.exists() {
-            let output = std::process::Command::new(generator)
-                .arg("--dryrun")
-                .env("QUADLET_UNIT_DIRS", units.path())
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let service = String::from_utf8(output.stdout).unwrap();
-            let volume = volume_escape(unit.cluster.to_str().unwrap())
-                .replace('\\', "\\\\")
-                .replace(' ', "\\x20");
-            assert!(
-                service.contains(&format!("-v \"{volume}:/cluster\"")),
-                "{service}"
-            );
-            assert!(service.contains("--stop-timeout 360 --init"));
-            assert!(service.contains("TimeoutStopSec=420"));
+            for image in [DEFAULT_IMAGE, "quay.io/wh2099/dst-server:beta"] {
+                let mut channel = unit.clone();
+                channel.options.image = image.into();
+                let path = channel.save(units.path()).unwrap();
+                assert_eq!(ContainerUnit::load(path).unwrap(), channel);
+                let output = std::process::Command::new(generator)
+                    .arg("--dryrun")
+                    .env("QUADLET_UNIT_DIRS", units.path())
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let service = String::from_utf8(output.stdout).unwrap();
+                let volume = volume_escape(unit.cluster.to_str().unwrap())
+                    .replace('\\', "\\\\")
+                    .replace(' ', "\\x20");
+                assert!(
+                    service.contains(&format!("-v \"{volume}:/cluster\"")),
+                    "{service}"
+                );
+                assert!(service.contains("--stop-timeout 360"));
+                assert!(service.contains("--init"));
+                assert!(service.contains("TimeoutStopSec=420"));
+                assert!(service.contains("--label io.containers.autoupdate=registry"));
+                assert!(service.contains("--pull never"));
+                assert!(service.contains(image));
+            }
+            unit.save(units.path()).unwrap();
         }
         let dropin = units.path().join("dst-.container.d");
         fs::create_dir(&dropin).unwrap();
