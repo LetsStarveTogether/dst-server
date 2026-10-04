@@ -39,11 +39,13 @@ function telemetry.report(stage, message)
         stage = "telemetry"
     end
     if not messages[message] then message = "callback_failed" end
+    local repeated = state.faults[stage] == message
     state.errors = state.errors + 1
     state.health_revision = state.health_revision + 1
     state.faults[stage] = message
     local diagnostic = { stage = stage, message = message, count = state.errors, revision = state.health_revision }
     state.last_error = diagnostic
+    if repeated then return end
     if pcall(write, "dst.telemetry.error", diagnostic) then return end
 
     -- A diagnostic must survive failure of the codec or game clocks, without recursion.
