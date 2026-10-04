@@ -126,7 +126,12 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
             let client = Client::connect(&path).await.unwrap();
             let stream = client.subscribe("events").await.unwrap();
             for sequence in 0..1100 {
-                hub.publish("events", &json!({"sequence":sequence}));
+                hub.publish(
+                    "events",
+                    serde_json::to_vec(&json!({"sequence":sequence}))
+                        .unwrap()
+                        .into(),
+                );
             }
             let batch = stream.next(512).await.unwrap();
             assert_eq!(batch.records.len(), 512);
@@ -137,8 +142,9 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
 
             let stream = client.subscribe("logs").await.unwrap();
             let record = json!({"line":"x".repeat(60 * 1024)});
+            let encoded: std::sync::Arc<[u8]> = serde_json::to_vec(&record).unwrap().into();
             for _ in 0..200 {
-                hub.publish("logs", &record);
+                hub.publish("logs", encoded.clone());
             }
             let batch = stream.next(512).await.unwrap();
             assert!(batch.dropped > 0 && batch.dropped < 200);

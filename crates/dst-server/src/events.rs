@@ -76,6 +76,21 @@ pub fn schema() -> &'static Value {
 
 /// Validate a complete native event without changing its values.
 pub fn validate(value: &Value) -> model::Result<()> {
+    validate_record(value)?;
+    if serde_json::to_vec(value)
+        .map_err(|_| model::Error::invalid("event", "game event must contain finite JSON values"))?
+        .len()
+        > MAX_EVENT_BYTES
+    {
+        return Err(model::Error::invalid(
+            "event",
+            "game event exceeds byte limit",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_record(value: &Value) -> model::Result<()> {
     let event = value["event"]
         .as_str()
         .ok_or_else(|| model::Error::invalid("/event", "game event name must be a string"))?;
@@ -104,16 +119,6 @@ pub fn validate(value: &Value) -> model::Result<()> {
             _ => {}
         }
     }
-    if serde_json::to_vec(value)
-        .map_err(|_| model::Error::invalid("event", "game event must contain finite JSON values"))?
-        .len()
-        > MAX_EVENT_BYTES
-    {
-        return Err(model::Error::invalid(
-            "event",
-            "game event exceeds byte limit",
-        ));
-    }
     validator.validate(value).map_err(|error| {
         model::Error::invalid("event", "invalid game event")
             .with_details(json!({"field": error.instance_path().to_string()}))
@@ -121,15 +126,16 @@ pub fn validate(value: &Value) -> model::Result<()> {
 }
 
 /// Parse and validate a native JSON record, retaining nulls and exact numbers.
-pub fn parse(source: &str) -> model::Result<Value> {
+pub fn parse(source: impl AsRef<[u8]>) -> model::Result<Value> {
+    let source = source.as_ref();
     if source.len() > MAX_EVENT_BYTES {
         return Err(model::Error::invalid(
             "event",
             "game event exceeds byte limit",
         ));
     }
-    let value = serde_json::from_str(source)
+    let value = serde_json::from_slice(source)
         .map_err(|_| model::Error::invalid("event", "game event must be valid JSON"))?;
-    validate(&value)?;
+    validate_record(&value)?;
     Ok(value)
 }
