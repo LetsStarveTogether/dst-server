@@ -9,6 +9,7 @@ use std::{
 
 use chrono::{Timelike, Utc};
 use dst_server::{
+    agent::RESTART_EXIT,
     files::RoomLock,
     model::{Envelope, ErrorCode, Request, Target},
     recovery::{ClosedReason, RecoveryState},
@@ -201,7 +202,7 @@ async fn failed_telemetry_drain_preserves_requested_exit() {
     let endpoint = format!("http://{}", collector.local_addr().unwrap());
     for (request, code) in [
         (Request::Stop { notice: None }, 0),
-        (Request::Restart { notice: None }, 8),
+        (Request::Restart { notice: None }, i32::from(RESTART_EXIT)),
     ] {
         let mut agent = Agent::with_environment(
             json!({"policy":{"mod_auto_update":false}}),
