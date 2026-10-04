@@ -77,6 +77,8 @@ local function install(profile)
     assert(health.protocol == 3)
     assert(health.telemetry_status == (profile == "off" and "disabled" or "active"))
     assert(health.errors == 0 and health.events_emitted == 0 and health.last_error == json.null)
+    assert(health.capabilities.container_transfers == ((profile == nil or profile == "history") and "active" or "disabled"))
+    assert(health.capabilities.teleporters == (profile == "off" and "disabled" or "active"))
     return driver
 end
 local function records(name)

@@ -3,6 +3,7 @@ dofile(root .. "/tests/lua/setup.lua")(root, scripts)
 require("class")
 require("vector3")
 require("util")
+require("mathutil")
 Entity = {}
 require("entityscript")
 
@@ -35,7 +36,9 @@ local function entity(prefab, userid)
         prefab = prefab, GUID = next_guid, userid = userid, components = {},
         IsValid = function() return true end,
         AddTag = noop,
-        Transform = {GetWorldPosition = function() return 1, 0, 2 end},
+        RemoveTag = noop,
+        HasTag = function(_, tag) return tag == "player" and userid ~= nil end,
+        Transform = {GetWorldPosition = function() return 1, 0, 2 end, SetPosition = noop},
         StartUpdatingComponent = function(self) self.updating = true end,
         StopUpdatingComponent = function(self) self.updating = false end,
     }, {__index = EntityScript})
@@ -191,4 +194,195 @@ local before = #outputs
 local result, err = pcall(delivery.SendToPoint, delivery, destination, player)
 assert(not result and err == failure and #outputs == before)
 assert(state.errors == (enabled and 2 or 0), tostring(state.errors))
+
+-- Run native container UI handlers and stack splitting/merging without the engine's UI registry.
+package.loaded.containers = {}
+local Container = require("components/container")
+local Inventory = require("components/inventory")
+local Stackable = require("components/stackable")
+TUNING.STACK_SIZE_MEDITEM = 40
+MAXUINT = 4294967295
+BRANCH = "release"
+GetGameModeProperty = function() return false end
+local replica = setmetatable({}, {__index = function() return noop end})
+local function item(prefab, size)
+    local inst = entity(prefab)
+    inst.replica = {stackable = replica}
+    inst.components.inventoryitem = {
+        cangoincontainer = true,
+        OnPutInInventory = function(self, owner) self.owner = owner end,
+        OnRemoved = function(self) self.owner = nil end,
+        OnDropped = noop, InheritMoisture = noop, SetTemperature = noop,
+        DiluteMoisture = noop, DiluteTemperature = noop,
+        GetMoisture = function() return 0 end,
+        IsWet = function() return false end,
+        GetTemperature = function() return 20 end,
+    }
+    inst.components.stackable = Stackable(inst)
+    inst.components.stackable:SetStackSize(size or 1)
+    inst.Remove = function(self) self.removed = true end
+    return inst
+end
+SpawnPrefab = item
+local function chest(size)
+    local inst = entity("treasurechest")
+    inst.replica = {container = replica}
+    inst.GetPosition = function() return Vector3(1, 0, 2) end
+    local component = Container(inst)
+    inst.components.container = component
+    component:SetNumSlots(size or 4)
+    component.openlist[player] = true
+    return component
+end
+-- The engine-facing inventory ownership methods are irrelevant to the UI transfer decision.
+local inventory = setmetatable({inst = player, itemslots = {}, equipslots = {}, isopen = true, isvisible = true},
+    {__index = Inventory})
+player.components.inventory = inventory
+inventory.GiveActiveItem = function(self, value) self.activeitem = value end
+inventory.SetActiveItem = inventory.GiveActiveItem
+inventory.RemoveItemBySlot = function(self, slot)
+    local value = self.itemslots[slot]
+    self.itemslots[slot] = nil
+    return value
+end
+inventory.RemoveItem = function(self, value, whole)
+    if not whole and value.components.stackable:IsStack() then return value.components.stackable:Get(1) end
+    if self.activeitem == value then self.activeitem = nil end
+    return value
+end
+inventory.CanTakeItemInSlot = function() return true end
+inventory.GiveItem = function(self, value, slot)
+    slot = slot or 1
+    if self.itemslots[slot] ~= nil then return false end
+    self.itemslots[slot] = value
+    return true
+end
+local history = profile == "history"
+if history then require("dst_server.container_events").install() end
+local transfer_event = "dst.player.container_transfer"
+local function transfer(callback, holder, target, before_size, after_size)
+    local before_count = count(transfer_event)
+    callback()
+    assert(count(transfer_event) == before_count + (history and 1 or 0), "one record per changed slot")
+    if history then
+        local rows = records(transfer_event)
+        local row = rows[#rows]
+        assert(row.player.userid == player.userid and row.holder.guid == holder.inst.GUID)
+        assert(row.target.guid == target.GUID and row.slot == 1)
+        assert((row.before and row.before.stack_size or 0) == before_size)
+        assert((row.after and row.after.stack_size or 0) == after_size)
+    end
+end
+local box = chest()
+inventory.activeitem = item("log", 8)
+transfer(function() box:PutOneOfActiveItemInSlot(1, player) end, box, player, 0, 1)
+transfer(function() box:AddOneOfActiveItemToSlot(1, player) end, box, player, 1, 2)
+transfer(function() box:AddAllOfActiveItemToSlot(1, player) end, box, player, 2, 8)
+assert(inventory.activeitem == nil)
+transfer(function() box:TakeActiveItemFromHalfOfSlot(1, player) end, box, player, 8, 4)
+inventory.activeitem = nil
+transfer(function() box:TakeActiveItemFromCountOfSlot(1, 2, player) end, box, player, 4, 2)
+inventory.activeitem = nil
+transfer(function() box:TakeActiveItemFromAllOfSlot(1, player) end, box, player, 2, 0)
+-- Both native delegation directions must record once, including swaps of different items.
+transfer(function() box:SwapActiveItemWithSlot(1, player) end, box, player, 0, 2)
+inventory.activeitem = item("rocks", 3)
+transfer(function() box:PutAllOfActiveItemInSlot(1, player) end, box, player, 2, 3)
+transfer(function() box:SwapOneOfActiveItemWithSlot(1, player) end, box, player, 3, 1)
+
+-- Moving between a player and containers bypasses BufferedAction entirely.
+local destination = chest()
+inventory.itemslots[1] = item("log", 10)
+transfer(function() inventory:MoveItemFromHalfOfSlot(1, destination.inst) end, inventory, destination.inst, 10, 5)
+transfer(function() inventory:MoveItemFromCountOfSlot(1, destination.inst, 2) end, inventory, destination.inst, 5, 3)
+transfer(function() inventory:MoveItemFromAllOfSlot(1, destination.inst) end, inventory, destination.inst, 3, 0)
+assert(destination.slots[1].components.stackable:StackSize() == 10)
+box.slots = {}
+transfer(function() destination:MoveItemFromHalfOfSlot(1, box.inst, player) end, destination, box.inst, 10, 5)
+transfer(function() destination:MoveItemFromCountOfSlot(1, box.inst, 2, player) end, destination, box.inst, 5, 3)
+transfer(function() destination:MoveItemFromAllOfSlot(1, box.inst, player) end, destination, box.inst, 3, 0)
+inventory.itemslots = {}
+transfer(function() box:MoveItemFromAllOfSlot(1, player, player) end, box, player, 10, 0)
+
+destination = chest(1)
+destination:GiveItem(item("log", 37), 1)
+box:GiveItem(item("log", 10), 1)
+transfer(function() box:MoveItemFromAllOfSlot(1, destination.inst, player) end, box, destination.inst, 10, 7)
+assert(destination.slots[1].components.stackable:StackSize() == 40, "partial acceptance must retain the actual change")
+
+local before_transfers = count(transfer_event)
+box.slots = {}
+box:GiveItem(item("log", 4), 1)
+box:TakeActiveItemFromAllOfSlot(1, player) -- Occupied cursor: no change.
+box:TakeActiveItemFromAllOfSlot(1, nil) -- No attributable player.
+destination.numslots = 0
+box:MoveItemFromAllOfSlot(1, destination.inst, player) -- Rejected, then restored to source.
+assert(box.slots[1].components.stackable:StackSize() == 4)
+box.slots[1].components.inventoryitem.islockedinslot = true
+inventory.activeitem = nil
+box:TakeActiveItemFromAllOfSlot(1, player)
+assert(count(transfer_event) == before_transfers, "failed transfers and automatic GiveItem must be silent")
+box.slots[1].components.inventoryitem.islockedinslot = false
+local item_ref = values.item_ref
+values.item_ref = function() error("snapshot failed") end
+box:TakeActiveItemFromAllOfSlot(1, player)
+values.item_ref = item_ref
+assert(box.slots[1] == nil and inventory.activeitem ~= nil)
+local native_error = {}
+local get_active = inventory.GetActiveItem
+inventory.GetActiveItem = function() error(native_error, 0) end
+local succeeded, failure_value = pcall(box.PutAllOfActiveItemInSlot, box, 1, player)
+inventory.GetActiveItem = get_active
+assert(not succeeded and failure_value == native_error)
+transfer(function() box:PutAllOfActiveItemInSlot(1, player) end, box, player, 0, 4)
+
+-- Wormholes, temporary map exits and other local portals share the actual teleporter component.
+local Teleporter = require("components/teleporter")
+if enabled then capture.install_teleporters() end
+local function portal(prefab, x)
+    local inst = entity(prefab)
+    inst.Transform.GetWorldPosition = function() return x, 0, 0 end
+    inst.DoTaskInTime = function() return {Cancel = noop} end
+    inst.components.teleporter = Teleporter(inst)
+    inst.components.teleporter.offset = 0
+    return inst
+end
+local entrance, exit, temporary = portal("wormhole", 0), portal("wormhole", 30), portal("tentacle_pillar_hole", 60)
+local teleporter = entrance.components.teleporter
+teleporter:Target(exit)
+player.ScreenFade = noop
+local position = 0
+player.Transform.SetPosition = function(_, x) position = x end
+TheWorld.Map = {IsOceanAtPoint = function() return false end}
+local teleport_event = "dst.player.teleport_started"
+assert(teleporter:Activate(player) and position == 30)
+assert(teleporter:UseTemporaryExit(player, temporary) and position == 60)
+assert(teleporter.targetTeleporterTemporary == nil)
+teleporter:SetEnabled(false)
+assert(not teleporter:Activate(player) and count(teleport_event) == (enabled and 2 or 0))
+teleporter:SetEnabled(true)
+assert(teleporter:Activate(drone))
+assert(count(teleport_event) == (enabled and 2 or 0), "non-player teleports are not player history")
+if enabled then
+    local rows = records(teleport_event)
+    assert(rows[1].player.userid == player.userid and rows[1].source.guid == entrance.GUID)
+    assert(rows[1].target.guid == exit.GUID and rows[2].target.guid == temporary.GUID)
+end
+TheShard = {GetShardId = function() return "1" end}
+Shard_IsWorldAvailable = function() return true end
+teleporter:MigrationTarget("2", 5, 0, 6)
+local migrations = 0
+TheWorld:ListenForEvent("ms_playerdespawnandmigrate", function() migrations = migrations + 1 end)
+assert(teleporter:Activate(player) and migrations == 1)
+assert(count(teleport_event) == (enabled and 2 or 0), "cross-shard travel already has a migration event")
+teleporter.migration_data = nil
+teleporter.onActivate = function() error(native_error, 0) end
+local before_error = #outputs
+succeeded, failure_value = pcall(teleporter.Activate, teleporter, player)
+assert(not succeeded and failure_value == native_error and #outputs == before_error)
+teleporter.onActivate = nil
+values.entity_ref = function() error("capture failed") end
+assert(teleporter:Activate(player) and position == 30)
+values.entity_ref = entity_ref
+assert(state.errors == (enabled and (history and 4 or 3) or 0), tostring(state.errors))
 for _, line in ipairs(outputs) do io.write(line, "\n") end

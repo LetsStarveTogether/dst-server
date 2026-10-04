@@ -2,6 +2,25 @@ local telemetry = require("dst_server.telemetry")
 local values = require("dst_server.values")
 local gameplay_events = {}
 
+function gameplay_events.install_teleporters()
+    local teleporter = require("components/teleporter")
+    local activate = assert(teleporter.Activate)
+    local capture = telemetry.guard("player.teleport_started", function(component, player)
+        -- Cross-shard travel already emits ms_playerdespawnandmigrate.
+        if component.migration_data ~= nil or player == nil or not player:HasTag("player") then return end
+        telemetry.emit("dst.player.teleport_started", {
+            player = values.entity_ref(player),
+            source = values.entity_ref(component.inst),
+            target = values.entity_ref(component.targetTeleporterTemporary or component.targetTeleporter),
+        })
+    end)
+    teleporter.Activate = function(self, player, ...)
+        local results = telemetry.pack(activate(self, player, ...))
+        if results[1] then capture(self, player) end
+        return telemetry.unpack(results)
+    end
+end
+
 function gameplay_events.install_deliveries()
     local deliverable = require("components/mapdeliverable")
     local send = assert(deliverable.SendToPoint)

@@ -1447,6 +1447,130 @@
         }
       ]
     },
+    "ContainerTransferData": {
+      "additionalProperties": false,
+      "description": "A player UI operation changed a slot on holder (container or player inventory). Before and after describe that slot; target is the requested other endpoint, which may route items to overflow storage.",
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "before": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "holder": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "slot": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "player",
+        "holder",
+        "target",
+        "slot",
+        "before",
+        "after"
+      ],
+      "title": "ContainerTransferData",
+      "type": "object"
+    },
+    "ContainerTransferEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/ContainerTransferData"
+        },
+        "event": {
+          "const": "dst.player.container_transfer",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "ContainerTransferEvent",
+      "type": "object"
+    },
     "CraftedData": {
       "additionalProperties": false,
       "properties": {
@@ -5153,6 +5277,104 @@
       "title": "TelemetryErrorEvent",
       "type": "object"
     },
+    "TeleportStartedData": {
+      "additionalProperties": false,
+      "description": "The native local teleporter accepted a player. This does not confirm completion of the arrival animation; cross-shard travel uses migration_started.",
+      "properties": {
+        "player": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "source": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "player",
+        "source",
+        "target"
+      ],
+      "title": "TeleportStartedData",
+      "type": "object"
+    },
+    "TeleportStartedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/TeleportStartedData"
+        },
+        "event": {
+          "const": "dst.player.teleport_started",
+          "title": "Event",
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "monotonic_ms": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "nonce": {
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Nonce",
+          "type": "string"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveSafeLuaInteger"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/NonNegativeSafeLuaInteger"
+        },
+        "v": {
+          "const": 3,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "v",
+        "nonce",
+        "generation",
+        "session_id",
+        "seq",
+        "event",
+        "tick",
+        "monotonic_ms",
+        "cycle",
+        "data"
+      ],
+      "title": "TeleportStartedEvent",
+      "type": "object"
+    },
     "UnequippedData": {
       "additionalProperties": false,
       "properties": {
@@ -6014,6 +6236,7 @@
       "dst.player.combat_hit": "#/$defs/CombatHitEvent",
       "dst.player.combat_received": "#/$defs/CombatReceivedEvent",
       "dst.player.condition_changed": "#/$defs/ConditionChangedEvent",
+      "dst.player.container_transfer": "#/$defs/ContainerTransferEvent",
       "dst.player.crafted": "#/$defs/CraftedEvent",
       "dst.player.deployed": "#/$defs/DeployedEvent",
       "dst.player.dice_rolled": "#/$defs/DiceRolledEvent",
@@ -6038,6 +6261,7 @@
       "dst.player.skill_changed": "#/$defs/SkillChangedEvent",
       "dst.player.skin_received": "#/$defs/SkinReceivedEvent",
       "dst.player.spawned": "#/$defs/SpawnedEvent",
+      "dst.player.teleport_started": "#/$defs/TeleportStartedEvent",
       "dst.player.unequipped": "#/$defs/UnequippedEvent",
       "dst.server.announcement": "#/$defs/AnnouncementEvent",
       "dst.server.pause_changed": "#/$defs/PauseChangedEvent",
@@ -6221,6 +6445,12 @@
     },
     {
       "$ref": "#/$defs/ModOutdatedEvent"
+    },
+    {
+      "$ref": "#/$defs/ContainerTransferEvent"
+    },
+    {
+      "$ref": "#/$defs/TeleportStartedEvent"
     }
   ]
 }

@@ -60,7 +60,6 @@ pub const DEFAULT_ACTIONS: &[&str] = &[
     "PLANT",
     "REPAIR",
     "REVIVE_CORPSE",
-    "TELEPORT",
     "UNLOCK",
     "UPGRADE",
 ];

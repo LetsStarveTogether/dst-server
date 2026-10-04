@@ -8,6 +8,7 @@ nolineprint = print
 require("class")
 require("vector3")
 require("util")
+package.loaded.containers = {}
 
 local world_listeners = {}
 local world_watchers = {}
