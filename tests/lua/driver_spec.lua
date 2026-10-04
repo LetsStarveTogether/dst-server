@@ -508,6 +508,27 @@ function scenarios.combat_history()
     assert(require("dst_server").health().errors == 0)
 end
 
+function scenarios.hound_warnings()
+    local now = 0
+    GetTime = function() return now end
+    local driver = install()
+    for _ = 1, 30 do
+        player:PushEvent("houndwarning", 3)
+        now = now + 1.3
+    end
+    assert(#records("dst.player.hound_warning") == 1, "repeated warning sounds share one record")
+    player:PushEvent("houndwarning", 8)
+    assert(#records("dst.player.hound_warning") == 2, "a changed warning type is recorded immediately")
+    local other = entity("wendy", 4, "KU_OTHER")
+    TheWorld:PushEvent("ms_playerjoined", other)
+    other:PushEvent("houndwarning", 8)
+    assert(#records("dst.player.hound_warning") == 3, "each player has an independent warning")
+    now = now + 31
+    player:PushEvent("houndwarning", 8)
+    assert(#records("dst.player.hound_warning") == 4, "silence permits a new warning of the same type")
+    assert(driver.health().errors == 0)
+end
+
 function scenarios.important_deaths()
     install()
     local victim = entity("wendy", 4, "KU_WENDY")

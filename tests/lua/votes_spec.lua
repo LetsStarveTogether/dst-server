@@ -51,6 +51,8 @@ local update = voter.OnUpdate
 TheWorld.net = {components = {worldvoter = voter}}
 require("dst_server.vote_events").install()
 assert(voter.OnUpdate == update, "vote capture must not wrap frame updates")
+TheWorld:PushEvent("master_worldvoterupdate", closed)
+assert(#outputs == 0, "idle initialization is not a vote")
 local snapshot = {
     countdown = 30, commandid = 42, targetuserid = "KU_TARGET", starteruserid = "KU_A",
     voters = {KU_A = 7, KU_B = 7},
@@ -58,26 +60,46 @@ local snapshot = {
 TheWorld:PushEvent("master_worldvoterupdate", snapshot)
 if scenario == "secondary" then assert(#outputs == 0); return end
 assert(#outputs == 1)
-TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-assert(#outputs == 2, "each native notification is recorded")
+for countdown = 29, 20, -1 do
+    snapshot.countdown = countdown
+    TheWorld:PushEvent("master_worldvoterupdate", snapshot)
+end
+assert(#outputs == 1, "countdown updates do not repeat unchanged ballots")
 snapshot.voters.KU_A = selected
 TheWorld:PushEvent("master_worldvoterupdate", snapshot)
 TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-assert(#outputs == 4)
+assert(#outputs == 2, "native voters are mutated in place")
 snapshot.voters.KU_B = selected
 TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-assert(#outputs == 5)
+assert(#outputs == 3)
 if scenario == "cancelled" then
     TheWorld:PushEvent("master_worldvoterupdate", closed)
-    assert(#outputs == 6, "cancellation must not invent a result")
+    assert(#outputs == 4, "cancellation must not invent a result")
 else
     local results = require("dst_server.telemetry").pack(pcall(voter.OnUpdate))
     if scenario == "error" then
-        assert(results[1] == false and results[2] == failure and #outputs == 6)
+        assert(results[1] == false and results[2] == failure and #outputs == 4)
     else
         assert(results.n == 4 and results[1] and results[2] == (scenario ~= "failed") and results[3] == nil and results[4] == "preserved")
-        assert(calls == 1 and #outputs == 7)
+        assert(calls == 1 and #outputs == 5)
     end
 end
+local recorded = #outputs
+TheWorld:PushEvent("master_worldvoterupdate", closed)
+assert(#outputs == recorded, "repeated closing notifications are ignored")
+TheWorld:PushEvent("master_worldvoterupdate", snapshot)
+assert(#outputs == recorded + 1, "the same command can start a new vote")
+snapshot.voters.KU_C = 7
+TheWorld:PushEvent("master_worldvoterupdate", snapshot)
+snapshot.voters.KU_B = nil
+TheWorld:PushEvent("master_worldvoterupdate", snapshot)
+assert(#outputs == recorded + 3, "added and removed voters change the snapshot")
+snapshot.targetuserid = "KU_NEW_TARGET"
+TheWorld:PushEvent("master_worldvoterupdate", snapshot)
+snapshot.starteruserid = "KU_NEW_STARTER"
+TheWorld:PushEvent("master_worldvoterupdate", snapshot)
+snapshot.commandid = 43
+TheWorld:PushEvent("master_worldvoterupdate", snapshot)
+assert(#outputs == recorded + 6, "vote identity changes are recorded")
 assert(state.errors == (scenario == "capture_error" and 1 or 0))
 for _, line in ipairs(outputs) do io.write(line, "\n") end
