@@ -20,44 +20,6 @@ use crate::{
 
 pub const MAX_ROOM_SLOT: u16 = 299;
 
-/// Describe the current native Room contract, including Agent policy and ports.
-pub fn schema() -> Value {
-    let mut schema = settings::schema("Room")
-        .expect("bundled Room schema")
-        .clone();
-    let properties = schema["properties"]
-        .as_object_mut()
-        .expect("Room properties");
-    properties.remove("schedule");
-    properties.remove("recycle");
-    properties.insert("policy".into(), json!({
-        "type":"object", "additionalProperties":false,
-        "properties":{
-            "timezone":{"type":"string","default":"Asia/Shanghai"},
-            "schedule":{"type":"array","default":[],"maxItems":1440,"items":{
-                "type":"object","additionalProperties":false,"required":["start","end"],
-                "properties":{
-                    "start":{"type":"string","pattern":"^(?:[01][0-9]|2[0-3]):[0-5][0-9](?::00)?$"},
-                    "end":{"type":"string","pattern":"^(?:[01][0-9]|2[0-3]):[0-5][0-9](?::00)?$"}
-                }
-            }},
-            "mod_auto_update":{"type":"boolean","default":true},
-            "idle_regeneration":{"type":"boolean","default":false}
-        }
-    }));
-    schema["$defs"]["RoomDeployment"]["properties"]["ports"] = json!({
-        "type":"array","default":[],"items":{
-            "type":"object","additionalProperties":false,"required":["host","container"],
-            "properties":{
-                "host":{"type":"integer","minimum":1024,"maximum":65535},
-                "container":{"type":"integer","minimum":1024,"maximum":65535},
-                "protocol":{"const":"udp","default":"udp"}
-            }
-        }
-    });
-    schema
-}
-
 static PRESETS: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../resources/settings/presets.json"))
         .expect("valid bundled room presets")
@@ -602,12 +564,10 @@ mod tests {
 
     #[test]
     fn templates_and_fleet_keep_game_modes_schedules_and_independent_room_slots() {
-        let schema = schema();
-        let validator = jsonschema::validator_for(&schema).unwrap();
-        assert!(validator.is_valid(&ordinary().as_value()));
+        assert!(Room::from_value(ordinary().as_value()).is_ok());
         let mut old_policy = ordinary().as_value();
         old_policy["schedule"] = json!([]);
-        assert!(!validator.is_valid(&old_policy));
+        assert!(Room::from_value(old_policy).is_err());
         assert_eq!(
             preset_names(),
             [

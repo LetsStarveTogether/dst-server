@@ -11,19 +11,19 @@ fn record() -> Value {
 }
 
 #[test]
-fn frozen_schema_covers_every_producer_and_preserves_values() {
-    assert_eq!(
-        events::schema()["discriminator"]["mapping"]
-            .as_object()
-            .unwrap()
-            .len(),
-        56
-    );
+fn event_types_cover_every_producer_and_preserve_values() {
+    assert_eq!(events::EVENT_NAMES.len(), 56);
     let value = record();
-    assert_eq!(events::parse(value.to_string()).unwrap(), value);
+    assert_eq!(
+        events::parse(value.to_string()).unwrap().into_value(),
+        value
+    );
     let mut boolean = record();
     boolean["data"] = json!({"name": "israining", "value": false});
-    assert_eq!(events::parse(boolean.to_string()).unwrap(), boolean);
+    assert_eq!(
+        events::parse(boolean.to_string()).unwrap().into_value(),
+        boolean
+    );
 
     let mut migration = record();
     migration["event"] = json!("dst.player.migration_started");
@@ -33,7 +33,10 @@ fn frozen_schema_covers_every_producer_and_preserves_values() {
         "destination_shard_id": "2", "portal_id": null,
         "destination": {"x": 0, "y": 0, "z": 0}
     });
-    assert_eq!(events::parse(migration.to_string()).unwrap(), migration);
+    assert_eq!(
+        events::parse(migration.to_string()).unwrap().into_value(),
+        migration
+    );
 }
 
 #[test]
@@ -88,6 +91,10 @@ fn diagnostics_are_sanitized_and_bounded() {
     diagnostic["data"] =
         json!({"stage": "player.finishedwork", "message": "callback_failed", "count": 1});
     events::validate(&diagnostic).unwrap();
+    assert_eq!(
+        events::parse(diagnostic.to_string()).unwrap().into_value(),
+        diagnostic
+    );
     for (field, value) in [
         ("message", json!("SECRET_TOKEN")),
         ("stage", json!("callback\nprivate chat")),
@@ -112,7 +119,7 @@ fn diagnostics_are_sanitized_and_bounded() {
         record().to_string(),
         width = events::MAX_EVENT_BYTES
     );
-    assert_eq!(events::parse(&padded).unwrap(), record());
+    assert_eq!(events::parse(&padded).unwrap().into_value(), record());
     assert!(events::parse(&(padded + " ")).is_err());
     let mut large = record();
     large["data"] = json!({"name": "season", "value": "x".repeat(events::MAX_EVENT_BYTES)});

@@ -36,9 +36,10 @@ scraper = { version = "0.27", default-features = false }
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
-jsonschema = { version = "0.58.5", default-features = false }
 sevenz-rust2 = { version = "0.23", default-features = false, features = ["compress", "util", "zstd"] }
 object_store = { version = "0.14", default-features = false, features = ["aws"] }
+garde = { version = "0.23.0", features = ["derive", "regex"] }
+serde_path_to_error = "0.1.20"
 
 [build-dependencies]
 capnpc = "0.27"

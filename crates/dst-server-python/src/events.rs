@@ -3,8 +3,8 @@ use pyo3::prelude::*;
 use crate::{from_python, py_error, to_python};
 
 #[pyfunction]
-fn event_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    to_python(py, dst_server::events::schema().clone())
+fn event_names() -> Vec<&'static str> {
+    dst_server::events::EVENT_NAMES.to_vec()
 }
 
 #[pyfunction]
@@ -16,7 +16,7 @@ fn validate_event(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(event_schema, module)?)?;
+    module.add_function(wrap_pyfunction!(event_names, module)?)?;
     module.add_function(wrap_pyfunction!(validate_event, module)?)?;
     Ok(())
 }

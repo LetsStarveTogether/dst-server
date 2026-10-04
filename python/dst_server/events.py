@@ -2,14 +2,14 @@
 
 from typing import Any, Literal, TypedDict, cast
 
-from ._native import event_schema
+from ._native import event_names
 from ._native import validate_event as _validate_event
 
-__all__ = ["GameEvent", "event_schema", "validate_event"]
+__all__ = ["GameEvent", "event_names", "validate_event"]
 
 
 class GameEvent(TypedDict):
-    """Version 3 envelope; event_schema() describes every event payload."""
+    """Version 3 envelope validated by the native Rust event types."""
 
     v: Literal[3]
     nonce: str

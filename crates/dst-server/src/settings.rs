@@ -1,8 +1,7 @@
-//! Sparse, validated native configuration. The bundled schemas contain data only.
+//! Typed, sparse configuration and native file adapters.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -14,47 +13,19 @@ use crate::{
     lua,
 };
 
-static SCHEMAS: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../resources/settings/schemas.json"))
-        .expect("bundled configuration schemas")
-});
-static DEFAULTS: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../resources/settings/defaults.json"))
-        .expect("bundled configuration defaults")
-});
-static INI: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../resources/settings/ini.json"))
-        .expect("bundled INI metadata")
-});
-static VALIDATORS: LazyLock<BTreeMap<String, jsonschema::Validator>> = LazyLock::new(|| {
-    SCHEMAS
-        .as_object()
-        .expect("schema map")
-        .iter()
-        .map(|(name, schema)| {
-            (
-                name.clone(),
-                jsonschema::options()
-                    .should_validate_formats(true)
-                    .build(schema)
-                    .expect("valid bundled schema"),
-            )
-        })
-        .collect()
-});
+mod checks;
+pub mod types;
+
+use checks::Check;
+use types::Resolve;
 
 pub const PERMISSION_FIELDS: [&str; 3] = ["adminlist", "whitelist", "blocklist"];
-
-/// Configuration schemas are embedded and self-contained; input cannot supply references.
-pub fn schema(name: &str) -> Result<&'static Value> {
-    SCHEMAS.get(name).context("unknown configuration schema")
-}
 
 fn object(value: &Value) -> Result<&Map<String, Value>> {
     value.as_object().context("configuration must be an object")
 }
 
-pub fn validate(name: &str, value: &Value) -> Result<()> {
+fn check_input(value: &Value) -> Result<()> {
     let mut stack = vec![(value, 0)];
     let mut nodes = 0;
     while let Some((value, depth)) = stack.pop() {
@@ -73,75 +44,7 @@ pub fn validate(name: &str, value: &Value) -> Result<()> {
         serde_json::to_vec(value)?.len() <= files::MAX_TRANSACTION_BYTES,
         "configuration exceeds the byte limit"
     );
-    let validator = VALIDATORS
-        .get(name)
-        .context("unknown configuration schema")?;
-    if let Err(error) = validator.validate(value) {
-        bail!("invalid {name} at {}", error.instance_path());
-    }
-    validate_relations(name, value)
-}
-
-/// Resolve defaults without changing which fields the input explicitly supplied.
-pub fn resolved(name: &str, sparse: &Value) -> Value {
-    let mut value = DEFAULTS.get(name).cloned().unwrap_or_else(|| json!({}));
-    if let Some(properties) = SCHEMAS[name]["properties"].as_object() {
-        for (key, property) in properties {
-            if value.get(key).is_none()
-                && let Some(default) = property.get("default")
-            {
-                value[key] = default.clone();
-            }
-        }
-    }
-    if let Some(fields) = sparse.as_object() {
-        value
-            .as_object_mut()
-            .expect("object default")
-            .extend(fields.clone());
-    }
-    match name {
-        "ClusterConfig" | "RoomPreset" => {
-            value["settings"] = resolved("ClusterSettings", &value["settings"]);
-            if value.get("shards").is_none() {
-                value["shards"] = json!({});
-            }
-            for shard in value["shards"]
-                .as_object_mut()
-                .expect("validated shards")
-                .values_mut()
-            {
-                *shard = resolved("ShardConfig", shard);
-            }
-            if name == "ClusterConfig" {
-                value["downloads"] = resolved("WorkshopDownloads", &value["downloads"]);
-                value["mod_settings"] = resolved("ModSettings", &value["mod_settings"]);
-            } else {
-                value["mods"] = resolved("ModOverrides", &value["mods"]);
-            }
-        }
-        "ShardConfig" => {
-            value["settings"] = resolved("ShardSettings", &value["settings"]);
-            value["mods"] = resolved("ModOverrides", &value["mods"]);
-            for (key, model) in [
-                ("world", "WorldgenOverride"),
-                ("level", "LevelDataOverride"),
-            ] {
-                if value.get(key).is_some_and(|v| !v.is_null()) {
-                    value[key] = resolved(model, &value[key]);
-                }
-            }
-        }
-        "WorldgenOverride" | "LevelDataOverride" => {
-            if let Some(kind) = value["overrides"]["kind"].as_str().map(str::to_owned)
-                && let Some(model) = world_model(&kind)
-            {
-                value["overrides"]["values"] = resolved(model, &value["overrides"]["values"]);
-            }
-        }
-        _ => {}
-    }
-    value
+    Ok(())
 }
 
 pub fn redact(mut value: Value) -> Value {
@@ -170,46 +73,92 @@ pub fn redact(mut value: Value) -> Value {
     value
 }
 
-macro_rules! configuration_value {
-    ($($name:ident),+ $(,)?) => {$(
-        #[derive(Clone, PartialEq)]
-        pub struct $name(Value);
-        impl $name {
-            pub fn from_value(value: Value) -> Result<Self> {
-                validate(stringify!($name), &value)?;
-                Ok(Self(value))
+macro_rules! configuration_models {
+    ($($name:ident => $wire:literal),+ $(,)?) => {
+        $(
+            #[derive(Clone, PartialEq)]
+            pub struct $name(types::$name);
+
+            impl $name {
+                pub fn from_value(value: Value) -> Result<Self> {
+                    Self::from_ref(&value)
+                }
+
+                fn from_ref(value: &Value) -> Result<Self> {
+                    check_input(value)?;
+                    let data: types::$name = crate::validation::decode(value)
+                        .map_err(|error| anyhow::anyhow!("invalid {} at {}", $wire, error.path))?;
+                    data.check()?;
+                    Ok(Self(data))
+                }
+
+                pub fn data(&self) -> &types::$name { &self.0 }
+                pub fn as_value(&self) -> Value {
+                    serde_json::to_value(&self.0).expect("serializable configuration")
+                }
+                pub fn into_value(self) -> Value {
+                    serde_json::to_value(self.0).expect("serializable configuration")
+                }
+                pub fn resolved(&self) -> Value { self.0.resolved() }
             }
-            pub fn as_value(&self) -> &Value { &self.0 }
-            pub fn into_value(self) -> Value { self.0 }
-            pub fn resolved(&self) -> Value { resolved(stringify!($name), &self.0) }
-            pub fn schema() -> &'static Value { &SCHEMAS[stringify!($name)] }
-        }
-        impl std::fmt::Debug for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { redact(self.0.clone()).fmt(f) }
-        }
-        impl Serialize for $name {
-            fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> { redact(self.0.clone()).serialize(serializer) }
-        }
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-                Self::from_value(Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+
+            impl std::fmt::Debug for $name {
+                fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    redact(self.as_value()).fmt(formatter)
+                }
+            }
+
+            impl Serialize for $name {
+                fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+                    redact(self.as_value()).serialize(serializer)
+                }
+            }
+
+            impl<'de> Deserialize<'de> for $name {
+                fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+                    Self::from_value(Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+                }
+            }
+        )+
+
+        pub fn validate(name: &str, value: &Value) -> Result<()> {
+            match name {
+                $($wire => $name::from_ref(value).map(|_| ()),)+
+                _ => bail!("unknown configuration model"),
             }
         }
-    )+};
+
+        /// Fill defaults while retaining the sparse input in the stored model.
+        pub fn resolved(name: &str, value: &Value) -> Result<Value> {
+            match name {
+                $($wire => $name::from_ref(value).map(|model| model.resolved()),)+
+                _ => bail!("unknown configuration model"),
+            }
+        }
+    };
 }
 
-configuration_value!(
-    ClusterConfig,
-    ClusterSettings,
-    ShardConfig,
-    ShardSettings,
-    RoomPreset,
-    WorldgenOverride,
-    LevelDataOverride,
-    ModOverrides,
-    ModSettings,
-    WorkshopDownloads
-);
+configuration_models! {
+    ClusterConfig => "ClusterConfig",
+    ClusterSettings => "ClusterSettings",
+    ShardConfig => "ShardConfig",
+    ShardSettings => "ShardSettings",
+    RoomPreset => "RoomPreset",
+    WorldgenOverride => "WorldgenOverride",
+    LevelDataOverride => "LevelDataOverride",
+    ModOverride => "ModOverride",
+    ModOverrides => "ModOverrides",
+    ModSettings => "ModSettings",
+    WorkshopDownloads => "WorkshopDownloads",
+    WorldOverrides => "WorldOverrides",
+    ForestOverrides => "ForestOverrides",
+    CaveOverrides => "CaveOverrides",
+    QuagmireOverrides => "QuagmireOverrides",
+    LavaArenaOverrides => "LavaArenaOverrides",
+    CustomWorldOverrides => "CustomWorldOverrides",
+    LoadedForestOverrides => "_LoadedForestOverrides",
+    LoadedCaveOverrides => "_LoadedCaveOverrides",
+}
 
 fn world_model(kind: &str) -> Option<&'static str> {
     Some(match kind {
@@ -244,170 +193,6 @@ fn preset_kind(preset: &str) -> Option<&'static str> {
     }
 }
 
-fn validate_relations(name: &str, value: &Value) -> Result<()> {
-    let current = resolved(name, value);
-    match name {
-        "ClusterSettings" | "ShardSettings" => {
-            for (field, item) in object(&current)? {
-                if !item.is_null()
-                    && (DEFAULTS[name][field].is_number()
-                        || (name == "ShardSettings"
-                            && ["id", "master_port"].contains(&field.as_str())))
-                {
-                    ensure!(
-                        item.as_u64().is_some(),
-                        "{name}.{field} must be an unsigned integer"
-                    );
-                }
-            }
-            for value in object(&current)?.values().filter_map(Value::as_str) {
-                ensure!(
-                    !value.contains(['\0', '\r', '\n']),
-                    "INI strings cannot contain NUL, CR or LF"
-                );
-            }
-            if let Some(host) = current["master_ip"].as_str() {
-                configuration::validate_host(host)?;
-            }
-            if name == "ClusterSettings" {
-                ensure!(
-                    !(current["steam_group_only"] == true || current["steam_group_admins"] == true)
-                        || current["steam_group_id"].as_u64().unwrap_or(0) != 0,
-                    "Steam group restrictions require steam_group_id"
-                );
-                ensure!(
-                    current["whitelist_slots"].as_u64() <= current["max_players"].as_u64(),
-                    "whitelist_slots exceeds max_players"
-                );
-            } else if let Some(id) = current["id"].as_u64() {
-                ensure!(
-                    (current["is_master"] == true && id == 1)
-                        || (current["is_master"] == false && id >= 2),
-                    "master shard id must be 1; secondary shard ids must be at least 2"
-                );
-            }
-        }
-        "ClusterConfig" => {
-            validate_relations("ClusterSettings", &current["settings"])?;
-            ensure!(
-                current["token"]
-                    .as_str()
-                    .unwrap_or("")
-                    .bytes()
-                    .all(|byte| (b'!'..=b'~').contains(&byte)),
-                "cluster token must be printable non-space ASCII"
-            );
-            for field in PERMISSION_FIELDS {
-                ensure!(
-                    !current[field].as_str().unwrap_or("").contains(['\0', '\r']),
-                    "permission lists cannot contain NUL or CR"
-                );
-            }
-            validate_relations("ModSettings", &current["mod_settings"])?;
-            validate_relations("WorkshopDownloads", &current["downloads"])?;
-            for shard in object(&value["shards"])?.values() {
-                validate_relations("ShardConfig", shard)?;
-            }
-            validate_topology(value, &current)?;
-        }
-        "RoomPreset" => {
-            validate_relations("ClusterSettings", &current["settings"])?;
-            validate_relations("ModOverrides", &current["mods"])?;
-            for (name, shard) in value["shards"].as_object().into_iter().flatten() {
-                configuration::validate_shard_name(name)?;
-                validate_relations("ShardConfig", shard)?;
-            }
-        }
-        "ShardConfig" => {
-            validate_relations("ShardSettings", &current["settings"])?;
-            validate_relations("ModOverrides", &current["mods"])?;
-            for (field, model) in [
-                ("world", "WorldgenOverride"),
-                ("level", "LevelDataOverride"),
-            ] {
-                if !value[field].is_null() {
-                    validate_relations(model, &value[field])?;
-                }
-            }
-        }
-        "WorldgenOverride" => {
-            let kinds: BTreeSet<_> = ["worldgen_preset", "settings_preset"]
-                .iter()
-                .filter_map(|key| current[*key].as_str().and_then(preset_kind))
-                .collect();
-            ensure!(
-                kinds.len() <= 1,
-                "different built-in world types cannot be combined"
-            );
-            let kind = current["overrides"]["kind"]
-                .as_str()
-                .unwrap_or("world")
-                .trim_start_matches("loaded_");
-            if let Some(expected) = kinds.first() {
-                ensure!(
-                    !matches!(*expected, "quagmire" | "lavaarena") || kind == *expected,
-                    "event presets require matching overrides"
-                );
-                ensure!(
-                    !matches!(kind, "forest" | "cave" | "quagmire" | "lavaarena")
-                        || kind == *expected,
-                    "preset and overrides use different world types"
-                );
-            }
-            validate_world_values(&current["overrides"]["values"])?;
-        }
-        "LevelDataOverride" => {
-            ensure!(
-                value["overrides"]["values"]["task_set"]
-                    .as_str()
-                    .is_some_and(|value| !value.is_empty()),
-                "level data requires explicit task_set"
-            );
-            validate_level(&current)?;
-        }
-        "WorkshopDownloads" => {
-            for field in ["items", "collections"] {
-                for id in current[field]
-                    .as_array()
-                    .context("Workshop ids must be an array")?
-                {
-                    ensure!(
-                        id.as_u64().is_some_and(|id| id > 0),
-                        "Workshop ids must be positive uint64 integers"
-                    );
-                }
-            }
-        }
-        "ModOverrides" => {
-            for (name, entry) in object(&current["entries"])? {
-                validate_mod_name(name)?;
-                if !entry["configuration_options"].is_null() {
-                    lua::render_literal(&entry["configuration_options"])?;
-                }
-            }
-        }
-        "ModSettings" => {
-            for name in current["force_enabled"]
-                .as_array()
-                .context("force_enabled must be an array")?
-                .iter()
-                .filter_map(Value::as_str)
-            {
-                validate_mod_name(name)?;
-                static LUA_NUMBER: LazyLock<regex::Regex> = LazyLock::new(|| {
-                    regex::Regex::new(r"(?i)^\s*[+-]?(?:nan|inf(?:inity)?|0x(?:[0-9a-f]+(?:\.[0-9a-f]*)?|\.[0-9a-f]+)(?:p[+-]?[0-9]+)?|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:e[+-]?[0-9]+)?)\s*$").expect("numeric Mod name pattern")
-                });
-                let numeric = LUA_NUMBER.is_match(name);
-                if numeric {
-                    workshop_id(name)?;
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 fn validate_world_values(values: &Value) -> Result<()> {
     for value in object(values)?.values() {
         ensure!(
@@ -418,165 +203,6 @@ fn validate_world_values(values: &Value) -> Result<()> {
     let mut values = object(values)?.clone();
     values.retain(|_, value| !value.is_null());
     lua::render_literal(&Value::Object(values))?;
-    Ok(())
-}
-
-fn validate_level(value: &Value) -> Result<()> {
-    let overrides = &value["overrides"];
-    validate_world_values(&overrides["values"])?;
-    ensure!(
-        overrides["values"]["task_set"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty()),
-        "level data requires task_set"
-    );
-    if let Some(range) = value["background_node_range"].as_array() {
-        ensure!(
-            range.iter().all(|value| value.as_i64().is_some()),
-            "background_node_range requires integers"
-        );
-        ensure!(
-            range[0].as_i64().unwrap_or(-1) >= 0 && range[1].as_i64() >= range[0].as_i64(),
-            "invalid background_node_range"
-        );
-    }
-    for field in [
-        "version",
-        "min_playlist_position",
-        "max_playlist_position",
-        "numrandom_set_pieces",
-    ] {
-        if !value[field].is_null() {
-            ensure!(
-                value[field]
-                    .as_i64()
-                    .is_some_and(
-                        |value| (-lua::MAX_SAFE_INTEGER..=lua::MAX_SAFE_INTEGER).contains(&value)
-                    ),
-                "{field} requires a safe Lua integer"
-            );
-        }
-    }
-    if value["numrandom_set_pieces"].as_u64().unwrap_or(0) > 0 {
-        ensure!(
-            value["random_set_pieces"]
-                .as_array()
-                .is_some_and(|v| !v.is_empty()),
-            "positive numrandom_set_pieces requires random_set_pieces"
-        );
-    }
-    let kind = overrides["kind"]
-        .as_str()
-        .unwrap_or("custom")
-        .trim_start_matches("loaded_");
-    if matches!(kind, "forest" | "cave" | "quagmire" | "lavaarena") {
-        ensure!(
-            value["location"] == kind,
-            "level location and override kind differ"
-        );
-    }
-    if matches!(kind, "quagmire" | "lavaarena") {
-        let id = kind.to_ascii_uppercase();
-        ensure!(value["id"] == id, "event level has an incorrect id");
-        for field in ["settings_id", "worldgen_id"] {
-            ensure!(
-                value[field].is_null() || value[field] == id,
-                "event settings/worldgen ids differ"
-            );
-        }
-        if let Some(prefabs) = value["required_prefabs"].as_array() {
-            ensure!(
-                prefabs.contains(&json!(format!("{kind}_portal"))),
-                "event level is missing its portal prefab"
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_topology(sparse: &Value, current: &Value) -> Result<()> {
-    let shards = object(&current["shards"])?;
-    let settings = &current["settings"];
-    let multi = shards.len() > 1;
-    ensure!(
-        !multi || sparse["settings"]["shard_enabled"] != false,
-        "shard_enabled cannot be false for multiple shards"
-    );
-    let mut names = BTreeSet::new();
-    let mut ids = BTreeSet::new();
-    let mut ports = BTreeSet::new();
-    let mut master_ports = BTreeSet::new();
-    let mut keys = BTreeSet::new();
-    let mut masters = 0;
-    for (name, shard) in shards {
-        configuration::validate_shard_name(name)?;
-        ensure!(
-            names.insert(name.to_lowercase()),
-            "duplicate shard directory names"
-        );
-        let shard_settings = &shard["settings"];
-        let master = shard_settings["is_master"] == true;
-        masters += usize::from(master);
-        if !master {
-            ensure!(
-                shard_settings["name"]
-                    .as_str()
-                    .is_some_and(|value| !value.is_empty()),
-                "secondary shards require a name"
-            );
-        }
-        if let Some(id) = shard_settings["id"].as_u64() {
-            ensure!(ids.insert(id), "shard ids must be unique");
-        }
-        for field in ["server_port", "master_server_port"] {
-            ensure!(
-                ports.insert(shard_settings[field].as_u64().unwrap()),
-                "UDP ports must be unique"
-            );
-        }
-        master_ports.insert(
-            shard_settings["master_port"]
-                .as_u64()
-                .or(settings["master_port"].as_u64())
-                .unwrap(),
-        );
-        keys.insert(
-            shard_settings["cluster_key"]
-                .as_str()
-                .or(settings["cluster_key"].as_str()),
-        );
-        if (multi || settings["shard_enabled"] == true) && !master {
-            ensure!(
-                shard_settings["master_ip"]
-                    .as_str()
-                    .or(settings["master_ip"].as_str())
-                    .is_some(),
-                "secondary shards require master_ip"
-            );
-        }
-        if matches!(
-            settings["game_mode"].as_str(),
-            Some("quagmire" | "lavaarena")
-        ) {
-            ensure!(
-                !shard["level"].is_null(),
-                "event game modes require level data for every shard"
-            );
-        }
-    }
-    ensure!(masters == 1, "expected exactly one master shard");
-    ensure!(
-        master_ports.len() == 1,
-        "all shards must use the same master_port"
-    );
-    ensure!(
-        !ports.contains(master_ports.first().unwrap()),
-        "master_port conflicts with another UDP port"
-    );
-    ensure!(
-        keys.len() == 1 && !keys.contains(&Some("")),
-        "all shards require the same non-empty cluster_key or must omit it"
-    );
     Ok(())
 }
 
@@ -605,11 +231,16 @@ pub(crate) fn workshop_id(value: &str) -> Result<u64> {
     value.parse().context("Workshop id exceeds uint64")
 }
 
+fn ini_sections(model: &str) -> Result<&'static [(&'static str, &'static [&'static str])]> {
+    match model {
+        "ClusterSettings" => Ok(types::ClusterSettings::SECTIONS),
+        "ShardSettings" => Ok(types::ShardSettings::SECTIONS),
+        _ => bail!("unknown INI model"),
+    }
+}
+
 pub fn parse_ini(model: &str, source: &str) -> Result<Value> {
-    ensure!(
-        matches!(model, "ClusterSettings" | "ShardSettings"),
-        "unknown INI model"
-    );
+    let sections = ini_sections(model)?;
     let document = configuration::Ini::parse(
         Path::new(if model == "ClusterSettings" {
             "cluster.ini"
@@ -620,48 +251,21 @@ pub fn parse_ini(model: &str, source: &str) -> Result<Value> {
         Some(model == "ShardSettings"),
     )?
     .into_sections();
-    let definitions = object(&INI[model]["fields"])?;
     let mut result = Map::new();
     for (section, fields) in document {
         ensure!(
-            definitions.values().any(|value| value
-                .as_str()
-                .is_some_and(|v| v.eq_ignore_ascii_case(&section)))
-                || INI[model]["ignored"]
-                    .as_object()
-                    .is_some_and(|ignored| ignored
-                        .keys()
-                        .any(|key| key.eq_ignore_ascii_case(&section))),
+            sections
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(&section)),
             "unknown INI section"
         );
         for (name, text) in fields {
             if model == "ShardSettings" && section == "steam" && name == "authentication_port" {
                 continue;
             }
-            ensure!(
-                definitions
-                    .get(&name)
-                    .and_then(Value::as_str)
-                    .is_some_and(|expected| expected.eq_ignore_ascii_case(&section)),
-                "unknown INI option"
-            );
-            let default = &DEFAULTS[model][&name];
-            let value = if default.is_boolean() {
-                ensure!(
-                    text.eq_ignore_ascii_case("true") || text.eq_ignore_ascii_case("false"),
-                    "INI boolean must be true or false"
-                );
-                json!(text.eq_ignore_ascii_case("true"))
-            } else if default.is_number()
-                || (model == "ShardSettings" && ["id", "master_port"].contains(&name.as_str()))
-            {
-                ensure!(
-                    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()),
-                    "INI integer must be unsigned decimal"
-                );
-                json!(text.parse::<u64>().context("INI integer exceeds uint64")?)
-            } else {
-                json!(text)
+            let value = match model {
+                "ClusterSettings" => types::ClusterSettings::parse_field(&section, &name, &text)?,
+                _ => types::ShardSettings::parse_field(&section, &name, &text)?,
             };
             result.insert(name, value);
         }
@@ -675,7 +279,7 @@ pub fn render_ini(model: &str, sparse: &Value, multi: bool) -> Result<String> {
     validate(model, sparse)?;
     let mut value = sparse.clone();
     if model == "ShardSettings" {
-        let defaults = resolved(model, sparse);
+        let defaults = resolved(model, sparse)?;
         value["encode_user_path"] = defaults["encode_user_path"].clone();
         if multi {
             value["is_master"] = defaults["is_master"].clone();
@@ -684,18 +288,10 @@ pub fn render_ini(model: &str, sparse: &Value, multi: bool) -> Result<String> {
         value["shard_enabled"] = json!(true);
     }
     let mut sections = Vec::new();
-    for section in INI[model]["sections"]
-        .as_array()
-        .expect("bundled INI sections")
-    {
+    for (section, fields) in ini_sections(model)? {
         let mut lines = Vec::new();
-        for field in section["fields"]
-            .as_array()
-            .expect("bundled INI fields")
-            .iter()
-            .filter_map(Value::as_str)
-        {
-            if let Some(value) = value.get(field).filter(|value| !value.is_null()) {
+        for field in *fields {
+            if let Some(value) = value.get(*field).filter(|value| !value.is_null()) {
                 let text = value
                     .as_str()
                     .map(str::to_owned)
@@ -704,11 +300,7 @@ pub fn render_ini(model: &str, sparse: &Value, multi: bool) -> Result<String> {
             }
         }
         if !lines.is_empty() {
-            sections.push(format!(
-                "[{}]\n{}",
-                section["name"].as_str().unwrap(),
-                lines.join("\n")
-            ));
+            sections.push(format!("[{section}]\n{}", lines.join("\n")));
         }
     }
     let source = sections.join("\n\n");
@@ -725,18 +317,18 @@ pub fn render_ini(model: &str, sparse: &Value, multi: bool) -> Result<String> {
 
 impl ClusterSettings {
     pub fn parse(source: &str) -> Result<Self> {
-        Ok(Self(parse_ini("ClusterSettings", source)?))
+        Self::from_value(parse_ini("ClusterSettings", source)?)
     }
     pub fn render(&self, multi: bool) -> Result<String> {
-        render_ini("ClusterSettings", &self.0, multi)
+        render_ini("ClusterSettings", &self.as_value(), multi)
     }
 }
 impl ShardSettings {
     pub fn parse(source: &str) -> Result<Self> {
-        Ok(Self(parse_ini("ShardSettings", source)?))
+        Self::from_value(parse_ini("ShardSettings", source)?)
     }
     pub fn render(&self, multi: bool) -> Result<String> {
-        render_ini("ShardSettings", &self.0, multi)
+        render_ini("ShardSettings", &self.as_value(), multi)
     }
 }
 
@@ -751,7 +343,12 @@ impl ModOverrides {
         Self::from_value(value)
     }
     pub fn render(&self) -> Result<String> {
-        let mut entries = self.0["entries"].as_object().cloned().unwrap_or_default();
+        let mut entries: Map<String, Value> = self
+            .0
+            .entries()
+            .into_iter()
+            .map(|(name, entry)| (name, ModOverride(entry).into_value()))
+            .collect();
         for entry in entries.values_mut() {
             entry
                 .as_object_mut()
@@ -762,24 +359,17 @@ impl ModOverrides {
                             && value.as_object().is_some_and(Map::is_empty))
                 });
         }
-        if self
-            .0
-            .get("client_mods_disabled")
-            .is_some_and(|value| !value.is_null())
-        {
-            entries.insert(
-                "client_mods_disabled".into(),
-                self.0["client_mods_disabled"].clone(),
-            );
+        if let Some(disabled) = self.0.client_mods_disabled() {
+            entries.insert("client_mods_disabled".into(), json!(disabled));
         }
         files::render_lua_table(&Value::Object(entries))
     }
     pub fn workshop_items(&self) -> BTreeSet<u64> {
-        self.0["entries"]
-            .as_object()
-            .into_iter()
+        self.0
+            .entries
+            .iter()
             .flatten()
-            .filter(|(_, value)| value["enabled"] == true)
+            .filter(|(_, value)| value.enabled() == Some(true))
             .filter_map(|(name, _)| {
                 name.strip_prefix("workshop-")
                     .and_then(|id| id.parse().ok())
@@ -848,11 +438,10 @@ impl ModSettings {
         Ok(output)
     }
     pub fn workshop_items(&self) -> BTreeSet<u64> {
-        self.0["force_enabled"]
-            .as_array()
-            .into_iter()
+        self.0
+            .force_enabled
+            .iter()
             .flatten()
-            .filter_map(Value::as_str)
             .filter_map(|name| workshop_id(name.strip_prefix("workshop-").unwrap_or(name)).ok())
             .collect()
     }
@@ -885,16 +474,11 @@ impl WorkshopDownloads {
     }
     pub fn render(&self) -> Result<String> {
         let mut output = String::new();
-        for (field, function) in [
-            ("items", "ServerModSetup"),
-            ("collections", "ServerModCollectionSetup"),
+        for (ids, function) in [
+            (self.0.items(), "ServerModSetup"),
+            (self.0.collections(), "ServerModCollectionSetup"),
         ] {
-            let ids: BTreeSet<_> = self.0[field]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_u64)
-                .collect();
+            let ids: BTreeSet<_> = ids.into_iter().collect();
             for id in ids {
                 output.push_str(&format!("{function}(\"{id}\")\n"));
             }
@@ -998,7 +582,7 @@ impl WorldgenOverride {
             } else {
                 let candidates: Vec<_> = ["forest", "cave"]
                     .into_iter()
-                    .filter(|kind| VALIDATORS[world_model(kind).unwrap()].is_valid(&overrides))
+                    .filter(|kind| validate(world_model(kind).unwrap(), &overrides).is_ok())
                     .collect();
                 ensure!(
                     candidates.len() == 1,
@@ -1015,13 +599,16 @@ impl WorldgenOverride {
     }
 
     pub fn render(&self) -> Result<String> {
-        let mut table = json!({"override_enabled":self.resolved()["enabled"], "overrides":{}});
-        for field in ["worldgen_preset", "settings_preset"] {
-            if self.0.get(field).is_some_and(|value| !value.is_null()) {
-                table[field] = self.0[field].clone();
+        let mut table = json!({"override_enabled":self.0.enabled(), "overrides":{}});
+        for (field, preset) in [
+            ("worldgen_preset", self.0.worldgen_preset()),
+            ("settings_preset", self.0.settings_preset()),
+        ] {
+            if let Some(preset) = preset {
+                table[field] = json!(preset);
             }
         }
-        if let Some(values) = self.0["overrides"]["values"].as_object() {
+        if let Some(values) = self.0.overrides().values().as_object() {
             table["overrides"] = Value::Object(
                 values
                     .iter()
@@ -1063,9 +650,10 @@ impl LevelDataOverride {
         Self::from_value(value)
     }
     pub fn render(&self) -> Result<String> {
-        let mut table = object(&self.0)?.clone();
+        let mut table = object(&self.as_value())?.clone();
         table.retain(|_, value| !value.is_null());
-        let values = object(&self.0["overrides"]["values"])?;
+        let overrides = self.0.overrides.values();
+        let values = object(&overrides)?;
         table.insert(
             "overrides".into(),
             Value::Object(
@@ -1107,15 +695,14 @@ impl ClusterConfig {
         )
     }
     pub fn files(&self) -> Result<FileChanges> {
-        let current = self.resolved();
-        let multi = object(&self.0["shards"])?.len() > 1;
-        let settings = self.0.get("settings").cloned().unwrap_or_else(|| json!({}));
+        let multi = self.0.shards.len() > 1;
+        let settings = self.0.settings();
         let mut files = FileChanges::new();
         files.insert(
             PathBuf::from("cluster.ini"),
-            render_ini("ClusterSettings", &settings, multi)?,
+            ClusterSettings(settings.clone()).render(multi)?,
         );
-        let token = current["token"].as_str().unwrap_or("");
+        let token = self.0.token();
         files.insert(
             PathBuf::from("cluster_token.txt"),
             if token.is_empty() {
@@ -1124,69 +711,58 @@ impl ClusterConfig {
                 format!("{token}\n")
             },
         );
-        for field in PERMISSION_FIELDS {
-            files.insert(
-                PathBuf::from(format!("{field}.txt")),
-                current[field].as_str().unwrap_or("").to_owned(),
-            );
+        for (field, users) in [
+            ("adminlist", self.0.adminlist()),
+            ("whitelist", self.0.whitelist()),
+            ("blocklist", self.0.blocklist()),
+        ] {
+            files.insert(PathBuf::from(format!("{field}.txt")), users);
         }
         files.insert(
             PathBuf::from("mods/modsettings.lua"),
-            ModSettings::from_value(
-                self.0
-                    .get("mod_settings")
-                    .cloned()
-                    .unwrap_or_else(|| json!({})),
-            )?
-            .render()?,
+            ModSettings(self.0.mod_settings()).render()?,
         );
         files.insert(
             PathBuf::from("mods/dedicated_server_mods_setup.lua"),
             self.resolved_downloads()?.render()?,
         );
-        let multi = multi || current["settings"]["shard_enabled"] == true;
-        for (name, shard) in object(&self.0["shards"])? {
+        let multi = multi || settings.shard_enabled();
+        for (name, shard) in &self.0.shards {
             files.insert(
                 PathBuf::from(name).join("server.ini"),
-                render_ini("ShardSettings", &shard["settings"], multi)?,
+                ShardSettings(shard.settings.clone()).render(multi)?,
             );
             files.insert(
                 PathBuf::from(name).join("modoverrides.lua"),
-                ModOverrides::from_value(shard.get("mods").cloned().unwrap_or_else(|| json!({})))?
-                    .render()?,
+                ModOverrides(shard.mods()).render()?,
             );
-            for (field, file) in [
-                ("world", "worldgenoverride.lua"),
-                ("level", "leveldataoverride.lua"),
-            ] {
-                if shard.get(field).is_some_and(|value| !value.is_null()) {
-                    let rendered = if field == "world" {
-                        WorldgenOverride::from_value(shard[field].clone())?.render()?
-                    } else {
-                        LevelDataOverride::from_value(shard[field].clone())?.render()?
-                    };
-                    files.insert(PathBuf::from(name).join(file), rendered);
-                }
+            if let Some(world) = shard.world() {
+                files.insert(
+                    PathBuf::from(name).join("worldgenoverride.lua"),
+                    WorldgenOverride(world).render()?,
+                );
+            }
+            if let Some(level) = shard.level() {
+                files.insert(
+                    PathBuf::from(name).join("leveldataoverride.lua"),
+                    LevelDataOverride(level).render()?,
+                );
             }
         }
         Ok(files)
     }
 
     pub fn resolved_downloads(&self) -> Result<WorkshopDownloads> {
-        let current = self.resolved();
-        let mut items: BTreeSet<_> = current["downloads"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_u64)
-            .collect();
-        items.extend(ModSettings::from_value(current["mod_settings"].clone())?.workshop_items());
-        for shard in object(&current["shards"])?.values() {
-            items.extend(ModOverrides::from_value(shard["mods"].clone())?.workshop_items());
+        let downloads = self.0.downloads();
+        let mut items: BTreeSet<_> = downloads.items().into_iter().collect();
+        items.extend(ModSettings(self.0.mod_settings()).workshop_items());
+        for shard in self.0.shards.values() {
+            items.extend(ModOverrides(shard.mods()).workshop_items());
         }
-        WorkshopDownloads::from_value(
-            json!({"items":items,"collections":current["downloads"]["collections"]}),
-        )
+        Ok(WorkshopDownloads(types::WorkshopDownloads {
+            items: Some(items.into_iter().collect()),
+            collections: Some(downloads.collections()),
+        }))
     }
 
     /// Apply a complete offline configuration while retaining saves and live lists.
@@ -1196,11 +772,12 @@ impl ClusterConfig {
         permissions: files::PermissionFiles,
     ) -> Result<Vec<PathBuf>> {
         let mut configuration = self.0.clone();
-        let current = self.resolved();
-        let has_key = object(&current["shards"])?.values().any(|shard| {
-            shard["settings"]["cluster_key"].is_string()
-                || current["settings"]["cluster_key"].is_string()
-        });
+        let has_key = self.0.settings().cluster_key().is_some()
+            || self
+                .0
+                .shards
+                .values()
+                .any(|shard| shard.settings.cluster_key().is_some());
         if !has_key {
             let old_cluster_key = room
                 .read_optional_text("cluster.ini")?
@@ -1230,23 +807,25 @@ impl ClusterConfig {
                 .flatten()
                 .map(Ok)
                 .unwrap_or_else(new_cluster_key)?;
-            if configuration.get("settings").is_none() {
-                configuration["settings"] = json!({});
-            }
-            configuration["settings"]["cluster_key"] = json!(key);
+            configuration
+                .settings
+                .get_or_insert_with(Default::default)
+                .cluster_key = Some(Some(key));
         }
-        let target = Self::from_value(configuration)?;
+        check_input(&serde_json::to_value(&configuration)?)?;
+        crate::validation::check(&configuration)?;
+        configuration.check()?;
+        let target = Self(configuration);
         let mut files = target.files()?;
         if permissions == files::PermissionFiles::Preserve {
             for field in PERMISSION_FIELDS {
                 files.remove(Path::new(&format!("{field}.txt")));
             }
         }
-        if self.0.get("token").is_none() && room.read_optional_text("cluster_token.txt")?.is_some()
-        {
+        if self.0.token.is_none() && room.read_optional_text("cluster_token.txt")?.is_some() {
             files.remove(Path::new("cluster_token.txt"));
         }
-        if self.0.get("mod_settings").is_none()
+        if self.0.mod_settings.is_none()
             && room.read_optional_text("mods/modsettings.lua")?.is_some()
         {
             files.remove(Path::new("mods/modsettings.lua"));
@@ -1271,7 +850,7 @@ impl ClusterConfig {
         }
         let mut removed = Vec::new();
         for name in room.shard_directories()? {
-            if target.0["shards"].get(&name).is_none()
+            if !target.0.shards.contains_key(&name)
                 && room
                     .read_optional_text(Path::new(&name).join("server.ini"))?
                     .is_some()
@@ -1279,7 +858,7 @@ impl ClusterConfig {
                 removed.push(PathBuf::from(name).join("server.ini"));
             }
         }
-        for name in object(&target.0["shards"])?.keys() {
+        for name in target.0.shards.keys() {
             for filename in ["worldgenoverride.lua", "leveldataoverride.lua"] {
                 let path = PathBuf::from(name).join(filename);
                 if !files.contains_key(&path) && room.read_optional_text(&path)?.is_some() {
@@ -1323,7 +902,7 @@ fn load_cluster(
         read(path)?.with_context(|| format!("missing native configuration: {}", path.display()))
     };
     let settings = parse_ini("ClusterSettings", &required(Path::new("cluster.ini"))?)?;
-    let token = required(Path::new("cluster_token.txt"))?;
+    let token = read(Path::new("cluster_token.txt"))?.unwrap_or_default();
     let token = token
         .strip_suffix("\r\n")
         .or_else(|| token.strip_suffix('\n'))
@@ -1395,20 +974,21 @@ impl RoomPreset {
     pub fn compose(parts: &[Self]) -> Result<Self> {
         let mut output = json!({"settings":{},"shards":{},"mods":{}});
         for part in parts {
-            overlay(&mut output["settings"], &part.0["settings"]);
-            if part.0["mods"]
+            let part = part.as_value();
+            overlay(&mut output["settings"], &part["settings"]);
+            if part["mods"]
                 .as_object()
                 .is_some_and(|mods| !mods.is_empty())
             {
-                merge_mods(&mut output["mods"], &part.0["mods"]);
+                merge_mods(&mut output["mods"], &part["mods"]);
                 for shard in output["shards"].as_object_mut().unwrap().values_mut() {
                     if shard.get("mods").is_none() {
                         shard["mods"] = json!({});
                     }
-                    merge_mods(&mut shard["mods"], &part.0["mods"]);
+                    merge_mods(&mut shard["mods"], &part["mods"]);
                 }
             }
-            for (name, patch) in part.0["shards"].as_object().into_iter().flatten() {
+            for (name, patch) in part["shards"].as_object().into_iter().flatten() {
                 if let Some(base) = output["shards"].get_mut(name) {
                     let mut patch = patch.clone();
                     let mut settings = base["settings"].clone();
@@ -1455,9 +1035,10 @@ impl RoomPreset {
         cluster_key: Option<&str>,
         settings: Option<&ClusterSettings>,
     ) -> Result<ClusterConfig> {
-        let mut configuration = json!({"settings": self.0.get("settings").cloned().unwrap_or_else(|| json!({})), "shards":self.0.get("shards").cloned().unwrap_or_else(|| json!({})), "token":token});
+        let value = self.as_value();
+        let mut configuration = json!({"settings": value.get("settings").cloned().unwrap_or_else(|| json!({})), "shards":value.get("shards").cloned().unwrap_or_else(|| json!({})), "token":token});
         if let Some(settings) = settings {
-            overlay(&mut configuration["settings"], settings.as_value());
+            overlay(&mut configuration["settings"], &settings.as_value());
         }
         if let Some(key) = cluster_key {
             configuration["settings"]["cluster_key"] = json!(key);
@@ -1467,7 +1048,7 @@ impl RoomPreset {
             .unwrap()
             .values_mut()
         {
-            let mut mods = self.0.get("mods").cloned().unwrap_or_else(|| json!({}));
+            let mut mods = value.get("mods").cloned().unwrap_or_else(|| json!({}));
             merge_mods(&mut mods, &shard["mods"]);
             shard["mods"] = mods;
         }
@@ -1569,7 +1150,112 @@ mod tests {
                 .unwrap()
                 .render(true)
                 .unwrap(),
-            "[SHARD]\nis_master = true\n\n[ACCOUNT]\nencode_user_path = true\n"
+            "[SHARD]\nis_master = true\n\n[ACCOUNT]\nencode_user_path = false\n"
+        );
+    }
+
+    #[test]
+    fn saving_writes_default_encoding_and_preserves_explicit_encoding() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("forest")).unwrap();
+        fs::write(
+            directory.path().join("cluster.ini"),
+            "[SHARD]\ncluster_key = existing-key\n",
+        )
+        .unwrap();
+        let server = directory.path().join("forest/server.ini");
+        fs::write(&server, "[NETWORK]\nserver_port = 12000\n").unwrap();
+        let mut room = RoomLock::try_acquire(directory.path()).unwrap();
+        let cluster = ClusterConfig::load(&room).unwrap();
+        assert!(
+            cluster.as_value()["shards"]["forest"]["settings"]
+                .get("encode_user_path")
+                .is_none()
+        );
+        assert_eq!(
+            cluster.resolved()["shards"]["forest"]["settings"]["encode_user_path"],
+            false
+        );
+        assert!(
+            cluster.files().unwrap()[Path::new("forest/server.ini")]
+                .contains("encode_user_path = false\n")
+        );
+        cluster
+            .save(&mut room.while_stopped(), files::PermissionFiles::Preserve)
+            .unwrap();
+        assert!(
+            fs::read_to_string(&server)
+                .unwrap()
+                .contains("encode_user_path = false\n")
+        );
+
+        // Maintenance must repair a file that omits the setting even when its effective value agrees.
+        let source = fs::read_to_string(&server)
+            .unwrap()
+            .replace("encode_user_path = false\n", "");
+        fs::write(&server, source).unwrap();
+        let cluster = ClusterConfig::load(&room).unwrap();
+        assert_eq!(
+            cluster
+                .save(&mut room.while_stopped(), files::PermissionFiles::Preserve)
+                .unwrap(),
+            vec![PathBuf::from("forest/server.ini")]
+        );
+        assert!(
+            cluster
+                .save(&mut room.while_stopped(), files::PermissionFiles::Preserve)
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut value = cluster.into_value();
+        value["shards"]["forest"]["settings"]["encode_user_path"] = json!(true);
+        let encoded = ClusterConfig::from_value(value).unwrap();
+        encoded
+            .save(&mut room.while_stopped(), files::PermissionFiles::Preserve)
+            .unwrap();
+        assert!(
+            fs::read_to_string(&server)
+                .unwrap()
+                .contains("encode_user_path = true\n")
+        );
+        assert_eq!(
+            ClusterConfig::load(&room).unwrap().resolved()["shards"]["forest"]["settings"]["encode_user_path"],
+            true
+        );
+    }
+
+    #[test]
+    fn native_models_reject_invalid_presence_collections_and_world_values() {
+        for (model, value) in [
+            ("ShardSettings", json!({"encode_user_path":null})),
+            ("ClusterSettings", json!({"autosaver_enabled":null})),
+            ("ClusterConfig", json!({"shards":{}})),
+            ("WorkshopDownloads", json!({"items":[1,1]})),
+            ("ModSettings", json!({"force_enabled":["local","local"]})),
+            (
+                "ModOverride",
+                json!({"configuration_options":{"value":null}}),
+            ),
+            ("QuagmireOverrides", json!({"loop_percent":1.01})),
+            ("QuagmireOverrides", json!({"loop_percent":-0.01})),
+            ("WorldgenOverride", json!({"overrides":{"kind":"forest"}})),
+            (
+                "WorldgenOverride",
+                json!({"overrides":{"kind":"forest","values":{},"unexpected":true}}),
+            ),
+        ] {
+            assert!(validate(model, &value).is_err(), "{model}: {value}");
+        }
+        for value in [0, 1] {
+            validate("QuagmireOverrides", &json!({"loop_percent":value})).unwrap();
+        }
+        let values = json!({"cluster_name":null,"pvp":false});
+        assert_eq!(
+            ClusterSettings::from_value(values.clone())
+                .unwrap()
+                .into_value(),
+            values
         );
     }
 
@@ -1604,7 +1290,7 @@ mod tests {
             "[STEAM]\nauthentication_port=legacy\n[ACCOUNT]\nencode_user_path=false\n",
         )
         .unwrap();
-        assert_eq!(shard.as_value(), &json!({"encode_user_path":false}));
+        assert_eq!(shard.as_value(), json!({"encode_user_path":false}));
         for value in [json!({"id":2}), json!({"is_master":false,"id":1})] {
             assert!(ShardSettings::from_value(value).is_err());
         }
