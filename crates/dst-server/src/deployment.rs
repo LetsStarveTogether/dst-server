@@ -1,10 +1,9 @@
-//! Single-container Quadlets and durable UDP publication allocation.
+//! Single-container Quadlets and UDP publication allocation.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, UdpSocket};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -214,7 +213,7 @@ impl ContainerUnit {
     pub fn render(&self) -> Result<String> {
         self.validate()?;
         let mut source = format!(
-            "{OWNER}\n[Unit]\nDescription=Don't Starve Together {}\n\n[Container]\nImage={}\nPull=never\nRunInit=true\nExec=/usr/local/bin/dst-server agent --cluster /cluster\nStopTimeout=360\n",
+            "{OWNER}\n[Unit]\nDescription=Don't Starve Together {}\n\n[Container]\nImage={}\nPull=never\nRunInit=true\nTimezone=local\nExec=/usr/local/bin/dst-server agent --cluster /cluster\nStopTimeout=360\n",
             escape(&self.name),
             quote(&self.options.image)
         );
@@ -264,6 +263,15 @@ impl ContainerUnit {
         }
         Ok(source)
     }
+    pub(crate) fn load_for_room(path: impl AsRef<Path>, directory: &Path) -> Result<Self> {
+        let unit = Self::load(path)?;
+        ensure!(
+            unit.cluster == std::path::absolute(directory)?,
+            "Quadlet must mount the selected room directory"
+        );
+        Ok(unit)
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let source = read_regular(path)?;
@@ -290,6 +298,7 @@ impl ContainerUnit {
         for (section, key, value) in [
             ("Container", "Pull", "never"),
             ("Container", "RunInit", "true"),
+            ("Container", "Timezone", "local"),
             (
                 "Container",
                 "Exec",
@@ -485,21 +494,10 @@ fn endpoints(configuration: &ClusterConfig) -> Result<Vec<Endpoint>> {
     Ok(result)
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Reservation {
-    mappings: Vec<PortMapping>,
-    held: BTreeSet<u16>,
-}
-
-/// The flock stays held through reservation, native unit replacement and finalization.
-/// Interrupted publication retains both old and new claims; retry safely releases the old claims.
+/// Hold the host lock until the Quadlet containing these mappings has been saved.
 pub struct PortAllocation {
-    path: PathBuf,
     _lock: File,
     owner_pid: u32,
-    reservations: BTreeMap<u16, Reservation>,
-    room: u16,
     pub mappings: Vec<PortMapping>,
 }
 
@@ -508,8 +506,7 @@ impl Drop for PortAllocation {
         if self.owner_pid == std::process::id() {
             // A child can retain this shared descriptor before exec; only the
             // allocating process may release the lock on drop or failed setup.
-            // SAFETY: self owns the valid lock descriptor throughout Drop.
-            unsafe { libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN) };
+            let _ = self._lock.unlock();
         }
     }
 }
@@ -542,53 +539,73 @@ impl PortAllocation {
             lock.metadata()?.is_file(),
             "host lock is not a regular file"
         );
-        // SAFETY: lock owns a valid descriptor throughout this allocation.
-        ensure!(
-            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
-            "another host deployment is in progress"
-        );
+        lock.try_lock()
+            .context("host deployment is busy or cannot be locked")?;
         let mut allocation = Self {
-            path: root.join(".dst-ports.json"),
             _lock: lock,
             owner_pid: std::process::id(),
-            reservations: BTreeMap::new(),
-            room,
             mappings: Vec::new(),
         };
-        let path = &allocation.path;
-        let mut reservations: BTreeMap<u16, Reservation> = if path.try_exists()? {
-            serde_json::from_str(&read_regular(path)?)?
-        } else {
-            BTreeMap::new()
-        };
         let mut occupied = BTreeSet::new();
-        for (number, reservation) in &reservations {
-            for mapping in &reservation.mappings {
-                mapping.validate()?;
-            }
-            if *number != room {
-                occupied.extend(reservation.held.iter().copied());
-                occupied.extend(reservation.mappings.iter().map(|mapping| mapping.host));
-            }
-        }
-        // Include native units even when the registry was created after them.
+        let mut old = BTreeMap::new();
+        let current = format!("dst-{room:03}.container");
         for entry in fs::read_dir(quadlets.as_ref())? {
             let path = entry?.path();
             if path
                 .extension()
-                .is_some_and(|extension| extension == "container")
-                && path
-                    .file_name()
-                    .is_none_or(|name| name != format!("dst-{room:03}.container").as_str())
+                .is_none_or(|extension| extension != "container")
             {
-                let fields = parse_sections(&read_regular(&path)?)?;
-                for value in fields
-                    .get(&("Container".into(), "PublishPort".into()))
-                    .into_iter()
-                    .flatten()
-                {
-                    occupied.extend(existing_udp_ports(value)?);
+                continue;
+            }
+            if path
+                .file_name()
+                .is_some_and(|name| name == current.as_str())
+            {
+                let unit = ContainerUnit::load(&path)?;
+                for path in dropins(quadlets.as_ref(), &unit.name)? {
+                    ensure!(
+                        !parse_sections(&read_regular(&path)?)?
+                            .contains_key(&("Container".into(), "PublishPort".into())),
+                        "drop-in overrides managed ports: {}",
+                        path.display()
+                    );
                 }
+                old.extend(
+                    unit.options
+                        .ports
+                        .into_iter()
+                        .map(|mapping| (mapping.container, mapping.host)),
+                );
+            } else {
+                let mut fields = parse_sections(&read_regular(&path)?)?;
+                let key = ("Container".into(), "PublishPort".into());
+                let mut ports = fields.remove(&key).unwrap_or_default();
+                let name = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .context("invalid Quadlet name")?;
+                for path in dropins(quadlets.as_ref(), name)? {
+                    for value in parse_sections(&read_regular(&path)?)?
+                        .remove(&key)
+                        .unwrap_or_default()
+                    {
+                        ports.push(value);
+                    }
+                }
+                let mut used = BTreeSet::new();
+                for value in ports {
+                    if value.is_empty() {
+                        used.clear();
+                    } else {
+                        let value = if value.starts_with('"') {
+                            unquote(&value)?
+                        } else {
+                            value
+                        };
+                        used.extend(existing_udp_ports(&value)?);
+                    }
+                }
+                occupied.extend(used);
             }
         }
         let endpoints = endpoints(configuration)?;
@@ -608,18 +625,7 @@ impl PortAllocation {
                 "duplicate explicit container port"
             );
         }
-        let previous = reservations.get(&room).cloned().unwrap_or_default();
-        let old: BTreeMap<_, _> = previous
-            .mappings
-            .iter()
-            .map(|mapping| (mapping.container, mapping.host))
-            .collect();
-        let owned: BTreeSet<_> = previous
-            .held
-            .iter()
-            .copied()
-            .chain(old.values().copied())
-            .collect();
+        let owned: BTreeSet<_> = old.values().copied().collect();
         let mut mappings = Vec::new();
         let mut available = pool;
         for endpoint in endpoints {
@@ -652,26 +658,14 @@ impl PortAllocation {
                 protocol: Protocol::Udp,
             });
         }
-        let held = owned
-            .into_iter()
-            .chain(mappings.iter().map(|mapping| mapping.host))
-            .collect();
-        reservations.insert(
-            room,
-            Reservation {
-                mappings: mappings.clone(),
-                held,
-            },
-        );
-        atomic_write(path, &serde_json::to_vec(&reservations)?)?;
-        allocation.reservations = reservations;
         allocation.mappings = mappings;
+        let legacy = root.join(".dst-ports.json");
+        if legacy.try_exists()? {
+            read_regular(&legacy)?;
+            fs::remove_file(legacy)?;
+            File::open(root)?.sync_all()?;
+        }
         Ok(allocation)
-    }
-    pub fn commit(mut self) -> Result<()> {
-        self.reservations.get_mut(&self.room).unwrap().held =
-            self.mappings.iter().map(|mapping| mapping.host).collect();
-        atomic_write(&self.path, &serde_json::to_vec(&self.reservations)?)
     }
 }
 
@@ -959,7 +953,7 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::os::fd::FromRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::{net::UnixStream, process::CommandExt};
     use std::process::Command;
     use std::time::Duration;
@@ -975,86 +969,77 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let units = tempfile::tempdir().unwrap();
         let configuration = cluster(1);
-        for commit in [false, true] {
-            let allocation = PortAllocation::reserve(
-                root.path(),
-                units.path(),
-                0,
-                &configuration,
-                &[],
-                43000..=43100,
-            )
+        let allocation = PortAllocation::reserve(
+            root.path(),
+            units.path(),
+            0,
+            &configuration,
+            &[],
+            43000..=43100,
+        )
+        .unwrap();
+        let owner_pid = allocation.owner_pid;
+        let lock_fd = allocation._lock.as_raw_fd();
+        let (mut parent, child) = UnixStream::pair().unwrap();
+        parent
+            .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
-            let owner_pid = allocation.owner_pid;
-            let lock_fd = allocation._lock.as_raw_fd();
-            let (mut parent, child) = UnixStream::pair().unwrap();
-            parent
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            let parent_fd = parent.as_raw_fd();
-            let launched = std::thread::spawn(move || {
-                let mut command = Command::new("/bin/true");
-                // SAFETY: the callback only performs async-signal-safe descriptor
-                // operations with valid inherited FDs and stack-local byte storage.
-                unsafe {
-                    command.pre_exec(move || {
-                        libc::close(parent_fd);
-                        let lock_fd = libc::dup(lock_fd);
-                        if lock_fd < 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        // Empty collections avoid allocation/deallocation after
-                        // fork; this Drop must leave the parent's lock in place.
-                        drop(PortAllocation {
-                            path: PathBuf::new(),
-                            _lock: File::from_raw_fd(lock_fd),
-                            owner_pid,
-                            reservations: BTreeMap::new(),
-                            room: 0,
-                            mappings: Vec::new(),
-                        });
-                        let mut byte = 1_u8;
-                        if libc::write(child.as_raw_fd(), (&byte as *const u8).cast(), 1) != 1
-                            || libc::read(child.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) != 1
-                        {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
+        let parent_fd = parent.as_raw_fd();
+        let launched = std::thread::spawn(move || {
+            let mut command = Command::new("/bin/true");
+            // SAFETY: the callback only performs async-signal-safe descriptor
+            // operations with valid inherited FDs and stack-local byte storage.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::close(parent_fd);
+                    let lock_fd = libc::dup(lock_fd);
+                    if lock_fd < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    // Empty collections avoid allocation/deallocation after
+                    // fork; this Drop must leave the parent's lock in place.
+                    drop(PortAllocation {
+                        _lock: File::from_raw_fd(lock_fd),
+                        owner_pid,
+                        mappings: Vec::new(),
                     });
-                }
-                command.status().unwrap()
-            });
-            parent.read_exact(&mut [0]).unwrap();
-            let parent_lock_intact = PortAllocation::reserve(
-                root.path(),
-                units.path(),
-                0,
-                &configuration,
-                &[],
-                43000..=43100,
-            )
-            .is_err();
-            if commit {
-                allocation.commit().unwrap();
-            } else {
-                drop(allocation);
+                    let mut byte = 1_u8;
+                    if libc::write(child.as_raw_fd(), (&byte as *const u8).cast(), 1) != 1
+                        || libc::read(child.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) != 1
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
             }
-            let next = PortAllocation::reserve(
-                root.path(),
-                units.path(),
-                0,
-                &configuration,
-                &[],
-                43000..=43100,
-            );
-            parent.write_all(&[1]).unwrap();
-            assert!(launched.join().unwrap().success());
-            assert!(
-                parent_lock_intact,
-                "child Drop released its parent's allocation lock"
-            );
-            assert!(next.is_ok(), "{:#}", next.err().unwrap());
-        }
+            command.status().unwrap()
+        });
+        parent.read_exact(&mut [0]).unwrap();
+        let parent_lock_intact = PortAllocation::reserve(
+            root.path(),
+            units.path(),
+            0,
+            &configuration,
+            &[],
+            43000..=43100,
+        )
+        .is_err();
+        drop(allocation);
+        let next = PortAllocation::reserve(
+            root.path(),
+            units.path(),
+            0,
+            &configuration,
+            &[],
+            43000..=43100,
+        );
+        parent.write_all(&[1]).unwrap();
+        assert!(launched.join().unwrap().success());
+        assert!(
+            parent_lock_intact,
+            "child Drop released its parent's allocation lock"
+        );
+        assert!(next.is_ok(), "{:#}", next.err().unwrap());
     }
     #[test]
     fn five_world_allocation_is_stable_and_excludes_other_rooms() {
@@ -1082,7 +1067,19 @@ mod tests {
             )
             .is_err()
         );
-        first.commit().unwrap();
+        ContainerUnit::for_cluster(
+            "dst-000",
+            root.path(),
+            &cluster(5),
+            DeploymentOptions {
+                ports: mappings.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .save(units.path())
+        .unwrap();
+        drop(first);
         let retry = PortAllocation::reserve(
             root.path(),
             units.path(),
@@ -1093,7 +1090,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(retry.mappings, mappings);
-        retry.commit().unwrap();
+        drop(retry);
         let next = PortAllocation::reserve(
             root.path(),
             units.path(),
@@ -1109,6 +1106,74 @@ mod tests {
                 .all(|mapping| !mappings.iter().any(|old| old.host == mapping.host))
         );
     }
+    #[test]
+    fn allocation_reads_dropin_ports_and_releases_unpublished_claims() {
+        let root = tempfile::tempdir().unwrap();
+        let units = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join(".dst-ports.json"),
+            "legacy claims are superseded by Quadlets",
+        )
+        .unwrap();
+        fs::write(
+            units.path().join("other.container"),
+            "[Container]\nPublishPort=42100:12000/udp\n",
+        )
+        .unwrap();
+        let dropin = units.path().join("other.container.d");
+        fs::create_dir(&dropin).unwrap();
+        fs::write(
+            dropin.join("ports.conf"),
+            "[Container]\nPublishPort=\nPublishPort=\"42101-42102:12001-12002/udp\"\n",
+        )
+        .unwrap();
+        let config = cluster(1);
+        let first =
+            PortAllocation::reserve(root.path(), units.path(), 0, &config, &[], 42100..=42110)
+                .unwrap();
+        assert_eq!(
+            first
+                .mappings
+                .iter()
+                .map(|port| port.host)
+                .collect::<Vec<_>>(),
+            [42100, 42103]
+        );
+        let mappings = first.mappings.clone();
+        drop(first);
+        let retry =
+            PortAllocation::reserve(root.path(), units.path(), 1, &config, &[], 42100..=42110)
+                .unwrap();
+        assert_eq!(retry.mappings, mappings);
+        assert!(!root.path().join(".dst-ports.json").exists());
+        ContainerUnit::for_cluster(
+            "dst-001",
+            root.path(),
+            &config,
+            DeploymentOptions {
+                ports: mappings,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .save(units.path())
+        .unwrap();
+        drop(retry);
+        fs::create_dir(units.path().join("dst-001.container.d")).unwrap();
+        fs::write(
+            units.path().join("dst-001.container.d/ports.conf"),
+            "[Container]\nPublishPort=42104:12000/udp\n",
+        )
+        .unwrap();
+        assert!(
+            PortAllocation::reserve(root.path(), units.path(), 1, &config, &[], 42100..=42110)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("drop-in overrides managed ports")
+        );
+    }
+
     #[test]
     fn native_quadlet_roundtrip_conflicts_and_literal_expansions() {
         let root = tempfile::tempdir().unwrap();
@@ -1169,6 +1234,7 @@ mod tests {
                 );
                 assert!(service.contains("--stop-timeout 360"));
                 assert!(service.contains("--init"));
+                assert!(service.contains("--tz local"));
                 assert!(service.contains("TimeoutStopSec=420"));
                 assert!(
                     service.contains(&format!("SuccessExitStatus={}", crate::agent::RESTART_EXIT))

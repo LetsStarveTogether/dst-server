@@ -55,6 +55,7 @@ class Host:  # ruff: ignore[too-many-public-methods]
         return self._host.units(number)
 
     async def list(self) -> builtins.list[dict[str, Any]]:
+        """Return a batch outcome for each room, ordered by room number."""
         return await self._host.list()
 
     async def load(self, number: int) -> Room:

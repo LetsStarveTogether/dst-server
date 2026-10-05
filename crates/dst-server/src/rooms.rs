@@ -353,12 +353,8 @@ impl RoomStore {
             let path = directory.join(format!("dst-{number:03}.container"));
             match fs::symlink_metadata(&path) {
                 Ok(_) => {
-                    let unit = ContainerUnit::load(path)?;
-                    ensure!(
-                        unit.cluster == std::path::absolute(guard.directory())?,
-                        "Quadlet must mount the selected room directory"
-                    );
-                    room.deployment = unit.options;
+                    room.deployment =
+                        ContainerUnit::load_for_room(path, guard.directory())?.options;
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),

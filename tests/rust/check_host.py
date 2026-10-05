@@ -116,7 +116,14 @@ async def check(directory: Path) -> tuple[Path, Path, Path]:  # ruff: ignore[too
         statuses = await host.batch([2, 299, 1], {"operation": "status", "game": False})
         assert [entry["number"] for entry in statuses] == [2, 299, 1]
         assert [entry["result"]["ok"] for entry in statuses] == [True, False, True]
-        assert len(await host.list()) == 2
+        statuses = await host.list()
+        assert [entry["number"] for entry in statuses] == [1, 2]
+        assert all(entry["result"]["ok"] for entry in statuses)
+        assert statuses[0]["result"]["value"]["active"] == "inactive"
+        host.rooms.save(definition(299))
+        statuses = await host.list()
+        assert [entry["number"] for entry in statuses] == [1, 2, 299]
+        assert [entry["result"]["ok"] for entry in statuses] == [True, True, False]
         assert (await host.status(1))["active"] == "inactive"
 
         trace = systemctl.with_suffix(".trace")
@@ -158,25 +165,22 @@ async def check(directory: Path) -> tuple[Path, Path, Path]:  # ruff: ignore[too
 def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root, units, systemctl = asyncio.run(check(Path(temporary)))
+        command = [
+            sys.executable,
+            "-I",
+            "-m",
+            "dst_server",
+            "--json",
+            "host",
+            "--root",
+            str(root),
+            "--quadlet-dir",
+            str(units),
+            "--systemctl",
+            str(systemctl),
+        ]
         result = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                "-m",
-                "dst_server",
-                "--json",
-                "host",
-                "--root",
-                str(root),
-                "--quadlet-dir",
-                str(units),
-                "--systemctl",
-                str(systemctl),
-                "status",
-                "--room",
-                "1,299",
-                "--service-only",
-            ],
+            [*command, "status", "--room", "1,299", "--service-only"],
             capture_output=True,
             text=True,
             check=False,
@@ -187,6 +191,13 @@ def main() -> None:
             True,
             False,
         ]
+        result = subprocess.run(
+            [*command, "list"], capture_output=True, text=True, check=False, timeout=30
+        )
+        assert result.returncode == 1, result.stderr
+        listed = json.loads(result.stdout)
+        assert [entry["number"] for entry in listed] == [1, 2, 299]
+        assert [entry["result"]["ok"] for entry in listed] == [True, True, False]
 
 
 if __name__ == "__main__":
