@@ -505,10 +505,9 @@ impl Host {
             options,
         )?;
         unit.validate_update(&self.quadlet_dir)?;
-        lock.read_control()?;
+        lock.read_state()?;
         {
             let mut stopped = lock.while_stopped();
-            stopped.recover()?;
             definition
                 .cluster
                 .save(&mut stopped, PermissionFiles::Preserve)?;
@@ -768,7 +767,6 @@ impl Host {
         let mut lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
         self.require_inactive(number).await?;
         let mut stopped = lock.while_stopped();
-        stopped.recover()?;
         let source = stopped
             .read_optional_bytes(kind.file())?
             .unwrap_or_default();
@@ -928,7 +926,7 @@ mod tests {
                 .contains("exhausted three attempts")
         );
         let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
-        lock.update_control(|control| {
+        lock.update_state(|control| {
             control.get_mut("policy_state").unwrap()["mods"]["attempts"] = json!(4);
             Ok(())
         })
@@ -944,7 +942,7 @@ mod tests {
     async fn offline_mod_updates_persist_intent_before_start_and_finish_outside_open_hours() {
         let (temporary, host) = offline_host().await;
         host.set_policy(1, &closed_policy()).await.unwrap();
-        let control = host.rooms.path(1).unwrap().join(files::CONTROL_FILE);
+        let control = host.rooms.path(1).unwrap().join(files::STATE_FILE);
         let observed = temporary.path().join("observed.json");
         let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
         recovery::on_failure(
@@ -1105,7 +1103,7 @@ mod tests {
         files::create_directory(root.join("001")).unwrap();
         files::create_directory(&units).unwrap();
         std::fs::write(root.join("001/cluster.ini"), "broken").unwrap();
-        std::fs::write(root.join("001/.dst-control.json"), "[bad").unwrap();
+        std::fs::write(root.join("001/.dst-server.json"), "[bad").unwrap();
         let script = temporary.path().join("systemctl");
         let trace = temporary.path().join("calls");
         std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *show*) printf 'Id=dst-001.service\\nLoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nJob=0\\nResult=success\\n';; esac\n", trace.display())).unwrap();

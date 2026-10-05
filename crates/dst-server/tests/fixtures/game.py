@@ -22,9 +22,9 @@ def arg(name: str) -> str:
 
 root = pathlib.Path(arg("-persistent_storage_root")) / arg("-cluster")
 name = arg("-shard")
-options = json.loads((root / name / "dst_server_driver.json").read_text())
+options = json.loads((root / name / "dst_server_driver.json").read_text())["driver"]
 nonce = options["nonce"]
-snapshot, generation, save_id = 5, 1, 0
+snapshot, generation = 5, 1
 if (root / name / "initial-snapshot").exists():
     snapshot = int((root / name / "initial-snapshot").read_text())
 session = "S_" + name
@@ -55,24 +55,9 @@ def record_lifecycle(event: str) -> None:
         output.write(event + "\n")
 
 
-def control(shutdown: bool = False, failed: bool = False) -> None:
-    global save_id, snapshot
+def perform_save(shutdown: bool = False) -> None:
+    global snapshot
     record_lifecycle("shutdown_save" if shutdown else "save")
-    save_id += 1
-    emit(
-        4,
-        b"DST_CONTROL|",
-        {
-            "v": 1,
-            "nonce": nonce,
-            "generation": generation,
-            "event": "save_unconfirmed" if failed else "save_complete",
-            "session_id": session,
-            "snapshot_id": snapshot,
-            "save_id": save_id,
-            "shutdown": shutdown,
-        },
-    )
     snapshot += 1
 
 
@@ -97,7 +82,11 @@ def bootstrap() -> None:
 record_lifecycle("start")
 bootstrap()
 while True:
-    if pending_migration is not None and time.monotonic() >= pending_migration[1]:
+    if (
+        pending_migration is not None
+        and time.monotonic() >= pending_migration[1]
+        and not (root / "hold-migration").exists()
+    ):
         (root / "player-location.new").write_text(pending_migration[0])
         (root / "player-location.new").replace(root / "player-location")
         (root / "migration.json").unlink()
@@ -115,12 +104,12 @@ while True:
                 snapshot = reload["snapshot_id"] + 1
             bootstrap()
     marker = root / "save-request"
-    if marker.exists():
+    if marker.exists() and not (root / "hold-save").exists():
         save = json.loads(marker.read_text())
         if save["id"] > seen_save:
             seen_save = save["id"]
             snapshot = save["snapshot_id"]
-            control(failed=name == "Caves" and (root / "fail-save").exists())
+            perform_save()
     if not select.select([3], [], [], 0.01)[0]:
         continue
     encoded = os.read(3, 4096)
@@ -131,7 +120,7 @@ while True:
         if (root / "hang-shutdown").exists():
             time.sleep(5)
         time.sleep(0.08)
-        control(shutdown=True)
+        perform_save(shutdown=True)
         os.write(5, b"DST_Stopping\nDST_Shutdown\n")
         shutdown_mode = root / name / "shutdown-mode"
         if shutdown_mode.exists():
@@ -202,7 +191,7 @@ while True:
             "idle_seconds": 0,
             "observed_seconds": 0,
             "session_id": session,
-            "observation": nonce + ":" + str(generation),
+            "observation_epoch": 0,
             "outdated_mods": [],
         }
     if method == "list_snapshots":
@@ -240,8 +229,6 @@ while True:
         (root / "save-request.new").replace(marker)
     if method == "evaluate":
         source = params["source"]
-        if source == "old_shutdown_save":
-            control(shutdown=True)
         if source == "crash":
             os._exit(7)
         if source == "slow":

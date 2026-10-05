@@ -31,8 +31,9 @@ local function control(record)
 end
 
 local function configure(encoded)
-    assert(type(encoded) == "string" and #encoded <= 64 * 1024)
-    local value = wire.decode(encoded)
+    local document = wire.decode(encoded)
+    assert(wire.is_object(document))
+    local value = document.driver
     assert(wire.is_object(value))
     control_requested = value.control ~= nil
     assert(type(value.nonce) == "string" and #value.nonce == 26
@@ -48,8 +49,8 @@ local function configure(encoded)
         and generation == math.floor(generation))
     if control_requested then
         assert(wire.is_object(value.control))
-        for key in pairs(value.control) do assert(key == "observe_saves" or key == "recovery") end
-        assert(value.control.observe_saves == nil or type(value.control.observe_saves) == "boolean")
+        for key in pairs(value.control) do assert(key == "observe_loads" or key == "recovery") end
+        assert(value.control.observe_loads == nil or type(value.control.observe_loads) == "boolean")
         if value.control.recovery ~= nil then
             assert(wire.is_object(value.control.recovery))
             require("dst_server.recovery").validate(value.control.recovery)
@@ -135,8 +136,7 @@ function bootstrap.start()
         if options.control ~= nil then
             local installed = pcall(function()
                 assert(resolve_recovery ~= nil, "native index loading hook is unavailable")
-                if options.control.observe_saves then
-                    require("dst_server.save_observer").install(control)
+                if options.control.observe_loads then
                     require("dst_server.load_observer").install(control)
                 end
             end)

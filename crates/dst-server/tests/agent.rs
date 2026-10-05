@@ -52,7 +52,7 @@ impl Agent {
             fs::write(root.join(name).join("server.ini"), format!("[NETWORK]\nserver_port={port}\n[SHARD]\nis_master={}\nid={id}\nname={name}\n[STEAM]\nmaster_server_port={}\n", id == 1, port + 1)).unwrap();
         }
         fs::write(
-            root.join(".dst-control.json"),
+            root.join(".dst-server.json"),
             serde_json::to_vec(&control).unwrap(),
         )
         .unwrap();
@@ -148,7 +148,7 @@ if not prepared.exists():
     }
 
     fn control(&self) -> Value {
-        serde_json::from_slice(&fs::read(self.root.join(".dst-control.json")).unwrap()).unwrap()
+        serde_json::from_slice(&fs::read(self.root.join(".dst-server.json")).unwrap()).unwrap()
     }
 
     fn assert_native_lifecycle(&self, expected: &str) {
@@ -162,8 +162,8 @@ if not prepared.exists():
     }
 
     fn assert_no_games(&self) {
+        assert!(self.control().get("driver").is_none());
         for name in ["Master", "Caves"] {
-            assert!(!self.root.join(name).join("dst_server_driver.json").exists());
             assert!(!self.root.join(name).join("native-lifecycle").exists());
         }
     }
@@ -250,7 +250,7 @@ async fn closed_start_exits_and_releases_the_room_without_starting_games() {
     let mut control = agent.control();
     control["agent_run"] = json!({"active":true,"failure":{"kind":"retryable"}});
     fs::write(
-        agent.root.join(".dst-control.json"),
+        agent.root.join(".dst-server.json"),
         serde_json::to_vec(&control).unwrap(),
     )
     .unwrap();
@@ -407,7 +407,7 @@ async fn unexpected_exit_persists_failure_before_requesting_container_rebuild() 
         error.code,
         ErrorCode::Unknown | ErrorCode::Transport
     ));
-    agent.wait(75).await;
+    agent.wait(1).await;
     let control = agent.control();
     assert_eq!(control["agent_run"]["active"], false);
     assert!(control["agent_run"]["failure"]["kind"].is_string());
@@ -450,7 +450,7 @@ async fn kill_interrupts_a_restart_countdown_and_requests_failure_recovery() {
         .await;
     let failure = restart.await.unwrap().unwrap_err();
     assert_eq!(failure.code, ErrorCode::Unknown);
-    agent.wait(75).await;
+    agent.wait(1).await;
     agent.assert_native_lifecycle("start\n");
     assert!(agent.control()["agent_run"]["failure"]["kind"].is_string());
 }
@@ -461,7 +461,7 @@ async fn restart_replies_then_exits_without_spawning_replacement_games() {
     let client = agent.client().await;
     let restarted = call(&client, Request::Restart { notice: None }).await;
     assert_eq!(restarted["restart"], true);
-    agent.wait(76).await;
+    agent.wait(8).await;
     agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
     assert_eq!(agent.control()["agent_run"]["active"], false);
     assert!(agent.control()["agent_run"]["failure"].is_null());
@@ -489,7 +489,7 @@ async fn termination_uses_native_shutdown_and_preserves_abnormal_exit_as_failure
             unsafe { libc::kill(agent.child.id() as i32, libc::SIGTERM) },
             0
         );
-        agent.wait(if abnormal { 75 } else { 0 }).await;
+        agent.wait(if abnormal { 1 } else { 0 }).await;
         agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
         assert_eq!(agent.control()["agent_run"]["active"], false);
         assert_eq!(
@@ -515,7 +515,7 @@ async fn manual_mod_updates_run_in_a_new_process_and_honor_reopening() {
         )
         .await;
         assert_eq!(result, json!({"queued":true,"restart":restart}));
-        agent.wait(76).await;
+        agent.wait(8).await;
         agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
         assert_eq!(
             fs::read_to_string(agent.root.join("mods/prepared")).unwrap(),

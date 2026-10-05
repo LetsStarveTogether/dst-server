@@ -140,6 +140,7 @@ fn invalid_transport_configuration_cannot_expose_credentials() {
 
 fn telemetry_event() -> DriverEvent {
     DriverEvent {
+        id: ulid::Ulid::generate().to_string(),
         kind: DriverEventKind::Telemetry,
         shard: "Master".into(),
         nonce: "attempt-fixture".into(),
@@ -161,10 +162,8 @@ fn driver_event_identity_body_and_source_time_survive_both_sinks() -> anyhow::Re
     assert_eq!(log.event_name, "dst.player.action");
     assert_eq!(log.body, source.data["data"]);
     assert_eq!(log.observed_timestamp_ns, source.observed_timestamp_ns);
-    assert_eq!(
-        log.attributes["log.record.uid"],
-        "attempt-fixture:7:9007199254740993"
-    );
+    assert_eq!(log.attributes["log.record.uid"], source.id);
+    assert_eq!(source.id.parse::<ulid::Ulid>()?.to_string(), source.id);
     assert_eq!(log.attributes["dst.cluster.name"], "cluster");
     assert_eq!(log.attributes["dst.shard.name"], "Master");
     assert_eq!(log.attributes["dst.session.id"], "");
@@ -225,7 +224,7 @@ fn operational_observations_keep_one_unique_id_per_record() -> anyhow::Result<()
         serde_json::to_value(log.clone())?,
         serde_json::to_value(&log)?
     );
-    assert_ne!(
+    assert_eq!(
         log.attributes["log.record.uid"],
         LogEvent::from_driver(&source, "cluster")?.attributes["log.record.uid"]
     );

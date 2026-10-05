@@ -108,9 +108,17 @@ assert(periodic.data.clients[1] == "KU_A")
 clients = {}
 local presence = connections.presence()
 assert(presence.idle_seconds == 0 and presence.observed_seconds == 60)
+assert(presence.observation_epoch == 0)
 now = now + 30000
 presence = connections.presence()
 assert(math.abs(presence.idle_seconds - 30) < 1e-9 and presence.observed_seconds == 90)
+assert(presence.observation_epoch == 0)
+GetTimeReal = function() error("clock unavailable") end
+TheWorld:PushEvent("ms_playerleft", {})
+GetTimeReal = function() return now end
+presence = connections.presence()
+assert(presence.observation_epoch == 1 and presence.observed_seconds == 0)
+assert(connections.presence().observation_epoch == 1)
 for _, line in ipairs(outputs) do
     assert(not line:find("[\r\n%z]") and #line <= 64 * 1024)
     assert(not line:find("PRIVATE_NAME", 1, true))

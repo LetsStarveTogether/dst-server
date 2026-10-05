@@ -487,7 +487,7 @@ fn clean_shutdown_preserves_idle_but_world_changes_and_clock_jumps_reset_it() {
 fn saving_policy_preserves_recovery_and_other_control_keys() {
     let directory = tempfile::tempdir().unwrap();
     let mut room = RoomLock::try_acquire(directory.path()).unwrap();
-    room.update_control(|control| {
+    room.update_state(|control| {
         control.insert("recovery".into(), json!({"remaining": 2}));
         control.insert("future".into(), json!([1, 2, 3]));
         Ok(())
@@ -498,7 +498,7 @@ fn saving_policy_preserves_recovery_and_other_control_keys() {
     PolicyState::default().save(&mut room).unwrap();
     assert_eq!(Policy::load(&room).unwrap(), expected);
     assert_eq!(PolicyState::load(&room).unwrap(), PolicyState::default());
-    let control = room.read_control().unwrap();
+    let control = room.read_state().unwrap();
     assert_eq!(control["recovery"], json!({"remaining": 2}));
     assert_eq!(control["future"], json!([1, 2, 3]));
 }

@@ -880,6 +880,14 @@ function scenarios.invalid_options()
     assert(not pcall(driver.install, options()))
 end
 
+if scenario == "--list" then
+    local names = {}
+    for name in pairs(scenarios) do names[#names + 1] = name end
+    table.sort(names)
+    for _, name in ipairs(names) do io.write(name, "\n") end
+    return
+end
+
 assert(scenarios[scenario], "unknown scenario")()
 for _, line in ipairs(outputs) do
     if string.sub(line, 1, 9) == "DST_OTEL|" or scenario == "print_boundary" or scenario == "print_mixed" then

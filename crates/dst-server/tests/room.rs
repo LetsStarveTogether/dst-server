@@ -2,11 +2,11 @@
 use dst_server::{
     driver::DriverOptions,
     files::RoomLock,
-    model::{Envelope, ErrorCode, Outcome, Phase, Request, StopResult, Target},
+    model::{Countdown, Envelope, ErrorCode, Outcome, Phase, Request, StopResult, Target},
     room::Room,
     rpc::EventHub,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{fs, os::unix::fs::PermissionsExt, sync::Arc, time::Duration};
 use tokio::time::{sleep, timeout};
 
@@ -97,18 +97,27 @@ async fn start_waits_for_native_sync_during_runtime_and_connection_checks() {
 }
 
 #[tokio::test]
+async fn invalid_launch_options_fail_before_starting_games() {
+    let (temp, room) = room();
+    room.configure_driver_control(json!({"unknown":true}))
+        .unwrap();
+    assert!(invoke(&room, Request::Start {}).await.is_err());
+    assert_eq!(room.status().phase, Phase::Failed);
+    assert!(!temp.path().join("cluster/Master/native-lifecycle").exists());
+    assert!(!temp.path().join("cluster/Caves/native-lifecycle").exists());
+}
+
+#[tokio::test]
 async fn save_uses_master_snapshot_and_rejects_ahead_secondaries_before_writing() {
     let (temp, room) = room();
     fs::write(temp.path().join("cluster/Master/initial-snapshot"), "7").unwrap();
     invoke(&room, Request::Start {}).await.unwrap();
     let saved = invoke(&room, Request::Save {}).await.unwrap();
-    assert!(
-        saved["shards"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|shard| shard["result"]["value"]["snapshot_id"] == 7)
-    );
+    assert_eq!(saved, true);
+    let request: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("cluster/save-request")).unwrap())
+            .unwrap();
+    assert_eq!(request["snapshot_id"], 7);
     room.shutdown().await.unwrap();
 
     let (temp, room) = self::room();
@@ -122,19 +131,11 @@ async fn save_uses_master_snapshot_and_rejects_ahead_secondaries_before_writing(
 }
 
 #[tokio::test]
-async fn interrupted_stop_finishes_cleanup_and_retains_its_exit_and_save_reports() {
+async fn interrupted_stop_finishes_cleanup_and_retains_its_exit_reports() {
     for force in [false, true] {
         let (temp, room) = room();
         invoke(&room, Request::Start {}).await.unwrap();
         if force {
-            invoke(
-                &room,
-                Request::ExecuteAll {
-                    source: "old_shutdown_save".into(),
-                },
-            )
-            .await
-            .unwrap();
             fs::write(temp.path().join("cluster/hang-shutdown"), "").unwrap();
         }
         let copy = room.clone();
@@ -172,15 +173,14 @@ async fn interrupted_stop_finishes_cleanup_and_retains_its_exit_and_save_reports
                 assert_eq!(error.details["stopped"]["returncode"], -libc::SIGKILL);
                 assert_eq!(error.details["stopped"]["forced"], true);
                 assert_eq!(error.details["stopped"]["output_drained"], true);
-                assert!(error.details["stopped"]["saved_snapshot"].is_null());
             } else {
                 assert!(
-                    matches!(shard.result, Outcome::Success { value } if !value.forced && value.output_drained && value.saved_snapshot.is_some())
+                    matches!(shard.result, Outcome::Success { value } if !value.forced && value.output_drained)
                 );
             }
         }
         let stopped = interrupt.await.unwrap().unwrap();
-        assert!(stopped.shards.iter().all(|shard| matches!(&shard.result, Outcome::Success { value } if value.forced == force && value.output_drained && value.saved_snapshot.is_some() != force)));
+        assert!(stopped.shards.iter().all(|shard| matches!(&shard.result, Outcome::Success { value } if value.forced == force && value.output_drained)));
         if force {
             assert!(stopped.shards.iter().all(|shard| matches!(&shard.result, Outcome::Success { value } if value.returncode == Some(-libc::SIGKILL))));
         }
@@ -209,7 +209,7 @@ async fn stop_rejects_abnormal_exits_and_retains_every_shard_report() {
         for shard in stopped.shards {
             if shard.shard == "Master" {
                 assert!(
-                    matches!(shard.result, Outcome::Success { value } if value.returncode == Some(0) && !value.forced && value.output_drained && value.saved_snapshot.is_some())
+                    matches!(shard.result, Outcome::Success { value } if value.returncode == Some(0) && !value.forced && value.output_drained)
                 );
                 continue;
             }
@@ -217,7 +217,6 @@ async fn stop_rejects_abnormal_exits_and_retains_every_shard_report() {
                 panic!("Stop accepted {mode} exit");
             };
             assert_eq!(error.details["stopped"]["output_drained"], true);
-            assert!(error.details["stopped"]["saved_snapshot"].is_object());
             match mode {
                 "exit" | "signal" => {
                     assert_eq!(error.code, ErrorCode::Transport);
@@ -279,7 +278,62 @@ async fn repeated_announcements_complete_and_shutdown_cancels_future_notices() {
 }
 
 #[tokio::test]
-async fn migration_refusal_finishes_and_moves_wait_for_destination_entry() {
+async fn stop_countdown_renders_parameters_and_shutdown_cancels_later_notices() {
+    for delay in [0.0, 60.0] {
+        let (temp, room) = room();
+        invoke(&room, Request::Start {}).await.unwrap();
+        let notices = temp.path().join("cluster/announcements");
+        let notice = Countdown {
+            template: "{{room}} {when} {remaining} {minutes} {why}".into(),
+            delay,
+            interval: 30.0,
+            parameters: std::collections::BTreeMap::from([("why".into(), json!("更新"))]),
+        };
+        let copy = room.clone();
+        let stopping = tokio::spawn(async move {
+            invoke(
+                &copy,
+                Request::Stop {
+                    notice: Some(notice),
+                },
+            )
+            .await
+        });
+        until(&room, || notices.exists()).await;
+        if delay > 0.0 {
+            room.shutdown_priority().await.unwrap();
+            assert_eq!(
+                stopping.await.unwrap().unwrap_err().code,
+                ErrorCode::Unknown
+            );
+        } else {
+            stopping.await.unwrap().unwrap();
+        }
+        let delivered = fs::read_to_string(notices).unwrap();
+        let messages: Vec<serde_json::Value> = delivered
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["count"], 1);
+        assert_eq!(
+            messages[0]["message"],
+            if delay == 0.0 {
+                "{room} 即将 0 0 更新"
+            } else {
+                "{room} 将在约 1 分钟后 60 1 更新"
+            }
+        );
+        assert!(
+            room.driver_states()
+                .values()
+                .all(|state| !state.running && state.output_drained)
+        );
+    }
+}
+
+#[tokio::test]
+async fn migration_returns_native_acceptance_before_destination_entry() {
     let (temp, room) = room_with_shards(&[
         ("Master", 1, 19100),
         ("Caves", 2, 19200),
@@ -306,13 +360,38 @@ async fn migration_refusal_finishes_and_moves_wait_for_destination_entry() {
     assert!(room.status().operations.current.is_none());
     fs::remove_file(root.join("refuse-migration")).unwrap();
     for (id, destination) in [("2", "Caves"), ("3", "Caves2")] {
-        let located = invoke(&room, migrate(id)).await.unwrap();
-        assert_eq!(located["state"], "active");
-        assert_eq!(located["shard"], destination);
+        fs::write(root.join("hold-migration"), "").unwrap();
         assert_eq!(
-            located["identity"]["session_id"],
-            format!("S_{destination}")
+            timeout(Duration::from_secs(1), invoke(&room, migrate(id)))
+                .await
+                .expect("migration returns before arrival")
+                .unwrap(),
+            true
         );
+        assert!(root.join("migration.json").exists());
+        fs::remove_file(root.join("hold-migration")).unwrap();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let located = invoke(
+                    &room,
+                    Request::GetPlayer {
+                        userid: "KU_ABC".into(),
+                    },
+                )
+                .await
+                .unwrap();
+                if located["state"] == "active" && located["shard"] == destination {
+                    assert_eq!(
+                        located["identity"]["session_id"],
+                        format!("S_{destination}")
+                    );
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert!(!root.join("migration.json").exists());
     }
     assert_eq!(
@@ -494,7 +573,7 @@ async fn admin_changes_preserve_native_lists_and_reload_every_shard() {
 }
 
 #[tokio::test]
-async fn room_owns_cancelled_mutation_and_reaps_all_shards_with_save_proof() {
+async fn room_owns_cancelled_mutation_and_reaps_all_shards() {
     let (temp, room) = room();
     invoke(&room, Request::Start {}).await.unwrap();
     assert_eq!(room.status().phase, Phase::Running);
@@ -504,6 +583,20 @@ async fn room_owns_cancelled_mutation_and_reaps_all_shards_with_save_proof() {
             .iter()
             .all(|shard| shard.readiness.ready())
     );
+    let identities: std::collections::BTreeSet<_> = room
+        .status()
+        .shards
+        .iter()
+        .map(|shard| shard.identity.as_ref().unwrap().process_id.clone())
+        .collect();
+    assert_eq!(
+        identities.len(),
+        2,
+        "shared launch options must retain distinct process identities"
+    );
+    for id in &identities {
+        assert_eq!(id.parse::<ulid::Ulid>().unwrap().to_string(), *id);
+    }
     let pids: Vec<_> = room
         .driver_states()
         .values()
@@ -539,13 +632,7 @@ async fn room_owns_cancelled_mutation_and_reaps_all_shards_with_save_proof() {
         matches!(room.status().operations.last.unwrap().result,Some(Outcome::Success{value}) if value=="captured")
     );
     let saved = invoke(&room, Request::Save {}).await.unwrap();
-    assert!(
-        saved["shards"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|shard| shard["result"]["value"]["snapshot_id"] == 5)
-    );
+    assert_eq!(saved, true);
     let moved = invoke(
         &room,
         Request::Teleport {
@@ -583,7 +670,7 @@ async fn room_owns_cancelled_mutation_and_reaps_all_shards_with_save_proof() {
     let stopped: StopResult =
         serde_json::from_value(invoke(&room, Request::Stop { notice: None }).await.unwrap())
             .unwrap();
-    assert!(stopped.shards.iter().all(|shard|matches!(&shard.result,Outcome::Success{value} if !value.forced && value.output_drained && value.saved_snapshot.is_some())));
+    assert!(stopped.shards.iter().all(|shard|matches!(&shard.result,Outcome::Success{value} if !value.forced && value.output_drained)));
     for pid in pids {
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
     }
@@ -603,19 +690,24 @@ async fn room_owns_cancelled_mutation_and_reaps_all_shards_with_save_proof() {
 }
 
 #[tokio::test]
-async fn one_failed_save_is_explicit_and_unexpected_shard_exit_stops_the_room() {
+async fn save_returns_on_acceptance_and_unexpected_shard_exit_stops_the_room() {
     let (temp, room) = room();
     invoke(&room, Request::Start {}).await.unwrap();
-    fs::write(temp.path().join("cluster/fail-save"), "").unwrap();
-    let error = invoke(&room, Request::Save {}).await.unwrap_err();
-    assert_eq!(error.code, ErrorCode::PartialFailure);
-    assert!(
-        error.details["shards"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|shard| shard["shard"] == "Caves" && shard["result"]["status"] == "failure")
+    fs::write(temp.path().join("cluster/hold-save"), "").unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(1), invoke(&room, Request::Save {}))
+            .await
+            .expect("save returns before persistence")
+            .unwrap(),
+        true
     );
+    for name in ["Master", "Caves"] {
+        let runtime = room
+            .invoke(Envelope::new(Target::Shard(name.into()), Request::Runtime {}).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(runtime["snapshot"], 5);
+    }
     let crash = Envelope::new(
         Target::Shard("Master".into()),
         Request::Execute {
@@ -768,7 +860,7 @@ async fn dropping_from_a_foreign_thread_holds_the_room_lock_until_native_reap() 
 }
 
 #[tokio::test]
-async fn priority_shutdown_interrupts_pending_work_and_finishes_a_clean_save() {
+async fn priority_shutdown_interrupts_pending_work_and_reaps_cleanly() {
     let (_temp, room) = room();
     invoke(&room, Request::Start {}).await.unwrap();
     let request = Envelope::new(
@@ -783,7 +875,7 @@ async fn priority_shutdown_interrupts_pending_work_and_finishes_a_clean_save() {
     until(&room, || room.status().operations.current.is_some()).await;
     let stopped = room.shutdown_priority().await.unwrap();
     assert!(operation.await.unwrap().is_err());
-    assert!(stopped.shards.iter().all(|shard|matches!(&shard.result,Outcome::Success{value} if !value.forced && value.output_drained && value.saved_snapshot.is_some())));
+    assert!(stopped.shards.iter().all(|shard|matches!(&shard.result,Outcome::Success{value} if !value.forced && value.output_drained)));
     assert!(!room.requires_container_restart());
     assert_eq!(room.status().phase, Phase::Stopped);
 }

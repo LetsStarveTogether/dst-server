@@ -341,7 +341,7 @@ impl RoomStore {
 
     pub fn load(&self, number: u16) -> Result<Room> {
         let guard = RoomLock::try_acquire(self.path(number)?)?;
-        let mut control = guard.read_control()?;
+        let mut control = guard.read_state()?;
         let mut room = Room {
             number,
             template: serde_json::from_value(control.remove("template").unwrap_or(Value::Null))?,
@@ -380,10 +380,9 @@ impl RoomStore {
         let directory = self.path(room.number)?;
         files::create_directory(&directory)?;
         let mut guard = RoomLock::try_acquire(&directory)?;
-        guard.read_control()?;
+        guard.read_state()?;
         let changed = {
             let mut stopped = guard.while_stopped();
-            stopped.recover()?;
             room.cluster.save(&mut stopped, PermissionFiles::Preserve)?
         };
         save_policy(&mut guard, room)?;
@@ -401,7 +400,7 @@ impl RoomStore {
 }
 
 pub(crate) fn save_policy(guard: &mut RoomLock, room: &Room) -> Result<()> {
-    guard.update_control(|control| {
+    guard.update_state(|control| {
         control.insert("template".into(), serde_json::to_value(&room.template)?);
         control.insert("policy".into(), serde_json::to_value(&room.policy)?);
         Ok(())
@@ -790,7 +789,7 @@ mod tests {
         fs::write(root.join("cave/save/session/world"), b"world\0\xff").unwrap();
         let mut guard = RoomLock::try_acquire(&root).unwrap();
         guard
-            .update_control(|control| {
+            .update_state(|control| {
                 control.insert(
                     "policy_state".into(),
                     json!({"activity":{"sessions":{"forest":"current"}}}),
@@ -835,7 +834,7 @@ mod tests {
         store.save_policy(&changed).unwrap();
         assert_eq!(fs::read(root.join("cluster.ini")).unwrap(), native);
         let guard = RoomLock::try_acquire(&root).unwrap();
-        let control = guard.read_control().unwrap();
+        let control = guard.read_state().unwrap();
         assert_eq!(
             control["policy_state"]["activity"]["sessions"]["forest"],
             "current"
@@ -844,11 +843,11 @@ mod tests {
         assert!(!control.contains_key("cluster"));
         assert!(!control.contains_key("deployment"));
         drop(guard);
-        fs::remove_file(root.join(files::CONTROL_FILE)).unwrap();
+        fs::remove_file(root.join(files::STATE_FILE)).unwrap();
         let loaded = store.load(16).unwrap();
         assert_eq!(loaded.policy, Policy::default());
         assert!(loaded.template.is_none());
-        assert!(!root.join(files::CONTROL_FILE).exists());
+        assert!(!root.join(files::STATE_FILE).exists());
     }
 
     #[test]
@@ -874,7 +873,7 @@ mod tests {
             11
         );
         let before = fs::read(&cluster).unwrap();
-        fs::write(root.join(files::CONTROL_FILE), "[]").unwrap();
+        fs::write(root.join(files::STATE_FILE), "[]").unwrap();
         assert!(store.save(&ordinary()).is_err());
         assert_eq!(fs::read(&cluster).unwrap(), before);
         assert!(store.path(300).is_err());
@@ -887,7 +886,7 @@ mod tests {
         let quadlets = directory.path().join("quadlets");
         fs::create_dir(&quadlets).unwrap();
         fs::write(quadlets.join("dst-299.container"), "invalid").unwrap();
-        fs::remove_file(root.join(files::CONTROL_FILE)).unwrap();
+        fs::remove_file(root.join(files::STATE_FILE)).unwrap();
         assert!(store.with_quadlet_dir(quadlets).load(299).is_err());
     }
 }

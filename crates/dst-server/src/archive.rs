@@ -165,7 +165,7 @@ pub async fn publish_artifact(directory: &Path, mut archive: ClusterArchive) -> 
             crate::files::artifact_ids(&directory)?.len() < MAX_ARTIFACTS,
             "archive transfer lease limit reached; release an earlier artifact"
         );
-        let id = ulid::Ulid::new().to_string();
+        let id = ulid::Ulid::generate().to_string();
         let mut destination = crate::files::artifact_file(&directory, &id, true)?;
         let write = (|| {
             archive.file.rewind()?;
@@ -340,7 +340,6 @@ pub async fn export_host(
     );
     let prepared = tokio::task::spawn_blocking(move || {
         let mut stopped = lock.while_stopped();
-        stopped.recover()?;
         prepare(&mut stopped, &options)
     })
     .await

@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     configuration,
-    files::{self, FileChanges, RoomLock, StoppedRoom},
+    files::{self, FileChanges, StoppedRoom},
     lua,
 };
 
@@ -41,7 +41,7 @@ fn check_input(value: &Value) -> Result<()> {
         }
     }
     ensure!(
-        serde_json::to_vec(value)?.len() <= files::MAX_TRANSACTION_BYTES,
+        serde_json::to_vec(value)?.len() <= files::MAX_CONFIG_BYTES,
         "configuration exceeds the byte limit"
     );
     Ok(())
@@ -669,11 +669,11 @@ impl LevelDataOverride {
 }
 
 impl ClusterConfig {
-    pub fn load(room: &RoomLock) -> Result<Self> {
+    pub fn load(room: &files::RoomReader) -> Result<Self> {
         Self::load_with_kinds(room, &BTreeMap::new(), &BTreeMap::new())
     }
     pub fn load_with_kinds(
-        room: &RoomLock,
+        room: &files::RoomReader,
         world_kinds: &BTreeMap<String, String>,
         level_kinds: &BTreeMap<String, String>,
     ) -> Result<Self> {
@@ -872,7 +872,7 @@ impl ClusterConfig {
                 changed.insert(path, contents);
             }
         }
-        room.commit_with_deletions(changed, removed, permissions)
+        room.write_files(changed, removed, permissions)
     }
 }
 
@@ -1078,6 +1078,7 @@ fn merge_mods(base: &mut Value, patch: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::files::RoomLock;
     use std::fs;
 
     #[test]

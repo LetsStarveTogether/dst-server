@@ -88,7 +88,7 @@ function connections.presence()
         observed_since, last_active, reliable = now, now, true
     end
     return {
-        observation = string.format("%s:%.0f:%.0f", state.nonce, state.generation, observation_epoch),
+        observation_epoch = observation_epoch,
         session_id = TheWorld.meta.session_identifier,
         client_count = count,
         player_count = #data.players,

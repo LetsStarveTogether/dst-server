@@ -181,16 +181,19 @@ async fn native(
             "native preloader deadline expired",
         ));
     }
+    let options = DriverOptions {
+        profile: "off".into(),
+        actions: Vec::new(),
+        control: json!({"observe_loads":true,"recovery":request}),
+        extra_args: vec!["-skip_update_server_mods".into(), "-offline".into()],
+    };
+    let nonce = stopped.with_lock(|lock| options.save(lock))?;
     let driver = Driver::spawn(
         cluster,
         stopped.executable(),
         shard,
-        DriverOptions {
-            profile: "off".into(),
-            actions: Vec::new(),
-            control: json!({"observe_saves":true,"recovery":request}),
-            extra_args: vec!["-skip_update_server_mods".into(), "-offline".into()],
-        },
+        &nonce,
+        options.extra_args,
     )
     .map_err(internal)?;
     let outcome = tokio::select! {
@@ -419,7 +422,7 @@ def argument(key): return sys.argv[sys.argv.index(key) + 1]
 root = pathlib.Path(argument('-persistent_storage_root')) / argument('-cluster')
 shard = argument('-shard')
 directory = root / shard
-config = json.loads((directory / 'dst_server_driver.json').read_text())
+config = json.loads((root / '.dst-server.json').read_text())['driver']
 request = config['control']['recovery']
 scenario = (directory / 'scenario').read_text()
 (directory / 'pid').write_text(str(os.getpid()))
@@ -521,7 +524,7 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
             };
             self.room
                 .with_lock(|lock| {
-                    lock.update_control(|state| {
+                    lock.update_state(|state| {
                         state.insert(
                             "recovery".into(),
                             serde_json::to_value(RecoveryState {
@@ -621,7 +624,7 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
         fixture
             .room
             .with_lock(|lock| {
-                assert_eq!(lock.read_control()?["policy_fixture"]["retained"], true);
+                assert_eq!(lock.read_state()?["policy_fixture"]["retained"], true);
                 recovery::begin_recovered_room(lock)
             })
             .unwrap();
@@ -675,6 +678,7 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
         let state = DriverState {
             shard: "Master".into(),
             pid: 1,
+            process_id: ulid::Ulid::generate().to_string(),
             nonce: "fixture".into(),
             generation: Some(1),
             generation_changes: 0,

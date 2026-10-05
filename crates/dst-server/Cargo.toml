@@ -14,7 +14,7 @@ clap.workspace = true
 clap_complete = "4"
 full_moon.workspace = true
 libc.workspace = true
-ulid = "1"
+ulid = "3"
 opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic", "logs"] }
 opentelemetry = { version = "0.33", default-features = false, features = ["trace", "metrics"] }
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics"] }

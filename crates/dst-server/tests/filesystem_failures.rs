@@ -1,4 +1,4 @@
-//! Real write failures through the production transaction API.
+//! Real write failures through the production configuration API.
 //!
 //! The ENOSPC worker runs explicitly inside a disposable 64 KiB tmpfs container.
 //! The ordinary test uses a child process with RLIMIT_FSIZE, affecting no sibling.
@@ -62,27 +62,31 @@ fn assert_errno(error: &anyhow::Error, expected: i32) {
     assert_eq!(actual, Some(expected), "{error:#}");
 }
 
-fn failed_before_publication(root: &Path, expected: i32) -> u64 {
+fn failed_partial_update(root: &Path, expected: i32) -> u64 {
     setup(root);
     let mut lock = RoomLock::try_acquire(root).unwrap();
     let error = lock
         .while_stopped()
-        .commit(changes(4096, 128 * 1024), PermissionFiles::Preserve)
+        .write_files(
+            changes(4096, 128 * 1024),
+            Vec::new(),
+            PermissionFiles::Preserve,
+        )
         .unwrap_err();
     assert_errno(&error, expected);
-    let staging = root.join(".dst-config-transaction");
-    let partial_bytes = fs::metadata(staging.join(".manifest.tmp")).unwrap().len();
+    let partial_bytes = fs::metadata(root.join("Master/.dst-config-write.tmp"))
+        .unwrap()
+        .len();
     assert!(partial_bytes > 0 && partial_bytes < 128 * 1024);
-    assert!(!staging.join("manifest.json").exists());
-    assert_eq!(fs::read_to_string(root.join(FIRST)).unwrap(), OLD);
+    assert!(!root.join(".dst-config-transaction").exists());
+    assert_eq!(fs::read_to_string(root.join(FIRST)).unwrap(), lua(4096));
     assert_eq!(fs::read_to_string(root.join(SECOND)).unwrap(), OLD);
     preserved(root);
     drop(lock);
-    // Recovery can remove an unpublished partial manifest even on a full disk.
-    let mut lock = RoomLock::try_acquire(root).unwrap();
-    assert!(lock.while_stopped().recover().unwrap().is_empty());
-    assert!(!staging.exists());
-    preserved(root);
+    // Reopening the room does not complete a partial configuration update.
+    let lock = RoomLock::try_acquire(root).unwrap();
+    assert_eq!(lock.read_text(FIRST).unwrap(), lua(4096));
+    assert_eq!(lock.read_text(SECOND).unwrap(), OLD);
     partial_bytes
 }
 
@@ -123,12 +127,12 @@ fn file_size_worker() {
         assert_ne!(libc::signal(libc::SIGXFSZ, libc::SIG_IGN), libc::SIG_ERR);
         assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
     }
-    let partial_bytes = failed_before_publication(root.path(), libc::EFBIG);
+    let partial_bytes = failed_partial_update(root.path(), libc::EFBIG);
     assert_eq!(partial_bytes, 4096);
     let mut lock = RoomLock::try_acquire(root.path()).unwrap();
     assert_eq!(
         lock.while_stopped()
-            .commit(changes(128, 128), PermissionFiles::Preserve)
+            .write_files(changes(128, 128), Vec::new(), PermissionFiles::Preserve)
             .unwrap()
             .len(),
         2
@@ -136,7 +140,7 @@ fn file_size_worker() {
     preserved(root.path());
     println!(
         "FILESYSTEM_FAILURE_REPORT {}",
-        json!({"case":"partial_manifest_efbig", "errno":libc::EFBIG, "partial_bytes":partial_bytes, "recovered":true})
+        json!({"case":"partial_update_efbig", "errno":libc::EFBIG, "partial_bytes":partial_bytes, "reapplied":true})
     );
 }
 
@@ -156,60 +160,28 @@ fn tmpfs_enospc_worker() {
     assert_eq!(filesystem.f_type, libc::TMPFS_MAGIC);
     assert_eq!(filesystem.f_blocks * filesystem.f_bsize as u64, 64 * 1024);
 
-    let before_publication = tempfile::tempdir_in(&mount).unwrap();
-    let manifest_partial_bytes = failed_before_publication(before_publication.path(), libc::ENOSPC);
-    drop(before_publication);
-
     let root = tempfile::tempdir_in(&mount).unwrap();
-    setup(root.path());
-    // Leave enough room for the complete manifest and first atomic replacement;
-    // the second replacement then performs a real short write before ENOSPC.
-    fs::write(root.path().join("ballast"), vec![0; 24 * 1024]).unwrap();
-    let intended = changes(4096, 12 * 1024);
+    let partial_bytes = failed_partial_update(root.path(), libc::ENOSPC);
     let mut lock = RoomLock::try_acquire(root.path()).unwrap();
-    let error = lock
-        .while_stopped()
-        .commit(intended.clone(), PermissionFiles::Preserve)
-        .unwrap_err();
-    assert_errno(&error, libc::ENOSPC);
-    assert!(
-        root.path()
-            .join(".dst-config-transaction/manifest.json")
-            .is_file()
+    let intended = changes(128, 128);
+    assert_eq!(
+        lock.while_stopped()
+            .write_files(intended.clone(), Vec::new(), PermissionFiles::Preserve)
+            .unwrap()
+            .len(),
+        2
     );
-    assert_eq!(lock.read_text(FIRST).unwrap(), intended[Path::new(FIRST)]);
-    assert_eq!(lock.read_text(SECOND).unwrap(), OLD);
-    let replacement_partial_bytes = fs::metadata(root.path().join("Master/.dst-config-write.tmp"))
-        .unwrap()
-        .len();
-    assert!(replacement_partial_bytes > 0 && replacement_partial_bytes < 12 * 1024);
-    preserved(root.path());
-    drop(lock);
-
-    // Restarted ownership still cannot roll forward until actual capacity returns.
-    let mut lock = RoomLock::try_acquire(root.path()).unwrap();
-    assert_errno(&lock.while_stopped().recover().unwrap_err(), libc::ENOSPC);
-    assert!(
-        root.path()
-            .join(".dst-config-transaction/manifest.json")
-            .is_file()
-    );
-    fs::remove_file(root.path().join("ballast")).unwrap();
-    assert_eq!(lock.while_stopped().recover().unwrap().len(), 2);
     for (path, contents) in intended {
         assert_eq!(lock.read_text(path).unwrap(), contents);
     }
-    assert!(lock.while_stopped().recover().unwrap().is_empty());
-    assert!(!root.path().join(".dst-config-transaction").exists());
     assert!(!root.path().join("Master/.dst-config-write.tmp").exists());
     preserved(root.path());
     println!(
         "FILESYSTEM_FAILURE_REPORT {}",
         json!({
             "case":"tmpfs_enospc", "errno":libc::ENOSPC, "capacity_bytes":64 * 1024,
-            "manifest_partial_bytes":manifest_partial_bytes, "replacement_partial_bytes":replacement_partial_bytes,
-            "first_replacement_committed":true, "second_replacement_kept_original":true,
-            "retry_while_full_failed":true, "recovered_after_space_released":true,
+            "partial_bytes":partial_bytes, "first_replacement_applied":true,
+            "second_replacement_kept_original":true, "reapplied":true,
             "saved_game_and_permissions_preserved":true
         })
     );

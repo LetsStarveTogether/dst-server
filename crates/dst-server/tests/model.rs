@@ -121,7 +121,7 @@ fn public_contract_validates_scope_defaults_and_nullable_notices() {
             .timeout()
             .unwrap()
             .as_secs(),
-        300
+        120
     );
     let default_stop = call(Target::Room, "stop", json!({})).unwrap();
     let Request::Stop {
@@ -416,7 +416,7 @@ fn world_identity_readiness_and_operation_results_are_unambiguous() {
         ShardResult {
             shard: "Cave".into(),
             result: Outcome::Failure {
-                error: Error::new(ErrorCode::Unknown, "save confirmation was lost"),
+                error: Error::new(ErrorCode::Unknown, "command confirmation was lost"),
             },
         },
     ];
@@ -424,14 +424,14 @@ fn world_identity_readiness_and_operation_results_are_unambiguous() {
         current: None,
         last: Some(OperationStatus {
             id: "operation-id".into(),
-            method: "save".into(),
+            method: "execute_all".into(),
             target: Target::Room,
             started_at_ns: 1_700_000_000_000_000_001,
             completed_at_ns: Some(1_700_000_000_000_000_010),
             result: Some(Outcome::Failure {
                 error: Error::new(
                     ErrorCode::PartialFailure,
-                    "not all shard saves were confirmed",
+                    "not all shard commands were confirmed",
                 )
                 .with_details(json!(results)),
             }),
