@@ -7,7 +7,11 @@ use dst_server::{
     files::{self, PermissionFiles, RoomLock},
     lua, rooms, scripts, settings as native,
 };
-use pyo3::{exceptions::PyValueError, prelude::*, types::PyDict};
+use pyo3::{
+    exceptions::PyValueError,
+    prelude::*,
+    types::{PyDict, PyMapping},
+};
 use serde_json::{Value, json};
 
 use crate::{anyhow_error as error, from_python, to_python};
@@ -19,9 +23,11 @@ fn input(value: &Bound<'_, PyAny>) -> PyResult<Value> {
 fn configuration_input(model: &str, source: &Bound<'_, PyAny>) -> PyResult<Value> {
     let mut value = input(source)?;
     if matches!(model, "WorldgenOverride" | "LevelDataOverride")
-        && let Ok(fields) = source.cast::<PyDict>()
-        && let Some(overrides) = fields.get_item("overrides")?
-        && let Ok(overrides) = overrides.extract::<PyRef<'_, Configuration>>()
+        && let Ok(fields) = source.cast::<PyMapping>()
+        && fields.contains("overrides")?
+        && let Ok(overrides) = fields
+            .get_item("overrides")?
+            .extract::<PyRef<'_, Configuration>>()
     {
         let kind = match overrides.model.as_str() {
             "WorldOverrides" => "world",

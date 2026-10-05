@@ -1,15 +1,15 @@
 """Klei reads performed by the native SDK, exposed as asyncio coroutines."""
 
-from collections.abc import Sequence
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict
+lazy from collections.abc import Sequence
 
-from ._native import KleiClient as _KleiClient
+lazy from ._native import KleiClient as _KleiClient
 
 type Region = Literal["us-east-1", "eu-central-1", "ap-southeast-1", "ap-east-1"]
 type Platform = Literal["Steam", "PSN", "Rail", "XBone", "Switch"]
 
 
-class KleiEndpoints(TypedDict, total=False):
+class KleiEndpoints(TypedDict, total=False, closed=True):
     """Explicit trusted endpoint overrides; room endpoints receive the token."""
 
     builds: str
@@ -19,7 +19,7 @@ class KleiEndpoints(TypedDict, total=False):
     room: str
 
 
-class RoomQuery(TypedDict):
+class RoomQuery(TypedDict, closed=True):
     row_id: str
     region: Region
 
@@ -47,7 +47,7 @@ class KleiClient:
     ) -> None:
         self._client = _KleiClient(
             access_token,
-            endpoints=cast("dict[str, str] | None", endpoints),
+            endpoints=endpoints,
             request_timeout=request_timeout,
             connect_timeout=connect_timeout,
             max_response_bytes=max_response_bytes,
@@ -80,7 +80,7 @@ class KleiClient:
         return await self._client.get_lobbies(regions, platforms)
 
     async def get_rooms(self, rooms: Sequence[RoomQuery]) -> list[dict[str, Any]]:
-        return await self._client.get_rooms([dict(room) for room in rooms])
+        return await self._client.get_rooms(list(rooms))
 
     async def discover_rooms(self) -> dict[str, Any]:
         return await self._client.discover_rooms()

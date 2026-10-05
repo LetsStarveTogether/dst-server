@@ -27,6 +27,12 @@ See [resident Agent deployment](#resident-agent-deployment) when upgrading an ex
 | CLI | Native and Python entry points share Rust parsing and dispatch; `describe` provides the current operation schemas. |
 
 The release targets Linux x86_64, CPython 3.15 and trusted callers on the same host.
+Python imports use `lazy import`; the package loads native bindings and feature modules on first use.
+Type annotations remain available through `typing.get_type_hints()`, including `Host.connect()`.
+Configuration and RPC objects accept string-keyed mappings, including nested `frozendict` values.
+The existing value, nesting and item limits apply to every mapping implementation.
+Public `TypedDict` contracts are closed to extra keys; native validation remains responsible for runtime checks.
+Development and CI select Python from `pyproject.toml` without a separate version override.
 The socket has mode `0600`; the server checks peer credentials and limits connections.
 RPC protocol 2 replaces JSON payload blobs with typed commands and recursive native values.
 Protocol 3 changes account and vote requests and uses a new Cap'n Proto interface identity.

@@ -4,7 +4,7 @@ use dst_server::{model, rpc};
 use pyo3::{
     exceptions::{PyException, PyOSError, PyTimeoutError, PyTypeError, PyValueError},
     prelude::*,
-    types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple},
+    types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyMapping, PyString, PyTuple},
 };
 use serde_json::{Map, Number, Value, json};
 
@@ -79,15 +79,16 @@ pub(crate) fn from_python(
     if let Ok(text) = value.cast::<PyString>() {
         return Ok(Value::String(text.to_str()?.to_owned()));
     }
-    if let Ok(object) = value.cast::<PyDict>() {
+    if let Ok(object) = value.cast::<PyMapping>() {
         let mut result = Map::new();
-        for (key, value) in object.iter() {
+        for key in object.try_iter()? {
+            let key = key?;
             let key = key
                 .cast::<PyString>()
                 .map_err(|_| PyTypeError::new_err("object keys must be strings"))?;
             result.insert(
                 key.to_str()?.to_owned(),
-                from_python(&value, depth + 1, count)?,
+                from_python(&object.get_item(key)?, depth + 1, count)?,
             );
         }
         return Ok(Value::Object(result));
@@ -107,7 +108,7 @@ pub(crate) fn from_python(
             .map(Value::Array);
     }
     Err(PyTypeError::new_err(
-        "expected None, bool, number, text, list, tuple or dict",
+        "expected None, bool, number, text, list, tuple or mapping",
     ))
 }
 

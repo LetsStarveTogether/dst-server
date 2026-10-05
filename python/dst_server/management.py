@@ -3,13 +3,13 @@
 from typing import TypedDict
 
 
-class Permissions(TypedDict):
+class Permissions(TypedDict, closed=True):
     adminlist: list[str]
     blocklist: list[str]
     whitelist: list[str]
 
 
-class VoteCommand(TypedDict):
+class VoteCommand(TypedDict, closed=True):
     command: str
     command_hash: int
     requires_target: bool
@@ -19,18 +19,18 @@ class VoteCommand(TypedDict):
     minimum_starter_age: float | None
 
 
-class VoteOption(TypedDict):
+class VoteOption(TypedDict, closed=True):
     description: str
     count: int
 
 
-class Voter(TypedDict):
+class Voter(TypedDict, closed=True):
     userid: str
     can_vote: bool
     selection: int | None
 
 
-class Vote(TypedDict):
+class Vote(TypedDict, closed=True):
     command: str
     command_hash: int
     starter_userid: str | None
@@ -40,6 +40,6 @@ class Vote(TypedDict):
     voters: list[Voter]
 
 
-class VoteStatus(TypedDict):
+class VoteStatus(TypedDict, closed=True):
     enabled: bool
     current: Vote | None

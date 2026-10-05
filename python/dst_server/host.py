@@ -2,18 +2,17 @@
 """Host operations delegated to the native SDK."""
 
 import builtins
-from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
-from os import PathLike
-from typing import TYPE_CHECKING, Any, Self
+lazy from collections.abc import AsyncGenerator, Mapping, Sequence
+lazy from os import PathLike
+lazy from typing import Any, Self
 
-from ._native import Host as _Host
-from .logs import JournalQuery, JournalResult, JournalStream, _journal_record
-from .management import Permissions, VoteCommand, VoteStatus
-from .settings import Room, RoomStore
+lazy import dst_server
 
-if TYPE_CHECKING:
-    from . import Client
+lazy from ._native import Host as _Host
+lazy from .logs import JournalQuery, JournalResult, JournalStream, _journal_record
+lazy from .management import Permissions, VoteCommand, VoteStatus
+lazy from .settings import Room, RoomStore
 
 
 class Host:  # ruff: ignore[too-many-public-methods]
@@ -82,11 +81,11 @@ class Host:  # ruff: ignore[too-many-public-methods]
     ) -> builtins.list[dict[str, Any]]:
         return await self._host.provision(definitions)
 
-    async def operate(self, number: int, request: dict[str, Any]) -> Any:
+    async def operate(self, number: int, request: Mapping[str, Any]) -> Any:
         return await self._host.operate(number, request)
 
     async def batch(
-        self, numbers: Sequence[int], request: dict[str, Any]
+        self, numbers: Sequence[int], request: Mapping[str, Any]
     ) -> builtins.list[dict[str, Any]]:
         """Return one result per room, in input order, with up to eight in flight."""
         return await self._host.batch(numbers, request)
@@ -143,18 +142,18 @@ class Host:  # ruff: ignore[too-many-public-methods]
         number: int,
         *,
         restart: bool = False,
-        notice: dict[str, Any] | None = None,
+        notice: Mapping[str, Any] | None = None,
     ) -> Any:
         return await self._host.operate(
             number,
             {"operation": "update_mods", "restart": restart, "notice": notice},
         )
 
-    async def set_policy(self, number: int, policy: dict[str, Any]) -> None:
+    async def set_policy(self, number: int, policy: Mapping[str, Any]) -> None:
         await self._host.operate(number, {"operation": "set_policy", "policy": policy})
 
     async def call(
-        self, number: int, method: str, arguments: dict[str, Any] | None = None
+        self, number: int, method: str, arguments: Mapping[str, Any] | None = None
     ) -> Any:
         return await self._host.operate(
             number,
@@ -235,10 +234,8 @@ class Host:  # ruff: ignore[too-many-public-methods]
         return await self.call(number, "cancel_vote")
 
     @asynccontextmanager
-    async def connect(self, number: int) -> AsyncGenerator[Client]:
-        from . import Client
-
-        async with Client(await self._host.connect(number)) as client:
+    async def connect(self, number: int) -> AsyncGenerator[dst_server.Client]:
+        async with dst_server.Client(await self._host.connect(number)) as client:
             yield client
 
     async def journal(

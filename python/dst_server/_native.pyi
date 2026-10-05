@@ -1,8 +1,10 @@
 import builtins
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from os import PathLike
 from pathlib import Path
 from typing import Any, Literal
+
+from .external import KleiEndpoints
 
 class DstError(Exception):
     code: str
@@ -14,7 +16,7 @@ class Client:
     def call(
         self,
         method: str,
-        arguments: dict[str, Any] | None = None,
+        arguments: Mapping[str, Any] | None = None,
         *,
         shard: str | None = None,
         timeout: float | None = None,
@@ -35,7 +37,7 @@ def run_cli(arguments: list[str]) -> int: ...
 
 class Configuration:
     def __init__(
-        self, model: str, values: dict[str, Any] | None = None, **fields: Any
+        self, model: str, values: Mapping[str, Any] | None = None, **fields: Any
     ) -> None: ...
     @property
     def model(self) -> str: ...
@@ -64,11 +66,13 @@ class Configuration:
         *,
         token: str = "",
         cluster_key: str | None = None,
-        settings: Configuration | dict[str, Any] | None = None,
+        settings: Configuration | Mapping[str, Any] | None = None,
     ) -> Configuration: ...
 
 class Room:
-    def __init__(self, value: dict[str, Any] | None = None, **fields: Any) -> None: ...
+    def __init__(
+        self, value: Mapping[str, Any] | None = None, **fields: Any
+    ) -> None: ...
     @property
     def number(self) -> int: ...
     @property
@@ -111,7 +115,7 @@ def build_template(
     number: int | None = None,
     token: str = "",
     cluster_key: str | None = None,
-    settings: Configuration | dict[str, Any] | None = None,
+    settings: Configuration | Mapping[str, Any] | None = None,
 ) -> Configuration: ...
 def fleet_room(
     room_number: int, *, token: str = "", cluster_key: str | None = None
@@ -157,19 +161,19 @@ class Host:
     def edit_fields(
         self, number: int, changes: builtins.list[tuple[str, Any]], unset: Sequence[str]
     ) -> Awaitable[Room]: ...
-    def operate(self, number: int, request: dict[str, Any]) -> Awaitable[Any]: ...
+    def operate(self, number: int, request: Mapping[str, Any]) -> Awaitable[Any]: ...
     def batch(
-        self, numbers: Sequence[int], request: dict[str, Any]
+        self, numbers: Sequence[int], request: Mapping[str, Any]
     ) -> Awaitable[builtins.list[dict[str, Any]]]: ...
     def provision(
         self, definitions: Sequence[Room]
     ) -> Awaitable[builtins.list[dict[str, Any]]]: ...
     def connect(self, number: int) -> Awaitable[Client]: ...
     def journal(
-        self, numbers: Sequence[int], request: dict[str, Any]
+        self, numbers: Sequence[int], request: Mapping[str, Any]
     ) -> Awaitable[dict[str, Any]]: ...
     def follow_journal(
-        self, numbers: Sequence[int], request: dict[str, Any]
+        self, numbers: Sequence[int], request: Mapping[str, Any]
     ) -> Awaitable[JournalStream]: ...
 
 class KleiClient:
@@ -177,7 +181,7 @@ class KleiClient:
         self,
         access_token: str | None = None,
         *,
-        endpoints: dict[str, str] | None = None,
+        endpoints: KleiEndpoints | None = None,
         request_timeout: float = 30.0,
         connect_timeout: float = 10.0,
         max_response_bytes: int = 33_554_432,
@@ -197,7 +201,7 @@ class KleiClient:
         platforms: Sequence[str] | None = None,
     ) -> Awaitable[list[dict[str, Any]]]: ...
     def get_rooms(
-        self, rooms: list[dict[str, Any]]
+        self, rooms: list[Mapping[str, Any]]
     ) -> Awaitable[list[dict[str, Any]]]: ...
     def discover_rooms(self) -> Awaitable[dict[str, Any]]: ...
 
@@ -220,11 +224,11 @@ class JournalLogs:
     def query(
         self,
         units: Sequence[str] | None,
-        request: dict[str, Any],
+        request: Mapping[str, Any],
         completion_timeout: float,
     ) -> Awaitable[dict[str, Any]]: ...
     def follow(
-        self, units: Sequence[str] | None, request: dict[str, Any]
+        self, units: Sequence[str] | None, request: Mapping[str, Any]
     ) -> Awaitable[JournalStream]: ...
 
 class JournalStream:
@@ -248,7 +252,7 @@ class NetdataLogs:
         max_output_bytes: int,
     ) -> None: ...
     def query(
-        self, request: dict[str, Any], completion_timeout: float
+        self, request: Mapping[str, Any], completion_timeout: float
     ) -> Awaitable[dict[str, Any]]: ...
 
 def event_names() -> list[str]: ...
@@ -283,7 +287,7 @@ def export_archive(
     host: Host,
     number: int,
     *,
-    options: dict[str, Any] | None = None,
+    options: Mapping[str, Any] | None = None,
     compression_level: int = 9,
 ) -> Awaitable[ClusterArchive]: ...
 

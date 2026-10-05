@@ -48,6 +48,7 @@ Adding a scenario does not require a matching Python registry or source parsing 
 The Lua fixtures load the checked out game modules, and their global state is discarded with each process.
 
 Python wheel checks remain in [`tests/rust`](../tests/rust) because installation and binding behavior need an installed SDK.
+They check lazy public imports and runtime annotations, plus mapping inputs such as Python 3.15's `frozendict`.
 Native game checks use disposable rooms and containers as described in the [migration guide](migration.md#native-verification).
 
 ## Running Tests

@@ -5,6 +5,7 @@ import fcntl
 import json
 import sys
 import tempfile
+from collections import UserDict
 from functools import partial
 from pathlib import Path
 from zipfile import ZipFile
@@ -36,6 +37,40 @@ from dst_server.settings import (
 )
 
 DUMMY_TOKEN = "private-token"  # ruff: ignore[hardcoded-password-string]
+
+
+def mappings() -> None:
+    for mapping in (dict, frozendict, UserDict):
+        source = mapping(max_players=12)
+        assert ClusterSettings(source).dump() == {"max_players": 12}
+        assert source == {"max_players": 12}
+        world = WorldgenOverride(
+            mapping(overrides=ForestOverrides(mapping(day="onlynight")))
+        )
+        assert parse_lua_literal(world.render().removeprefix("return "))[
+            "overrides"
+        ] == {"day": "onlynight"}
+        literal = mapping(nested=(mapping(value="世界"),))
+        assert parse_lua_literal(render_lua_literal(literal)) == {
+            "nested": [{"value": "世界"}]
+        }
+        try:
+            render_lua_literal(mapping({1: "invalid key"}))
+        except TypeError:
+            pass
+        else:
+            raise AssertionError
+
+    nested = frozendict(value=1)
+    for _ in range(65):
+        nested = frozendict(nested=nested)
+    for invalid in (nested, frozendict((str(i), i) for i in range(65_537))):
+        try:
+            render_lua_literal(invalid)
+        except ValueError as error:
+            assert "limit" in str(error)  # ruff: ignore[pytest-assert-in-except]
+        else:
+            raise AssertionError
 
 
 def configuration() -> Configuration:
@@ -172,6 +207,7 @@ def tools(root: Path) -> None:
 
 
 def main() -> None:
+    mappings()
     cluster = configuration()
     presets()
     with tempfile.TemporaryDirectory(prefix="dst-settings-") as temporary:
