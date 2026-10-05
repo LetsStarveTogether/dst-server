@@ -103,7 +103,7 @@ jobs:
           uv pip install --python .wheel-check/bin/python --no-deps dist/python/*.whl
           .wheel-check/bin/python -I tests/rust/check_binding.py "$PWD/target/debug/examples/rpc_fixture" "$PWD/dist/native/dst-server-linux-x86_64"
           for check in tests/rust/check_*.py; do
-            case "$check" in */check_binding.py|*/check_lua.py) continue ;; esac
+            case "$check" in */check_binding.py) continue ;; esac
             .wheel-check/bin/python -I "$check"
           done
           for check in tests/rust/check_*_cli.py; do

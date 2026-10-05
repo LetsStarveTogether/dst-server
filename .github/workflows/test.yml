@@ -57,9 +57,12 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --locked --workspace --all-targets -- -D warnings
 
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Test native SDK
         run: |
-          cargo test --locked -p dst-server --all-targets
+          cargo nextest run --locked -p dst-server --all-targets --profile ci
           cargo build --locked -p dst-server --bin dst-server --example rpc_fixture
 
       - name: Check Python facade and build tools
@@ -70,7 +73,7 @@ jobs:
           uv run --locked --no-sync ty check python
 
       - name: Test Lua 5.1 and LuaJIT contracts
-        run: uv run --no-project --python 3.14 -- python tests/rust/check_lua.py
+        run: uv run --locked --no-sync pytest tests/lua
 
       - name: Build wheel from source distribution
         run: uv build --python 3.14 --clear --out-dir dist --no-sources -C 'maturin.build-args=--compatibility pypi'
@@ -83,7 +86,7 @@ jobs:
           uv pip install --python .wheel-check/bin/python --no-deps dist/*.whl
           .wheel-check/bin/python -I tests/rust/check_binding.py "$PWD/target/debug/examples/rpc_fixture" "$PWD/target/debug/dst-server"
           for check in tests/rust/check_*.py; do
-            case "$check" in */check_binding.py|*/check_lua.py) continue ;; esac
+            case "$check" in */check_binding.py) continue ;; esac
             .wheel-check/bin/python -I "$check"
           done
           for check in tests/rust/check_*_cli.py; do
@@ -116,6 +119,11 @@ jobs:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
           submodules: true
+
+      - name: Setup uv and Python
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: '3.14'
 
       - name: Resolve current native game version
         id: game
@@ -154,7 +162,7 @@ jobs:
           sudo podman cp "$native_container:/usr/local/share/dst-server/build-manifest.json" "$native_directory/build-manifest.json"
           "$native_directory/dst-server" scripts verify "$native_directory/scripts.zip"
           python3 -m zipfile -e "$native_directory/scripts.zip" "$native_directory/source"
-          python3 tests/rust/check_lua.py --scripts "$native_directory/source/scripts"
+          uv run --locked --only-group dev pytest tests/lua --scripts "$native_directory/source/scripts" --binary "$native_directory/dst-server"
 
       - name: Run native recovery, player and 1, 2, 5 world acceptance checks
         timeout-minutes: 60
