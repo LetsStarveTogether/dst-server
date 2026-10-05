@@ -31,6 +31,19 @@ verify: build
 test-system image:
     DST_SERVER_IMAGE="{{ image }}" uv run --locked --all-extras pytest -m system tests/system
 
+# Lua contracts for the standalone client mod; no server/container required.
+test-client-mod:
+    uv run --locked pytest tests/client_mod
+
+# Exercise native game components in an isolated, offline dedicated server.
+test-client-mod-system image:
+    DST_SERVER_IMAGE="{{ image }}" uv run --locked --all-extras pytest -m system tests/system/test_client_mod.py
+
+# Install by extracting fieldkit/ into the game's mods/ directory.
+package-client-mod:
+    mkdir -p dist
+    python -m zipfile -c dist/fieldkit.zip mods/fieldkit
+
 # Also verify the OTLP round trip against a configured local Netdata.
 test-netdata-system image:
     DST_SERVER_NETDATA_TEST=1 just test-system "{{ image }}"
