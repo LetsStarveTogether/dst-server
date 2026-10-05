@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail, ensure};
 use full_moon::{
     LuaVersion,
     ast::{
-        Ast, Call, Expression, Field, FunctionArgs, FunctionCall, LastStmt, Prefix, Stmt, Suffix,
-        UnOp,
+        Ast, BinOp, Call, Expression, Field, FunctionArgs, FunctionCall, LastStmt, Prefix, Stmt,
+        Suffix, UnOp,
     },
     tokenizer::{Lexer, LexerResult, StringLiteralQuoteType, Symbol, TokenReference, TokenType},
 };
@@ -217,14 +217,7 @@ fn parse(source: &str, calls: bool) -> Result<Ast> {
             _ => bail!("only literal Lua data is supported"),
         }
     }
-    let ast = full_moon::parse_fallible(&source, LuaVersion::lua51())
-        .into_result()
-        .map_err(|_| anyhow::anyhow!("invalid Lua 5.1 syntax"))?;
-    ensure!(
-        ast.to_string() == source,
-        "Lua parser did not consume the complete source"
-    );
-    Ok(ast)
+    parse_script(&source)
 }
 
 fn returned_value(ast: &Ast) -> Result<Value> {
@@ -411,8 +404,7 @@ pub(crate) fn string(token: &TokenReference) -> Result<String> {
     String::from_utf8(decoded).context("Lua string must contain valid UTF-8")
 }
 
-/// Parse native executable setup code without evaluating it. The lexical bounds
-/// also limit recursive expressions before the parser allocates their AST.
+/// Parse Lua 5.1 without evaluating it, checking depth before building its recursive AST.
 pub(crate) fn parse_script(source: &str) -> Result<Ast> {
     ensure!(
         source.len() <= MAX_SOURCE_BYTES,
@@ -423,66 +415,7 @@ pub(crate) fn parse_script(source: &str) -> Result<Ast> {
         "Lua source contains an embedded NUL"
     );
     let source = normalize_line_endings(source);
-    let mut lexer = Lexer::new(&source, LuaVersion::lua51());
-    let mut depth = 0_usize;
-    let mut operators = 0_usize;
-    let mut tokens = 0_usize;
-    while let Some(token) = lexer.consume() {
-        let LexerResult::Ok(token) = token else {
-            bail!("invalid Lua 5.1 syntax");
-        };
-        tokens += 1;
-        ensure!(tokens <= MAX_TOKENS, "Lua source exceeds the token limit");
-        if let TokenType::Symbol { symbol } = token.token_type() {
-            match symbol {
-                Symbol::LeftBrace
-                | Symbol::LeftBracket
-                | Symbol::LeftParen
-                | Symbol::Do
-                | Symbol::Then
-                | Symbol::Function
-                | Symbol::Repeat => {
-                    depth += 1;
-                }
-                Symbol::RightBrace
-                | Symbol::RightBracket
-                | Symbol::RightParen
-                | Symbol::End
-                | Symbol::ElseIf
-                | Symbol::Until => {
-                    depth = depth.saturating_sub(1);
-                }
-                _ => {}
-            }
-            match symbol {
-                Symbol::Plus
-                | Symbol::Minus
-                | Symbol::Star
-                | Symbol::Slash
-                | Symbol::Percent
-                | Symbol::Caret
-                | Symbol::TwoDots
-                | Symbol::Hash
-                | Symbol::Not
-                | Symbol::And
-                | Symbol::Or
-                | Symbol::TwoEqual
-                | Symbol::TildeEqual
-                | Symbol::LessThan
-                | Symbol::LessThanEqual
-                | Symbol::GreaterThan
-                | Symbol::GreaterThanEqual => {
-                    operators += 1;
-                }
-                _ => {}
-            }
-            ensure!(depth <= MAX_NESTING, "Lua nesting exceeds the limit");
-            ensure!(
-                operators <= MAX_NESTING,
-                "Lua setup code exceeds the operator limit"
-            );
-        }
-    }
+    check_script_depth(&source)?;
     let ast = full_moon::parse_fallible(&source, LuaVersion::lua51())
         .into_result()
         .map_err(|_| anyhow::anyhow!("invalid Lua 5.1 syntax"))?;
@@ -491,6 +424,157 @@ pub(crate) fn parse_script(source: &str) -> Result<Ast> {
         "Lua parser did not consume the complete source"
     );
     Ok(ast)
+}
+
+struct ScriptScope {
+    opening: Option<Symbol>,
+    nesting: usize,
+    operators: usize,
+    nested_depth: usize,
+    max_depth: usize,
+}
+
+impl ScriptScope {
+    fn new(opening: Option<Symbol>, can_end_expression: bool) -> Self {
+        // Call arguments and blocks need more parser stack than grouping.
+        let nesting = match opening {
+            Some(Symbol::Do | Symbol::Then | Symbol::Function | Symbol::Repeat) => 4,
+            Some(Symbol::LeftParen | Symbol::LeftBrace) if can_end_expression => 2,
+            _ => 1,
+        };
+        Self {
+            opening,
+            nesting,
+            operators: 0,
+            nested_depth: 0,
+            max_depth: 0,
+        }
+    }
+
+    fn finish_expression(&mut self) {
+        self.max_depth = self.max_depth.max(self.operators + self.nested_depth);
+        self.operators = 0;
+        self.nested_depth = 0;
+    }
+}
+
+fn check_script_depth(source: &str) -> Result<()> {
+    let mut lexer = Lexer::new(source, LuaVersion::lua51());
+    let mut scopes = vec![ScriptScope::new(None, false)];
+    let mut can_end_expression = false;
+    let mut tokens = 0_usize;
+    while let Some(token) = lexer.consume() {
+        let LexerResult::Ok(token) = token else {
+            bail!("invalid Lua 5.1 syntax");
+        };
+        tokens += 1;
+        ensure!(tokens <= MAX_TOKENS, "Lua source exceeds the token limit");
+        let kind = token.token_type();
+        // These tokens after a complete expression start another Lua statement.
+        if can_end_expression
+            && matches!(
+                kind,
+                TokenType::Identifier { .. }
+                    | TokenType::Symbol {
+                        symbol: Symbol::Function
+                    }
+            )
+        {
+            scopes.last_mut().unwrap().finish_expression();
+        }
+        if let TokenType::Symbol { symbol } = kind {
+            match symbol {
+                Symbol::LeftBrace
+                | Symbol::LeftBracket
+                | Symbol::LeftParen
+                | Symbol::Do
+                | Symbol::Then
+                | Symbol::Function
+                | Symbol::Repeat => {
+                    if matches!(symbol, Symbol::Do | Symbol::Then | Symbol::Repeat) {
+                        scopes.last_mut().unwrap().finish_expression();
+                    }
+                    scopes.push(ScriptScope::new(Some(*symbol), can_end_expression));
+                    ensure!(
+                        scopes.len() <= MAX_NESTING + 1,
+                        "Lua nesting exceeds the limit"
+                    );
+                }
+                Symbol::RightBrace
+                | Symbol::RightBracket
+                | Symbol::RightParen
+                | Symbol::End
+                | Symbol::ElseIf
+                | Symbol::Until => {
+                    ensure!(scopes.len() > 1, "unbalanced Lua scope");
+                    let mut scope = scopes.pop().unwrap();
+                    ensure!(
+                        matches!(
+                            (scope.opening.unwrap(), symbol),
+                            (Symbol::LeftBrace, Symbol::RightBrace)
+                                | (Symbol::LeftBracket, Symbol::RightBracket)
+                                | (Symbol::LeftParen, Symbol::RightParen)
+                                | (Symbol::Do | Symbol::Then | Symbol::Function, Symbol::End)
+                                | (Symbol::Then, Symbol::ElseIf)
+                                | (Symbol::Repeat, Symbol::Until)
+                        ),
+                        "unbalanced Lua scope"
+                    );
+                    scope.finish_expression();
+                    let parent = scopes.last_mut().unwrap();
+                    parent.nested_depth = parent.nested_depth.max(scope.max_depth + scope.nesting);
+                    ensure!(
+                        parent.operators + parent.nested_depth <= MAX_NESTING,
+                        "Lua expression exceeds the depth limit"
+                    );
+                    if matches!(symbol, Symbol::ElseIf | Symbol::Until) {
+                        parent.finish_expression();
+                    }
+                }
+                Symbol::Equal
+                | Symbol::Comma
+                | Symbol::Semicolon
+                | Symbol::Local
+                | Symbol::Return
+                | Symbol::Break
+                | Symbol::If
+                | Symbol::While
+                | Symbol::For
+                | Symbol::Else => {
+                    scopes.last_mut().unwrap().finish_expression();
+                }
+                _ if matches!(symbol, Symbol::Hash | Symbol::Not)
+                    || BinOp::precedence_of_token(&token).is_some() =>
+                {
+                    let scope = scopes.last_mut().unwrap();
+                    scope.operators += 1;
+                    ensure!(
+                        scope.operators + scope.nested_depth <= MAX_NESTING,
+                        "Lua expression exceeds the depth limit"
+                    );
+                }
+                _ => {}
+            }
+        }
+        can_end_expression = matches!(
+            kind,
+            TokenType::Identifier { .. }
+                | TokenType::Number { .. }
+                | TokenType::StringLiteral { .. }
+                | TokenType::Symbol {
+                    symbol: Symbol::RightBrace
+                        | Symbol::RightBracket
+                        | Symbol::RightParen
+                        | Symbol::End
+                        | Symbol::True
+                        | Symbol::False
+                        | Symbol::Nil
+                        | Symbol::Ellipsis
+                }
+        );
+    }
+    ensure!(scopes.len() == 1, "unclosed Lua scope");
+    Ok(())
 }
 
 /// Render a finite JSON value as literal Lua data; null has no supported mapping.
@@ -718,6 +802,116 @@ mod tests {
         ] {
             assert!(parse_return_table(source).is_err(), "accepted: {source:?}");
         }
+    }
+
+    #[test]
+    fn script_depth_is_bounded_per_expression_across_nested_scopes() {
+        for expression in [
+            format!("{}1{}", "(".repeat(1000), ")".repeat(1000)),
+            format!("{}1", "not ".repeat(1000)),
+            format!("1{}", "+1".repeat(1000)),
+            format!("1{}", "^1".repeat(1000)),
+            format!("'x'{}", "..'x'".repeat(1000)),
+            format!("{}1", "function() return ".repeat(1000)),
+            format!("{}1{}", "function() return ".repeat(32), " end".repeat(32)),
+            format!(
+                "1{}",
+                "+(function() local x = 1 return x end)()".repeat(1000)
+            ),
+            format!("{}1{}", "1+(".repeat(40), ")".repeat(40)),
+        ] {
+            let source = format!("local value = {expression}");
+            assert!(parse_script(&source).is_err());
+            assert!(crate::annotations::parse_modutil(&source, "modutil").is_err());
+            assert!(
+                crate::annotations::parse_component(&source, "widget", "Widget", "components")
+                    .is_err()
+            );
+        }
+        for (opening, closing) in [
+            ("do ", " end"),
+            ("if true then ", " end"),
+            ("repeat ", " until true"),
+        ] {
+            assert!(
+                parse_script(&format!("{}f(){}", opening.repeat(32), closing.repeat(32))).is_err()
+            );
+        }
+        parse_script(&format!(
+            "local value = {}1{}",
+            "function() return ".repeat(15),
+            " end".repeat(15)
+        ))
+        .unwrap();
+        let statements = "local n = 1 + 2\nvalue = n - 1\nprint(n) print(n)\n".repeat(1000);
+        parse_script(&statements).unwrap();
+        parse_script(&format!("function f() {statements} end")).unwrap();
+        parse_script(&"function f() return 1 + 2 end\n".repeat(1000)).unwrap();
+        parse_script(&format!(
+            "return {}nil",
+            "(a and b() and c and d) or ".repeat(20)
+        ))
+        .unwrap();
+        parse_script(&format!("local values = {{{}}}", "(1+2),".repeat(1000))).unwrap();
+        parse_script("if a then f() elseif b then g() else h() end\nwhile a do break end\nrepeat f() until a\nfor x=1,3 do f(x) end").unwrap();
+        parse_script(&format!(
+            "--{}\nlocal s = [[{}]]",
+            "(".repeat(1000),
+            "not ".repeat(1000)
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn nested_call_arguments_are_bounded_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                for (opening, closing) in [
+                    ("f(", ")"),
+                    ("f{", "}"),
+                    ("object:method(", ")"),
+                    ("object:method{", "}"),
+                ] {
+                    for depth in [33, 44, 56] {
+                        let expression =
+                            format!("{}1{}", opening.repeat(depth), closing.repeat(depth));
+                        assert!(check_script_depth(&expression).is_err(), "{expression}");
+                        assert!(literal_calls(&expression).is_err());
+                        let source = format!("local value = {expression}");
+                        assert!(parse_script(&source).is_err());
+                        assert!(crate::mods::scan_setup(&source).is_err());
+                        assert!(crate::annotations::parse_modutil(&source, "modutil").is_err());
+                        assert!(
+                            crate::annotations::parse_component(
+                                &source,
+                                "widget",
+                                "Widget",
+                                "components"
+                            )
+                            .is_err()
+                        );
+                    }
+                    let source = format!(
+                        "local value = {}1{}",
+                        opening.repeat(32),
+                        closing.repeat(32)
+                    );
+                    crate::annotations::parse_component(&source, "widget", "Widget", "components")
+                        .unwrap();
+                }
+                for (opening, closing) in [("(", ")"), ("{", "}"), ("value[", "]")] {
+                    parse_script(&format!(
+                        "local value = {}1{}",
+                        opening.repeat(64),
+                        closing.repeat(64)
+                    ))
+                    .unwrap();
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

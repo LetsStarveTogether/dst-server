@@ -10,7 +10,6 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use full_moon::{
-    LuaVersion,
     ast::{Call, Expression, FunctionArgs, Prefix, Stmt, Suffix},
     tokenizer::{StringLiteralQuoteType, TokenType},
 };
@@ -152,19 +151,8 @@ fn read_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>> {
 }
 
 fn check_startup(source: &[u8]) -> Result<()> {
-    ensure!(
-        source.len() <= crate::lua::MAX_SOURCE_BYTES,
-        "native main.lua exceeds the parser byte limit"
-    );
     let source = std::str::from_utf8(source).context("native main.lua must be UTF-8")?;
-    let source = crate::lua::normalize_line_endings(source);
-    let ast = full_moon::parse_fallible(&source, LuaVersion::lua51())
-        .into_result()
-        .map_err(|_| anyhow::anyhow!("native main.lua has invalid Lua 5.1 syntax"))?;
-    ensure!(
-        ast.to_string() == source,
-        "native main.lua was not completely parsed"
-    );
+    let ast = crate::lua::parse_script(source).context("invalid native main.lua")?;
     let found = ast.nodes().stmts().any(|statement| {
         let Stmt::FunctionCall(call) = statement else { return false; };
         let Prefix::Name(name) = call.prefix() else { return false; };
@@ -490,6 +478,17 @@ mod tests {
         ] {
             check_startup(source.as_bytes()).unwrap();
         }
+        let source = format!(
+            "require('globalvariableoverrides')\n{}",
+            "local x = 1 + 2\n".repeat(1000)
+        );
+        check_startup(source.as_bytes()).unwrap();
+        let nested = format!(
+            "local x = {}1{}\nrequire('globalvariableoverrides')",
+            "(".repeat(1000),
+            ")".repeat(1000)
+        );
+        assert!(check_startup(nested.as_bytes()).is_err());
     }
 
     #[test]
