@@ -29,7 +29,7 @@ From this checkout:
 ```sh
 cargo build --locked --release -p dst-server --bin dst-server
 export PATH="$PWD/target/release:$PATH"
-uv sync --python 3
+uv sync
 dst-server --help
 uv run python -m dst_server --help
 ```
@@ -625,7 +625,7 @@ cargo nextest run --locked -p dst-server --all-targets
 uv run ruff check python tests/rust tools
 uv run ty check python
 uv run --locked --only-group dev pytest tests/lua
-uv build --python 3 --out-dir dist --no-sources
+uv build --out-dir dist --no-sources
 ```
 
 CI builds a wheel from the source distribution and installs it in an isolated environment.

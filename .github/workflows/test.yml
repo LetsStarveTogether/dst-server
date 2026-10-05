@@ -42,15 +42,14 @@ jobs:
 
       - name: Setup uv and Python
         uses: astral-sh/setup-uv@v10.3.3
-        with:
-          python-version: '3'
 
       - name: Install native build and Lua dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends capnproto pkg-config libarchive-dev lua5.1 luajit
           rustup show
-          printf 'PYO3_PYTHON=%s\n' "$(uv python find 3)" >> "$GITHUB_ENV"
+          uv sync --locked --only-group dev
+          printf 'PYO3_PYTHON=%s\n' "$(uv python find)" >> "$GITHUB_ENV"
 
       - name: Check Rust formatting and lints
         run: |
@@ -69,7 +68,6 @@ jobs:
 
       - name: Check Python facade and build tools
         run: |
-          uv sync --locked --only-group dev
           uv run --locked --no-sync ruff format --check .
           uv run --locked --no-sync ruff check .
           uv run --locked --no-sync ty check python
@@ -78,13 +76,13 @@ jobs:
         run: uv run --locked --no-sync pytest tests/lua
 
       - name: Build wheel from source distribution
-        run: uv build --python 3 --clear --out-dir dist --no-sources -C 'maturin.build-args=--compatibility pypi'
+        run: uv build --clear --out-dir dist --no-sources -C 'maturin.build-args=--compatibility pypi'
 
       - name: Check isolated wheel and native process ownership
         shell: bash
         run: |
           set -euo pipefail
-          uv venv .wheel-check --python 3
+          uv venv .wheel-check
           uv pip install --python .wheel-check/bin/python --no-deps dist/*.whl
           .wheel-check/bin/python -I tests/rust/check_binding.py "$PWD/target/debug/examples/rpc_fixture" "$PWD/target/debug/dst-server"
           for check in tests/rust/check_*.py; do
@@ -99,9 +97,9 @@ jobs:
 
       - name: Verify release manifest generation
         run: |
-          uv run --no-project --python 3 -- python tools/build_manifest.py \
+          uv run --locked --no-sync python tools/build_manifest.py \
             --output "$RUNNER_TEMP/build-manifest.json" \
-            --python "$(uv python find 3)" \
+            --python "$(uv python find)" \
             --artifact target/debug/dst-server --artifact dist/*.whl --artifact dist/*.tar.gz
 
   native-game:
@@ -124,8 +122,6 @@ jobs:
 
       - name: Setup uv and Python
         uses: astral-sh/setup-uv@v10.3.3
-        with:
-          python-version: '3'
 
       - name: Resolve current native game version
         id: game
@@ -169,7 +165,7 @@ jobs:
       - name: Run native recovery, player and 1, 2, 5 world acceptance checks
         timeout-minutes: 60
         run: |
-          sudo -E python3 tests/rust/native_acceptance.py --image "$DST_SERVER_IMAGE" \
+          sudo -E "$(uv python find)" tests/rust/native_acceptance.py --image "$DST_SERVER_IMAGE" \
             --binary "$RUNNER_TEMP/native-image/dst-server" \
             --source-scripts "$RUNNER_TEMP/native-image/scripts.zip" \
             --output "$RUNNER_TEMP/native-acceptance"

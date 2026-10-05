@@ -214,8 +214,6 @@ jobs:
       - name: Setup uv and Python
         if: ${{ matrix.build }}
         uses: astral-sh/setup-uv@v10.3.3
-        with:
-          python-version: '3'
 
       - name: Build image
         if: ${{ matrix.build }}
@@ -297,7 +295,7 @@ jobs:
         run: |
           set -euo pipefail
           podman save --format oci-archive "$DST_SERVER_IMAGE" | sudo podman load
-          sudo -E python3 tests/rust/native_acceptance.py --image "$DST_SERVER_IMAGE" \
+          sudo -E "$(uv python find)" tests/rust/native_acceptance.py --image "$DST_SERVER_IMAGE" \
             --binary "$NATIVE_DIRECTORY/dst-server" \
             --source-scripts "$NATIVE_DIRECTORY/scripts.zip" \
             --output "$RUNNER_TEMP/native-acceptance"

@@ -76,8 +76,6 @@ jobs:
 
       - name: Setup Python and uv
         uses: astral-sh/setup-uv@v10.3.3
-        with:
-          python-version: '3'
 
       - name: Build distributions against the game image libc
         shell: bash
@@ -99,7 +97,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends capnproto pkg-config libarchive-dev lua5.1 luajit
           cargo build --locked -p dst-server --example rpc_fixture
-          uv venv .wheel-check --python 3
+          uv venv .wheel-check
           uv pip install --python .wheel-check/bin/python --no-deps dist/python/*.whl
           .wheel-check/bin/python -I tests/rust/check_binding.py "$PWD/target/debug/examples/rpc_fixture" "$PWD/dist/native/dst-server-linux-x86_64"
           for check in tests/rust/check_*.py; do
