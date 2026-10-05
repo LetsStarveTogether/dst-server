@@ -459,9 +459,6 @@ impl Controller {
             );
         }
         let retry = state.retry;
-        let recovered = state.target.as_ref().is_some_and(|target| {
-            matches!(target.phase, TargetPhase::Preparing | TargetPhase::Starting)
-        });
         if retry.is_some() {
             // A fresh monotonic wait is conservative across container and wall-clock changes.
             tokio::time::sleep(recovery::RETRY_DELAY).await;
@@ -508,8 +505,6 @@ impl Controller {
             self.room.with_lock(|lock| {
                 recovery::begin_current_retry(lock, now_ms().max(retry.not_before_ms))
             })?;
-        } else if recovered {
-            self.room.with_lock(recovery::begin_recovered_room)?;
         }
         self.save_run(RunState {
             active: true,
