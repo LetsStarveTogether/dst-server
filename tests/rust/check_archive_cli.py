@@ -1,4 +1,4 @@
-"""Run installed archive commands against a stopped disposable room."""
+"""Export an owned room without service control or temporary disk artifacts."""
 
 # Child programs, paths and credentials are local disposable fixtures.
 # ruff: file-ignore[suspicious-subprocess-import, subprocess-without-shell-equals-true, hardcoded-password-func-arg]
@@ -53,16 +53,7 @@ def command(
 def check(directory: Path) -> None:
     systemctl = directory / "systemctl"
     systemctl.write_text(
-        f"#!{sys.executable}\n"
-        "import pathlib, sys\n"
-        "path = pathlib.Path(sys.argv[0]).with_suffix('.state')\n"
-        "state = path.read_text() if path.exists() else 'inactive'\n"
-        "if state == 'transition':\n"
-        "    path.write_text('active')\n"
-        "    state = 'inactive'\n"
-        "print(f'Id=dst-007.service\\nLoadState=loaded\\nActiveState={state}\\n'\n"
-        "      'SubState=dead\\nJob=0\\nResult=success')\n",
-        encoding="utf-8",
+        f"#!{sys.executable}\nraise SystemExit('export called systemctl')\n"
     )
     systemctl.chmod(0o755)
     store = RoomStore(directory / "rooms")
@@ -84,6 +75,8 @@ def check(directory: Path) -> None:
     assert contents.startswith(b"7z\xbc\xaf\x27\x1c")
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
 
+    check_import(directory, output)
+
     existing = command(directory, output)
     assert existing.returncode == 1
     assert output.read_bytes() == contents
@@ -91,22 +84,102 @@ def check(directory: Path) -> None:
     locked = directory / "locked.7z"
     with (directory / "rooms/007/.dst-room.lock").open("r+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        assert command(directory, locked).returncode == 1
-        assert not locked.exists()
+        exported = command(directory, locked)
+        assert exported.returncode == 0, exported.stderr
+        assert locked.read_bytes().startswith(b"7z\xbc\xaf\x27\x1c")
+    assert not (directory / "rooms/007/.dst-archives").exists()
 
-    systemctl.with_suffix(".state").write_text("transition", encoding="utf-8")
-    raced = directory / "raced.7z"
-    race = command(directory, raced)
-    assert race.returncode == 1
-    assert "inactive room service" in race.stderr
-    assert not raced.exists()
+    client = command(directory, directory / "client.7z", "--client-compatible")
+    assert client.returncode == 0, client.stderr
+    assert json.loads(client.stdout)["filename"].startswith("DST-Cluster_7-")
+    conflict = command(
+        directory,
+        directory / "conflict.7z",
+        "--client-compatible",
+        "--room-id",
+        "custom",
+    )
+    assert conflict.returncode == 2, conflict.stderr
+    assert not (directory / "conflict.7z").exists()
 
-    online = directory / "online.7z"
-    assert command(directory, online).returncode == 1
-    assert not online.exists()
-
-    systemctl.with_suffix(".state").write_text("inactive", encoding="utf-8")
     check_upload_termination(directory)
+
+
+def check_import(directory: Path, source: Path) -> None:
+    restored = directory / "restored"
+    imported = subprocess.run(
+        [*arguments(directory), "import", str(source), "--output", str(restored)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert imported.returncode == 0, imported.stderr
+    result_config = json.loads(imported.stdout)
+    assert result_config["path"] == str(restored)
+    assert result_config["configuration"]["settings"]["cluster_name"]
+    assert (restored / "cluster_token.txt").read_bytes() == b""
+    assert (restored / "cluster.ini").is_file()
+    assert not (restored / ".dst-server.json").exists()
+    existing_import = subprocess.run(
+        [*arguments(directory), "import", str(source), "--output", str(restored)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert existing_import.returncode == 1
+    assert "already exists" in existing_import.stderr
+
+    from zipfile import ZipFile
+
+    client_input = directory / "client.zip"
+    with ZipFile(client_input, "w") as archive:
+        archive.writestr(
+            "Cluster_2/Master/save/shardindex",
+            'KLEI     1 return {session_id="0123456789ABCDEF",version=5,'
+            'server={name="Client fixture",encode_user_path=true},'
+            'world={options={id="SURVIVAL_TOGETHER",name="World",desc="",location="forest",overrides={task_set="default"}}},enabled_mods={}}',
+        )
+        archive.writestr(
+            "Cluster_2/Master/save/session/0123456789ABCDEF/000000001", b"world\x00\xff"
+        )
+        archive.writestr(
+            "Cluster_2/Master/save/session/0123456789ABCDEF/A7K1NP32JUC8/000000001",
+            b"player\x00\xff",
+        )
+        archive.writestr("Cluster_2/Master/save/server_temp/cache", b"discard")
+    client_output = directory / "imported-client"
+    client_import = subprocess.run(
+        [
+            *arguments(directory),
+            "import",
+            str(client_input),
+            "--from-client",
+            "--output",
+            str(client_output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert client_import.returncode == 0, client_import.stderr
+    assert (
+        json.loads(client_import.stdout)["configuration"]["settings"]["cluster_name"]
+        == "Client fixture"
+    )
+    assert (
+        client_output / "forest/save/session/0123456789ABCDEF/000000001"
+    ).read_bytes() == b"world\x00\xff"
+    shard = json.loads(client_import.stdout)["configuration"]["shards"]["forest"]
+    assert shard["settings"]["name"] == "forest"
+    assert shard["settings"]["encode_user_path"] is False
+    assert (
+        client_output / "forest/save/session/0123456789ABCDEF/KU_WRv6AVc8_/000000001"
+    ).read_bytes() == b"player\x00\xff"
+    assert not (client_output / "Master").exists()
+    assert not (client_output / "forest/save/server_temp").exists()
 
 
 def check_upload_termination(directory: Path) -> None:
@@ -152,6 +225,7 @@ def check_upload_termination(directory: Path) -> None:
                     *arguments(directory),
                     "upload",
                     "7",
+                    "--client-compatible",
                     "--bucket",
                     "fixture",
                     "--endpoint",

@@ -1,4 +1,4 @@
-//! CLI access to consistent room exports and multipart uploads.
+//! CLI access to native room imports, exports and multipart uploads.
 
 use std::path::PathBuf;
 
@@ -7,7 +7,7 @@ use clap::{Args, Subcommand};
 use serde_json::json;
 
 use crate::{
-    archive::{self, ExportOptions, S3Options},
+    archive::{self, ExportOptions, ImportOptions, ImportSource, S3Options},
     host::Host,
     settings::ClusterConfig,
 };
@@ -29,10 +29,11 @@ pub struct Arguments {
 #[derive(Args)]
 struct Source {
     number: u16,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "client_compatible")]
     room_id: Option<String>,
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    encode_user_path: bool,
+    /// Adapt exactly one master and one secondary for a client save slot.
+    #[arg(long)]
+    client_compatible: bool,
     /// Replacement export configuration as JSON, @file, or stdin (-).
     #[arg(long)]
     configuration: Option<String>,
@@ -44,7 +45,7 @@ impl Source {
     fn options(&self) -> Result<ExportOptions> {
         Ok(ExportOptions {
             room_id: self.room_id.clone(),
-            encode_user_path: self.encode_user_path,
+            client_compatible: self.client_compatible,
             configuration: self
                 .configuration
                 .as_deref()
@@ -56,6 +57,16 @@ impl Source {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Rebuild one native room from a directory, ZIP or 7z archive.
+    Import {
+        source: PathBuf,
+        /// A new directory for the imported room.
+        #[arg(long)]
+        output: PathBuf,
+        /// Reconstruct server settings from a client's Master/Caves shard indexes.
+        #[arg(long)]
+        from_client: bool,
+    },
     /// Export one room to an explicit local archive path.
     Export {
         #[command(flatten)]
@@ -91,6 +102,22 @@ pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
     host.systemd.executable = arguments.systemctl;
     host.systemd.user = arguments.user;
     match arguments.command {
+        Command::Import {
+            source,
+            output,
+            from_client,
+        } => {
+            let configuration = archive::import_cluster(
+                ImportSource::Path(source),
+                output.clone(),
+                ImportOptions { from_client },
+            )
+            .await?;
+            super::emit(
+                &json!({"path": output, "configuration": configuration}),
+                compact,
+            )?;
+        }
         Command::Export { source, output } => {
             let archive = archive::export_host(
                 &host,

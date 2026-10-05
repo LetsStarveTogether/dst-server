@@ -12,8 +12,36 @@ use pyo3::{
 use crate::{
     anyhow_error as error, from_python,
     host::{Host, room_number},
+    settings::Configuration,
     to_python,
 };
+
+#[pyfunction]
+#[pyo3(signature = (source, destination, *, options=None))]
+fn import_archive<'py>(
+    py: Python<'py>,
+    source: &Bound<'_, PyAny>,
+    destination: PathBuf,
+    options: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let source = if let Ok(archive) = source.extract::<PyRef<'_, ClusterArchive>>() {
+        native::ImportSource::Archive(archive.copy()?.into_file())
+    } else {
+        native::ImportSource::Path(source.extract()?)
+    };
+    let options = options
+        .map(|value| from_python(value, 0, &mut 0))
+        .transpose()?
+        .unwrap_or_else(|| serde_json::json!({}));
+    let options = serde_json::from_value::<native::ImportOptions>(options)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        native::import_cluster(source, destination, options)
+            .await
+            .map(Configuration::from_cluster)
+            .map_err(error)
+    })
+}
 
 #[pyclass(name = "ClusterArchive", module = "dst_server._native")]
 pub(crate) struct ClusterArchive {
@@ -56,7 +84,7 @@ impl ClusterArchive {
 impl ClusterArchive {
     #[new]
     fn new(py: Python<'_>, filename: String, stream: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let mut file = tempfile::tempfile()
+        let mut file = native::memory_file()
             .map_err(|error| pyo3::exceptions::PyOSError::new_err(error.to_string()))?;
         stream.call_method1("seek", (0,))?;
         loop {
@@ -205,7 +233,7 @@ impl Upload {
 }
 
 #[pyfunction]
-#[pyo3(signature = (host, number, *, options=None, compression_level=3))]
+#[pyo3(signature = (host, number, *, options=None, compression_level=22))]
 fn export_archive<'py>(
     py: Python<'py>,
     host: PyRef<'_, Host>,
@@ -243,5 +271,6 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<ClusterArchive>()?;
     module.add_class::<Upload>()?;
     module.add_function(wrap_pyfunction!(export_archive, module)?)?;
+    module.add_function(wrap_pyfunction!(import_archive, module)?)?;
     Ok(())
 }

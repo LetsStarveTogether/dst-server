@@ -320,19 +320,6 @@ impl StoppedRoom<'_> {
 
     /// Replace files in order, stopping at the first I/O error.
     /// Earlier writes remain applied; reapply the configuration after fixing the error.
-    pub(crate) fn open_regular(&self, relative: impl AsRef<Path>) -> Result<File> {
-        self.room.open_regular(relative)
-    }
-
-    pub(crate) fn list_directory(
-        &self,
-        relative: impl AsRef<Path>,
-    ) -> Result<Vec<(String, std::fs::FileType)>> {
-        self.room.list_directory(relative)
-    }
-
-    /// Commit a complete set of explicit replacements. Files absent from the set
-    /// are untouched. A failure after manifest publication requires `recover`.
     pub fn write_files(
         &mut self,
         files: FileChanges,
@@ -517,58 +504,61 @@ pub fn create_directory(path: impl AsRef<Path>) -> Result<()> {
     Directory::open_with_creation(path.as_ref(), true).map(|_| ())
 }
 
+/// Write a new native tree once and publish it without replacing any existing path.
+pub(crate) fn write_new_directory(
+    destination: &Path,
+    files: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<()> {
+    let name = destination
+        .file_name()
+        .context("destination must name a new directory")?;
+    let parent = Directory::open_with_creation(
+        destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+        true,
+    )?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".dst-import-")
+        .tempdir_in(format!("/proc/self/fd/{}", parent.0.as_raw_fd()))?;
+    let temporary_name = temporary.path().file_name().unwrap();
+    let root = parent.child_os(temporary_name, false, 0o700)?;
+    for (path, bytes) in files {
+        let (directory, filename) = root.parent(path, true)?;
+        let mut file = directory.open_file(
+            &filename,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        )?;
+        file.write_all(bytes)
+            .context("write imported native file")?;
+        file.sync_all()?;
+        directory.sync()?;
+    }
+    root.sync()?;
+    let source = CString::new(temporary_name.as_bytes())?;
+    let destination = CString::new(name.as_bytes())?;
+    // SAFETY: both names are NUL terminated and parent owns the directory descriptor.
+    if unsafe {
+        libc::renameat2(
+            parent.0.as_raw_fd(),
+            source.as_ptr(),
+            parent.0.as_raw_fd(),
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .context("publish imported directory (must not already exist)");
+    }
+    parent.sync()?;
+    Ok(())
+}
+
 pub fn directory_names(path: impl AsRef<Path>) -> Result<Vec<String>> {
     Directory::open(path.as_ref())?.directory_names(false)
-}
-
-/// Archive leases are controller files, independent of game world mutations.
-/// Every component remains anchored and rejects symlinks, including the lease.
-pub(crate) fn artifact_file(root: &Path, id: &str, create: bool) -> Result<File> {
-    crate::model::validate_artifact_id(id)?;
-    let directory = Directory::open(root)?.child(".dst-archives", create, 0o700)?;
-    let flags = if create {
-        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL
-    } else {
-        libc::O_RDONLY
-    };
-    directory.open_file(&format!("{id}.7z"), flags, 0o600)
-}
-
-pub(crate) fn remove_artifact_file(root: &Path, id: &str) -> Result<bool> {
-    crate::model::validate_artifact_id(id)?;
-    let root = Directory::open(root)?;
-    if root.kind(".dst-archives")?.is_none() {
-        return Ok(false);
-    }
-    let directory = root.child(".dst-archives", false, 0o700)?;
-    let name = format!("{id}.7z");
-    let exists = directory.kind(&name)?.is_some();
-    directory.remove_regular_if_present(&name)?;
-    directory.sync()?;
-    Ok(exists)
-}
-
-pub(crate) fn artifact_ids(root: &Path) -> Result<Vec<String>> {
-    let root = Directory::open(root)?;
-    if root.kind(".dst-archives")?.is_none() {
-        return Ok(Vec::new());
-    }
-    let directory = root.child(".dst-archives", false, 0o700)?;
-    let mut ids = Vec::new();
-    for (name, kind) in directory.entries()? {
-        let Some(id) = name.strip_suffix(".7z") else {
-            continue;
-        };
-        if crate::model::validate_artifact_id(id).is_err() {
-            continue;
-        }
-        ensure!(
-            kind.is_file(),
-            "archive artifact must be a regular file without symlinks"
-        );
-        ids.push(id.to_owned());
-    }
-    Ok(ids)
 }
 
 impl Directory {

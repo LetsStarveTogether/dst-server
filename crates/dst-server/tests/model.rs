@@ -255,7 +255,6 @@ fn registry_is_the_discovery_contract_for_every_method() {
                     "source" => json!("return 1"),
                     "message" => json!("hello"),
                     "configuration" | "policy" => json!({}),
-                    "artifact_id" => json!("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
                     "paused" => json!(true),
                     "session_id" | "shard_id" => json!("1"),
                     "item" => json!("twigs"),

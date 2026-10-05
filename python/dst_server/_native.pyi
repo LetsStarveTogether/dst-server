@@ -284,5 +284,11 @@ def export_archive(
     number: int,
     *,
     options: dict[str, Any] | None = None,
-    compression_level: int = 3,
+    compression_level: int = 22,
 ) -> Awaitable[ClusterArchive]: ...
+def import_archive(
+    source: str | PathLike[str] | ClusterArchive,
+    destination: str | PathLike[str],
+    *,
+    options: dict[str, Any] | None = None,
+) -> Awaitable[Configuration]: ...
