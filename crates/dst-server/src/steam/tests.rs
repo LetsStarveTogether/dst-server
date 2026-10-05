@@ -391,7 +391,7 @@ impl Server {
                                 let header = std::str::from_utf8(&bytes[..split]).unwrap();
                                 let length: usize = header.lines().filter_map(|line| line.split_once(':'))
                                     .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                                    .map(|(_, value)| value.trim().parse().unwrap()).unwrap();
+                                    .map(|(_, value)| value.trim().parse().unwrap()).unwrap_or(0);
                                 if bytes.len() < split + 4 + length { continue; }
                                 let index = count.fetch_add(1, Ordering::SeqCst);
                                 send.send(String::from_utf8(bytes).unwrap()).unwrap();
@@ -452,6 +452,48 @@ async fn request_uses_anonymous_indexed_form_and_exact_ids() {
         );
     }
     assert_eq!(server.count(), 1);
+}
+
+#[tokio::test]
+async fn explicit_proxy_receives_https_tunnels_and_preserves_safe_errors() {
+    const SECRET: &str = "private-proxy-password";
+    let mut proxy = Server::start(vec![response(407, "", SECRET.as_bytes())]).await;
+    let mut url = Url::parse(&proxy.endpoint).unwrap();
+    url.set_username("user").unwrap();
+    url.set_password(Some(SECRET)).unwrap();
+    let mut client = Client::with_proxy(Some(url.as_str())).unwrap();
+    client.endpoint =
+        "https://steam.invalid/ISteamRemoteStorage/GetPublishedFileDetails/v1/".into();
+    let error = client.published_file_details(&IDS).await.unwrap_err();
+    assert!(matches!(error, Error::Transport(_)));
+    assert_eq!(proxy.count(), MAX_ATTEMPTS);
+    for _ in 0..MAX_ATTEMPTS {
+        let request = proxy.requests.recv().await.unwrap();
+        assert!(request.starts_with("CONNECT steam.invalid:443 HTTP/1.1\r\n"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("proxy-authorization: basic ")
+        );
+    }
+    let mut source: Option<&dyn std::error::Error> = Some(&error);
+    while let Some(error) = source {
+        let text = format!("{error} {error:?}");
+        assert!(!text.contains(SECRET));
+        assert!(!text.contains("steam.invalid"));
+        source = error.source();
+    }
+}
+
+#[test]
+fn invalid_proxy_configuration_does_not_expose_credentials() {
+    let error =
+        Client::with_proxy(Some("http://user:private-proxy-password@[invalid]")).unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Transport(TransportError::Configuration)
+    ));
+    assert!(!format!("{error} {error:?}").contains("private-proxy-password"));
 }
 
 #[tokio::test]

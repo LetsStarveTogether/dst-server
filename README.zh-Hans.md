@@ -445,6 +445,7 @@ Rust 的 [`dst_server::steam`](crates/dst-server/src/steam.rs) 提供匿名工�
 重试在总时限内遵循 `Retry-After`，支持秒数和三种 HTTP 日期格式。
 `Error::Transport` 使用 `TransportError` 表达错误类别，普通输出、调试输出和错误源均不包含 URL 或上游错误文本。
 Agent 使用此客户端检测创意工坊更新，同时保留游戏原生更新通知。
+`DST_SERVER_MOD_PROXY` 同时为工坊版本检查和原生 Mod 下载指定 HTTP(S) 代理。
 
 存档导出可在游戏运行时进行，保留世界、玩家及 Mod 进度。
 所需文件读取一次后保存在内存中，默认使用编码器的 LZMA2 9 级预设生成可寻址的 7z 内存文件。

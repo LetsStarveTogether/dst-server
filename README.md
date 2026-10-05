@@ -490,6 +490,7 @@ Retries honor `Retry-After` seconds and all three HTTP date formats within the c
 `Error::Transport` carries a `TransportError` category.
 Display, debug output and error sources exclude URLs and upstream error text.
 The Agent uses this client for Workshop update detection alongside native game notifications.
+`DST_SERVER_MOD_PROXY` supplies the HTTP(S) proxy for both Workshop version checks and native Mod downloads.
 
 Archive export reads persistent world/player saves and Mod progress while games keep running.
 It captures the selected files in memory and creates a seekable 7z archive using the encoder's LZMA2 level 9 preset.

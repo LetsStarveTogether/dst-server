@@ -3,7 +3,10 @@ use dst_server::steam::{AppId, Client, PublishedFileId, ResultCode};
 #[tokio::test]
 #[ignore = "queries the public Steam API; run explicitly with --ignored --nocapture"]
 async fn anonymous_dst_workshop_queries() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new()?;
+    let proxy = std::env::var("DST_SERVER_MOD_PROXY")
+        .ok()
+        .filter(|proxy| !proxy.is_empty());
+    let client = Client::with_proxy(proxy.as_deref())?;
     let ids = [2189004162, 1803285852, 378160973, 347079953, 1840284484].map(PublishedFileId);
     let files = client.published_file_details(&ids).await?;
     assert_eq!(files.len(), ids.len());

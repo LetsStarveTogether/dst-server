@@ -1131,9 +1131,7 @@ impl Room {
                 "the room container must be recreated before Mod maintenance",
             ));
         }
-        let proxy = std::env::var("DST_SERVER_MOD_PROXY")
-            .ok()
-            .filter(|proxy| !proxy.is_empty());
+        let proxy = crate::mods::proxy_from_env()?;
         let prepared = self.with_lock(|lock| {
             Ok(crate::mods::PreparedMods::prepare(
                 lock,

@@ -924,7 +924,11 @@ pub async fn run(options: Options) -> Result<u8> {
     controller.initialize()?;
     let monitor_controller = controller.clone();
     let mut monitor_task = tokio::spawn(async move {
-        let client = crate::steam::Client::new();
+        let client = crate::mods::proxy_from_env()
+            .map_err(|_| {
+                crate::steam::Error::Transport(crate::steam::TransportError::Configuration)
+            })
+            .and_then(|proxy| crate::steam::Client::with_proxy(proxy.as_deref()));
         let mut interval = tokio::time::interval(crate::mods::monitor::INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {

@@ -317,16 +317,22 @@ pub struct Client {
 
 impl Client {
     pub fn new() -> Result<Self, Error> {
-        let http = reqwest::Client::builder()
+        Self::with_proxy(None)
+    }
+
+    /// Use an explicit proxy when supplied; otherwise retain the HTTP client's defaults.
+    pub fn with_proxy(proxy: Option<&str>) -> Result<Self, Error> {
+        let mut http = reqwest::Client::builder()
             .redirect(Policy::none())
             .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(3))
             .timeout(REQUEST_TIMEOUT)
-            .user_agent(concat!("dst-server/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(Error::transport)?;
+            .user_agent(concat!("dst-server/", env!("CARGO_PKG_VERSION")));
+        if let Some(proxy) = proxy {
+            http = http.proxy(reqwest::Proxy::all(proxy).map_err(Error::transport)?);
+        }
         Ok(Self {
-            http,
+            http: http.build().map_err(Error::transport)?,
             endpoint: PUBLISHED_FILE_DETAILS.into(),
         })
     }

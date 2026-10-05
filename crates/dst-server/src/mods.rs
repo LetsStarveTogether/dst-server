@@ -245,6 +245,14 @@ pub fn activate(executable: &Path, room: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn proxy_from_env() -> Result<Option<String>> {
+    let proxy = std::env::var("DST_SERVER_MOD_PROXY")
+        .ok()
+        .filter(|proxy| !proxy.is_empty());
+    validate_proxy(proxy.as_deref())?;
+    Ok(proxy)
+}
+
 pub fn validate_proxy(proxy: Option<&str>) -> Result<()> {
     let Some(proxy) = proxy else {
         return Ok(());
