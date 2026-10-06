@@ -20,8 +20,9 @@ def executable(directory: Path, name: str, body: str) -> Path:
         f"#!{sys.executable}\n"
         "import json, os, pathlib, sys, time\n"
         "path = pathlib.Path(sys.argv[0])\n"
-        "path.with_suffix('.pid').write_text(str(os.getpid()))\n"
-        "path.with_suffix('.args').write_text(json.dumps(sys.argv[1:]))\n" + body,
+        "path.with_suffix('.args').write_text(json.dumps(sys.argv[1:]))\n"
+        "path.with_suffix('.pid.tmp').write_text(str(os.getpid()))\n"
+        "path.with_suffix('.pid.tmp').replace(path.with_suffix('.pid'))\n" + body,
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -50,9 +51,10 @@ def reaped(reader: Path) -> None:
 JOURNAL = """
 record = {'__CURSOR': 'first', '__REALTIME_TIMESTAMP': '1000001',
           'MESSAGE': '玩家\\nsecond line', '_SYSTEMD_UNIT': 'dst-007.service'}
-print(json.dumps(record), flush=True)
 if '--follow' in sys.argv:
     print('reader diagnostic', file=sys.stderr, flush=True)
+print(json.dumps(record), flush=True)
+if '--follow' in sys.argv:
     time.sleep(60)
 else:
     record['__CURSOR'] = 'second'
@@ -124,6 +126,7 @@ def check_journal(directory: Path) -> None:
             process.send_signal(stop)
             _, errors = process.communicate(timeout=10)
             assert process.returncode == 0, errors
+            assert json.loads(errors)["diagnostics"] == "reader diagnostic"
             reaped(reader)
         finally:
             if process.poll() is None:

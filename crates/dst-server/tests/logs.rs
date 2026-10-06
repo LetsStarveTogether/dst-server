@@ -7,7 +7,11 @@ use dst_server::logs::{
 };
 use serde_json::json;
 use tempfile::TempDir;
-use tokio::time::{sleep, timeout};
+use tokio::{
+    io::AsyncWriteExt,
+    net::{UnixListener, UnixStream},
+    time::{sleep, timeout},
+};
 
 const DEADLINE: Duration = Duration::from_secs(5);
 // Concurrent fixture writes can leave an inherited writable FD in another fork,
@@ -17,19 +21,26 @@ static SCRIPT_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 struct Script {
     directory: TempDir,
     executable: PathBuf,
+    control: UnixListener,
 }
 impl Script {
     fn new(body: &str) -> Result<Self> {
         let directory = tempfile::tempdir()?;
         let executable = directory.path().join("reader");
+        let control = UnixListener::bind(executable.with_extension("sock"))?;
         fs::write(
             &executable,
             format!(
                 r#"#!/usr/bin/python3
-import json, os, pathlib, signal, sys, time
+import json, os, pathlib, signal, socket, sys, time
 path = pathlib.Path(sys.argv[0])
-path.with_suffix('.pid').write_text(str(os.getpid()))
 path.with_suffix('.args').write_text(json.dumps(sys.argv[1:]))
+path.with_suffix('.pid.tmp').write_text(str(os.getpid()))
+path.with_suffix('.pid.tmp').replace(path.with_suffix('.pid'))
+def checkpoint():
+    with socket.socket(socket.AF_UNIX) as peer:
+        peer.connect(str(path.with_suffix('.sock')))
+        assert peer.recv(1) == b'G'
 {body}
 "#
             ),
@@ -38,6 +49,7 @@ path.with_suffix('.args').write_text(json.dumps(sys.argv[1:]))
         Ok(Self {
             directory,
             executable,
+            control,
         })
     }
     fn journal(&self) -> JournalLogs {
@@ -64,10 +76,13 @@ path.with_suffix('.args').write_text(json.dumps(sys.argv[1:]))
     fn pid(&self) -> Result<i32> {
         Ok(fs::read_to_string(self.executable.with_extension("pid"))?.parse()?)
     }
+    async fn checkpoint(&self) -> Result<UnixStream> {
+        Ok(timeout(DEADLINE, self.control.accept()).await??.0)
+    }
 }
 
 fn reaped(pid: i32) -> bool {
-    // SAFETY: signal zero only checks existence; waitpid cannot affect another task's child.
+    // SAFETY: signal zero only checks process existence.
     unsafe {
         libc::kill(pid, 0) == -1
             && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
@@ -320,15 +335,14 @@ async fn journal_grep_empty_results_preserve_actual_process_errors() -> Result<(
 }
 
 #[tokio::test]
-async fn follow_cancellation_keeps_anchor_and_close_reaps_even_under_backpressure() -> Result<()> {
+async fn follow_cancellation_before_anchor_keeps_cursor_validation() -> Result<()> {
     let _isolation = SCRIPT_TESTS.lock().await;
     let script = Script::new(
         r#"
-time.sleep(0.15)
+checkpoint()
 for cursor in ['anchor', 'next']:
     print(json.dumps({'__CURSOR': cursor, '__REALTIME_TIMESTAMP':'1'}), flush=True)
-sys.stderr.write('reader warning\n'); sys.stderr.flush()
-time.sleep(60)
+checkpoint()
 "#,
     )?;
     let mut stream = script
@@ -341,11 +355,11 @@ time.sleep(60)
             },
         )
         .await?;
-    assert!(
-        timeout(Duration::from_millis(20), stream.next_record())
-            .await
-            .is_err()
-    );
+    let mut ready = script.checkpoint().await?;
+    let mut pending = Box::pin(stream.next_record());
+    assert!(futures::poll!(&mut pending).is_pending());
+    drop(pending);
+    ready.write_all(b"G").await?;
     assert_eq!(
         timeout(DEADLINE, stream.next_record())
             .await??
@@ -355,8 +369,33 @@ time.sleep(60)
     );
     stream.close().await?;
     assert!(reaped(script.pid()?));
-    assert_eq!(stream.diagnostics(), "reader warning");
+    Ok(())
+}
 
+#[tokio::test]
+async fn close_preserves_diagnostics_written_before_the_record() -> Result<()> {
+    let _isolation = SCRIPT_TESTS.lock().await;
+    let script = Script::new(
+        r#"
+sys.stderr.write('reader warning\n'); sys.stderr.flush()
+print(json.dumps({'__CURSOR':'ready','__REALTIME_TIMESTAMP':'1'}), flush=True)
+checkpoint()
+"#,
+    )?;
+    let mut stream = script
+        .journal()
+        .follow(None, &JournalQuery::follow())
+        .await?;
+    assert!(timeout(DEADLINE, stream.next_record()).await??.is_some());
+    stream.close().await?;
+    assert!(reaped(script.pid()?));
+    assert_eq!(stream.diagnostics(), "reader warning");
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_close_reaps_an_uncooperative_writer() -> Result<()> {
+    let _isolation = SCRIPT_TESTS.lock().await;
     let noisy = Script::new(
         r#"
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -364,7 +403,6 @@ i = 0
 while True:
     print(json.dumps({'__CURSOR':str(i),'__REALTIME_TIMESTAMP':'1','MESSAGE':'x'*262144}), flush=True)
     i += 1
-    path.with_suffix('.count').write_text(str(i))
 "#,
     )?;
     let mut stream = noisy
@@ -372,17 +410,122 @@ while True:
         .follow(None, &JournalQuery::follow())
         .await?;
     assert!(timeout(DEADLINE, stream.next_record()).await??.is_some());
-    sleep(Duration::from_millis(100)).await;
-    let count: usize = fs::read_to_string(noisy.executable.with_extension("count"))?.parse()?;
-    assert!(count <= 4, "writer ran past bounded queue: {count}");
-    // Cancelling close still leaves the supervisor responsible for escalation.
-    assert!(
-        timeout(Duration::from_millis(20), stream.close())
-            .await
-            .is_err()
-    );
+    let mut closing = Box::pin(stream.close());
+    assert!(futures::poll!(&mut closing).is_pending());
+    drop(closing);
     timeout(DEADLINE, stream.close()).await??;
     assert!(reaped(noisy.pid()?));
+    Ok(())
+}
+
+#[tokio::test]
+async fn leader_exit_and_close_reap_descendants_without_losing_errors() -> Result<()> {
+    let _isolation = SCRIPT_TESTS.lock().await;
+    struct Reaper {
+        previous: i32,
+        groups: Vec<i32>,
+        descendants: Vec<i32>,
+    }
+    impl Drop for Reaper {
+        fn drop(&mut self) {
+            // SAFETY: only this test's process groups and adopted children are used.
+            unsafe {
+                for group in &self.groups {
+                    libc::kill(-group, libc::SIGKILL);
+                }
+                for pid in &self.descendants {
+                    libc::waitpid(*pid, std::ptr::null_mut(), 0);
+                }
+                libc::prctl(libc::PR_SET_CHILD_SUBREAPER, self.previous);
+            }
+        }
+    }
+    let mut reaper = Reaper {
+        previous: 0,
+        groups: Vec::new(),
+        descendants: Vec::new(),
+    };
+    // SAFETY: the test serializes child creation and restores the previous setting.
+    unsafe {
+        assert_eq!(
+            libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut reaper.previous),
+            0
+        );
+        assert_eq!(libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1), 0);
+    }
+    for natural_exit in [true, false] {
+        for hold_pipes in [true, false] {
+            let script = Script::new(&format!(
+                r#"
+r, w = os.pipe()
+descendant = os.fork()
+if descendant == 0:
+    os.close(r)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if not {hold_pipes}:
+        os.close(1)
+        os.close(2)
+    os.write(w, b'R')
+    os.close(w)
+    signal.pause()
+    os._exit(0)
+os.close(w)
+assert os.read(r, 1) == b'R'
+os.close(r)
+path.with_suffix('.descendant').write_text(str(descendant))
+for _ in range(1 if {hold_pipes} else 4):
+    print(json.dumps({{'__CURSOR':'ready','__REALTIME_TIMESTAMP':'1'}}), flush=True)
+checkpoint()
+os._exit(7)
+"#,
+                hold_pipes = if hold_pipes { "True" } else { "False" },
+            ))?;
+            let mut stream = script
+                .journal()
+                .follow(None, &JournalQuery::follow())
+                .await?;
+            reaper.groups.push(stream.pid() as i32);
+            assert!(timeout(DEADLINE, stream.next_record()).await??.is_some());
+            let descendant: i32 =
+                fs::read_to_string(script.executable.with_extension("descendant"))?.parse()?;
+            reaper.descendants.push(descendant);
+            let mut ready = script.checkpoint().await?;
+            if natural_exit {
+                ready.write_all(b"G").await?;
+                let error = if hold_pipes {
+                    timeout(DEADLINE, stream.next_record()).await?.unwrap_err()
+                } else {
+                    // Unconsumed records keep the reader pending after the leader is reaped.
+                    wait_reaped(stream.pid() as i32).await?;
+                    timeout(DEADLINE, stream.close()).await?.unwrap_err()
+                };
+                assert_eq!(
+                    error.downcast_ref::<LogProcessError>().unwrap().returncode,
+                    7
+                );
+            } else {
+                timeout(DEADLINE, stream.close()).await??;
+            }
+            assert!(reaped(stream.pid() as i32));
+            timeout(DEADLINE, async {
+                loop {
+                    let mut status = 0;
+                    // SAFETY: this is the adopted descendant created by the fixture.
+                    let waited = unsafe { libc::waitpid(descendant, &mut status, libc::WNOHANG) };
+                    if waited == descendant {
+                        assert!(libc::WIFSIGNALED(status));
+                        assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+                        break;
+                    }
+                    assert_eq!(waited, 0);
+                    sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await?;
+            reaper.groups.pop();
+            reaper.descendants.pop();
+        }
+    }
     Ok(())
 }
 
@@ -414,9 +557,11 @@ async fn journal_budgets_timeout_and_task_abort_reap_children() -> Result<()> {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("timed out"));
-    assert!(reaped(script.pid()?));
+    if script.executable.with_extension("pid").exists() {
+        assert!(reaped(script.pid()?));
+        fs::remove_file(script.executable.with_extension("pid"))?;
+    }
     let reader = script.journal();
-    fs::remove_file(script.executable.with_extension("pid"))?;
     let query =
         tokio::spawn(async move { reader.query(None, &JournalQuery::default(), DEADLINE).await });
     timeout(DEADLINE, async {

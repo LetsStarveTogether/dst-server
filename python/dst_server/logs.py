@@ -85,7 +85,11 @@ class JournalResult:
 
 
 class JournalStream:
-    """Cancelling a pending read closes its native reader."""
+    """Cancelling a pending read closes its native reader.
+
+    Await close() to confirm process cleanup and finalize diagnostics.
+    Process failures and incomplete output drainage can make close() raise.
+    """
 
     __slots__ = ("_stream",)
 

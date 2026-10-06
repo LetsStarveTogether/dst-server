@@ -409,19 +409,15 @@ async fn cancelled_tls_close_retains_the_original_drain_deadline() -> Result<()>
         .await?
         .unwrap();
     exporter.submit(&event())?;
-    let closing = tokio::spawn({
-        let exporter = exporter.clone();
-        async move { exporter.close().await }
-    });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !exporter.stats().closed {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await?;
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    closing.abort();
+    // TLS and request acceptance finished before controlling the drain clock.
+    tokio::time::pause();
+    let mut closing = Box::pin(exporter.close());
+    assert!(futures::poll!(&mut closing).is_pending());
+    assert!(exporter.stats().closed);
+    tokio::time::advance(Duration::from_millis(400)).await;
+    drop(closing);
     let stats = tokio::time::timeout(Duration::from_millis(400), exporter.close()).await??;
+    tokio::time::resume();
     assert_eq!(
         (stats.accepted, stats.timed_out, stats.shutdown_dropped),
         (2, 1, 1)

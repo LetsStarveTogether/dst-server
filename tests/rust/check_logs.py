@@ -28,8 +28,9 @@ def executable(directory: Path, name: str, body: str) -> Path:
         f"#!{sys.executable}\n"
         "import json, os, pathlib, sys, time\n"
         "path = pathlib.Path(sys.argv[0])\n"
-        "path.with_suffix('.pid').write_text(str(os.getpid()))\n"
-        "path.with_suffix('.args').write_text(json.dumps(sys.argv[1:]))\n" + body,
+        "path.with_suffix('.args').write_text(json.dumps(sys.argv[1:]))\n"
+        "path.with_suffix('.pid.tmp').write_text(str(os.getpid()))\n"
+        "path.with_suffix('.pid.tmp').replace(path.with_suffix('.pid'))\n" + body,
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -130,10 +131,12 @@ async def check_streams(directory: Path) -> None:
     logs = JournalLogs(journal)
     async with logs.follow(None) as stream:
         assert (await anext(stream)).cursor == "0"
-        pending = asyncio.create_task(anext(stream))
-        await asyncio.sleep(0.02)
-        assert stream.diagnostics == "reader warning"
+        pending = asyncio.create_task(anext(stream), eager_start=True)
+        assert not pending.done()
+        # A live snapshot must remain accessible while next() is pending.
+        _ = stream.diagnostics
         await stream.close()
+        assert stream.diagnostics == "reader warning"
         assert isinstance(
             (await asyncio.gather(pending, return_exceptions=True))[0],
             StopAsyncIteration,
@@ -142,8 +145,8 @@ async def check_streams(directory: Path) -> None:
 
     async with logs.follow(None) as stream:
         await anext(stream)
-        pending = asyncio.create_task(anext(stream))
-        await asyncio.sleep(0.02)
+        pending = asyncio.create_task(anext(stream), eager_start=True)
+        assert not pending.done()
         pending.cancel()
         assert isinstance(
             (await asyncio.gather(pending, return_exceptions=True))[0],
@@ -165,7 +168,8 @@ async def check_streams(directory: Path) -> None:
     try:
         await JournalLogs(hanging).query(None, completion_timeout=0.2)
     except TimeoutError:
-        await reaped(int(hanging.with_suffix(".pid").read_text()))
+        if hanging.with_suffix(".pid").exists():
+            await reaped(int(hanging.with_suffix(".pid").read_text()))
     else:
         msg = "native query timeout was not exposed"
         raise AssertionError(msg)

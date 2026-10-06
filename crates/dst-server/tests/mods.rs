@@ -29,7 +29,8 @@ fn fixture(directory: &Path, body: &str) -> (PathBuf, PathBuf) {
 import json, os, signal, subprocess, sys, time
 from pathlib import Path
 ugc = Path(sys.argv[sys.argv.index('-ugc_directory') + 1])
-(ugc / 'pid').write_text(str(os.getpid()))
+(ugc / 'pid.tmp').write_text(str(os.getpid()))
+(ugc / 'pid.tmp').replace(ugc / 'pid')
 counter = ugc / 'attempts'
 counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))
 (ugc / 'partial').write_text('retained download')
@@ -323,7 +324,8 @@ async fn cancellation_and_parent_exit_reclaim_the_entire_downloader_group() {
         let source = format!(
             r#"
 child = subprocess.Popen([sys.executable, '-c', 'import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); signal.pause()'])
-(ugc / 'descendant').write_text(str(child.pid))
+(ugc / 'descendant.tmp').write_text(str(child.pid))
+(ugc / 'descendant.tmp').replace(ugc / 'descendant')
 print({}, flush=True)
 {}
 "#,

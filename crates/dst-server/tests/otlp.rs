@@ -441,17 +441,16 @@ async fn cancelled_close_keeps_its_deadline_and_accounts_for_every_record() -> a
     collector.receive().await?;
     exporter.submit(&event())?;
     exporter.submit(&event())?;
-    let closing = tokio::spawn({
-        let exporter = exporter.clone();
-        async move { exporter.close().await }
-    });
-    tokio::task::yield_now().await;
+    // The collector has acknowledged the real I/O; only the drain timer remains.
+    tokio::time::pause();
+    let mut closing = Box::pin(exporter.close());
+    assert!(futures::poll!(&mut closing).is_pending());
     assert!(exporter.stats().closed);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    closing.abort();
-    // The original deadline has about 100 ms left. Resetting it here to a new
-    // 300 ms budget must fail this wait, even though the first waiter cancelled.
+    tokio::time::advance(Duration::from_millis(200)).await;
+    drop(closing);
+    // Resetting the original 300 ms deadline would exceed this remaining budget.
     let stats = tokio::time::timeout(Duration::from_millis(200), exporter.close()).await??;
+    tokio::time::resume();
     assert_eq!(
         (stats.accepted, stats.timed_out, stats.shutdown_dropped),
         (3, 1, 2)
