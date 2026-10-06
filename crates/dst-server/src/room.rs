@@ -358,8 +358,7 @@ impl Room {
     }
     fn publish_status(&self) {
         let record = json!({"event":"room_status", "status":self.status(), "observed_timestamp_ns":timestamp()});
-        self.events
-            .publish("lifecycle", serde_json::to_vec(&record).unwrap().into());
+        self.events.publish("lifecycle", &record);
     }
     fn refresh_shard(&self, state: &DriverState) {
         if let Some(observer) = self.observability.lock().unwrap().as_ref() {
@@ -658,13 +657,13 @@ impl Room {
                         log: &'a LogEvent,
                         resource: &'a serde_json::Map<String, Value>,
                     }
-                    if let Ok(encoded) = serde_json::to_vec(&Record {
+                    if let Ok(record) = serde_json::to_value(&Record {
                         log: &log,
                         resource: &resource,
                     }) {
-                        let encoded: Arc<[u8]> = encoded.into();
-                        events.publish(kind, encoded.clone());
-                        if !output.submit(&encoded) {
+                        events.publish(kind, &record);
+                        if !serde_json::to_vec(&record).is_ok_and(|encoded| output.submit(&encoded))
+                        {
                             losses.record_log_drop(1);
                         }
                     } else {
