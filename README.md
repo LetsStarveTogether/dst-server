@@ -396,8 +396,9 @@ Season, mode, intent and character prefab retain unknown strings from game updat
 Additional response fields are also preserved.
 
 Archive export reads persistent world/player saves and Mod progress while games keep running.
-It captures the selected files in memory, then creates a seekable 7z archive in RAM using Zstd level 22 by default.
-Extraction requires a tool that supports Zstd compression inside 7z archives.
+It captures the selected files in memory and creates a seekable 7z archive using the encoder's LZMA2 level 9 preset.
+Compression levels range from 1 to 9; dictionary and match parameters use the encoder's presets.
+The archive can be extracted with standard 7-Zip tools.
 Each process runs one export compressor at a time; no staging directory or transfer file is written.
 Exports include room/shard settings, world generation, Mod configuration, native sessions and `shardindex`.
 Recipe progress, worldjump saves, and ReForged achievements and experience are also included.

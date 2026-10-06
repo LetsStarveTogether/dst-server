@@ -639,8 +639,9 @@ fn contents(archive: ClusterArchive) -> BTreeMap<String, Vec<u8>> {
         sevenz_rust2::ArchiveReader::new(archive.file, sevenz_rust2::Password::empty()).unwrap();
     assert!(reader.archive().blocks.iter().all(|block| {
         block.coders.iter().any(|coder| {
-            coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_ZSTD
-                && coder.properties().get(2) == Some(&22)
+            coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_LZMA2
+                // Preset 9 uses a 64 MiB dictionary, encoded as property 28.
+                && coder.properties() == [28]
         })
     }));
     let mut files = BTreeMap::new();

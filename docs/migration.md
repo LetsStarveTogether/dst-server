@@ -38,7 +38,7 @@ Dynamic numbers use `Int64`, `UInt64` and `Float64`.
 Exact numbers outside those representations use decimal text in a dedicated numeric field.
 Game event payloads now use Rust enums and `garde` validation, preserving required nulls and exact JSON numbers.
 The `event_schema()` API has been removed; use `event_names()` to list supported names and `validate_event()` to check data.
-Archive export reads the room directory directly and builds its 7z/Zstd archive in memory, including while games run.
+Archive export reads the room directory directly and builds its 7z/LZMA2 archive in memory, including while games run.
 Export no longer uses Agent `export_archive` / `release_archive` requests or transfer artifacts.
 Callers need read access to the native room directory.
 Basic exports now preserve native shard names and player path encoding.

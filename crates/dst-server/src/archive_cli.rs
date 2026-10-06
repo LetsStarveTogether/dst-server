@@ -37,7 +37,8 @@ struct Source {
     /// Replacement export configuration as JSON, @file, or stdin (-).
     #[arg(long)]
     configuration: Option<String>,
-    #[arg(long, default_value_t = archive::DEFAULT_COMPRESSION_LEVEL, value_parser = clap::value_parser!(u32).range(1..=22))]
+    /// LZMA2 compression preset (1-9).
+    #[arg(long, default_value_t = archive::DEFAULT_COMPRESSION_LEVEL, value_parser = clap::value_parser!(u32).range(1..=9))]
     compression_level: u32,
 }
 

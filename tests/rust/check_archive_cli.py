@@ -102,6 +102,12 @@ def check(directory: Path) -> None:
     assert conflict.returncode == 2, conflict.stderr
     assert not (directory / "conflict.7z").exists()
 
+    invalid_level = command(
+        directory, directory / "invalid-level.7z", "--compression-level", "10"
+    )
+    assert invalid_level.returncode == 2, invalid_level.stderr
+    assert not (directory / "invalid-level.7z").exists()
+
     check_upload_termination(directory)
 
 

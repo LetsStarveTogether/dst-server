@@ -233,7 +233,7 @@ impl Upload {
 }
 
 #[pyfunction]
-#[pyo3(signature = (host, number, *, options=None, compression_level=22))]
+#[pyo3(signature = (host, number, *, options=None, compression_level=9))]
 fn export_archive<'py>(
     py: Python<'py>,
     host: PyRef<'_, Host>,
@@ -260,10 +260,10 @@ fn export_archive<'py>(
 fn level(value: &Bound<'_, PyAny>) -> PyResult<u32> {
     from_python(value, 0, &mut 0)?
         .as_u64()
-        .filter(|value| (1..=22).contains(value))
+        .filter(|value| (1..=9).contains(value))
         .map(|value| value as u32)
         .ok_or_else(|| {
-            PyValueError::new_err("compression_level must be an integer from 1 through 22")
+            PyValueError::new_err("compression_level must be an integer from 1 through 9")
         })
 }
 
