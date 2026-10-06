@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
 use crate::{
-    deployment::{ContainerUnit, DeploymentOptions},
+    deployment::{ContainerUnit, DeploymentOptions, PortMapping, Protocol},
     files::{self, PermissionFiles, RoomLock},
     policy::Policy,
     settings::{self, ClusterConfig, ClusterSettings},
@@ -471,7 +471,7 @@ fn fleet_definition(number: u16) -> Result<&'static Value> {
         .expect("fleet definitions")
         .iter()
         .find(|room| room["number"].as_u64() == Some(u64::from(number)))
-        .context("LST room number must be in 000-099 or 200-219")
+        .context("LST room number must be in 000-100 or 200-219")
 }
 
 pub fn room_numbers() -> Vec<u16> {
@@ -520,8 +520,28 @@ pub fn build(number: u16, token: &str, cluster_key: Option<&str>) -> Result<Clus
 
 pub fn fleet_room(number: u16, token: &str, cluster_key: Option<&str>) -> Result<Room> {
     let definition = fleet_definition(number)?;
+    let cluster = build(number, token, cluster_key)?;
     let mut deployment: DeploymentOptions =
         serde_json::from_value(definition["deployment"].clone())?;
+    deployment.ports.clear();
+    for shard in cluster.resolved()["shards"]
+        .as_object()
+        .context("missing fleet shards")?
+        .values()
+    {
+        let settings = &shard["settings"];
+        let base = 30000 + number * 10 + if settings["is_master"] == true { 0 } else { 2 };
+        for (field, offset) in [("server_port", 0), ("master_server_port", 1)] {
+            deployment.ports.push(PortMapping {
+                host: base + offset,
+                container: settings[field]
+                    .as_u64()
+                    .context("missing fleet shard UDP port")?
+                    .try_into()?,
+                protocol: Protocol::Udp,
+            });
+        }
+    }
     // On host boot, the Agent opens the room only during its scheduled hours.
     deployment.start_on_boot = true;
     let mut policy = json!({});
@@ -535,7 +555,7 @@ pub fn fleet_room(number: u16, token: &str, cluster_key: Option<&str>) -> Result
     let room = Room {
         number,
         template: Some(room(number)?.0.into()),
-        cluster: build(number, token, cluster_key)?,
+        cluster,
         deployment,
         policy: serde_json::from_value(policy)?,
     };
@@ -612,7 +632,10 @@ mod tests {
                 "forge"
             ]
         );
-        assert_eq!(room_numbers(), (0..100).chain(200..220).collect::<Vec<_>>());
+        assert_eq!(
+            room_numbers(),
+            (0..=100).chain(200..220).collect::<Vec<_>>()
+        );
         for template in template_names() {
             let cluster =
                 build_template(template, 299, "test-token", Some("shared-key"), None).unwrap();
@@ -636,7 +659,7 @@ mod tests {
         for number in room_numbers() {
             let fleet = fleet_room(number, "test-token", None).unwrap();
             assert_eq!(fleet.number, number);
-            assert_eq!(fleet.policy.idle_regeneration, number < 100);
+            assert_eq!(fleet.policy.idle_regeneration, number <= 100);
             assert!(fleet.deployment.start_on_boot);
             assert_eq!(
                 fleet.cluster.resolved()["settings"]["cluster_name"],
@@ -649,7 +672,7 @@ mod tests {
         assert!(room_name(20).unwrap().contains("18-24"));
         assert!(ordinary().policy.schedule.is_empty());
         assert!(!ordinary().policy.idle_regeneration);
-        for number in [100, 199, 220, 299] {
+        for number in [101, 199, 220, 299] {
             assert!(fleet_room(number, "", None).is_err());
         }
         assert!(build_template("pure_survival", 300, "", None, None).is_err());
