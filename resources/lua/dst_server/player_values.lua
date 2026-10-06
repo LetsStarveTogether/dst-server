@@ -46,8 +46,9 @@ local function state(client, player)
     }
 end
 
-function player_values.player(client, player)
+function player_values.summary(client, player)
     local identity = connections.client(client.userid, client)
+    local loaded = connections.loaded(player)
     local value = {
         userid = client.userid,
         steam_id = identity.steam_id,
@@ -61,11 +62,9 @@ function player_values.player(client, player)
         is_ghost = json.null,
         position = json.null,
         age = json.null,
-        vitals = json.null,
-        state = json.null,
     }
-    if player == nil then
-        return value
+    if player == nil or loaded == false then
+        return value, loaded
     end
 
     value.is_ghost = player:HasTag("playerghost")
@@ -79,6 +78,15 @@ function player_values.player(client, player)
         }
     end
 
+    return value, loaded
+end
+
+function player_values.player(client, player)
+    local value, loaded = player_values.summary(client, player)
+    if player == nil or loaded == false then
+        value.vitals, value.state = json.null, json.null
+        return value, loaded
+    end
     local vitals = {
         health = json.null,
         hunger = json.null,
@@ -129,7 +137,7 @@ function player_values.player(client, player)
     end
     value.vitals = vitals
     value.state = state(client, player)
-    return value
+    return value, loaded
 end
 
 function player_values.item(item)

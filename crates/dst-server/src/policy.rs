@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::Instant;
 
-use crate::{files::RoomLock, model::Countdown};
+use crate::{
+    files::{RoomLock, state_section},
+    model::Countdown,
+};
 
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(30);
 pub const MOD_NOTICE_DELAY: Duration = Duration::from_secs(60);
@@ -68,15 +71,8 @@ mod minute_time {
         deserializer: D,
     ) -> std::result::Result<NaiveTime, D::Error> {
         let value = String::deserialize(deserializer)?;
-        let time = NaiveTime::parse_from_str(&value, "%H:%M")
-            .or_else(|_| NaiveTime::parse_from_str(&value, "%H:%M:%S"))
-            .map_err(|_| serde::de::Error::custom("daily window time must be HH:MM"))?;
-        if time.second() != 0 || time.nanosecond() != 0 {
-            return Err(serde::de::Error::custom(
-                "daily windows require minute precision",
-            ));
-        }
-        Ok(time)
+        NaiveTime::parse_from_str(&value, "%H:%M")
+            .map_err(|_| serde::de::Error::custom("daily window time must be HH:MM"))
     }
 }
 
@@ -131,13 +127,11 @@ impl Policy {
     }
 
     pub fn load(room: &RoomLock) -> Result<Self> {
-        let policy = room
-            .read_state()?
-            .remove("policy")
-            .map(serde_json::from_value)
-            .transpose()
-            .context("invalid room policy")?
-            .unwrap_or_default();
+        Self::from_document(&room.read_state()?)
+    }
+
+    pub(crate) fn from_document(document: &serde_json::Map<String, Value>) -> Result<Self> {
+        let policy = state_section(document, "policy")?;
         Self::validate(&policy)?;
         Ok(policy)
     }
@@ -238,7 +232,7 @@ impl Policy {
         state.validate()?;
         inputs.validate()?;
         let schedule = self.schedule_at(now)?;
-        let clock_changed = state.clock_changed(now, inputs.monotonic)?;
+        let clock_changed = state.clock_changed(now, inputs.previous_tick)?;
         let new_opening = schedule.opening_id.filter(|opening| {
             !clock_changed
                 && state.current_opening != Some(*opening)
@@ -247,32 +241,31 @@ impl Policy {
                     .is_none_or(|previous| *opening > previous)
         });
         state.current_opening = schedule.opening_id;
+        if self.mod_auto_update
+            && !inputs.mod_targets.is_empty()
+            && state.mods.phase == ModPhase::Idle
+        {
+            state.mods.targets = inputs.mod_targets.clone();
+            state.mods.enter_pending();
+        }
         if let Some(opening) = new_opening {
             state.last_opening = Some(opening);
-            if matches!(state.mods.phase, ModPhase::Failed) {
-                state.mods.request()?;
-            } else if self.mod_auto_update
-                && !inputs.game_running
-                && state.mods.phase == ModPhase::Idle
-            {
-                state.mods.phase = ModPhase::Pending;
+            if self.mod_auto_update && !inputs.game_running && state.mods.phase == ModPhase::Idle {
+                state.mods.enter_pending();
             }
         }
-        if self.mod_auto_update
-            && inputs.mods_outdated
-            && !state.mods.observed_outdated
-            && matches!(state.mods.phase, ModPhase::Idle)
+        if !self.mod_auto_update
+            && !state.mods.manual
+            && !matches!(state.mods.phase, ModPhase::Updating)
+            && !inputs.writes_in_progress
         {
-            state.mods.phase = ModPhase::Pending;
+            state.mods = ModMaintenance::default();
         }
-        state.mods.observed_outdated = inputs.mods_outdated;
-        if !self.mod_auto_update && !state.mods.manual && state.mods.attempts == 0 {
-            state.mods = ModMaintenance {
-                observed_outdated: inputs.mods_outdated,
-                ..ModMaintenance::default()
-            };
+        if self.idle_regeneration {
+            state.observe_activity(now, inputs, clock_changed)?;
+        } else {
+            state.activity = None;
         }
-        state.observe_activity(now, inputs, clock_changed)?;
         let mut plan = Plan {
             schedule,
             new_opening,
@@ -311,7 +304,7 @@ impl Policy {
             return Ok(plan);
         }
 
-        if !matches!(state.mods.phase, ModPhase::Idle) {
+        if state.mods.require_game_start().is_err() {
             let closing_soon = !state.mods.manual
                 && plan.schedule.next_change.is_some_and(|close| {
                     close - now <= TimeDelta::seconds(MOD_NOTICE_DELAY.as_secs() as i64)
@@ -328,7 +321,7 @@ impl Policy {
             }
             return Ok(plan);
         }
-        if inputs.busy {
+        if inputs.busy || inputs.faulted {
             return Ok(plan);
         }
         if !inputs.game_running {
@@ -336,7 +329,7 @@ impl Policy {
             return Ok(plan);
         }
 
-        if self.idle_regeneration
+        if state.mods.phase == ModPhase::Idle
             && inputs.all_ready
             && let Some(day) = inputs.master_day
             && let Some(activity) = &mut state.activity
@@ -345,9 +338,13 @@ impl Policy {
             && now.signed_duration_since(activity.last_active_at) > retention(day)
         {
             // Renew before dispatch, including a later unknown regeneration result.
+            let idle_since = activity.last_active_at;
             activity.last_active_at = now;
             plan.action = Some(Action::Regenerate {
                 expected_sessions: activity.sessions.clone(),
+                idle_since,
+                world_day: day,
+                retention_seconds: retention(day).num_seconds(),
             });
             return Ok(plan);
         }
@@ -390,6 +387,7 @@ impl Policy {
             .unwrap_or_default();
         state.last_closing_notice = Some(notice);
         Ok(Some(Action::Announce {
+            purpose: AnnouncementPurpose::Schedule,
             message: format!(
                 "本房间将在约 {minutes} 分钟后定时关闭，请提前安排游戏进度。{opening}"
             ),
@@ -460,16 +458,16 @@ pub struct Inputs {
     pub busy: bool,
     pub writes_in_progress: bool,
     pub faulted: bool,
-    pub mods_outdated: bool,
+    pub mod_targets: crate::mods::UpdateTargets,
     pub expected_shards: Vec<String>,
     pub presence: BTreeMap<String, Presence>,
     pub master_day: Option<u64>,
-    /// Agent uptime from a monotonic clock; supply it to detect wall-clock jumps.
-    pub monotonic: Option<Duration>,
+    /// The previous tick's wall time and the monotonic time elapsed since that tick.
+    pub previous_tick: Option<(DateTime<Utc>, Duration)>,
 }
 
+/// The policy uses the occupancy fields of a game's presence reply.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Presence {
     pub session_id: String,
     pub observation: String,
@@ -482,6 +480,7 @@ pub struct Presence {
 
 impl Inputs {
     fn validate(&self) -> Result<()> {
+        crate::mods::validate_targets(&self.mod_targets)?;
         ensure!(
             !self.all_ready || self.game_running,
             "a stopped room cannot be ready"
@@ -550,38 +549,18 @@ struct ClosingNotice {
     minutes: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyState {
-    pub version: u8,
     pub current_opening: Option<DateTime<Utc>>,
     pub last_opening: Option<DateTime<Utc>>,
     pub activity: Option<Activity>,
     pub mods: ModMaintenance,
     last_closing_notice: Option<ClosingNotice>,
-    // Each Agent tick reloads this state; initialization resets clocks after a restart.
-    last_wall: Option<DateTime<Utc>>,
-    last_monotonic: Option<Duration>,
-}
-
-impl Default for PolicyState {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            current_opening: None,
-            last_opening: None,
-            activity: None,
-            mods: ModMaintenance::default(),
-            last_closing_notice: None,
-            last_wall: None,
-            last_monotonic: None,
-        }
-    }
 }
 
 impl PolicyState {
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.version == 1, "unsupported policy state version");
         self.mods.validate()?;
         if let Some(activity) = &self.activity {
             ensure!(
@@ -613,13 +592,11 @@ impl PolicyState {
     }
 
     pub fn load(room: &RoomLock) -> Result<Self> {
-        let state = room
-            .read_state()?
-            .remove("policy_state")
-            .map(serde_json::from_value)
-            .transpose()
-            .context("invalid room policy state")?
-            .unwrap_or_default();
+        Self::from_document(&room.read_state()?)
+    }
+
+    pub(crate) fn from_document(document: &serde_json::Map<String, Value>) -> Result<Self> {
+        let state = state_section(document, "policy_state")?;
         Self::validate(&state)?;
         Ok(state)
     }
@@ -643,10 +620,14 @@ impl PolicyState {
 
     /// Invoke after startup cleanup confirms no previous updater is still writing.
     pub fn resume_after_restart(&mut self, now: DateTime<Utc>) -> Result<()> {
-        self.last_wall = None;
-        self.last_monotonic = None;
-        if matches!(self.mods.phase, ModPhase::Updating) {
-            self.finish_mod_update(now, Err("previous mod update was interrupted".into()))?;
+        self.validate()?;
+        match self.mods.phase {
+            ModPhase::Updating => {
+                self.finish_mod_update(now, Err("previous mod update was interrupted".into()))?;
+            }
+            // A successful download already fulfilled the previous Agent's request to exit.
+            ModPhase::Verifying => self.mods.resume_game = true,
+            _ => {}
         }
         if let Some(activity) = &mut self.activity
             && !activity.clean_shutdown
@@ -656,15 +637,8 @@ impl PolicyState {
         Ok(())
     }
 
-    pub fn request_mod_update(&mut self) -> Result<()> {
-        self.queue_mod_update(true)
-    }
-
     pub fn queue_mod_update(&mut self, resume_game: bool) -> Result<()> {
-        self.mods.request()?;
-        self.mods.manual = true;
-        self.mods.resume_game = resume_game;
-        Ok(())
+        self.mods.request(resume_game, None)
     }
 
     pub fn finish_mod_update(
@@ -677,66 +651,83 @@ impl PolicyState {
             "no mod update is running"
         );
         match outcome {
+            Ok(()) if !self.mods.targets.is_empty() => {
+                self.mods.phase = ModPhase::Verifying;
+                self.mods.error = None;
+            }
             Ok(()) => {
-                self.mods = ModMaintenance {
-                    observed_outdated: self.mods.observed_outdated,
-                    ..ModMaintenance::default()
-                }
+                self.mods = ModMaintenance::default();
             }
             Err(error) => {
-                self.mods.error = Some(error);
-                self.mods.phase = if self.mods.attempts >= MOD_ATTEMPTS {
-                    ModPhase::Failed
-                } else {
-                    ModPhase::Retry {
-                        not_before: now + TimeDelta::seconds(MOD_RETRY_DELAY.as_secs() as i64),
-                    }
-                };
+                self.mods.retry(now, error);
             }
         }
         Ok(())
     }
 
-    fn clock_changed(&mut self, now: DateTime<Utc>, monotonic: Option<Duration>) -> Result<bool> {
-        let mut skew = TimeDelta::zero();
-        let mut backwards = false;
-        if let Some(previous) = self.last_wall {
-            let elapsed = now.signed_duration_since(previous);
-            backwards = elapsed < TimeDelta::zero();
-            if let (Some(before), Some(after)) = (self.last_monotonic, monotonic) {
-                let actual = TimeDelta::from_std(after.saturating_sub(before))
-                    .context("monotonic interval is out of range")?;
-                skew = elapsed - actual;
-            } else if elapsed < TimeDelta::zero() {
-                skew = elapsed;
+    /// An empty result completes the event; retries retain its complete target table.
+    pub fn verify_mod_update(
+        &mut self,
+        now: DateTime<Utc>,
+        outcome: std::result::Result<crate::mods::UpdateTargets, String>,
+    ) -> Result<()> {
+        ensure!(
+            self.mods.phase == ModPhase::Verifying,
+            "no Mod update awaits verification"
+        );
+        match outcome {
+            Ok(targets) if targets.is_empty() => self.mods = ModMaintenance::default(),
+            Ok(targets) => {
+                crate::mods::validate_targets(&targets)?;
+                self.mods.targets = targets;
+                self.mods.retry(
+                    now,
+                    "download completed but loaded Mod versions still differ".into(),
+                );
             }
+            Err(error) => self.mods.error = Some(error),
         }
+        Ok(())
+    }
+
+    fn clock_changed(
+        &mut self,
+        now: DateTime<Utc>,
+        previous_tick: Option<(DateTime<Utc>, Duration)>,
+    ) -> Result<bool> {
+        let Some((previous, monotonic)) = previous_tick else {
+            return Ok(false);
+        };
+        let elapsed = now - previous;
+        let monotonic =
+            TimeDelta::from_std(monotonic).context("monotonic interval is out of range")?;
+        let skew = elapsed
+            .checked_sub(&monotonic)
+            .context("clock skew is out of range")?;
         let tolerance = TimeDelta::seconds(CHECK_INTERVAL.as_secs() as i64);
-        let changed = backwards || skew < -tolerance || skew > tolerance;
-        if changed {
-            match &mut self.mods.phase {
-                ModPhase::Announcing {
-                    deadline,
-                    next_notice,
-                } => {
-                    *deadline = deadline
-                        .checked_add_signed(skew)
-                        .context("mod countdown is out of range")?;
-                    *next_notice = next_notice
-                        .checked_add_signed(skew)
-                        .context("mod countdown is out of range")?;
-                }
-                ModPhase::Retry { not_before } => {
-                    *not_before = not_before
-                        .checked_add_signed(skew)
-                        .context("mod retry is out of range")?
-                }
-                _ => {}
-            }
+        if elapsed >= TimeDelta::zero() && (-tolerance..=tolerance).contains(&skew) {
+            return Ok(false);
         }
-        self.last_wall = Some(now);
-        self.last_monotonic = monotonic;
-        Ok(changed)
+        match &mut self.mods.phase {
+            ModPhase::Announcing {
+                deadline,
+                next_notice,
+            } => {
+                *deadline = deadline
+                    .checked_add_signed(skew)
+                    .context("mod countdown is out of range")?;
+                *next_notice = next_notice
+                    .checked_add_signed(skew)
+                    .context("mod countdown is out of range")?;
+            }
+            ModPhase::Retry { not_before } => {
+                *not_before = not_before
+                    .checked_add_signed(skew)
+                    .context("mod retry is out of range")?
+            }
+            _ => {}
+        }
+        Ok(true)
     }
 
     fn observe_activity(
@@ -815,14 +806,39 @@ impl PolicyState {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ModMaintenance {
     pub phase: ModPhase,
     pub attempts: u8,
     pub manual: bool,
     pub resume_game: bool,
-    pub observed_outdated: bool,
+    pub targets: crate::mods::UpdateTargets,
     pub error: Option<String>,
+    pub origin: Option<ModOrigin>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModSource {
+    Rpc,
+    Manual,
+    ModAuto,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModOrigin {
+    pub operation_id: String,
+    pub source: ModSource,
+}
+
+impl ModOrigin {
+    pub(crate) fn new(source: ModSource) -> Self {
+        Self {
+            operation_id: ulid::Ulid::generate().to_string(),
+            source,
+        }
+    }
 }
 
 impl Default for ModMaintenance {
@@ -832,8 +848,9 @@ impl Default for ModMaintenance {
             attempts: 0,
             manual: false,
             resume_game: true,
-            observed_outdated: false,
+            targets: Default::default(),
             error: None,
+            origin: None,
         }
     }
 }
@@ -850,6 +867,7 @@ pub enum ModPhase {
     },
     Stopping,
     Updating,
+    Verifying,
     Retry {
         not_before: DateTime<Utc>,
     },
@@ -857,13 +875,53 @@ pub enum ModPhase {
 }
 
 impl ModMaintenance {
+    pub(crate) fn require_game_start(&self) -> crate::model::Result<()> {
+        use crate::model::{Error, ErrorCode};
+        match self.phase {
+            ModPhase::Idle | ModPhase::Verifying => Ok(()),
+            ModPhase::Failed => Err(Error::new(ErrorCode::NotReady, "Mod maintenance failed")
+                .with_details(serde_json::json!({"error": self.error}))),
+            _ => Err(Error::new(
+                ErrorCode::Busy,
+                "room Mod maintenance is pending",
+            )),
+        }
+    }
+
+    pub(crate) fn enter_pending(&mut self) {
+        self.phase = ModPhase::Pending;
+        self.origin = Some(ModOrigin::new(ModSource::ModAuto));
+    }
+
     fn validate(&self) -> Result<()> {
+        if let Some(origin) = &self.origin {
+            ensure!(
+                origin
+                    .operation_id
+                    .parse::<ulid::Ulid>()
+                    .is_ok_and(|id| id.to_string() == origin.operation_id),
+                "invalid policy_state.mods.origin.operation_id"
+            );
+        } else {
+            ensure!(
+                self.phase == ModPhase::Idle,
+                "missing policy_state.mods.origin"
+            );
+        }
+        crate::mods::validate_targets(&self.targets)?;
         ensure!(self.attempts <= MOD_ATTEMPTS, "mod retry budget is invalid");
         match self.phase {
-            ModPhase::Idle => ensure!(self.attempts == 0, "idle mod state retains attempts"),
+            ModPhase::Idle => ensure!(
+                self.attempts == 0 && self.targets.is_empty() && self.origin.is_none(),
+                "idle mod state retains an unfinished update"
+            ),
             ModPhase::Updating => {
                 ensure!(self.attempts > 0, "running update has no reserved attempt")
             }
+            ModPhase::Verifying => ensure!(
+                self.attempts > 0 && !self.targets.is_empty(),
+                "Mod verification has no attempted target"
+            ),
             ModPhase::Retry { .. } => ensure!(
                 (1..MOD_ATTEMPTS).contains(&self.attempts),
                 "retry state has no remaining attempts"
@@ -881,22 +939,64 @@ impl ModMaintenance {
         Ok(())
     }
 
-    fn request(&mut self) -> Result<()> {
-        ensure!(
-            !matches!(self.phase, ModPhase::Updating),
-            "a mod update is already writing"
-        );
-        self.phase = ModPhase::Pending;
-        self.attempts = 0;
-        self.manual = false;
-        self.resume_game = true;
-        self.error = None;
+    fn retry(&mut self, now: DateTime<Utc>, error: String) {
+        self.error = Some(error);
+        self.phase = if self.attempts >= MOD_ATTEMPTS {
+            ModPhase::Failed
+        } else {
+            ModPhase::Retry {
+                not_before: now + TimeDelta::seconds(MOD_RETRY_DELAY.as_secs() as i64),
+            }
+        };
+    }
+
+    pub(crate) fn request(&mut self, resume_game: bool, rpc_id: Option<&str>) -> Result<()> {
+        // A repeated offline Host request resumes the same pending service start.
+        if rpc_id.is_none()
+            && self.phase == ModPhase::Pending
+            && self.manual
+            && self.resume_game == resume_game
+        {
+            return Ok(());
+        }
+        self.require_manual_update()?;
+        *self = Self {
+            phase: ModPhase::Pending,
+            manual: true,
+            resume_game,
+            origin: Some(match rpc_id {
+                Some(id) => ModOrigin {
+                    operation_id: id.into(),
+                    source: ModSource::Rpc,
+                },
+                None => ModOrigin::new(ModSource::Manual),
+            }),
+            targets: std::mem::take(&mut self.targets),
+            ..Self::default()
+        };
+        Ok(())
+    }
+
+    pub(crate) fn require_manual_update(&self) -> crate::model::Result<()> {
+        let busy = match self.phase {
+            ModPhase::Updating => true,
+            ModPhase::Idle | ModPhase::Verifying | ModPhase::Failed => false,
+            _ => self.manual,
+        };
+        if busy {
+            return Err(crate::model::Error::new(
+                crate::model::ErrorCode::Busy,
+                "Mod maintenance is already pending",
+            ));
+        }
         Ok(())
     }
 
     pub(crate) fn action(&mut self, now: DateTime<Utc>, inputs: &Inputs) -> Result<Option<Action>> {
         match self.phase {
-            ModPhase::Idle | ModPhase::Updating | ModPhase::Failed => return Ok(None),
+            ModPhase::Idle | ModPhase::Updating | ModPhase::Verifying | ModPhase::Failed => {
+                return Ok(None);
+            }
             ModPhase::Retry { not_before } if now < not_before => return Ok(None),
             ModPhase::Announcing {
                 deadline,
@@ -916,6 +1016,7 @@ impl ModMaintenance {
                         next_notice: deadline - TimeDelta::seconds(((seconds + 29) / 30 - 1) * 30),
                     };
                     return Ok(Some(Action::Announce {
+                        purpose: AnnouncementPurpose::ModUpdate,
                         message: mod_message(seconds),
                     }));
                 }
@@ -938,6 +1039,7 @@ impl ModMaintenance {
                 next_notice: now + TimeDelta::seconds(30),
             };
             return Ok(Some(Action::Announce {
+                purpose: AnnouncementPurpose::ModUpdate,
                 message: mod_message(60),
             }));
         }
@@ -982,6 +1084,7 @@ pub enum Action {
         message: Option<String>,
     },
     Announce {
+        purpose: AnnouncementPurpose,
         message: String,
     },
     UpdateMods {
@@ -989,7 +1092,17 @@ pub enum Action {
     },
     Regenerate {
         expected_sessions: BTreeMap<String, String>,
+        idle_since: DateTime<Utc>,
+        world_day: u64,
+        retention_seconds: i64,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnouncementPurpose {
+    Schedule,
+    ModUpdate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1083,7 +1196,7 @@ where
     }
 }
 
-fn next_notice(deadline: Instant, remaining: Duration, interval: Duration) -> Instant {
+pub(crate) fn next_notice(deadline: Instant, remaining: Duration, interval: Duration) -> Instant {
     let offset = remaining.as_nanos().saturating_sub(1) / interval.as_nanos() * interval.as_nanos();
     deadline
         - Duration::new(
@@ -1113,23 +1226,21 @@ mod tests {
     }
 
     #[test]
-    fn a_new_maintenance_request_resets_the_previous_continuation() {
-        let mut state = PolicyState::default();
-        state.queue_mod_update(false).unwrap();
-        state.mods.request().unwrap();
-        assert!(state.mods.resume_game);
-        assert!(!state.mods.manual);
-        state.queue_mod_update(false).unwrap();
-        assert!(!state.mods.resume_game);
-    }
-
-    #[test]
     fn queued_maintenance_keeps_its_continuation_until_completion() {
         let mut state = PolicyState::default();
         state.queue_mod_update(false).unwrap();
+        let origin = state.mods.origin.clone().unwrap();
+        assert_eq!(origin.source, ModSource::Manual);
+        let mut encoded = serde_json::to_value(&state).unwrap();
+        encoded["mods"]["origin"]["source"] = serde_json::json!("unknown_source");
+        assert!(serde_json::from_value::<PolicyState>(encoded).is_err());
+        let mut invalid = state.clone();
+        invalid.mods.origin.as_mut().unwrap().operation_id = "invalid-id".into();
+        assert!(invalid.mods.validate().is_err());
         let mut state: PolicyState =
             serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
         state.resume_after_restart(Utc::now()).unwrap();
+        assert_eq!(state.mods.origin.as_ref(), Some(&origin));
         assert!(state.mods.manual);
         assert!(!state.mods.resume_game);
         assert_eq!(

@@ -18,22 +18,22 @@ tc: lint
     cargo clippy --locked --workspace --all-targets -- -D warnings
     uv run --locked ty check python
 
-test: tc
+_test-core: tc
     cargo nextest run --locked -p dst-server --all-targets
     cargo build --locked -p dst-server --bin dst-server --example rpc_fixture
+    uv run --locked --only-group dev pytest tests/lua
+
+test: _test-core
     uv sync --locked --all-groups --reinstall-package dst-server
-    uv run --locked pytest tests/lua
-    uv run --locked python tests/rust/check_binding.py target/debug/examples/rpc_fixture target/debug/dst-server
-    for check in tests/rust/check_*.py; do case "$check" in */check_binding.py) continue ;; esac; uv run --locked python "$check"; done
-    for check in tests/rust/check_*_cli.py; do uv run --locked python "$check" target/debug/dst-server; done
+    uv run --locked --no-sync sh tests/rust/run_sdk_checks.sh python "$PWD/target/debug/examples/rpc_fixture" "$PWD/target/debug/dst-server"
 
-build: test
+build: _test-core
     uv build --clear --out-dir dist --no-create-gitignore --no-sources -C 'maturin.build-args=--compatibility pypi'
+    uv run --isolated --no-project --no-config --with dist/dst_server-*.whl -- sh tests/rust/run_sdk_checks.sh python "$PWD/target/debug/examples/rpc_fixture" "$PWD/target/debug/dst-server"
 
-# Run the full dependency chain, repository hooks, and isolated wheel check.
+# Verify the packaged wheel and repository hooks.
 verify: build
     uv run --locked prek run --all-files --show-diff-on-failure --skip just-check
-    uv run --isolated --no-project --no-config --with dist/dst_server-*.whl -- python -I tests/rust/check_binding.py target/debug/examples/rpc_fixture target/debug/dst-server
 
 check:
     uv lock --check

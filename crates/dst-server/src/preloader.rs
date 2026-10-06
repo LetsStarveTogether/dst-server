@@ -1,21 +1,21 @@
 //! Native snapshot inspection and fixed-target recovery while the whole room is stopped.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, ensure};
+use anyhow::ensure;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout_at};
 
 use crate::configuration::{self, Cluster};
-use crate::driver::{Driver, DriverOptions, DriverState};
+use crate::driver::{DriverOptions, DriverState, TelemetryProfile};
 use crate::files::RoomLock;
 use crate::model::{Error, ErrorCode, Result};
 use crate::recovery::{
-    self, Catalog, Catalogs, FailedLoad, Failure, FixedTarget, Snapshot, TargetPhase,
+    self, Catalog, Catalogs, FixedTarget, RecoveryErrorReason as Reason, Snapshot, TargetPhase,
+    native_path,
 };
 use crate::room::{Room, StoppedOperation};
 
@@ -116,6 +116,9 @@ async fn apply_stopped(
             expected == target.shards.keys().map(String::as_str).collect(),
             "persisted recovery target differs from native shard topology"
         );
+        for (shard, saved) in &target.shards {
+            recovery::require_target_file(lock, shard, &saved.session_id, &saved.world_file)?;
+        }
         Ok(())
     })?;
     for shard in &cluster.shards {
@@ -144,10 +147,10 @@ async fn apply_stopped(
                 ErrorCode::Protocol,
                 "native recovery receipt differs from the persisted target",
             )
-            .with_details(json!({"shard":shard.name})));
+            .with_details(json!({"shard":shard.name, "reason":Reason::InvalidEvidence})));
         }
     }
-    stopped.with_lock(recovery::mark_prepared)
+    stopped.record_prepared()
 }
 
 async fn native(
@@ -158,14 +161,12 @@ async fn native(
     deadline: Instant,
     cancelled: &mut oneshot::Receiver<()>,
 ) -> Result<Value> {
+    stopped.check_interrupted()?;
     if !matches!(
         cancelled.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     ) {
-        return Err(Error::new(
-            ErrorCode::Unknown,
-            "native preloader was cancelled",
-        ));
+        return Err(Error::shutdown(ErrorCode::Unknown));
     }
     if Instant::now() >= deadline {
         return Err(Error::new(
@@ -174,33 +175,26 @@ async fn native(
         ));
     }
     let options = DriverOptions {
-        profile: "off".into(),
-        actions: Vec::new(),
-        control: json!({"observe_loads":true,"recovery":request}),
+        profile: TelemetryProfile::Off,
+        control: json!({"recovery":request}),
         extra_args: vec!["-skip_update_server_mods".into(), "-offline".into()],
     };
-    let nonce = stopped.with_lock(|lock| options.save(lock))?;
-    let driver = Driver::spawn(
-        cluster,
-        stopped.executable(),
-        shard,
-        &nonce,
-        options.extra_args,
-    )
-    .map_err(internal)?;
+    let nonce = stopped.with_lock(|lock| options.save(lock, [shard]))?;
+    let driver = stopped.spawn_driver(cluster, shard, &nonce, options.extra_args)?;
     let outcome = tokio::select! {
         result = timeout_at(deadline, driver.wait()) => match result {
             Ok(Ok(exit)) => {
                 if exit.status.success() && !exit.forced && exit.output_drained && exit.protocol_error.is_none() {
                     validate_result(&driver.snapshot())
                 } else {
-                    Err(Error::new(ErrorCode::Transport, "native preloader did not exit cleanly").with_details(json!({"shard":shard,"returncode":exit.returncode(),"forced":exit.forced,"output_drained":exit.output_drained})))
+                    Err(Error::new(ErrorCode::Transport, "native preloader did not exit cleanly").with_details(json!({"shard":shard,"reason":Reason::UncleanExit,"returncode":exit.returncode(),"forced":exit.forced,"output_drained":exit.output_drained})))
                 }
             },
             Ok(Err(error)) => Err(Error::new(ErrorCode::Transport, error.to_string())),
             Err(_) => Err(Error::new(ErrorCode::Timeout, "native preloader deadline expired")),
         },
-        _ = cancelled => Err(Error::new(ErrorCode::Unknown, "native preloader was cancelled")),
+        _ = cancelled => Err(Error::shutdown(ErrorCode::Unknown)),
+        _ = stopped.interrupted() => Err(Error::shutdown(ErrorCode::Unknown)),
     };
     // Driver owns its process supervisor. Always await it here before releasing the
     // stopped-operation guard, including on timeout or cancellation.
@@ -211,37 +205,38 @@ async fn native(
             ErrorCode::Transport,
             format!("native preloader cleanup failed: {cleanup}"),
         )),
-        (Err(error), Err(cleanup)) => Err(Error::new(
-            error.code,
-            format!(
+        (Err(mut error), Err(cleanup)) => {
+            error.message = format!(
                 "{}; native preloader cleanup failed: {cleanup}",
                 error.message
-            ),
-        )
-        .with_details(error.details)),
+            );
+            error.details["cleanup_failed"] = Value::Bool(true);
+            Err(error)
+        }
     }
 }
 
 fn validate_result(state: &DriverState) -> Result<Value> {
-    if state.failure.is_some()
-        || state.native_ready
-        || state.ready
-        || state.health.is_some()
-        || state.last_native_save.is_some()
-        || state.generation_changes != 0
-        || state.control_records.len() != 1
-    {
+    let valid = state.failure.is_none()
+        && !state.native_ready
+        && !state.ready
+        && state.health.is_none()
+        && state.last_native_save.is_none()
+        && state.generation_changes == 0
+        && state.control_count == 1;
+    let Some(record) = state.last_control.as_ref().filter(|_| valid) else {
         return Err(Error::new(
             ErrorCode::Protocol,
             "native preloader loaded a world, changed generation, or produced invalid evidence",
         )
-        .with_details(json!({"shard":state.shard})));
-    }
-    let record = &state.control_records[0];
+        .with_details(json!({"shard":state.shard, "reason":Reason::InvalidEvidence})));
+    };
     if record["event"] == "recovery_failed" {
+        let reason: Reason =
+            serde_json::from_value(record["error"].clone()).unwrap_or(Reason::NativeRecoveryFailed);
         return Err(
             Error::new(ErrorCode::Conflict, "native recovery refused the request")
-                .with_details(json!({"shard":state.shard,"reason":record["error"]})),
+                .with_details(json!({"shard":state.shard,"reason":reason})),
         );
     }
     if !matches!(
@@ -253,46 +248,86 @@ fn validate_result(state: &DriverState) -> Result<Value> {
         return Err(Error::new(
             ErrorCode::Protocol,
             "native preloader returned invalid control evidence",
-        ));
+        )
+        .with_details(json!({"shard":state.shard, "reason":Reason::InvalidEvidence})));
     }
     Ok(record.clone())
 }
 
 fn parse_catalog(lock: &RoomLock, shard: &str, record: &Value) -> anyhow::Result<Catalog> {
+    let invalid = |reason: Reason, message: &str| {
+        Error::new(ErrorCode::Protocol, message)
+            .with_details(json!({"reason":reason, "shard":shard}))
+    };
     ensure!(
         record["event"] == "recovery_catalog" && record["has_more"].is_boolean(),
-        "native preloader did not return a snapshot catalog"
+        invalid(
+            Reason::InvalidCatalog,
+            "native preloader did not return a snapshot catalog"
+        )
     );
     let session = record["session_id"]
         .as_str()
         .filter(|value| valid_text(value, 128))
-        .context("native catalog has no valid session")?;
-    let latest = record["latest_world_file"]
-        .as_str()
-        .context("native catalog has no latest world file")?;
-    native_path(shard, session, latest)?;
-    let snapshots: Vec<Snapshot> = serde_json::from_value(record["snapshots"].clone())
-        .context("invalid native snapshot entries")?;
+        .ok_or_else(|| {
+            invalid(
+                Reason::MissingSession,
+                "native catalog has no valid session",
+            )
+        })?;
+    let latest = record["latest_world_file"].as_str().ok_or_else(|| {
+        invalid(
+            Reason::MissingLatest,
+            "native catalog has no latest world file",
+        )
+    })?;
+    let path = |file: &str| {
+        native_path(shard, session, file)
+            .map_err(|error| invalid(Reason::InvalidPath, &error.to_string()))
+    };
+    path(latest)?;
+    let mut has_latest = false;
+    let mut snapshots: Vec<Snapshot> = serde_json::from_value(record["snapshots"].clone())
+        .map_err(|_| invalid(Reason::InvalidCatalog, "invalid native snapshot entries"))?;
     let mut ids = BTreeSet::new();
     let mut paths = BTreeSet::new();
-    for snapshot in &snapshots {
+    for snapshot in &mut snapshots {
         ensure!(
             snapshot.snapshot_id > 0
                 && snapshot.snapshot_id <= crate::lua::MAX_SAFE_INTEGER as u64
                 && ids.insert(snapshot.snapshot_id),
-            "invalid or duplicate native snapshot identity"
+            invalid(
+                Reason::InvalidCatalog,
+                "invalid or duplicate native snapshot identity"
+            )
         );
         if let Some(file) = &snapshot.world_file {
-            ensure!(paths.insert(file.clone()), "duplicate native world file");
-            let path = native_path(shard, session, file)?;
-            // Validate the native world's file type and every parent without following links.
-            lock.open_regular(&path)
-                .context("open native world snapshot")?;
+            let world = path(file)?;
+            let usable = recovery::nonempty_world_file(lock, &world);
+            ensure!(
+                paths.insert(world),
+                invalid(Reason::InvalidCatalog, "duplicate native world file")
+            );
+            if file == latest {
+                ensure!(
+                    usable,
+                    invalid(
+                        Reason::MissingWorldFile,
+                        "latest native world file is missing, unreadable or empty"
+                    )
+                );
+                has_latest = true;
+            } else if !usable {
+                snapshot.world_file = None;
+            }
         }
     }
     ensure!(
-        paths.contains(latest),
-        "native latest world file is absent from its catalog"
+        has_latest,
+        invalid(
+            Reason::MissingLatest,
+            "native latest world file is absent from its catalog"
+        )
     );
     Ok(Catalog {
         session_id: session.into(),
@@ -301,93 +336,8 @@ fn parse_catalog(lock: &RoomLock, shard: &str, record: &Value) -> anyhow::Result
     })
 }
 
-fn native_path(shard: &str, session: &str, file: &str) -> anyhow::Result<PathBuf> {
-    ensure!(
-        valid_text(file, 4096) && !file.contains('\\'),
-        "invalid native world path"
-    );
-    let relative = file.strip_prefix("save/").unwrap_or(file);
-    let parts: Vec<_> = relative.split('/').collect();
-    ensure!(
-        parts.len() == 3
-            && parts[0] == "session"
-            && parts[1] == session
-            && parts
-                .iter()
-                .all(|part| !part.is_empty() && !matches!(*part, "." | "..")),
-        "native world path does not belong to its session"
-    );
-    let path = Path::new(relative);
-    Ok(Path::new(shard).join("save").join(path))
-}
-
 fn valid_text(value: &str, limit: usize) -> bool {
     !value.is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
-}
-
-/// Only structured native decoding evidence permits automatic rollback. Generic
-/// log messages, read failures and failures inside world/Mod callbacks stay unknown.
-pub fn classify(states: &[DriverState]) -> Failure {
-    if states.is_empty()
-        || states
-            .iter()
-            .any(|state| state.running || !state.output_drained || state.failure.is_some())
-    {
-        return Failure::Unknown;
-    }
-    let mut shards = BTreeMap::new();
-    for state in states {
-        let Some(record) = &state.load_failure else {
-            continue;
-        };
-        let session = record["session_id"]
-            .as_str()
-            .filter(|value| valid_text(value, 128));
-        let file = record["world_file"]
-            .as_str()
-            .filter(|value| valid_text(value, 4096));
-        if record["event"] != "world_load_failed"
-            || record["v"] != 1
-            || record["nonce"] != state.nonce
-            || record["generation"].as_u64() != state.generation
-            || record["phase"] != "decode"
-            || record["read_succeeded"] != true
-            || record["callback_entered"] != false
-            || record["decoder_unchanged"] != true
-            || !record["source_bytes"]
-                .as_u64()
-                .is_some_and(|bytes| bytes > 0)
-            || !matches!(
-                record["reason"].as_str(),
-                Some("parse_failed" | "decoded_nil" | "decoded_empty")
-            )
-            || session.is_none()
-            || file.is_none()
-        {
-            return Failure::Unknown;
-        }
-        let (session, file) = (session.unwrap(), file.unwrap());
-        if native_path(&state.shard, session, file).is_err() {
-            return Failure::Unknown;
-        }
-        shards.insert(
-            state.shard.clone(),
-            FailedLoad {
-                session_id: session.into(),
-                world_file: file.into(),
-            },
-        );
-    }
-    if !shards.is_empty() {
-        Failure::LoadFailure { shards }
-    } else if states
-        .iter()
-        .any(|state| state.native_ready && state.runtime.is_some())
-    {
-        Failure::Retryable
-    } else {
-        Failure::Unknown
-    }
 }
 
 fn internal(error: impl std::fmt::Display) -> Error {
@@ -402,9 +352,9 @@ mod tests {
         rpc::EventHub,
     };
     use std::{
-        collections::BTreeMap,
         fs,
         os::unix::fs::{PermissionsExt, symlink},
+        path::{Path, PathBuf},
     };
 
     const META: &str = "return { clock={ cycles=2, segs={day=10,dusk=4,night=2}, phase=\"day\", totaltimeinphase=300, remainingtimeinphase=150 } }\0";
@@ -414,7 +364,7 @@ def argument(key): return sys.argv[sys.argv.index(key) + 1]
 root = pathlib.Path(argument('-persistent_storage_root')) / argument('-cluster')
 shard = argument('-shard')
 directory = root / shard
-config = json.loads((root / '.dst-server.json').read_text())['driver']
+config = json.loads((directory / 'dst_server_driver.json').read_text())['driver']
 request = config['control']['recovery']
 scenario = (directory / 'scenario').read_text()
 (directory / 'pid.tmp').write_text(str(os.getpid()))
@@ -424,7 +374,7 @@ if scenario == 'sleep':
     time.sleep(30)
     sys.exit(0)
 if scenario == 'empty': sys.exit(0)
-if scenario == 'refuse': record = {'event':'recovery_failed', 'error':'fixture refusal'}
+if scenario in ('refuse', 'shutdown_refusal'): record = {'event':'recovery_failed', 'error':'shutdown' if scenario == 'shutdown_refusal' else 'fixture refusal'}
 elif request['mode'] == 'catalog':
     record = json.loads((directory / 'catalog').read_text())
 else:
@@ -432,7 +382,7 @@ else:
     (directory / 'applied').write_text(str(request['snapshot_id']))
     record = dict(request, event='recovery_applied', changed=changed)
     if scenario == 'wrong_receipt': record['snapshot_id'] += 1
-record.update(v=1, nonce=config['nonce'], generation=1)
+record.update(nonce=config['nonce'], generation=1)
 def emit(record): os.write(4, ('DST_CONTROL|' + json.dumps(record) + '\n').encode())
 emit(record)
 if scenario == 'duplicate': emit(record)
@@ -465,13 +415,20 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
                 let session = format!("SESSION{index}");
                 let directory = path.join("save/session").join(&session);
                 fs::create_dir_all(&directory).unwrap();
-                for id in [1, 2] {
+                for id in 1..=3 {
                     fs::write(directory.join(format!("{id:010}")), b"native world").unwrap();
                     fs::write(directory.join(format!("{id:010}.meta")), META).unwrap();
                 }
+                let snapshots: Vec<_> = (1..=3)
+                    .map(|id| {
+                        json!({
+                            "snapshot_id":id,"world_file":format!("session/{session}/{id:010}")
+                        })
+                    })
+                    .collect();
                 let record = json!({"event":"recovery_catalog", "session_id":session,
-                    "latest_world_file":format!("session/{session}/0000000002"), "has_more":false,
-                    "snapshots":[{"snapshot_id":1,"world_file":format!("session/{session}/0000000001")},{"snapshot_id":2,"world_file":format!("session/{session}/0000000002")}]});
+                    "latest_world_file":format!("session/{session}/0000000003"), "has_more":false,
+                    "snapshots":snapshots});
                 fs::write(path.join("catalog"), record.to_string()).unwrap();
                 fs::write(path.join("scenario"), "ok").unwrap();
             }
@@ -483,6 +440,7 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
                 executable,
                 DriverOptions::default(),
                 EventHub::default(),
+                Default::default(),
             )
             .unwrap();
             Self {
@@ -552,24 +510,76 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
             catalogs["Caves"].snapshots[0].world_file.as_deref(),
             Some("session/SESSION1/0000000001")
         );
-        for scenario in ["empty", "duplicate", "generation", "ready", "refuse"] {
+        for scenario in [
+            "empty",
+            "duplicate",
+            "generation",
+            "ready",
+            "refuse",
+            "shutdown_refusal",
+        ] {
             fixture.scenario("Master", scenario);
-            assert!(
-                catalog(fixture.room.clone(), Duration::from_secs(5))
-                    .await
-                    .is_err(),
-                "{scenario}"
-            );
+            let error = catalog(fixture.room.clone(), Duration::from_secs(5))
+                .await
+                .unwrap_err();
+            assert!(!error.is_shutdown(), "{scenario}");
         }
         fixture.scenario("Master", "ok");
-        let world = fixture.root.join("Master/save/session/SESSION0/0000000001");
-        fs::remove_file(&world).unwrap();
-        symlink("0000000002", &world).unwrap();
-        assert!(
-            catalog(fixture.room.clone(), Duration::from_secs(5))
-                .await
-                .is_err()
+        let native_catalog = fixture.root.join("Master/catalog");
+        let original = fs::read(&native_catalog).unwrap();
+        let mut duplicate: Value = serde_json::from_slice(&original).unwrap();
+        duplicate["snapshots"][1]["world_file"] = duplicate["snapshots"][0]["world_file"].clone();
+        fs::write(&native_catalog, serde_json::to_vec(&duplicate).unwrap()).unwrap();
+        let error = catalog(fixture.room.clone(), Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Protocol);
+        assert_eq!(
+            error.details,
+            json!({"reason":"invalid_catalog","shard":"Master"})
         );
+        fs::write(native_catalog, original).unwrap();
+        let world = fixture.root.join("Master/save/session/SESSION0/0000000002");
+        fs::remove_file(&world).unwrap();
+        symlink("0000000001", &world).unwrap();
+        let catalogs = catalog(fixture.room.clone(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(catalogs["Master"].snapshots[1].world_file.is_none());
+        let current = &catalogs["Master"];
+        let failed = recovery::FailedLoad {
+            session_id: current.session_id.clone(),
+            world_file: current.latest_world_file.clone(),
+        };
+        let decision = fixture
+            .room
+            .with_lock(|lock| {
+                lock.update_state(|state| {
+                    state.insert(
+                        "recovery".into(),
+                        json!({"restarts_used":recovery::CURRENT_RESTARTS}),
+                    );
+                    Ok(())
+                })?;
+                recovery::on_failure(
+                    lock,
+                    recovery::Failure::LoadFailure {
+                        shards: [("Master".into(), failed)].into(),
+                    },
+                    &catalogs.keys().cloned().collect(),
+                    &catalogs,
+                    1,
+                )
+            })
+            .unwrap();
+        assert!(
+            matches!(decision, recovery::Decision::Restore { target, .. } if target.snapshot_id == 1)
+        );
+        fs::write(world.with_file_name("0000000003"), b"").unwrap();
+        let error = catalog(fixture.room.clone(), Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(error.details["reason"], "missing_world_file");
     }
 
     #[tokio::test]
@@ -579,6 +589,27 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
             .await
             .unwrap();
         let target = fixture.fix_target(&catalogs);
+        let cave_file = fixture.root.join("Caves/save/session/SESSION1/0000000001");
+        fs::write(&cave_file, b"").unwrap();
+        let unusable = catalog(fixture.room.clone(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(unusable["Caves"].snapshots[0].world_file.is_none());
+        for missing in [false, true] {
+            if missing {
+                fs::remove_file(&cave_file).unwrap();
+            }
+            let error = apply(fixture.room.clone(), target.clone(), Duration::from_secs(5))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.details,
+                json!({"shard":"Caves","reason":"missing_world_file"})
+            );
+            assert!(!fixture.root.join("Master/applied").exists());
+            assert!(!fixture.root.join("Caves/applied").exists());
+        }
+        fs::write(&cave_file, b"native world").unwrap();
         fixture.scenario("Caves", "refuse");
         assert!(
             apply(fixture.room.clone(), target.clone(), Duration::from_secs(5))
@@ -627,7 +658,7 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
         assert_eq!(completed.shards, partial.shards);
         assert_eq!(
             fs::read_to_string(fixture.root.join("Master/calls")).unwrap(),
-            "catalog\napply\napply\napply\n"
+            "catalog\ncatalog\napply\napply\napply\n"
         );
         fixture
             .room
@@ -681,78 +712,42 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
         fixture.room.while_stopped().await.unwrap();
     }
 
-    #[test]
-    fn only_verified_native_decode_failures_allow_rollback() {
-        let record = json!({"v":1,"nonce":"fixture","generation":1,"event":"world_load_failed",
-            "session_id":"SESSION","world_file":"session/SESSION/0000000002","phase":"decode",
-            "reason":"parse_failed","read_succeeded":true,"callback_entered":false,"source_bytes":4,"decoder_unchanged":true});
-        let state = DriverState {
-            shard: "Master".into(),
-            pid: 1,
-            process_id: ulid::Ulid::generate().to_string(),
-            nonce: "fixture".into(),
-            generation: Some(1),
-            generation_changes: 0,
-            native_ready: false,
-            ready: false,
-            running: false,
-            stopping: false,
-            returncode: Some(1),
-            forced: false,
-            output_drained: true,
-            load_failure: Some(record.clone()),
-            session_id: None,
-            health: None,
-            runtime: None,
-            last_native_save: None,
-            last_control: None,
-            control_records: Default::default(),
-            failure: None,
-            telemetry_sequence: 0,
-            telemetry_gaps: 0,
-            invalid_telemetry: 0,
-            stale_telemetry: 0,
-            unmatched_replies: 0,
-            recent_request: None,
-        };
-        assert!(
-            matches!(classify(std::slice::from_ref(&state)), Failure::LoadFailure {shards} if shards["Master"].world_file == "session/SESSION/0000000002")
+    #[tokio::test]
+    async fn service_handoff_cancels_the_current_preloader_before_another_shard_can_launch() {
+        let fixture = Fixture::new(&["Master", "Caves"]);
+        fixture.scenario("Master", "sleep");
+        let room = fixture.room.clone();
+        let catalog = tokio::spawn(async move { catalog(room, Duration::from_secs(20)).await });
+        let pid_path = fixture.root.join("Master/pid");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !pid_path.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let pid: i32 = fs::read_to_string(pid_path).unwrap().parse().unwrap();
+        let mut deadlines = crate::room::ShutdownDeadlines::new(Instant::now());
+        deadlines.handoff = Instant::now() + Duration::from_millis(100);
+        fixture.room.begin_service_shutdown(deadlines);
+        let context = crate::operation::OperationContext::new(
+            crate::operation::Source::Signal,
+            crate::operation::Layer::Policy,
+            None,
         );
-        let mut caves = state.clone();
-        caves.shard = "Caves".into();
-        caves.load_failure.as_mut().unwrap()["world_file"] = json!("session/SESSION/0000000001");
-        for states in [[state.clone(), caves.clone()], [caves, state.clone()]] {
-            let Failure::LoadFailure { shards } = classify(&states) else {
-                panic!("expected both failed world files");
-            };
-            assert_eq!(shards.len(), 2);
-            assert_eq!(shards["Master"].world_file, "session/SESSION/0000000002");
-            assert_eq!(shards["Caves"].world_file, "session/SESSION/0000000001");
-        }
-        for (field, value) in BTreeMap::from([
-            ("phase", json!("read")),
-            ("read_succeeded", json!(false)),
-            ("callback_entered", json!(true)),
-            ("source_bytes", json!(0)),
-            ("reason", json!("native_error")),
-            ("decoder_unchanged", json!(false)),
-            ("nonce", json!("stale")),
-            ("generation", json!(2)),
-            ("world_file", json!("session/SESSION/../outside")),
-        ]) {
-            let mut changed = state.clone();
-            changed.load_failure.as_mut().unwrap()[field] = value;
-            assert!(matches!(classify(&[changed]), Failure::Unknown), "{field}");
-        }
-        let mut ready = state.clone();
-        ready.load_failure = None;
-        ready.native_ready = true;
-        ready.runtime = Some(json!({}));
-        assert!(matches!(
-            classify(std::slice::from_ref(&ready)),
-            Failure::Retryable
-        ));
-        ready.output_drained = false;
-        assert!(matches!(classify(&[ready]), Failure::Unknown));
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            fixture.room.shutdown_service(deadlines, &context),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let error = catalog.await.unwrap().unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unknown);
+        assert!(error.is_shutdown());
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert!(!fixture.root.join("Caves/pid").exists());
+        assert!(!fixture.root.join("Caves/dst_server_driver.json").exists());
+        assert!(!fixture.room.requires_container_restart());
     }
 }

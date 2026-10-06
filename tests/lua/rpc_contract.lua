@@ -82,11 +82,13 @@ local player = {
         health = {
             currenthealth = 80,
             maxhealth = 100,
-            GetPercent = function() return 0.8 end,
-            IsDead = function() return false end,
+            GetPercent = function(self) return self.currenthealth / self.maxhealth end,
+            IsDead = function(self) return self.currenthealth <= 0 end,
             IsInvincible = function() return false end,
-            ForceKill = function() observed.killed = true end,
-            SetPercent = function(_, value) observed.health = value end,
+            SetPercent = function(self, value)
+                self.currenthealth = self.maxhealth * value
+                observed.health = value
+            end,
         },
         hunger = {
             current = 50,
@@ -113,24 +115,21 @@ local player = {
         },
         inventory = inventory,
     },
-    HasTag = function(_, tag)
-        return tag == "player" or (tag == "playerghost" and observed.killed == true)
+    HasTag = function(self, tag)
+        return tag == "player" or (tag == "playerghost" and self.components.health:IsDead())
+            or (tag == "corpse" and observed.corpse == true)
     end,
     GetDisplayName = function() return "Wilson" end,
     IsValid = function() return true end,
     PushEvent = function(_, name) observed.player_event = name end,
     DoTaskInTime = function(value, _, callback) callback(value) end,
-    ListenForEvent = function(_, name, callback)
-        assert(name == "ms_skilltreeinitialized" and type(callback) == "function")
-        observed.player_listener = name
-    end,
 }
 
+IsEntityDeadOrGhost = function(inst)
+    return inst:HasTag("playerghost") or inst.components.health:IsDead()
+end
+
 TheWorld = {
-    ListenForEvent = function(_, name, callback)
-        assert(name == "ms_playerjoined" and type(callback) == "function")
-        observed.world_listener = name
-    end,
     ismastersim = true,
     ismastershard = true,
     meta = {
@@ -292,7 +291,7 @@ WorldRollbackFromSim = function(count) observed.snapshot_rollback = count end
 
 local driver = require("dst_server")
 Networking_ModOutOfDateAnnouncement = function() end
-driver.install({ nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV", generation = 1, profile = "off", actions = {} })
+driver.install({ nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV", generation = 1, profile = "off" })
 
 local calls = {
     { "health", {} },
@@ -340,6 +339,8 @@ for _, call in ipairs(calls) do
         assert(result[1].steam_id == "76561198000000001" and result[2].steam_id == "76561198000000002")
     elseif call[1] == "get_player" then
         assert(result.userid == "KU_LOADING" and result.steam_id == "76561198000000002")
+    elseif call[1] == "set_vitals" then
+        assert(result and observed.health == 0.5)
     end
     print(call[1] .. "|" .. require("dst_server.wire").encode({
         ok = true,
@@ -347,15 +348,29 @@ for _, call in ipairs(calls) do
     }))
 end
 
-assert(driver.call("locate_player", { userid = "KU_TEST" }).player.steam_id == "76561198000000001")
+local original_players, original_lookup = AllPlayers, LookupPlayerInstByUserID
+AllPlayers = { {userid = "", name = "Loading"}, player, {userid = player.userid, prefab = "wendy"} }
+local lookups = 0
+LookupPlayerInstByUserID = function(userid)
+    lookups = lookups + 1
+    return original_lookup(userid)
+end
+local listed = driver.call("list_players", {})
+assert(lookups == 0, "listing must not rescan all avatars for each client")
+assert(#listed == 2 and listed[1].userid == player.userid and listed[1].prefab == player.prefab)
+assert(listed[2].userid == "KU_LOADING" and listed[2].is_ghost == json.null)
+assert(listed[2].age == json.null and listed[2].position == json.null)
+assert(listed[1].state == nil and listed[1].vitals == nil)
+AllPlayers = original_players
+assert(driver.call("locate_player", { userid = "KU_TEST", include_details = true }).player.steam_id == "76561198000000001")
+assert(lookups == 1, "location and details must share the same avatar observation")
+LookupPlayerInstByUserID = original_lookup
 local native_clients = GetPlayerClientTable
 GetPlayerClientTable = function() return {} end
 assert(driver.call("get_player", { userid = "KU_TEST" }).steam_id == "76561198000000001")
 assert(driver.call("get_player", { userid = "KU_LOADING" }) == json.null)
 GetPlayerClientTable = native_clients
 
-assert(observed.world_listener == "ms_playerjoined")
-assert(observed.player_listener == "ms_skilltreeinitialized")
 assert(observed.announcement == "hello")
 assert(observed.saved == true and observed.reset == true and observed.regenerated == true)
 assert(observed.truncated_snapshots[1] == "SESSION" and observed.truncated_snapshots[2] == -4)
@@ -398,11 +413,15 @@ local failed = json.decode(require("dst_server.wire").response(function()
 end))
 assert(not failed.ok and failed.error == "indeterminate" and blacklist == previous)
 assert(driver.call("unban", { userid = "KU_TIMED" }) == json.null and #blacklist == 1 and blacklist[1] == keep)
-assert(observed.health == 0.5)
-assert(observed.killed == true)
+assert(observed.health == 0 and player:HasTag("playerghost"))
 assert(observed.player_event == "respawnfromghost")
 -- Reset the simulated ghost before testing later vitals changes.
-observed.killed = false
+player.components.health:SetPercent(0.5)
+observed.corpse = true
+assert(not driver.call("set_vitals", { userid = player.userid, health = 1 }))
+assert(not driver.call("kill_player", { userid = player.userid }))
+assert(observed.health == 0.5)
+observed.corpse = false
 assert(observed.world_events.ms_playerdespawnanddelete == player)
 local migration = observed.world_events.ms_playerdespawnandmigrate
 assert(migration.player == player and migration.worldid == "2" and migration.portalid == 1)

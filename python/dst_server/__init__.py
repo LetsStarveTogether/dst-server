@@ -7,6 +7,7 @@ lazy from typing import Any, Literal, Self
 lazy from ._native import Client as _Client
 lazy from ._native import DstError, describe, inspect
 lazy from ._native import Subscription as _Subscription
+lazy from .events import SubscriptionBatch
 lazy from .external import KleiClient
 lazy from .host import Host
 lazy from .logs import (
@@ -42,6 +43,7 @@ __all__ = [
     "NetdataLogs",
     "Permissions",
     "Subscription",
+    "SubscriptionBatch",
     "VoteCommand",
     "VoteStatus",
     "describe",
@@ -157,7 +159,7 @@ class Subscription:
     def __init__(self, subscription: _Subscription) -> None:
         self._subscription = subscription
 
-    async def next(self, max_items: int = 512) -> dict[str, Any]:
+    async def next(self, max_items: int = 512) -> SubscriptionBatch:
         return await self._subscription.next(max_items)
 
     async def close(self) -> None:

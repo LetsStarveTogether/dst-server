@@ -1,6 +1,7 @@
 ARG GAME_VERSION
 ARG BETA=""
 ARG SOURCE_REVISION=""
+ARG SOURCE_DIRTY="unknown"
 ARG NATIVE_SCRIPTS_REVISION=""
 
 FROM docker.io/library/rust:latest AS rust-toolchain
@@ -27,11 +28,12 @@ ENV CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:${PATH}
 WORKDIR /build
 COPY . .
-RUN cargo build --locked --release -p dst-server --bin dst-server
 ARG GAME_VERSION
 ARG BETA
 ARG SOURCE_REVISION
+ARG SOURCE_DIRTY
 ARG NATIVE_SCRIPTS_REVISION
+RUN SOURCE_REVISION="${SOURCE_REVISION}" SOURCE_DIRTY="${SOURCE_DIRTY}" cargo build --locked --release -p dst-server --bin dst-server
 RUN install -D target/release/dst-server /out/native/dst-server-linux-x86_64 && \
     cp LICENSE /out/native/ && \
     python3 tools/build_manifest.py --output /out/build-manifest.json \
@@ -45,7 +47,7 @@ FROM sdk-build AS distributions
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_LINK_MODE=copy
 RUN uv python install && \
-    uv build --out-dir /out/python --no-sources \
+    SOURCE_REVISION="${SOURCE_REVISION}" SOURCE_DIRTY="${SOURCE_DIRTY}" uv build --out-dir /out/python --no-sources \
         -C 'maturin.build-args=--compatibility pypi' && \
     python3 tools/build_manifest.py --output /out/build-manifest.json \
         --revision="${SOURCE_REVISION}" \
@@ -108,4 +110,4 @@ RUN dst-server scripts build /install/data/databundles/scripts.zip \
 USER steam
 WORKDIR /
 VOLUME ["/cluster"]
-CMD ["/usr/local/bin/dst-server", "agent", "--cluster", "/cluster"]
+CMD ["/usr/local/bin/dst-server", "agent"]

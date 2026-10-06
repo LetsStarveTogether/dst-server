@@ -14,49 +14,34 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> None:
-    names = event_names()
-    assert len(names) == 56
-    names.clear()
-    assert len(event_names()) == 56
-
+    names = set(event_names())
     count = 0
     for name in ("lua5.1", "luajit"):
-        emitted = set()
         runtime = shutil.which(name)
         assert runtime, f"{name} is required to validate live event producers"
-        scripts = ROOT / "dst-scripts/scripts"
-        fixtures = [
-            ("event_contract.lua", ROOT / "resources/lua", ROOT / "tests/lua", scripts),
-            ("input_events_spec.lua", ROOT, scripts, "critical"),
-            ("gameplay_events_spec.lua", ROOT, scripts, "history"),
-            ("mode_votes_spec.lua", ROOT, scripts, "forge"),
-            ("connections_spec.lua", ROOT, scripts, "steam_identity"),
-            ("connections_spec.lua", ROOT, scripts, "metadata"),
-            ("connections_spec.lua", ROOT, scripts, "cave"),
-        ]
-        for fixture, *arguments in fixtures:
-            result = subprocess.run(
-                [runtime, str(ROOT / "tests/lua" / fixture), *map(str, arguments)],
-                capture_output=True,
-                check=True,
-                timeout=30,
-            )
-            records = [
-                json.loads(line.removeprefix(b"DST_OTEL|"))
-                for line in result.stdout.splitlines()
-            ]
-            assert records, fixture
-            for record in records:
-                validated = validate_event(record)
-                assert validated == record
-                assert validated is not record
-                assert validated["data"] is not record["data"]
-                emitted.add(validated["event"])
-                count += 1
-        assert emitted == set(event_names())
+        result = subprocess.run(
+            [
+                runtime,
+                str(ROOT / "tests/lua/event_contract.lua"),
+                str(ROOT),
+                str(ROOT / "dst-scripts/scripts"),
+                "play",
+            ],
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        emitted = set()
+        for line in result.stdout.splitlines():
+            record = json.loads(line.removeprefix(b"DST_OTEL|"))
+            validated = validate_event(record)
+            assert validated == record
+            assert validated["data"] is not record["data"]
+            emitted.add(record["event"])
+            count += 1
+        assert emitted == names, (names - emitted, emitted - names)
 
     event = {
-        "v": 3,
         "nonce": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         "generation": 1,
         "session_id": None,
@@ -68,8 +53,15 @@ def main() -> None:
         "data": {"name": "cycles", "value": 2**53 - 1},
     }
     assert validate_event(event) == event
+    projected_chat = {
+        "userid": "KU_PLAYER",
+        "name": None,
+        "prefab": None,
+        "message": "SECRET_TOKEN",
+        "emote": False,
+    }
     for changes in (
-        {"event": "dst.unknown"},
+        {"event": "dst.player.chat", "data": projected_chat},
         {"generation": True},
         {"tick": 0.0},
         {"data": {"name": "cycles", "value": 2**53}},

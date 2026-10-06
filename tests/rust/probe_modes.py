@@ -401,7 +401,7 @@ def main() -> None:
             "/cluster",
             "--offline",
             "--profile",
-            "history",
+            "play",
         ]
         with (root / "agent.log").open("w", encoding="utf-8") as log:
             process = subprocess.Popen(command, stdout=log, stderr=log)

@@ -2,8 +2,8 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 
 use anyhow::Result;
 use dst_server::logs::{
-    Direction, JournalCursorError, JournalLogs, JournalQuery, LogProcessError, NetdataLogQuery,
-    NetdataLogs,
+    Direction, JournalCursorError, JournalLogs, JournalQuery, JournalUnits, LogProcessError,
+    NetdataLogQuery, NetdataLogs,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -119,8 +119,8 @@ for record in records[:int(args['--lines'])]: print(json.dumps(record))
     for direction in [Direction::Forward, Direction::Backward] {
         for grep in [None, Some("--literal-option".to_owned())] {
             let mut request = JournalQuery {
-                limit: 2,
-                direction,
+                limit: Some(2),
+                direction: Some(direction),
                 grep,
                 namespace: Some("games".into()),
                 ..JournalQuery::default()
@@ -129,7 +129,7 @@ for record in records[:int(args['--lines'])]: print(json.dumps(record))
             loop {
                 let result = script
                     .journal()
-                    .query(Some(&units), &request, DEADLINE)
+                    .query(Some(JournalUnits::System(&units)), &request, DEADLINE)
                     .await?;
                 assert_eq!(
                     result.next_cursor.as_deref(),
@@ -174,17 +174,13 @@ for record in records[:int(args['--lines'])]: print(json.dumps(record))
     }
     let result = script
         .journal()
-        .query(
-            None,
-            &JournalQuery {
-                limit: 0,
-                ..JournalQuery::default()
-            },
-            DEADLINE,
-        )
+        .query(None, &JournalQuery::default(), DEADLINE)
         .await?;
-    assert!(result.has_more && result.records.is_empty() && result.next_cursor.is_none());
-    assert!(!script.args()?.iter().any(|arg| arg.starts_with("--unit=")));
+    assert_eq!(result.records.len(), 7);
+    assert_eq!(result.records[0].cursor(), "6");
+    let args = script.args()?;
+    assert!(args.contains(&"--lines=101".into()));
+    assert!(!args.iter().any(|arg| arg.starts_with("--unit=")));
     Ok(())
 }
 
@@ -231,18 +227,23 @@ async fn journal_rejects_invalid_scope_records_and_cursor() -> Result<()> {
         assert!(
             script
                 .journal()
-                .query(Some(&units), &JournalQuery::default(), DEADLINE)
+                .query(
+                    Some(JournalUnits::System(&units)),
+                    &JournalQuery::default(),
+                    DEADLINE
+                )
                 .await
                 .is_err()
         );
     }
     assert!(!script.executable.with_extension("pid").exists());
     for value in [
+        json!([]),
         json!({"limit":true}),
         json!({"limit":-1}),
         json!({"direction":"sideways"}),
     ] {
-        assert!(serde_json::from_value::<JournalQuery>(value).is_err());
+        assert!(JournalQuery::from_value(value).is_err());
     }
     for request in [
         JournalQuery {
@@ -252,6 +253,10 @@ async fn journal_rejects_invalid_scope_records_and_cursor() -> Result<()> {
         },
         JournalQuery {
             grep: Some(" \n".into()),
+            ..JournalQuery::default()
+        },
+        JournalQuery {
+            limit: Some(0),
             ..JournalQuery::default()
         },
     ] {
@@ -266,7 +271,13 @@ async fn journal_rejects_invalid_scope_records_and_cursor() -> Result<()> {
     assert!(
         script
             .journal()
-            .follow(None, &JournalQuery::default())
+            .follow(
+                None,
+                &JournalQuery {
+                    direction: Some(Direction::Backward),
+                    ..Default::default()
+                }
+            )
             .await
             .is_err()
     );
@@ -351,7 +362,7 @@ checkpoint()
             None,
             &JournalQuery {
                 cursor: Some("anchor".into()),
-                ..JournalQuery::follow()
+                ..JournalQuery::default()
             },
         )
         .await?;
@@ -628,7 +639,7 @@ if query == 'empty':
     sys.exit(0)
 count = int(args['limit']) + 1 if query == 'excess' else 2
 for i in range(count):
-    print(json.dumps({'timestamp_ns':since*1000000000+count-i,'fields':[['tag','a'],['tag','b'],['event_name','dst.player.action']]}))
+    print(json.dumps({'timestamp_ns':since*1000000000+count-i,'fields':[['tag','a'],['tag','b'],['event_name','dst.player.ate']]}))
 if query == 'missing': sys.exit(0)
 if query == 'fail':
     print('query failed',file=sys.stderr);sys.exit(7)
@@ -665,20 +676,17 @@ fn player_queries_match_identity_roles_and_escape_user_input() -> Result<()> {
     for field in [
         "userid",
         "player.userid",
-        "actor.userid",
         "victim.userid",
-        "attributed_player.userid",
+        "attributed_userid",
         "afflicter.userid",
         "target.userid",
         "feeder.userid",
         "reviver.userid",
-        "attacker.userid",
-        "initial_target_owner.userid",
+        "giver.userid",
+        "chef_userid",
         "starter_userid",
         "target_userid",
-        "voters[].userid",
         "players[].userid",
-        "clients[].userid",
         "clients[]",
     ] {
         let line = format!("body.{field}={userid}");
@@ -689,6 +697,9 @@ fn player_queries_match_identity_roles_and_escape_user_input() -> Result<()> {
         "name",
         "message",
         "skin",
+        "attacker.userid",
+        "voters[].userid",
+        "clients[].userid",
         "result.userid",
         "unrelated.userid",
     ] {
@@ -756,12 +767,13 @@ async fn netdata_arguments_window_duplicates_and_reported_counts() -> Result<()>
     }
     for (query, matched, truncated) in [
         ("limited", Some(5), Some(true)),
-        ("count-failure", Some(0), Some(false)),
+        ("count-failure", None, None),
         ("diagnostics", Some(2), Some(false)),
         ("lost-summary", None, None),
         ("empty", Some(0), Some(false)),
     ] {
         let result = reader.query(&netdata_request(query), DEADLINE).await?;
+        assert_eq!(result.records.len(), if query == "empty" { 0 } else { 2 });
         assert_eq!(result.matched, matched);
         assert_eq!(result.truncated(), truncated);
         assert_eq!(

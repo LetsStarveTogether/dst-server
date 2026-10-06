@@ -8,6 +8,13 @@ local success_prefix = '{"ok":true,"data":'
 local maximum_line_bytes = 64 * 1024
 local escapes = { ['"'] = '\\"', ["\\"] = "\\\\" }
 
+function wire.write_line(line)
+    -- LuaPrintRemote normally returns nil; only a raised error is observable.
+    local ok = pcall(function() TheSim:LuaPrintRemote(line .. "\n") end)
+    if not ok then return false, "write_failed" end
+    return true
+end
+
 for byte = 0, 31 do
     escapes[string.char(byte)] = string.format("\\u%04x", byte)
 end
@@ -40,7 +47,9 @@ end
 local function quote(value, remaining)
     local size = #value + 2
     if size > remaining then error("response_too_large", 0) end
-    local index = 1
+    -- Find the first byte that needs escaping or UTF-8 validation.
+    local index = string.find(value, '[%z\1-\31\128-\255\\"]')
+    if index == nil then return '"' .. value .. '"' end
     while true do
         index = string.find(value, "[\128-\255]", index)
         if index == nil then
@@ -171,6 +180,46 @@ function wire.encode(value, limit)
 
     encode(value)
     return table.concat(parts)
+end
+
+local previous_context
+
+local function counter(value)
+    return type(value) == "number" and value >= 0 and value <= 9007199254740991 and value == math.floor(value)
+end
+
+local function event_context(frame, limit)
+    local cached = previous_context
+    if cached and cached.nonce == frame.nonce
+        and cached.generation == frame.generation and cached.session_id == frame.session_id
+        and cached.cycle == frame.cycle then
+        return cached.prefix
+    end
+    if type(frame.nonce) ~= "string" or not counter(frame.generation)
+        or (frame.session_id ~= json.null and type(frame.session_id) ~= "string")
+        or (frame.cycle ~= json.null and not counter(frame.cycle)) then
+        error("invalid_json_value", 0)
+    end
+    local context = {
+        nonce = frame.nonce, generation = frame.generation,
+        session_id = frame.session_id, cycle = frame.cycle,
+    }
+    context.prefix = wire.encode(context, limit):sub(1, -2)
+    previous_context = context
+    return context.prefix
+end
+
+-- The driver builds this fixed envelope. Its payload still uses the full JSON encoder.
+function wire.encode_event(frame, limit)
+    limit = limit or maximum_line_bytes
+    if type(frame.event) ~= "string" or type(frame.data) ~= "table" or not counter(frame.seq) or frame.seq == 0
+        or not counter(frame.tick) or not counter(frame.monotonic_ms) then
+        error("invalid_json_value", 0)
+    end
+    local context = event_context(frame, limit)
+    local header = string.format('%s,"seq":%.17g,"event":%s,"tick":%.17g,"monotonic_ms":%.17g,"data":',
+        context, frame.seq, quote(frame.event, limit - #context), frame.tick, frame.monotonic_ms)
+    return header .. wire.encode(frame.data, limit - #header - 1) .. "}"
 end
 
 -- The native JSON decoder uses loadstring, accepts Lua expressions and loses

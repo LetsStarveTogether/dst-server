@@ -11,6 +11,7 @@ import select
 import signal
 import sys
 import time
+from collections.abc import Mapping
 
 PLAYER_GUID = 17
 args = sys.argv[1:]
@@ -43,6 +44,10 @@ def emit(fd: int, prefix: bytes, record: dict[str, object]) -> None:
     os.write(fd, prefix + json.dumps(record, separators=(",", ":")).encode() + b"\n")
 
 
+def control(record: Mapping[str, object]) -> None:
+    emit(4, b"DST_CONTROL|", {"nonce": nonce, "generation": generation, **record})
+
+
 def migration() -> dict[str, str] | None:
     try:
         return json.loads((root / "migration.json").read_text())
@@ -53,6 +58,8 @@ def migration() -> dict[str, str] | None:
 def record_lifecycle(event: str) -> None:
     with (root / name / "native-lifecycle").open("a") as output:
         output.write(event + "\n")
+    with (root / name / "native-times.jsonl").open("a") as output:
+        output.write(json.dumps({"event": event, "time": time.monotonic()}) + "\n")
 
 
 def perform_save(shutdown: bool = False) -> None:
@@ -61,27 +68,99 @@ def perform_save(shutdown: bool = False) -> None:
     snapshot += 1
 
 
+def health() -> dict[str, object]:
+    profile = options["profile"]
+    return {
+        "generation": generation,
+        "profile": profile,
+        "control_ready": not (name == "Caves" and (root / "unhealthy").exists()),
+        "telemetry_status": "disabled" if profile == "off" else "active",
+        "capabilities": {"connections": "active", "voting": "active"},
+        "errors": 0,
+        "revision": 2,
+        "play_queue_dropped": 0,
+        "events_emitted": 0,
+        "last_error": None,
+        "faults": {},
+    }
+
+
 def bootstrap() -> None:
     os.write(5, ("DST_SessionId|" + session + "\nDST_Master_Ready\n").encode())
-    emit(1, b"DST_DRIVER|", {"nonce": nonce, "generation": generation})
-    emit(
-        1,
-        b"DST_DRIVER|",
-        {
-            "nonce": nonce,
-            "health": {
-                "generation": generation,
-                "protocol": 3,
-                "telemetry_status": "active",
-                "capabilities": {"players": "active"},
-            },
-        },
-    )
+    emit(4, b"DST_DRIVER|", {"nonce": nonce, "generation": generation})
+    emit(4, b"DST_DRIVER|", {"nonce": nonce, "health": health()})
 
 
+recovery_request = options.get("control", {}).get("recovery")
+if recovery_request is not None:
+    calls = root / name / "catalog-calls"
+    count = int(calls.read_text()) + 1 if calls.exists() else 1
+    calls.write_text(str(count))
+    if (root / name / "hold-catalog").exists():
+        waiting = root / name / "catalog-waiting"
+        waiting.with_suffix(".new").write_text(str(os.getpid()))
+        waiting.with_suffix(".new").replace(waiting)
+        while (root / name / "hold-catalog").exists():
+            time.sleep(0.005)
+    fail_after = root / "catalog-fail-after"
+    if fail_after.exists() and count > int(fail_after.read_text()):
+        record = {"event": "recovery_failed", "error": "missing_session"}
+    else:
+        snapshots = [
+            {
+                "snapshot_id": int(path.name),
+                "world_file": "session/" + session + "/" + path.name,
+            }
+            for path in sorted((root / name / "save/session" / session).iterdir())
+            if path.name.isdecimal()
+        ]
+        record = {
+            "event": "recovery_catalog",
+            "session_id": session,
+            "has_more": False,
+            "latest_world_file": snapshots[-1]["world_file"],
+            "snapshots": snapshots,
+        }
+    control(record)
+    raise SystemExit(0)
+
+
+if (root / "ignore-term").exists():
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 record_lifecycle("start")
 bootstrap()
 while True:
+    fault = root / name / "fault-mode"
+    if fault.exists():
+        mode = fault.read_text()
+        if mode in ("decode", "generation-exit", "generation-hold"):
+            generation += 1
+            record = {"event": "world_load_started"}
+            if mode == "decode":
+                control(record)
+                record = {
+                    "event": "world_load_failed",
+                    "session_id": session,
+                    "world_file": f"session/{session}/0000000005",
+                    "phase": "decode",
+                    "reason": "parse_failed",
+                    "read_succeeded": True,
+                    "callback_entered": False,
+                    "source_bytes": 4,
+                    "decoder_unchanged": True,
+                }
+            control(record)
+        if mode in ("generation-hold", "diagnostic-hold"):
+            if mode == "diagnostic-hold":
+                os.write(1, b"LUA ERROR stack traceback:\n")
+                os.write(4, b"DST_OTEL|{}\n")
+            (root / name / "fault-waiting").touch()
+            while fault.exists():
+                time.sleep(0.005)
+            if mode == "generation-hold":
+                bootstrap()
+        else:
+            raise SystemExit(7)
     if (
         pending_migration is not None
         and time.monotonic() >= pending_migration[1]
@@ -136,23 +215,14 @@ while True:
         break
     request = json.loads(encoded.removeprefix(b"DST_RPC|"))
     method, params = request["method"], request["arguments"]
-    header = {key: request[key] for key in ("v", "nonce", "id", "generation")}
+    header = {key: request[key] for key in ("nonce", "id", "generation")}
     emit(4, b"DST_RPC|", {**header, "accepted": True})
     reload_during = root / name / ("reload-during-" + method)
     if reload_during.exists():
         reload_during.unlink()
         record_lifecycle("reload")
         generation += 1
-        emit(
-            4,
-            b"DST_CONTROL|",
-            {
-                "v": 1,
-                "nonce": nonce,
-                "generation": generation,
-                "event": "world_load_started",
-            },
-        )
+        control({"event": "world_load_started"})
         bootstrap()
         continue
     if (root / name / ("hold-" + method)).exists():
@@ -161,6 +231,8 @@ while True:
             time.sleep(0.005)
     data = True
     if method == "mods":
+        with (root / name / "mod-queries").open("a") as calls:
+            calls.write("mods\n")
         source = root / name / "enabled-mods.json"
         data = json.loads(source.read_text()) if source.exists() else []
     if method == "runtime":
@@ -171,23 +243,18 @@ while True:
             "is_master_shard": name == "Master",
         }
     if method == "health":
-        data = {
-            "generation": generation,
-            "protocol": 3,
-            "telemetry_status": "active",
-            "capabilities": {
-                "players": "failed"
-                if name == "Caves" and (root / "unhealthy").exists()
-                else "active"
-            },
-        }
+        data = health()
     if method == "connected_shards":
         data = [
-            {"id": shard_id, "name": shard, "ready": True}
+            {"id": shard_id, "name": shard, "is_current": shard == name, "ready": True}
             for shard, shard_id in shards.items()
         ]
+        response = root / name / "connected-shards.json"
+        if response.exists():
+            data = json.loads(response.read_text())
     if method == "presence":
         data = {
+            "day": 3,
             "reliable": True,
             "client_count": 0,
             "player_count": 0,
@@ -222,7 +289,12 @@ while True:
         data = {"day": 3, "cycles": 2, "season": "autumn"}
     if method == "announce":
         with (root / "announcements").open("a") as log:
-            log.write(json.dumps(params) + "\n")
+            log.write(json.dumps({**params, "time": time.monotonic()}) + "\n")
+        response = root / "announce-response.json"
+        if response.exists():
+            emit(4, b"DST_RPC|", {**header, "result": json.loads(response.read_text())})
+            os.write(4, b"DST_RemoteCommandDone\n")
+            continue
     if method == "save":
         marker = root / "save-request"
         serial = json.loads(marker.read_text())["id"] + 1 if marker.exists() else 1
@@ -250,14 +322,22 @@ while True:
         moving = migration()
         active = name == location and not (root / "kicked").exists()
         loading = moving is not None and name == moving["destination"]
+        handshake = (root / "player-handshake").exists() and not (
+            root / "kicked"
+        ).exists()
+        guid = (
+            PLAYER_GUID if active and not (root / "player-loading").exists() else None
+        )
         data = {
-            "player": {"userid": params["userid"]} if active or loading else None,
-            "guid": PLAYER_GUID
-            if active and not (root / "player-loading").exists()
-            else None,
-            "departing": moving is not None and name == moving["source"],
+            "present": active or loading or handshake,
+            "guid": guid,
+            "loaded": not handshake if guid is not None else None,
+            "departing": active
+            and ((root / "player-departing").exists() or moving is not None),
             "session_id": session,
         }
+        if params["include_details"] and data["present"]:
+            data["player"] = {"userid": params["userid"]}
     if method == "migrate":
         data = (
             not (root / "refuse-migration").exists()
@@ -301,6 +381,9 @@ while True:
             data = connected
     if method == "kick" and (root / ("invalid-kick-" + name)).exists():
         data = "malformed result"
+    if method == "check_vote_access":
+        (root / (name + ".vote-access")).write_text(json.dumps(params))
+        data = json.loads((root / "vote-access.json").read_text())
     if method in {"get_vote", "list_vote_commands", "start_vote", "cancel_vote"}:
         (root / (name + ".vote-call")).write_text(json.dumps(request))
         data = json.loads((root / "vote-response.json").read_text())
@@ -340,5 +423,11 @@ while True:
             params.get("_expected_guid") == PLAYER_GUID
             and params.get("_expected_session_id") == session
         )
-    emit(4, b"DST_RPC|", {**header, "result": {"ok": True, "data": data}})
+    response = root / name / (method + "-response.json")
+    result = (
+        json.loads(response.read_text())
+        if response.exists()
+        else {"ok": True, "data": data}
+    )
+    emit(4, b"DST_RPC|", {**header, "result": result})
     os.write(4, b"DST_RemoteCommandDone\n")

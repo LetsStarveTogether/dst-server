@@ -30,11 +30,7 @@ def executable(directory: Path, name: str, body: str) -> Path:
 
 
 def command(*arguments: str) -> list[str]:
-    program = (
-        sys.argv[1:]
-        if len(sys.argv) > 1
-        else [sys.executable, "-I", "-m", "dst_server"]
-    )
+    program = sys.argv[1:] or [sys.executable, "-I", "-m", "dst_server"]
     return [*program, "--json", "logs", *arguments]
 
 
@@ -77,6 +73,7 @@ def check_journal(directory: Path) -> None:
             "journal",
             "--executable",
             str(reader),
+            "--user",
             "--unit",
             "dst-007.service",
             "--query",
@@ -94,6 +91,7 @@ def check_journal(directory: Path) -> None:
     assert page["next_cursor"] == "first"
     assert page["records"][0]["fields"]["MESSAGE"] == "玩家\nsecond line"
     arguments = json.loads(reader.with_suffix(".args").read_text())
+    assert "--user" in arguments
     assert "--unit=dst-007.service" in arguments
     assert "--lines=+2" in arguments
     for key in ("since", "until", "namespace", "grep"):
@@ -120,6 +118,7 @@ def check_journal(directory: Path) -> None:
             record = json.loads(process.stdout.readline())
             assert record["fields"]["__CURSOR"] == "first"
             arguments = json.loads(reader.with_suffix(".args").read_text())
+            assert "--system" in arguments
             assert "--follow" in arguments
             assert "--lines=0" in arguments
             assert "--reverse" not in arguments

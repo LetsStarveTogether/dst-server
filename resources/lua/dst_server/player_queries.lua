@@ -1,47 +1,55 @@
+local connections = require("dst_server.connections")
 local player_values = require("dst_server.player_values")
 local values = require("dst_server.values")
 local queries = {}
 
 function queries.list_players()
+    local clients = GetPlayerClientTable()
+    if #clients == 0 then return {} end
+    local players = {}
+    for _, player in ipairs(AllPlayers) do
+        local userid = values.userid(player.userid)
+        if userid and players[userid] == nil and player:IsValid() then players[userid] = player end
+    end
     local result = {}
-    for _, client in ipairs(GetPlayerClientTable()) do
-        local player = LookupPlayerInstByUserID(client.userid)
-        result[#result + 1] = player_values.player(client, player)
+    for _, client in ipairs(clients) do
+        result[#result + 1] = player_values.summary(client, players[client.userid])
     end
     return result
 end
 
-function queries.get_player(args)
+local function lookup(args, include_details)
     local userid = values.required_string(args, "userid")
     local player = LookupPlayerInstByUserID(userid)
     if player ~= nil and not player:IsValid() then player = nil end
-    local client = nil
-    for _, item in ipairs(GetPlayerClientTable()) do
-        if item.userid == userid then
-            client = item
-            break
-        end
+    if player and not include_details then return player end
+    for _, client in ipairs(GetPlayerClientTable()) do
+        if client.userid == userid then return player, client end
     end
-    if client == nil and player == nil then
-        return json.null
-    end
-    client = client or {
-        userid = player.userid,
-        prefab = player.prefab,
-    }
-    return player_values.player(client, player)
+    return player, player and {userid = userid}
 end
 
--- A location observation is rechecked atomically by driver.call before a routed mutation.
+function queries.get_player(args)
+    local player, client = lookup(args, true)
+    return client and player_values.player(client, player) or json.null
+end
+
+-- Take the route and any requested character details from the same observation.
 function queries.locate_player(args)
-    local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
-    if player ~= nil and not player:IsValid() then player = nil end
-    return {
-        player = queries.get_player(args),
-        guid = player ~= nil and player.GUID or json.null,
+    local include_details = args.include_details == true
+    local player, client = lookup(args, include_details)
+    local location = {
+        present = player ~= nil or client ~= nil,
+        guid = player and player.GUID or json.null,
         departing = player ~= nil and player._despawning == true,
         session_id = TheWorld.meta.session_identifier,
     }
+    if include_details and client then
+        location.player, location.loaded = player_values.player(client, player)
+    else
+        location.loaded = connections.loaded(player)
+    end
+    return location
 end
 
 function queries.inventory(args)

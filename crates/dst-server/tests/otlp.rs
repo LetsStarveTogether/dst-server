@@ -1,8 +1,4 @@
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use dst_server::telemetry::{
     ExportConfig, LogEvent, LogExporter, Submission, any_value, export_request,
@@ -11,39 +7,23 @@ use opentelemetry_proto::tonic::{
     collector::logs::v1::{
         ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse,
         logs_service_client::LogsServiceClient,
-        logs_service_server::{LogsService, LogsServiceServer},
     },
     common::v1::{AnyValue, KeyValue, any_value::Value as Proto},
     logs::v1::SeverityNumber,
 };
 use prost::Message;
 use serde_json::{Value, json};
-use tokio::{
-    sync::{Semaphore, mpsc, oneshot},
-    task::JoinHandle,
-    time::Instant,
-};
-use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{
-    Code, Request, Response, Status, codec::CompressionEncoding, metadata::MetadataMap,
-    transport::Server,
-};
+use tokio::sync::Semaphore;
+use tonic::{Code, Status};
 use tonic_types::{ErrorDetails, StatusExt};
 
-struct Capture(mpsc::Sender<ExportLogsServiceRequest>);
-
-#[tonic::async_trait]
-impl LogsService for Capture {
-    async fn export(
-        &self,
-        request: Request<ExportLogsServiceRequest>,
-    ) -> Result<Response<ExportLogsServiceResponse>, Status> {
-        self.0
-            .try_send(request.into_inner())
-            .map_err(|error| Status::resource_exhausted(error.to_string()))?;
-        Ok(Response::new(ExportLogsServiceResponse::default()))
-    }
-}
+#[path = "fixtures/large_events.rs"]
+mod large_events;
+#[path = "fixtures/log_collector.rs"]
+mod log_collector;
+#[path = "fixtures/stopped_room.rs"]
+mod stopped_room;
+use log_collector::Collector;
 
 fn attribute<'a>(values: &'a [KeyValue], key: &str) -> &'a AnyValue {
     values
@@ -59,7 +39,8 @@ fn attribute<'a>(values: &'a [KeyValue], key: &str) -> &'a AnyValue {
 async fn structured_event_survives_protobuf_and_real_grpc_export() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(10), async {
         let event = LogEvent {
-            event_name: "dst.player.action".into(),
+            trace: None,
+            event_name: "dst.test.value_types".into(),
             body: json!({
                 "null": null,
                 "zero": 0,
@@ -86,24 +67,13 @@ async fn structured_event_survives_protobuf_and_real_grpc_export() -> anyhow::Re
         let decoded = ExportLogsServiceRequest::decode(expected.encode_to_vec().as_slice())?;
         assert_eq!(decoded, expected);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let endpoint = format!("http://{}", listener.local_addr()?);
-        let (received_tx, mut received_rx) = mpsc::channel(1);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let server = tokio::spawn(
-            Server::builder()
-                .add_service(LogsServiceServer::new(Capture(received_tx)))
-                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
-                    let _ = shutdown_rx.await;
-                }),
-        );
-        let mut client = LogsServiceClient::connect(endpoint).await?;
+        let mut collector = Collector::start(vec![], None).await?;
+        let mut client = LogsServiceClient::connect(collector.endpoint.clone()).await?;
         let response = client.export(expected.clone()).await?.into_inner();
         assert!(response.partial_success.is_none());
-        let received = received_rx.recv().await.unwrap();
+        let received = collector.receive().await?.message;
         assert_eq!(received, expected);
-        let _ = shutdown_tx.send(());
-        server.await??;
+        collector.stop().await?;
 
         let resource_logs = &received.resource_logs[0];
         assert_eq!(
@@ -167,6 +137,7 @@ fn invalid_values_fail_before_export_without_rounding() -> anyhow::Result<()> {
         Some(Proto::DoubleValue(1e20))
     );
     let invalid = LogEvent {
+        trace: None,
         event_name: "dst.test".into(),
         body: Value::Null,
         observed_timestamp_ns: 0,
@@ -190,6 +161,7 @@ fn invalid_values_fail_before_export_without_rounding() -> anyhow::Result<()> {
     );
     assert!(any_value(&json!({"key": deep})).is_err());
     let empty_name = LogEvent {
+        trace: None,
         event_name: String::new(),
         severity_text: "INFO".into(),
         ..invalid
@@ -198,84 +170,7 @@ fn invalid_values_fail_before_export_without_rounding() -> anyhow::Result<()> {
     Ok(())
 }
 
-struct CapturedRequest {
-    message: ExportLogsServiceRequest,
-    metadata: MetadataMap,
-    at: Instant,
-}
-
-struct ControlledCapture {
-    received: mpsc::Sender<CapturedRequest>,
-    replies: Mutex<VecDeque<Result<ExportLogsServiceResponse, Status>>>,
-    blocked: Option<Arc<Semaphore>>,
-}
-
-#[tonic::async_trait]
-impl LogsService for ControlledCapture {
-    async fn export(
-        &self,
-        request: Request<ExportLogsServiceRequest>,
-    ) -> Result<Response<ExportLogsServiceResponse>, Status> {
-        let metadata = request.metadata().clone();
-        self.received
-            .try_send(CapturedRequest {
-                message: request.into_inner(),
-                metadata,
-                at: Instant::now(),
-            })
-            .map_err(|error| Status::resource_exhausted(error.to_string()))?;
-        if let Some(blocked) = &self.blocked {
-            let _permit = blocked.acquire().await.unwrap();
-        }
-        self.replies
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| Ok(ExportLogsServiceResponse::default()))
-            .map(Response::new)
-    }
-}
-
-struct Collector {
-    endpoint: String,
-    received: mpsc::Receiver<CapturedRequest>,
-    shutdown: oneshot::Sender<()>,
-    task: JoinHandle<Result<(), tonic::transport::Error>>,
-    blocked: Option<Arc<Semaphore>>,
-}
-
 impl Collector {
-    async fn start(
-        replies: Vec<Result<ExportLogsServiceResponse, Status>>,
-        blocked: Option<Arc<Semaphore>>,
-    ) -> anyhow::Result<Self> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let endpoint = format!("http://{}", listener.local_addr()?);
-        let (received_tx, received) = mpsc::channel(64);
-        let (shutdown, shutdown_rx) = oneshot::channel();
-        let service = ControlledCapture {
-            received: received_tx,
-            replies: Mutex::new(replies.into()),
-            blocked: blocked.clone(),
-        };
-        let task = tokio::spawn(
-            Server::builder()
-                .add_service(
-                    LogsServiceServer::new(service).accept_compressed(CompressionEncoding::Gzip),
-                )
-                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
-                    let _ = shutdown_rx.await;
-                }),
-        );
-        Ok(Self {
-            endpoint,
-            received,
-            shutdown,
-            task,
-            blocked,
-        })
-    }
-
     fn config(&self) -> ExportConfig {
         ExportConfig {
             endpoint: self.endpoint.clone(),
@@ -285,29 +180,13 @@ impl Collector {
             ..Default::default()
         }
     }
-
-    async fn receive(&mut self) -> anyhow::Result<CapturedRequest> {
-        Ok(
-            tokio::time::timeout(Duration::from_secs(2), self.received.recv())
-                .await?
-                .unwrap(),
-        )
-    }
-
-    async fn stop(self) -> anyhow::Result<()> {
-        if let Some(blocked) = self.blocked {
-            blocked.add_permits(1);
-        }
-        let _ = self.shutdown.send(());
-        tokio::time::timeout(Duration::from_secs(2), self.task).await???;
-        Ok(())
-    }
 }
 
 fn event() -> LogEvent {
     LogEvent {
-        event_name: "dst.player.action".into(),
-        body: json!({"userid": "KU_test", "null": null}),
+        trace: None,
+        event_name: "dst.client.authenticated".into(),
+        body: json!({"userid": "KU_test"}),
         observed_timestamp_ns: 1_791_013_234_567_890_123,
         severity_text: "INFO".into(),
         attributes: Default::default(),
@@ -315,32 +194,51 @@ fn event() -> LogEvent {
 }
 
 #[tokio::test]
+async fn legal_maximum_game_frames_survive_exporter_and_collector() -> anyhow::Result<()> {
+    let mut collector = Collector::start(vec![], None).await?;
+    let (resource, cluster, shard) = large_events::dense_context().await;
+    let exporter = LogExporter::new(collector.config(), &resource)?;
+    let events = large_events::records();
+    let count = events.len() as u64;
+    let mut largest_local = 0;
+    for mut event in events {
+        event
+            .attributes
+            .insert("dst.cluster.name".into(), json!(cluster));
+        event
+            .attributes
+            .insert("dst.shard.name".into(), json!(shard));
+        let expected = export_request(&resource, std::slice::from_ref(&event))?;
+        largest_local =
+            largest_local.max(serde_json::to_vec(&large_events::local_record(&event))?.len());
+        assert_eq!(
+            exporter.submit(&event)?,
+            Submission::Accepted,
+            "{}",
+            event.event_name
+        );
+        exporter.flush().await?;
+        let received = collector.receive().await?.message;
+        let record = &received.resource_logs[0].scope_logs[0].log_records[0];
+        assert_eq!(record.time_unix_nano, 0);
+        assert_eq!(record.observed_time_unix_nano, event.observed_timestamp_ns);
+        assert!(received == expected, "{} changed", event.event_name);
+    }
+    assert!(largest_local > 64 * 1024);
+    let stats = exporter.close().await?;
+    assert_eq!((stats.exported, stats.too_large), (count, 0));
+    collector.stop().await
+}
+
+#[tokio::test]
 async fn admin_operations_export_targets_results_and_failures_while_games_are_stopped()
 -> anyhow::Result<()> {
-    use dst_server::{
-        driver::DriverOptions,
-        model::{Envelope, Request, Target},
-        room::Room,
-        rpc::EventHub,
-    };
+    use dst_server::model::{Envelope, Request, Target};
     let mut collector = Collector::start(vec![], None).await?;
-    let directory = tempfile::tempdir()?;
-    std::fs::write(directory.path().join("cluster.ini"), "")?;
-    std::fs::create_dir(directory.path().join("Master"))?;
-    std::fs::write(
-        directory.path().join("Master/server.ini"),
-        "[SHARD]\nis_master=true\n",
-    )?;
-    let room = Room::open(
-        directory.path(),
-        "/unused-game",
-        DriverOptions::default(),
-        EventHub::default(),
-    )?;
-    room.set_log_exporter(Some(Arc::new(LogExporter::new(
-        collector.config(),
-        &Default::default(),
-    )?)));
+    let (_directory, room) = stopped_room::open(dst_server::telemetry::TelemetryConfig {
+        logs: Some(collector.config()),
+        ..Default::default()
+    })?;
     for (request, succeeded) in [
         (
             Request::Ban {
@@ -369,6 +267,24 @@ async fn admin_operations_export_targets_results_and_failures_while_games_are_st
             },
             true,
         ),
+        (
+            Request::Whitelist {
+                userid: "KU_GUEST".into(),
+            },
+            true,
+        ),
+        (
+            Request::Unwhitelist {
+                userid: "KU_GUEST".into(),
+            },
+            true,
+        ),
+        (
+            Request::Kick {
+                userid: "KU_ABSENT".into(),
+            },
+            false,
+        ),
     ] {
         assert_eq!(
             room.invoke(Envelope::new(Target::Room, request)?)
@@ -379,13 +295,27 @@ async fn admin_operations_export_targets_results_and_failures_while_games_are_st
     }
     room.close_telemetry().await?;
     let received = collector.receive().await?.message;
-    let records = &received.resource_logs[0].scope_logs[0].log_records;
-    assert_eq!(records.len(), 4);
+    let all_records = &received.resource_logs[0].scope_logs[0].log_records;
+    assert_eq!(
+        all_records
+            .iter()
+            .filter(|record| record.event_name == "dst.server.operation")
+            .count(),
+        14
+    );
+    let records: Vec<_> = all_records
+        .iter()
+        .filter(|record| record.event_name == "dst.admin.operation")
+        .collect();
+    assert_eq!(records.len(), 7);
     for (record, (method, userid, status, result)) in records.iter().zip([
         ("ban", "KU_TARGET", "success", None),
         ("unban", "KU_ABSENT", "success", None),
         ("ban", "KU_TARGET", "failure", None),
         ("set_admin", "KU_ADMIN", "success", None),
+        ("whitelist", "KU_GUEST", "success", None),
+        ("unwhitelist", "KU_GUEST", "success", None),
+        ("kick", "KU_ABSENT", "failure", None),
     ]) {
         assert_eq!(record.event_name, "dst.admin.operation");
         let Some(Proto::KvlistValue(body)) = &record.body.as_ref().unwrap().value else {
@@ -398,15 +328,19 @@ async fn admin_operations_export_targets_results_and_failures_while_games_are_st
             );
         }
         assert_eq!(attribute(&body.values, "result").value, result);
-        assert_eq!(
+        assert_ne!(
             attribute(&body.values, "operation_id"),
             attribute(&record.attributes, "log.record.uid")
+        );
+        assert_eq!(
+            attribute(&body.values, "operation_id"),
+            attribute(&record.attributes, "dst.operation.id")
         );
         assert_eq!(
             attribute(&body.values, "error_code").value,
             (status == "failure").then(|| Proto::StringValue("not_ready".into()))
         );
-        if status == "failure" {
+        if method == "ban" && status == "failure" {
             assert_eq!(
                 attribute(&body.values, "seconds").value,
                 Some(Proto::IntValue(60))
@@ -494,7 +428,8 @@ async fn retry_info_headers_and_gzip_reach_the_collector() -> anyhow::Result<()>
     assert_eq!((stats.exported, stats.failed, stats.retries), (1, 0, 1));
     let first = collector.receive().await?;
     let second = collector.receive().await?;
-    assert!(second.at.duration_since(first.at) >= Duration::from_millis(200));
+    // A 200 ms RetryInfo is followed by 50–100 ms of jitter on the first retry.
+    assert!(second.at.duration_since(first.at) >= Duration::from_millis(250));
     assert_eq!(first.message, second.message);
     assert_eq!(first.metadata.get("x-test").unwrap(), "value with spaces");
     exporter.close().await?;

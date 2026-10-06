@@ -18,7 +18,7 @@ use super::{
 use crate::{
     files::{self, RoomLock, RoomReader},
     lua,
-    settings::{ClusterConfig, PERMISSION_FIELDS},
+    settings::{ClusterConfig, PERMISSION_FIELDS, event_game_mode},
 };
 
 /// Cumulative layers applied to an existing, stopped room.
@@ -50,8 +50,6 @@ pub enum ImportLevel {
 pub struct ImportedCluster {
     configuration: ClusterConfig,
     files: BTreeMap<PathBuf, Vec<u8>>,
-    // Generated IDs do not identify shards in the source room.
-    explicit_ids: BTreeSet<String>,
 }
 
 impl ImportedCluster {
@@ -101,7 +99,17 @@ impl ImportedCluster {
             ClusterConfig::read_files(&retained)?
         };
         let source = self.configuration.resolved();
-        let shards = match_shards(&source, &current, &self.explicit_ids)?;
+        if level != ImportLevel::All {
+            let from = source["settings"]["game_mode"].as_str().unwrap();
+            let to = current["settings"]["game_mode"]
+                .as_str()
+                .unwrap_or("survival");
+            ensure!(
+                event_game_mode(from) == event_game_mode(to),
+                "cannot apply {from} saves while keeping destination game mode {to}. Use level all to import the source game mode"
+            );
+        }
+        let shards = match_shards(&source, &current, level)?;
         let imported = self.configuration.as_value();
         let mut configuration = current;
         if level >= ImportLevel::Runtime {
@@ -114,7 +122,10 @@ impl ImportedCluster {
         }
         let mut replaced = BTreeSet::new();
         for (from, to) in &shards {
-            self.validate_save(from)?;
+            ensure!(
+                native::has_session_files(&self.files, from),
+                "shard {from} has no game saves to apply"
+            );
             replaced.insert(Path::new(to).join("save"));
             if level >= ImportLevel::Runtime {
                 for (field, file) in [
@@ -159,8 +170,9 @@ impl ImportedCluster {
                 destination = Path::new(to).join(converted.iter().skip(1).collect::<PathBuf>());
                 if path == &Path::new(name).join("save/shardindex") {
                     contents = Cow::Owned(native::sanitize_shard_index(
-                        std::str::from_utf8(bytes)?,
+                        lua::parse_return_table(std::str::from_utf8(bytes)?)?,
                         encoded,
+                        native::Conversion::Import,
                     )?);
                 }
             }
@@ -185,103 +197,84 @@ impl ImportedCluster {
         room.replace_import(&changes, &replaced)?;
         Ok(configuration)
     }
-
-    fn validate_save(&self, shard: &str) -> Result<()> {
-        let bytes = self
-            .files
-            .get(&Path::new(shard).join("save/shardindex"))
-            .with_context(|| format!("shard {shard} has no game saves: missing shardindex"))?;
-        let index = lua::parse_return_table(std::str::from_utf8(bytes)?)?;
-        let session = index["session_id"]
-            .as_str()
-            .context("shard index has no session ID")?;
-        ensure!(
-            files::relative_components(Path::new(session))?.len() == 1,
-            "invalid shard session ID"
-        );
-        let directory = Path::new(shard).join("save/session").join(session);
-        let mut latest: Option<(u32, &[u8])> = None;
-        for (path, bytes) in &self.files {
-            if path.parent() != Some(directory.as_path()) {
-                continue;
-            }
-            let name = path.file_name().unwrap().to_str().unwrap();
-            if name.len() != 10 || !name.bytes().all(|byte| byte.is_ascii_digit()) {
-                continue;
-            }
-            let id = name
-                .parse::<u32>()
-                .with_context(|| format!("invalid world snapshot number: {}", path.display()))?;
-            ensure!(id > 0, "world snapshot number must be positive");
-            if latest.is_none_or(|(previous, _)| id > previous) {
-                latest = Some((id, bytes));
-            }
-        }
-        let (id, bytes) = latest.with_context(|| {
-            format!("shard {shard} has no world snapshot for its indexed session")
-        })?;
-        ensure!(
-            !bytes.is_empty(),
-            "shard {shard} has an empty latest world snapshot: {id:010}"
-        );
-        Ok(())
-    }
 }
 
 fn match_shards(
     source: &Value,
     target: &Value,
-    explicit_ids: &BTreeSet<String>,
+    level: ImportLevel,
 ) -> Result<BTreeMap<String, String>> {
+    #[derive(Clone, Copy)]
+    enum Match {
+        Id,
+        Name,
+        Role,
+    }
     let source = source["shards"].as_object().unwrap();
     let target = target["shards"].as_object().unwrap();
     let master = |shard: &Value| shard["settings"]["is_master"].as_bool().unwrap_or(true);
+    // DST always uses ID 1 for the master. An unconfigured secondary gets its ID in game.
+    let id = |shard: &Value| {
+        if master(shard) {
+            Some(1)
+        } else {
+            shard["settings"]["id"].as_u64()
+        }
+    };
     ensure!(
         source.len() == target.len(),
         "import and destination must have the same number of shards"
     );
+    let order = if level == ImportLevel::All {
+        [Match::Name, Match::Id, Match::Role]
+    } else {
+        [Match::Id, Match::Name, Match::Role]
+    };
     let mut matched = BTreeMap::new();
-    for (name, shard) in source {
-        if let Some(existing) = target.get(name) {
-            ensure!(
-                master(shard) == master(existing),
-                "shard {name} has a different master role in the destination"
-            );
-            matched.insert(name.clone(), name.clone());
-        }
-    }
-    for (name, shard) in source {
-        if matched.contains_key(name) || !explicit_ids.contains(name) {
-            continue;
-        }
-        let candidates: Vec<_> = target
-            .iter()
-            .filter(|(name, existing)| {
-                !matched.values().any(|used| used == *name)
+    for by in order {
+        for (name, shard) in source {
+            if matched.contains_key(name) {
+                continue;
+            }
+            let source_id = id(shard);
+            if matches!(by, Match::Id) && source_id.is_none() {
+                continue;
+            }
+            if matches!(by, Match::Name)
+                && target
+                    .get(name)
+                    .is_some_and(|existing| master(shard) != master(existing))
+            {
+                bail!("shard {name} has a different master role in the destination");
+            }
+            let mut candidates = target.iter().filter(|(candidate, existing)| {
+                !matched.values().any(|used| used == *candidate)
                     && master(shard) == master(existing)
-                    && shard["settings"]["id"] == existing["settings"]["id"]
-            })
-            .collect();
-        ensure!(candidates.len() <= 1, "destination has ambiguous shard IDs");
-        if let Some((candidate, _)) = candidates.first() {
-            matched.insert(name.clone(), (*candidate).clone());
+                    && match by {
+                        Match::Name => name == *candidate,
+                        Match::Id => source_id == id(existing),
+                        Match::Role => true,
+                    }
+            });
+            let candidate = candidates.next();
+            ensure!(
+                candidates.next().is_none(),
+                "cannot match imported shard {name}; use matching shard names or explicit IDs"
+            );
+            if let Some((candidate, _)) = candidate {
+                matched.insert(name.clone(), candidate.clone());
+            } else if let (Match::Id, Some(id)) = (by, source_id)
+                && level != ImportLevel::All
+            {
+                bail!(
+                    "shard {name} requires SHARD.id = {id}; set that ID on the destination shard or use level all to import the source settings"
+                );
+            } else if matches!(by, Match::Role) {
+                bail!(
+                    "cannot match imported shard {name} to a destination with the same master role"
+                );
+            }
         }
-    }
-    for (name, shard) in source {
-        if matched.contains_key(name) {
-            continue;
-        }
-        let candidates: Vec<_> = target
-            .iter()
-            .filter(|(name, existing)| {
-                !matched.values().any(|used| used == *name) && master(shard) == master(existing)
-            })
-            .collect();
-        ensure!(
-            candidates.len() == 1,
-            "cannot match imported shard {name}; use matching shard names or explicit IDs"
-        );
-        matched.insert(name.clone(), candidates[0].0.clone());
     }
     Ok(matched)
 }
@@ -299,7 +292,7 @@ pub async fn import_cluster(source: ImportSource) -> Result<ImportedCluster> {
         let files = match source {
             ImportSource::Path(path) if std::fs::symlink_metadata(&path)?.is_dir() => {
                 let root = directory_root(&path)?;
-                NativeFiles::read_directory(&RoomReader::open(root)?)?
+                NativeFiles::read_directory(&RoomReader::open(root)?, native::Conversion::Import)?
             }
             ImportSource::Path(path) => {
                 let parent = RoomReader::open(
@@ -313,7 +306,7 @@ pub async fn import_cluster(source: ImportSource) -> Result<ImportedCluster> {
             }
             ImportSource::Archive(file) => read_archive(file)?,
         };
-        let (configuration, explicit_ids) = configuration::configuration(&files)?;
+        let configuration = configuration::configuration(&files)?;
         let mut files = files.normalize(configuration, None, native::Conversion::Import)?;
         let configuration = files.configuration()?;
         files.entries.extend(
@@ -325,14 +318,9 @@ pub async fn import_cluster(source: ImportSource) -> Result<ImportedCluster> {
         Ok(ImportedCluster {
             configuration,
             files: files.entries,
-            explicit_ids,
         })
     })
     .await
-}
-
-fn shard_directory(path: &Path) -> bool {
-    path != Path::new("mods") && native::kind(path) == Some(Kind::Directory)
 }
 
 fn wrapper_directory(name: &str) -> bool {
@@ -341,33 +329,29 @@ fn wrapper_directory(name: &str) -> bool {
 
 fn directory_root(path: &Path) -> Result<PathBuf> {
     let reader = RoomReader::open(path)?;
-    let is_root = |reader: &RoomReader| -> Result<bool> {
-        if reader.read_optional_bytes("cluster.ini")?.is_some() {
+    let is_root = |reader: &RoomReader, inside_shard: bool| -> Result<bool> {
+        if reader.has_file(Path::new("cluster.ini"))? {
             return Ok(true);
         }
-        for (name, kind) in reader.list_directory("")? {
-            if kind.is_dir() && shard_directory(Path::new(&name)) {
-                for marker in ["server.ini", "save/shardindex"] {
-                    if reader
-                        .read_optional_bytes(Path::new(&name).join(marker))?
-                        .is_some()
-                    {
-                        return Ok(true);
-                    }
-                }
-            }
+        let mut children = reader.list_directory("")?;
+        if inside_shard {
+            // A shard's save tree holds game and Mod data, including after retirement.
+            children.retain(|(name, _)| name != "save");
         }
-        Ok(false)
+        Ok(!native::directory_shards(reader, &children, native::Conversion::Import)?.is_empty())
     };
     let mut roots = Vec::new();
-    let direct = is_root(&reader)?;
+    let direct = is_root(&reader, false)?;
     if direct {
         roots.push(path.to_owned());
     }
     for (name, kind) in reader.list_directory("")? {
         if kind.is_dir() && wrapper_directory(&name) && !(direct && name == "mods") {
-            let child = path.join(name);
-            if is_root(&RoomReader::open(&child)?)? {
+            let child = path.join(&name);
+            if is_root(
+                &RoomReader::open(&child)?,
+                direct && native::shard_directory(name),
+            )? {
                 roots.push(child);
             }
         }
@@ -456,6 +440,7 @@ impl Entry {
 fn archive_root(entries: &[Entry]) -> Result<PathBuf> {
     let mut paths = Paths::default();
     let mut roots = BTreeSet::new();
+    let mut beneath_save = BTreeSet::new();
     for entry in entries {
         if entry.path.as_os_str().is_empty() {
             continue;
@@ -486,10 +471,13 @@ fn archive_root(entries: &[Entry]) -> Result<PathBuf> {
                     let relative = entry.path.strip_prefix(&root)?;
                     if wrapper_directory(root.to_str().unwrap())
                         && native::kind(relative) == Some(Kind::Configuration)
-                        && (depth == 1
-                            || shard_directory(Path::new(relative.iter().next().unwrap())))
+                        && (depth == 1 || native::shard_directory(relative.iter().next().unwrap()))
                     {
-                        roots.insert(root);
+                        if native::shard_directory(&root) && relative.starts_with("save") {
+                            beneath_save.insert(root);
+                        } else {
+                            roots.insert(root);
+                        }
                     }
                 }
             }
@@ -497,6 +485,9 @@ fn archive_root(entries: &[Entry]) -> Result<PathBuf> {
     }
     if roots.contains(Path::new("")) {
         roots.remove(Path::new("mods"));
+    } else {
+        // A wrapped room can itself have a shard named "save".
+        roots.append(&mut beneath_save);
     }
     ensure!(
         roots.len() == 1,
@@ -513,9 +504,12 @@ fn archive_root(entries: &[Entry]) -> Result<PathBuf> {
     Ok(root)
 }
 
-fn selected<'a>(entry: &'a Entry, root: &Path) -> Option<&'a Path> {
+fn selected<'a>(entry: &'a Entry, root: &Path, shards: &BTreeSet<String>) -> Option<&'a Path> {
     let path = entry.path.strip_prefix(root).ok()?;
     (!entry.directory
+        && (path == Path::new("cluster.ini")
+            || path.starts_with("mods")
+            || shards.contains(path.iter().next()?.to_str()?))
         && matches!(
             native::kind(path),
             Some(Kind::Configuration | Kind::Progress)
@@ -593,6 +587,18 @@ fn read_archive(mut file: File) -> Result<NativeFiles> {
         }
     }
     let root = archive_root(&entries)?;
+    let shards = native::select_shards(native::Conversion::Import, |marker| {
+        Ok(entries
+            .iter()
+            .filter(|entry| !entry.directory)
+            .filter_map(|entry| {
+                let mut parts = entry.path.strip_prefix(&root).ok()?.iter();
+                let name = parts.next()?.to_str()?;
+                (parts.as_path() == marker && native::shard_directory(name))
+                    .then(|| name.to_owned())
+            })
+            .collect())
+    })?;
     file.rewind()?;
     let mut files = NativeFiles::default();
     let mut reader = Reader::open(&mut file, &magic)?;
@@ -604,7 +610,7 @@ fn read_archive(mut file: File) -> Result<NativeFiles> {
         if entry.directory {
             continue;
         }
-        if let Some(path) = selected(&entry, &root) {
+        if let Some(path) = selected(&entry, &root, &shards) {
             read_file(&mut files, path, entry.size, &mut reader)?;
         } else {
             ensure!(
@@ -690,9 +696,8 @@ mod tests {
         let shard = |master, id| json!({"settings":{"is_master":master,"id":id}});
         let mut source = json!({"shards":{"Master":shard(true, 1),"Caves":shard(false, 2),"Extra":shard(false, 3)}});
         let mut target = json!({"shards":{"Surface":shard(true, 1),"Below":shard(false, 3),"Under":shard(false, 2)}});
-        let explicit_ids = ["Master", "Caves", "Extra"].map(String::from).into();
         assert_eq!(
-            match_shards(&source, &target, &explicit_ids).unwrap(),
+            match_shards(&source, &target, ImportLevel::Runtime).unwrap(),
             BTreeMap::from([
                 ("Master".into(), "Surface".into()),
                 ("Caves".into(), "Under".into()),
@@ -700,7 +705,8 @@ mod tests {
             ])
         );
         source["shards"]["Caves"]["settings"]["id"] = Value::Null;
-        assert!(match_shards(&source, &target, &BTreeSet::new()).is_err());
+        source["shards"]["Extra"]["settings"]["id"] = Value::Null;
+        assert!(match_shards(&source, &target, ImportLevel::Runtime).is_err());
         let master = target["shards"]
             .as_object_mut()
             .unwrap()
@@ -708,7 +714,7 @@ mod tests {
             .unwrap();
         target["shards"]["Caves"] = master;
         assert!(
-            match_shards(&source, &target, &explicit_ids)
+            match_shards(&source, &target, ImportLevel::All)
                 .unwrap_err()
                 .to_string()
                 .contains("different master role")

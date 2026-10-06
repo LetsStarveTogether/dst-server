@@ -21,11 +21,12 @@ end
 function voting.install()
     if voter() == nil then return false end
     TheWorld:ListenForEvent("master_worldvoterupdate", function(_, data)
+        if type(data) ~= "table" or type(data.commandid) ~= "number" or type(data.countdown) ~= "number" then return end
         countdown = current ~= nil and math.min(countdown, data.countdown) or data.countdown
         current = data.commandid ~= 0 and data or nil
     end)
     TheWorld:ListenForEvent("worldvotertick", function(_, data)
-        if current ~= nil then countdown = data.time end
+        if current ~= nil and type(data) == "table" and type(data.time) == "number" then countdown = data.time end
     end)
     watched = true
     return true
@@ -87,6 +88,42 @@ local function connected(userid)
     end
 end
 
+local function vote_command(commands, name, target)
+    local command = commands.GetCommandFromName(name)
+    if command == nil or not command.vote or command.aliasfor ~= nil then
+        return nil, failure("invalid", "command is not a registered vote")
+    end
+    if (command.usermenu == true) ~= (target ~= nil) then
+        return nil, failure("invalid", "vote target does not match the command")
+    end
+    return command
+end
+
+local function check_access(commands, command, player, target)
+    local result = commands.UserRunCommandResult(command.name, player, target)
+    if result == COMMAND_RESULT.VOTE or result == COMMAND_RESULT.ALLOW then return command.hash end
+    if result == COMMAND_RESULT.DISABLED then
+        local _, reason = commands.CanUserStartCommand(command.name, player, target)
+        return failure("invalid", reason or "command cannot start")
+    elseif result == COMMAND_RESULT.DENY then
+        if TheWorld.net.components.worldvoter:IsVoteActive() then
+            return failure("busy", "a vote is already active")
+        end
+        local _, reason = commands.CanUserStartVote(command.name, player, target)
+        return failure("invalid", reason or "starter cannot start a vote now")
+    end
+    return failure("invalid", "starter cannot access this command or target")
+end
+
+function voting.methods.check_vote_access(args)
+    local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
+    if not player then return failure("not_found", "vote starter is disconnected") end
+    local commands = require("usercommands")
+    local command, err = vote_command(commands, args.command, args.target_userid)
+    if not command then return err end
+    return check_access(commands, command, player, args.target_userid)
+end
+
 function voting.methods.start_vote(args)
     local name = values.required_string(args, "command")
     local starter = values.required_string(args, "starter_userid")
@@ -96,27 +133,24 @@ function voting.methods.start_vote(args)
     if not status.enabled then return failure("unsupported", "voting is disabled") end
     if status.current ~= json.null then return failure("busy", "a vote is already active") end
     local commands = require("usercommands")
-    local command = commands.GetCommandFromName(name)
-    if command == nil or not command.vote or command.aliasfor ~= nil then
-        return failure("invalid", "command is not a registered vote")
-    end
-    if (command.usermenu == true) ~= (target ~= nil) then
-        return failure("invalid", "vote target does not match the command")
-    end
+    local command, err = vote_command(commands, name, target)
+    if not command then return err end
     local client = connected(starter)
     if client == nil or target ~= nil and connected(target) == nil then
         return failure("not_found", "vote starter or target is disconnected")
     end
-    local player = LookupPlayerInstByUserID(starter) or client
-    if not commands.CanUserAccessCommand(name, player, target) then
-        return failure("invalid", "starter cannot access this command or target")
+    local player = LookupPlayerInstByUserID(starter)
+    if player ~= nil or args._checked_command_hash == nil then
+        local checked = check_access(commands, command, player or client, target)
+        if type(checked) ~= "number" then return checked end
+    elseif args._checked_command_hash ~= command.hash then
+        return failure("invalid", "vote command differs between shards")
     end
-    local allowed, reason = commands.CanUserStartCommand(name, player, target)
-    if not allowed then return failure("invalid", reason or "command cannot start") end
-    allowed, reason = commands.CanUserStartVote(name, client, target)
+    local allowed, reason = commands.CanUserStartVote(name, client, target)
     if not allowed then return failure("invalid", reason or "vote requirements are not met") end
-    TheWorld:PushEvent("ms_startvote", { commandhash = command.hash, starteruserid = starter, targetuserid = target })
-    if current == nil or current.commandid ~= command.hash or current.starteruserid ~= starter then
+    Shard_StartVote(command.hash, starter, target)
+    if current == nil or current.commandid ~= command.hash or current.starteruserid ~= starter
+        or nullable(current.targetuserid) ~= nullable(target) then
         return failure("invalid", "native voter rejected the request; the starter may be on cooldown")
     end
     return voting.methods.get_vote()

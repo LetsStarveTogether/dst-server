@@ -5,7 +5,7 @@ import fcntl
 import json
 import sys
 import tempfile
-from collections import UserDict
+from collections import UserDict, UserList, deque
 from functools import partial
 from pathlib import Path
 from zipfile import ZipFile
@@ -93,6 +93,12 @@ def configuration() -> Configuration:
     )
     assert settings.replace(cluster_name=None).dump()["cluster_name"] is None
     assert "cluster_name" not in settings.dump()
+    resolved = cluster.dump(defaults=True, secrets=True)
+    assert resolved["shards"]["Surface"]["world"]["overrides"]["values"] == {
+        "day": "onlynight"
+    }
+    cave = WorldgenOverride(overrides={"kind": "cave", "values": {"has_ocean": None}})
+    assert cave.dump(defaults=True)["overrides"]["values"] == {"has_ocean": None}
     for invalid in [False, 1.0, 2**80]:
         try:
             ClusterSettings(max_players=invalid)
@@ -128,8 +134,35 @@ def presets() -> None:
 
 
 def rooms(cluster: Configuration, root: Path) -> None:
-    room = Room(number=250, cluster=cluster)
+    headers = "OTEL_EXPORTER_OTLP_HEADERS"
+    room = Room(
+        number=250,
+        cluster=cluster,
+        deployment={"environment": {headers: "fixture-header"}},
+    )
+    assert "fixture-header" not in repr(room)
+    assert room.get(f"/deployment/environment/{headers}") == "*" * 10
+    for sequence in (list, tuple, UserList, deque):
+        edits = sequence([
+            ("/template", "custom"),
+            ["/cluster/settings/max_players", 10],
+        ])
+        updated = room.edit_many(edits)
+        assert updated.get("/template") == "custom"
+        assert updated.get("/cluster/settings/max_players") == 10
+    assert room.dump()["deployment"]["environment"][headers] == "*" * 10
+    assert (
+        room.dump(secrets=True)["deployment"]["environment"][headers]
+        == "fixture-header"
+    )
     store = RoomStore(root)
+    try:
+        store.save(room)
+    except ValueError as error:
+        assert "deployment options" in str(error)  # ruff: ignore[pytest-assert-in-except]
+    else:
+        raise AssertionError
+    room = Room(number=250, cluster=cluster)
     assert store.save(room)
     assert store.numbers() == [250]
     assert store.load(250).cluster.dump(secrets=True)["token"] == DUMMY_TOKEN

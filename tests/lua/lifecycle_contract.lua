@@ -1,4 +1,4 @@
-local root, scripts, profile = assert(arg[1]), assert(arg[2]), assert(arg[3])
+local root, scripts = assert(arg[1]), assert(arg[2])
 package.path = root .. "/resources/lua/?.lua;" .. scripts .. "/?.lua;" .. package.path
 json = require("json")
 require("class")
@@ -6,14 +6,14 @@ Entity = {}
 require("entityscript")
 
 local outputs = {}
-nolineprint = function(line) outputs[#outputs + 1] = line end
+dofile(root .. "/tests/lua/capture_remote.lua")(function(line) outputs[#outputs + 1] = line end)
 GetTick = function() return 10 end
 GetTimeReal = function() return 20 end
 local function entity(prefab, guid, userid)
     return setmetatable({
         prefab = prefab, GUID = guid, userid = userid, components = {},
         IsValid = function() return true end,
-        HasTag = function() return false end,
+        HasTag = function(_, tag) return tag == "player" and userid ~= nil end,
         Transform = { GetWorldPosition = function() return 1, 0, 2 end },
         WatchWorldState = function() end,
     }, { __index = EntityScript })
@@ -27,21 +27,11 @@ AllPlayers = { player }
 local state = require("dst_server.state")
 state.nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 state.generation = 1
-state.requested_profile = profile
-state.telemetry_active = profile ~= "off"
+state.requested_profile, state.telemetry_active = "timeline", true
 local world_events = require("dst_server.world_events")
 local extensions = require("prefabs/player_common_extensions")
-local original = extensions.OnRespawnFromVineSave
 world_events.install_players()
-if profile == "off" then
-    assert(extensions.OnRespawnFromVineSave == original)
-    return
-end
 require("dst_server.player_events").install_lifecycle()
-OnSimPaused = function() end
-OnSimUnpaused = function() TheWorld:PushEvent("ms_simunpaused") end
-world_events.install_world()
-require("dst_server.connections").install(TheWorld)
 
 player.components.age = {GetAge = function() return 4800.25 end}
 player:PushEvent("ms_respawnedfromghost")
@@ -52,7 +42,7 @@ assert(#outputs == 2)
 assert(json.decode(outputs[#outputs]:sub(10)).data.age_seconds == nil)
 player.components.age.GetAge = function() return 4800.25 end
 
--- Execute the shipped rescue function: a restored body, not a rescue request.
+-- Exercise the native vine rescue through the actual health restoration.
 TUNING = { SANITY_BECOME_SANE_THRESH = .3, STARTING_TEMP = 20, RESURRECT_HEALTH = 50 }
 STRINGS = { NAMES = { CHARLIE = "Charlie" } }
 GetNewRezAnnouncementString = function() return "Charlie rescue" end
@@ -77,36 +67,11 @@ extensions.OnRespawnFromVineSave(player)
 assert(not player.charlie_vinesave)
 assert(player.components.health.currenthealth == 50 and announcements == 1)
 assert(#outputs == 3, "a vine rescue emits one revival")
-assert(json.decode(outputs[#outputs]:sub(10)).data.age_seconds == 4800.25)
+local rescue = json.decode(outputs[#outputs]:sub(10)).data
+assert(rescue.method == "charlie" and rescue.age_seconds == 4800.25)
 local failure = {}
 player.components.inventory.Show = function() error(failure, 0) end
 local ok, err = pcall(extensions.OnRespawnFromVineSave, player)
 assert(not ok and err == failure and #outputs == 3)
 
--- World notifications and simulation callbacks are separate SDK inputs.
-TheWorld:PushEvent("serverpauseddirty", { pause = true, source = "玩家" })
-TheWorld:PushEvent("serverpauseddirty", { autopause = true })
-TheWorld:PushEvent("serverpauseddirty", { gameautopause = true })
-TheWorld:PushEvent("serverpauseddirty", {})
-local unpaused = 0
-TheWorld:ListenForEvent("ms_simunpaused", function() unpaused = unpaused + 1 end)
-OnSimPaused()
-OnSimUnpaused()
-assert(#outputs == 9 and unpaused == 1, "native simulation effects run once")
-local push = TheWorld.PushEvent
-TheWorld.PushEvent = function() error(failure, 0) end
-ok, err = pcall(OnSimUnpaused)
-assert(not ok and err == failure and #outputs == 9)
-TheWorld.PushEvent = push
-
--- Telemetry failure cannot change the native callback's return values or errors.
-local emit = require("dst_server.telemetry").emit
-require("dst_server.telemetry").emit = function() error("capture failed") end
-OnSimUnpaused()
-assert(unpaused == 2 and #outputs == 10)
-assert(require("dst_server.state").faults["world.onsimunpaused"] == "callback_failed")
-require("dst_server.telemetry").emit = emit
-OnSimUnpaused()
-assert(require("dst_server.state").faults["world.onsimunpaused"] == nil)
-outputs[#outputs] = nil
-for _, line in ipairs(outputs) do print(line) end
+io.write("ok\n")

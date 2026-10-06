@@ -3,11 +3,13 @@
 use std::{collections::BTreeMap, net::Ipv4Addr, str::FromStr, sync::LazyLock, time::Duration};
 
 use chrono::NaiveDate;
-use futures::{StreamExt, stream};
 use regex::Regex;
 use reqwest::{Client, RequestBuilder, Url, redirect::Policy};
 use scraper::{Html, Selector};
-use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{DeserializeOwned, IgnoredAny},
+};
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -114,7 +116,7 @@ pub struct Player {
 pub struct Secondary {
     pub id: String,
     pub port: Option<u16>,
-    #[serde(rename = "__addr", alias = "addr")]
+    #[serde(rename = "__addr")]
     pub addr: Option<Ipv4Addr>,
     pub steamid: Option<String>,
     #[serde(flatten)]
@@ -123,10 +125,10 @@ pub struct Secondary {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lobby {
-    #[serde(rename = "__rowId", alias = "row_id")]
+    #[serde(rename = "__rowId")]
     pub row_id: String,
     pub name: String,
-    #[serde(rename = "__addr", alias = "addr")]
+    #[serde(rename = "__addr")]
     pub addr: Ipv4Addr,
     pub port: u16,
     pub host: String,
@@ -325,6 +327,9 @@ pub fn parse_versions(html: &str) -> Result<Vec<Version>> {
             is_hotfix: row.select(&HOTFIX).next().is_some(),
         });
     }
+    if versions.is_empty() {
+        return Err(malformed());
+    }
     versions.sort_by_key(|version| std::cmp::Reverse((version.date, version.number)));
     Ok(versions)
 }
@@ -474,30 +479,34 @@ impl KleiClient {
                     .get(endpoint_url(&self.config.endpoints.builds)?),
             )
             .await?;
-        let builds: BTreeMap<String, Vec<Value>> = decode(&bytes, "builds")?;
-        let mut latest = None;
-        for (kind, versions) in builds {
-            for version in versions {
-                let version = version
-                    .as_u64()
-                    .or_else(|| version.as_str().and_then(|value| value.trim().parse().ok()))
-                    .ok_or_else(|| {
-                        Error::new(
-                            ErrorCode::Protocol,
-                            "Klei build numbers must be nonnegative integers",
-                        )
-                    })?;
-                if kind == version_type {
-                    latest = Some(latest.unwrap_or(0).max(version));
-                }
-            }
-        }
-        latest.ok_or_else(|| {
-            Error::new(
-                ErrorCode::Protocol,
-                "Klei build response has no versions for the requested branch",
-            )
-        })
+        let builds: Map<String, Value> = decode(&bytes, "builds")?;
+        let versions = builds
+            .get(version_type)
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    "Klei build response requires an array for the requested branch",
+                )
+            })?;
+        versions
+            .iter()
+            .filter_map(|version| {
+                version.as_u64().or_else(|| {
+                    version
+                        .as_str()
+                        .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))?
+                        .parse()
+                        .ok()
+                })
+            })
+            .max()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    "Klei returned no numeric build for the requested branch",
+                )
+            })
     }
 
     pub async fn get_versions(&self) -> Result<Vec<Version>> {
@@ -513,15 +522,20 @@ impl KleiClient {
     }
 
     pub async fn get_regions(&self) -> Result<Vec<String>> {
+        // Flattened metadata allows extra keys while requiring named JSON objects.
         #[derive(Deserialize)]
         struct Capabilities {
-            #[serde(rename = "LobbyRegions", default)]
+            #[serde(rename = "LobbyRegions")]
             regions: Vec<LobbyRegion>,
+            #[serde(flatten)]
+            _metadata: IgnoredAny,
         }
         #[derive(Deserialize)]
         struct LobbyRegion {
             #[serde(rename = "Region")]
             region: String,
+            #[serde(flatten)]
+            _metadata: IgnoredAny,
         }
         let bytes = self
             .read(
@@ -532,7 +546,7 @@ impl KleiClient {
         Ok(decode::<Capabilities>(&bytes, "regions")?
             .regions
             .into_iter()
-            .map(|region| region.region)
+            .map(|row| row.region)
             .collect())
     }
 
@@ -564,7 +578,19 @@ impl KleiClient {
         let bytes = self
             .read(self.client.post(endpoint_url(&endpoint)?).json(&payload))
             .await?;
-        Ok(decode_rows::<Room>(&bytes, region)?.into_iter().next())
+        let mut rooms = decode_rows::<Room>(&bytes, region)?;
+        let room = rooms.pop();
+        if !rooms.is_empty()
+            || room
+                .as_ref()
+                .is_some_and(|room| room.lobby.row_id != row_id)
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "Klei room response does not match the requested row",
+            ));
+        }
+        Ok(room)
     }
 
     /// Each region/platform result remains visible, including a failed request.
@@ -582,16 +608,14 @@ impl KleiClient {
                     .into_iter()
                     .map(move |platform| LobbyQuery { region, platform })
             });
-            let mut results: Vec<_> = stream::iter(queries.enumerate())
-                .map(|(index, query)| async move {
+            crate::batch::collect(
+                queries.map(|query| async move {
                     let result = self.lobby(query.region, query.platform).await.into();
-                    (index, QueryResult { query, result })
-                })
-                .buffer_unordered(self.config.lobby_concurrency)
-                .collect()
-                .await;
-            results.sort_by_key(|(index, _)| *index);
-            results.into_iter().map(|(_, result)| result).collect()
+                    QueryResult { query, result }
+                }),
+                self.config.lobby_concurrency,
+            )
+            .await
         }
     }
 
@@ -602,16 +626,14 @@ impl KleiClient {
         rooms: I,
     ) -> Result<Vec<QueryResult<RoomQuery, Option<Room>>>> {
         self.require_token()?;
-        let mut results: Vec<_> = stream::iter(rooms.into_iter().enumerate())
-            .map(|(index, query)| async move {
+        Ok(crate::batch::collect(
+            rooms.into_iter().map(|query| async move {
                 let result = self.room(&query.row_id, query.region).await.into();
-                (index, QueryResult { query, result })
-            })
-            .buffer_unordered(self.config.room_concurrency)
-            .collect()
-            .await;
-        results.sort_by_key(|(index, _)| *index);
-        Ok(results.into_iter().map(|(_, result)| result).collect())
+                QueryResult { query, result }
+            }),
+            self.config.room_concurrency,
+        )
+        .await)
     }
 
     pub async fn discover_rooms(&self) -> Result<RoomDiscovery> {
@@ -715,8 +737,10 @@ fn decode<T: DeserializeOwned>(bytes: &[u8], kind: &str) -> Result<T> {
 fn decode_rows<T: DeserializeOwned>(bytes: &[u8], region: Region) -> Result<Vec<T>> {
     #[derive(Deserialize)]
     struct Rows {
-        #[serde(rename = "GET", default)]
+        #[serde(rename = "GET")]
         rows: Vec<Value>,
+        #[serde(flatten)]
+        _metadata: IgnoredAny,
     }
     decode::<Rows>(bytes, "row")?
         .rows
@@ -725,8 +749,15 @@ fn decode_rows<T: DeserializeOwned>(bytes: &[u8], region: Region) -> Result<Vec<
             let row = value
                 .as_object_mut()
                 .ok_or_else(|| Error::new(ErrorCode::Protocol, "Klei row must be an object"))?;
-            row.entry("region")
-                .or_insert_with(|| Value::String(region.as_str().into()));
+            let row_region = row
+                .entry("region")
+                .or_insert_with(|| region.as_str().into());
+            if row_region.as_str() != Some(region.as_str()) {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "Klei row is outside the requested region",
+                ));
+            }
             serde_json::from_value(value)
                 .map_err(|_| Error::new(ErrorCode::Protocol, "Klei row does not match its schema"))
         })

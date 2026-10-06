@@ -26,6 +26,26 @@ const PERMISSION_FILES: [&str; 3] = ["adminlist.txt", "whitelist.txt", "blocklis
 pub type IniDocument = BTreeMap<String, BTreeMap<String, String>>;
 pub type FileChanges = BTreeMap<PathBuf, String>;
 
+/// A new room or an imported world may still be missing its runtime state.
+pub(crate) fn state_section<T: serde::de::DeserializeOwned + Default>(
+    document: &Map<String, Value>,
+    section: &str,
+) -> Result<T> {
+    let Some(value) = document.get(section) else {
+        return Ok(T::default());
+    };
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path();
+        let reason = error.inner().to_string();
+        // Missing fields name schema keys. Other serde errors can include the stored value.
+        if reason.starts_with("missing field ") {
+            anyhow::anyhow!("{section} at {path}: {reason}")
+        } else {
+            anyhow::anyhow!("invalid {section} at {path}")
+        }
+    })
+}
+
 /// Native blocklist records separate their user ID and metadata with byte 0xBA.
 /// The remaining fields can contain arbitrary bytes and are never text decoded.
 fn permission_userid(record: &[u8]) -> Option<&str> {
@@ -115,6 +135,17 @@ impl RoomReader {
         parent.open_file(&name, libc::O_RDONLY, 0)
     }
 
+    pub(crate) fn has_file(&self, relative: &Path) -> Result<bool> {
+        let Some((parent, name)) = self.root.existing_parent(relative)? else {
+            return Ok(false);
+        };
+        match parent.kind(&name)? {
+            None => Ok(false),
+            Some(libc::S_IFREG) => Ok(true),
+            Some(_) => bail!("{} must be a regular file", relative.display()),
+        }
+    }
+
     pub(crate) fn list_directory(
         &self,
         relative: impl AsRef<Path>,
@@ -129,7 +160,32 @@ impl RoomReader {
 
     /// Immediate directory names, excluding controller and shared Mod directories.
     pub fn shard_directories(&self) -> Result<Vec<String>> {
-        self.root.directory_names(true)
+        let mut names = Vec::new();
+        for (name, kind) in self.root.entries()? {
+            if name.starts_with('.') || name == "mods" {
+                continue;
+            }
+            ensure!(
+                !kind.is_symlink(),
+                "managed directory entries cannot be symlinks"
+            );
+            if kind.is_dir() {
+                names.push(name);
+            }
+        }
+        Ok(names)
+    }
+
+    pub fn read_state(&self) -> Result<Map<String, Value>> {
+        let Some(source) = self.read_optional_bytes(STATE_FILE)? else {
+            return Ok(Map::new());
+        };
+        let value: Value = serde_json::from_slice(&source)
+            .map_err(|_| anyhow::anyhow!("invalid room state JSON"))?;
+        match value {
+            Value::Object(object) => Ok(object),
+            _ => bail!("room state JSON must be an object"),
+        }
     }
 
     pub fn read_ini(&self, relative: impl AsRef<Path>) -> Result<IniDocument> {
@@ -196,16 +252,6 @@ impl RoomLock {
             (current.dev(), current.ino()) == (opened.dev(), opened.ino()),
             "room directory changed while acquiring its lock"
         );
-        let legacy = ".dst-control.json";
-        if room.root.kind(legacy)?.is_some() {
-            room.root.require_regular_or_absent(legacy)?;
-            ensure!(
-                room.root.kind(STATE_FILE)?.is_none(),
-                "both old and new room state files exist"
-            );
-            room.root.rename(legacy, STATE_FILE)?;
-            room.root.sync()?;
-        }
         Ok(room)
     }
 
@@ -234,28 +280,14 @@ impl RoomLock {
         self.root.replace(name, contents, 0o600)
     }
 
-    /// The native storage API can read a shard's parent, but rejects room-level traversal.
-    pub(crate) fn write_driver_options(&self, encoded: &[u8]) -> Result<()> {
-        for shard in self.shard_directories()? {
-            let directory = self.root.child(&shard, false, 0o755)?;
-            if directory.kind("server.ini")?.is_some() {
-                directory.replace("dst_server_driver.json", encoded, 0o600)?;
-            }
-        }
-        Ok(())
-    }
-
-    pub fn read_state(&self) -> Result<Map<String, Value>> {
-        if self.root.kind(STATE_FILE)?.is_none() {
-            return Ok(Map::new());
-        }
-        let source = self.root.read_text(STATE_FILE, MAX_FILE_BYTES)?;
-        let value: Value = serde_json::from_str(&source)
-            .map_err(|_| anyhow::anyhow!("invalid room state JSON"))?;
-        match value {
-            Value::Object(object) => Ok(object),
-            _ => bail!("room state JSON must be an object"),
-        }
+    pub(crate) fn write_driver_options(&self, shard: &str, encoded: &[u8]) -> Result<()> {
+        configuration::validate_shard_name(shard)?;
+        let directory = self.root.child(shard, false, 0o755)?;
+        ensure!(
+            directory.kind("server.ini")? == Some(libc::S_IFREG),
+            "{shard} has no regular server.ini"
+        );
+        directory.replace("dst_server_driver.json", encoded, 0o600)
     }
 
     /// Re-read the SDK state file before changing one part of it so recovery,
@@ -372,37 +404,20 @@ pub struct StoppedRoom<'a> {
     room: &'a mut RoomLock,
 }
 
+impl std::ops::Deref for StoppedRoom<'_> {
+    type Target = RoomReader;
+    fn deref(&self) -> &RoomReader {
+        self.room
+    }
+}
+
 impl StoppedRoom<'_> {
-    pub fn directory(&self) -> &Path {
-        self.room.directory()
-    }
-
-    pub fn read_text(&self, relative: impl AsRef<Path>) -> Result<String> {
-        self.room.read_text(relative)
-    }
-
-    pub fn read_optional_text(&self, relative: impl AsRef<Path>) -> Result<Option<String>> {
-        self.room.read_optional_text(relative)
-    }
-
-    pub fn read_optional_bytes(&self, relative: impl AsRef<Path>) -> Result<Option<Vec<u8>>> {
-        self.room.read_optional_bytes(relative)
-    }
-
     pub(crate) fn replace_permission(&mut self, name: &str, contents: &[u8]) -> Result<()> {
         self.room.replace_permission(name, contents)
     }
 
-    pub fn read_ini(&self, relative: impl AsRef<Path>) -> Result<IniDocument> {
-        self.room.read_ini(relative)
-    }
-
-    pub fn shard_directories(&self) -> Result<Vec<String>> {
-        self.room.shard_directories()
-    }
-
     /// Replace files in order, stopping at the first I/O error.
-    /// Earlier writes remain applied; reapply the configuration after fixing the error.
+    /// Earlier writes remain applied; re-read configuration and maintenance after an error.
     pub fn write_files(
         &mut self,
         files: FileChanges,
@@ -413,30 +428,167 @@ impl StoppedRoom<'_> {
         for path in files.keys().chain(&removed) {
             self.room.root.check_target(path)?;
         }
-        let mut written = Vec::with_capacity(files.len() + removed.len());
-        for (path, contents) in files {
-            let (parent, name) = self.room.root.parent(&path, true)?;
-            let private = ["cluster.ini", "cluster_token.txt", "server.ini"]
-                .contains(&name.as_str())
-                || PERMISSION_FILES.contains(&name.as_str());
-            parent
-                .replace(
-                    &name,
-                    contents.as_bytes(),
-                    if private { 0o600 } else { 0o644 },
-                )
-                .with_context(|| format!("write configuration {}", path.display()))?;
-            written.push(path);
-        }
-        for path in removed {
-            if let Some((parent, name)) = self.room.root.existing_parent(&path)? {
-                parent.remove_regular_if_present(&name)?;
-                parent.sync()?;
+        let before = if files.keys().chain(&removed).any(|path| {
+            path == Path::new("mods/modsettings.lua")
+                || path.components().count() == 2
+                    && matches!(
+                        path.file_name().and_then(OsStr::to_str),
+                        Some("server.ini" | "modoverrides.lua")
+                    )
+        }) {
+            Some(configured_mods(self.room)?)
+        } else {
+            None
+        };
+        let result: Result<_> = (|| {
+            let mut written = Vec::with_capacity(files.len() + removed.len());
+            for (path, contents) in files {
+                let (parent, name) = self.room.root.parent(&path, true)?;
+                let private = ["cluster.ini", "cluster_token.txt", "server.ini"]
+                    .contains(&name.as_str())
+                    || PERMISSION_FILES.contains(&name.as_str());
+                parent
+                    .replace(
+                        &name,
+                        contents.as_bytes(),
+                        if private { 0o600 } else { 0o644 },
+                    )
+                    .with_context(|| format!("write configuration {}", path.display()))?;
+                written.push(path);
             }
-            written.push(path);
+            for path in removed {
+                if let Some((parent, name)) = self.room.root.existing_parent(&path)? {
+                    parent.remove_regular_if_present(&name)?;
+                    parent.sync()?;
+                }
+                written.push(path);
+            }
+            Ok(written)
+        })();
+        // shortcut: config and maintenance save separately; durable before evidence is needed for automatic recovery across failures.
+        let reconciled = before.map_or(Ok(()), |before| {
+            reconcile_mod_configuration(self.room, &before)
+        });
+        match (result, reconciled) {
+            (Err(error), Err(reconcile)) => {
+                let message =
+                    format!("{error:#}; Mod maintenance reconciliation failed: {reconcile:#}");
+                Err(error.context(message))
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Ok(written), result) => {
+                result
+                    .context("configuration applied, but Mod maintenance reconciliation failed")?;
+                Ok(written)
+            }
         }
-        Ok(written)
     }
+}
+
+struct ConfiguredMods {
+    certain: BTreeSet<u64>,
+    possible: BTreeSet<u64>,
+}
+
+// Undecodable or dynamic Lua leaves maintenance targets uncertain.
+fn read_mod_config<T>(
+    room: &RoomReader,
+    path: impl AsRef<Path>,
+    parse: fn(&str) -> Result<T>,
+) -> Result<Option<T>> {
+    let bytes = room.read_optional_bytes(path)?;
+    Ok(bytes
+        .as_deref()
+        .and_then(|source| std::str::from_utf8(source).ok())
+        .and_then(|source| parse(source).ok()))
+}
+
+// Each active shard has an entry even when its Lua cannot prove Mod participation.
+fn configured_mods(room: &RoomReader) -> Result<BTreeMap<String, Option<ConfiguredMods>>> {
+    let forced = read_mod_config(
+        room,
+        "mods/modsettings.lua",
+        crate::settings::ModSettings::parse,
+    )?
+    .map(|shared| shared.workshop_items());
+    let mut configured = BTreeMap::new();
+    for shard in room.shard_directories()? {
+        if room
+            .read_optional_bytes(format!("{shard}/server.ini"))?
+            .is_none()
+        {
+            continue;
+        }
+        let path = format!("{shard}/modoverrides.lua");
+        let entry = configured.entry(shard).or_default();
+        let Some(forced) = &forced else { continue };
+        let Some(overrides) = read_mod_config(room, path, crate::settings::ModOverrides::parse)?
+        else {
+            continue;
+        };
+        let mut possible = overrides.workshop_items();
+        let mut certain = possible.clone();
+        // Numeric names may resolve to local Mods, so they cannot prove Workshop participation.
+        for (name, entry) in overrides.data().entries.iter().flatten() {
+            let Ok(id) = crate::settings::workshop_id(name) else {
+                continue;
+            };
+            match entry.enabled() {
+                Some(true) => {
+                    possible.insert(id);
+                }
+                Some(false) => {
+                    certain.remove(&id);
+                }
+                None => {}
+            }
+        }
+        certain.extend(forced);
+        possible.extend(forced);
+        *entry = Some(ConfiguredMods { certain, possible });
+    }
+    Ok(configured)
+}
+
+fn reconcile_mod_configuration(
+    room: &mut RoomLock,
+    before: &BTreeMap<String, Option<ConfiguredMods>>,
+) -> Result<()> {
+    let mut state = crate::policy::PolicyState::load(room)?;
+    if state.mods.targets.is_empty() || state.mods.phase == crate::policy::ModPhase::Updating {
+        return Ok(());
+    }
+    let after = configured_mods(room)?;
+    for (id, target) in &mut state.mods.targets {
+        target
+            .shards
+            .retain(|shard| match (before.get(shard), after.get(shard)) {
+                (Some(_), None) => false,
+                (Some(Some(before)), Some(Some(after))) => {
+                    !before.certain.contains(id) || after.possible.contains(id)
+                }
+                _ => true,
+            });
+        for (shard, current) in &after {
+            let Some(current) = current else { continue };
+            let newly_enabled = match before.get(shard) {
+                None => true,
+                Some(Some(previous)) => !previous.certain.contains(id),
+                Some(None) => false,
+            };
+            if current.certain.contains(id) && newly_enabled {
+                target.shards.insert(shard.clone());
+            }
+        }
+    }
+    state
+        .mods
+        .targets
+        .retain(|_, target| !target.shards.is_empty());
+    if state.mods.targets.is_empty() {
+        state.mods = Default::default();
+    }
+    state.save(room)
 }
 
 fn validate_changes(
@@ -524,7 +676,7 @@ pub fn render_ini(document: &IniDocument) -> Result<String> {
         for (key, value) in fields {
             ensure!(identifier(key), "invalid INI option name");
             ensure!(
-                !value.contains(['\0', '\r', '\n']) && value.trim() == value,
+                configuration::INI_VALUE.is_match(value),
                 "INI value contains unsupported control or surrounding whitespace"
             );
             source.push_str(&format!("{key} = {value}\n"));
@@ -624,10 +776,6 @@ pub(crate) fn write_new_directory(
     }
     parent.sync()?;
     Ok(())
-}
-
-pub fn directory_names(path: impl AsRef<Path>) -> Result<Vec<String>> {
-    Directory::open(path.as_ref())?.directory_names(false)
 }
 
 impl Directory {
@@ -808,23 +956,6 @@ impl Directory {
 
     fn duplicate(&self) -> Result<Self> {
         Ok(Self(self.0.try_clone()?))
-    }
-
-    fn directory_names(&self, shards_only: bool) -> Result<Vec<String>> {
-        let mut names = Vec::new();
-        for (name, kind) in self.entries()? {
-            if shards_only && (name.starts_with('.') || name == "mods") {
-                continue;
-            }
-            ensure!(
-                !kind.is_symlink(),
-                "managed directory entries cannot be symlinks"
-            );
-            if kind.is_dir() {
-                names.push(name);
-            }
-        }
-        Ok(names)
     }
 
     fn entries(&self) -> Result<Vec<(String, std::fs::FileType)>> {
@@ -1393,47 +1524,30 @@ mod tests {
     }
 
     #[test]
-    fn state_migration_preserves_recovery_and_rejects_conflicting_files() {
+    fn setting_driver_options_preserves_room_state_and_updates_shard_launch_files() {
         let root = tempfile::tempdir().unwrap();
-        let legacy = root.path().join(".dst-control.json");
         let current = root.path().join(STATE_FILE);
         let state = r#"{"policy":{"idle_regeneration":false},"recovery":{"restarts_used":2}}"#;
-        fs::write(&legacy, state).unwrap();
-        let mut room = RoomLock::try_acquire(root.path()).unwrap();
-        assert!(!legacy.exists());
-        assert_eq!(fs::read_to_string(&current).unwrap(), state);
-        let shard = root.path().join("Caves");
-        fs::create_dir(&shard).unwrap();
-        fs::write(shard.join("server.ini"), "[SHARD]\nis_master=false\n").unwrap();
-        fs::write(shard.join("dst_server_driver.json"), "old launch").unwrap();
-        crate::driver::DriverOptions::default()
-            .save(&mut room)
+        fs::write(&current, state).unwrap();
+        let room = RoomLock::try_acquire(root.path()).unwrap();
+        for shard in ["Master", "Caves"] {
+            let directory = root.path().join(shard);
+            fs::create_dir(&directory).unwrap();
+            fs::write(directory.join("server.ini"), "").unwrap();
+            fs::write(directory.join("dst_server_driver.json"), "old launch").unwrap();
+        }
+        let nonce = crate::driver::DriverOptions::default()
+            .save(&room, ["Master", "Caves"])
             .unwrap();
-        assert_eq!(room.read_state().unwrap()["recovery"]["restarts_used"], 2);
-        assert_eq!(
-            room.read_state().unwrap()["policy"]["idle_regeneration"],
-            false
-        );
-        let launch: Value =
-            serde_json::from_slice(&fs::read(shard.join("dst_server_driver.json")).unwrap())
-                .unwrap();
-        assert_eq!(launch["driver"], room.read_state().unwrap()["driver"]);
-        assert!(launch.get("recovery").is_none());
-        drop(room);
-        fs::write(&legacy, "second state").unwrap();
-        assert!(RoomLock::try_acquire(root.path()).is_err());
-        assert_eq!(fs::read_to_string(&legacy).unwrap(), "second state");
-        assert!(
-            fs::read_to_string(&current)
-                .unwrap()
-                .contains("restarts_used")
-        );
-        fs::remove_file(&legacy).unwrap();
-        fs::remove_file(&current).unwrap();
-        let outside = tempfile::NamedTempFile::new().unwrap();
-        symlink(outside.path(), &legacy).unwrap();
-        assert!(RoomLock::try_acquire(root.path()).is_err());
-        assert!(!current.exists());
+        for shard in ["Master", "Caves"] {
+            let file = root.path().join(shard).join("dst_server_driver.json");
+            let launch: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+            assert_eq!(
+                launch,
+                json!({"driver":{"nonce":nonce,"profile":"play","control":{}}})
+            );
+        }
+        assert_eq!(fs::read_to_string(current).unwrap(), state);
     }
 
     #[test]
@@ -1441,18 +1555,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut lock = RoomLock::try_acquire(root.path()).unwrap();
         lock.update_state(|control| {
-            control.insert("policies".into(), json!({"open": true}));
+            control.insert("policy".into(), json!({"mod_auto_update": true}));
             Ok(())
         })
         .unwrap();
         lock.update_state(|control| {
-            control.insert("recovery".into(), json!({"attempts": 1}));
+            control.insert("recovery".into(), json!({"restarts_used": 1}));
             Ok(())
         })
         .unwrap();
         assert_eq!(
             Value::Object(lock.read_state().unwrap()),
-            json!({"policies": {"open": true}, "recovery": {"attempts": 1}})
+            json!({"policy": {"mod_auto_update": true}, "recovery": {"restarts_used": 1}})
         );
         let inode = fs::metadata(root.path().join(STATE_FILE)).unwrap().ino();
         lock.update_state(|_| Ok(())).unwrap();

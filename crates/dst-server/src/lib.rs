@@ -3,6 +3,11 @@
 pub mod agent;
 pub mod annotations;
 pub mod archive;
+mod batch;
+mod bounded;
+#[cfg(test)]
+#[path = "../build_metadata.rs"]
+mod build_metadata;
 pub mod cli;
 pub mod configuration;
 pub mod deployment;
@@ -17,6 +22,7 @@ pub mod lua;
 pub mod model;
 pub mod mods;
 pub mod observability;
+mod operation;
 mod permissions;
 pub mod policy;
 pub mod preloader;
@@ -28,6 +34,7 @@ pub mod rooms;
 pub mod rpc;
 pub mod scripts;
 pub mod settings;
+mod status;
 pub mod steam;
 pub mod telemetry;
 pub mod validation;

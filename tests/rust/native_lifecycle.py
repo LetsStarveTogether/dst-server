@@ -78,7 +78,7 @@ class Fixture:
         # Keep PID 1 alive after killing the Agent so OCI container teardown
         # cannot hide a missing native parent monitor or unreaped descendants.
         command = (
-            "/test/dst-server agent --cluster /cluster --offline --profile history "
+            "/test/dst-server agent --cluster /cluster --offline --profile play "
             f">/cluster/acceptance-agent-{self.boot}.log 2>&1 & "
             f"wait $!; printf '%s\\n' $? >/cluster/acceptance-exit-{self.boot}; "
             "exec sleep infinity"
@@ -362,13 +362,22 @@ class Fixture:
 
 async def synthetic_player(client):
     user = "KU_RUSTTEST"
+    avatar = f"LookupPlayerInstByUserID('{user}')"
 
     async def lua(source):
         return await client.call("execute_json", {"source": source}, shard="surface")
 
     created = await lua(
-        f"local p=SpawnPrefab('wilson');p.userid='{user}';"
+        f"local p=SpawnPrefab('wanda');p.userid='{user}';p.test_deaths=0;"
+        "p:ListenForEvent('death',function(i)i.test_deaths=i.test_deaths+1 end);"
         "p.Physics:Teleport(4,0,5);return {guid=p.GUID,userid=p.userid}"
+    )
+    loading = await client.call("get_player", {"userid": user})
+    assert loading["state"] == "loading" and loading["player"]["position"] is None
+    # The fixture supplies the acknowledgement normally sent by the game client.
+    await lua(
+        f"LookupPlayerInstByUserID('{user}'):OnPostActivateHandshake_Server("
+        "POSTACTIVATEHANDSHAKE.READY);return true"
     )
     location = await client.call("get_player", {"userid": user})
     assert location["state"] == "active" and location["shard"] == "surface", location
@@ -385,13 +394,45 @@ async def synthetic_player(client):
         "local _,n=p.components.inventory:Has('goldnugget',99);return n"
     )
     assert count == 4, count
+    tackle_box = await lua(
+        f"local p=LookupPlayerInstByUserID('{user}');"
+        "local box=SpawnPrefab('tacklecontainer');"
+        "p.components.inventory:GiveItem(box);"
+        "p:PushBufferedAction(BufferedAction(p,nil,ACTIONS.RUMMAGE,box));"
+        "return box.GUID"
+    )
+    container = f"Ents[{tackle_box}].components.container"
+    async with asyncio.timeout(10):
+        while not await lua(f"return {container}:IsOpen()"):
+            await asyncio.sleep(0.1)
+    lure = {"userid": user, "item": "oceanfishinglure_spoon_red", "count": 3}
+    assert await client.call("give", lure) == 3
+    assert await lua(f"return {container}:Has('oceanfishinglure_spoon_red',3)")
+    assert await client.call("remove", lure) == 3
+    assert await client.call("remove", lure) == 0
     assert (
         await client.call("set_vitals", {"userid": user, "health": 0.5, "hunger": 0.5})
         is True
     )
+    # A swallowed player has a native health floor until the worm lets go.
+    await lua(f"{avatar}.components.health:SetMinHealth(1);return true")
+    assert await client.call("kill_player", {"userid": user}) is False
+    assert await lua(
+        f"local p={avatar};local h=p.components.health;local held=h.currenthealth;"
+        "h:SetMinHealth(0);"
+        "h:DoDelta(TUNING.POCKETWATCH_HEAL_HEALING,true,'pocketwatch_heal');"
+        "return held==1 and p.test_deaths==0 "
+        "and p.components.oldager.damage_remaining<0"
+    )
     assert await client.call("kill_player", {"userid": user}) is True
     dead = await client.call("get_player", {"userid": user})
     assert dead["player"]["vitals"]["health"]["is_dead"] is True, dead
+    assert await client.call("kill_player", {"userid": user}) is False
+    assert await client.call("set_vitals", {"userid": user, "health": 1}) is False
+    assert await lua(
+        f"local p={avatar};return p.test_deaths==1 and "
+        "p.components.health:IsDead() and p.components.oldager.damage_remaining==0"
+    )
     # A console-spawned character has no client animation acknowledgement.
     # Enter the native ghost state explicitly before testing public revival.
     await lua(
@@ -399,6 +440,12 @@ async def synthetic_player(client):
     )
     ghost = await client.call("get_player", {"userid": user})
     assert ghost["player"]["is_ghost"] is True, ghost
+    assert await client.call("kill_player", {"userid": user}) is False
+    assert await client.call("set_vitals", {"userid": user, "health": 1}) is False
+    health = await lua(
+        f"return LookupPlayerInstByUserID('{user}').components.health.currenthealth"
+    )
+    assert health == ghost["player"]["vitals"]["health"]["current"] > 0, health
     assert await client.call("revive", {"userid": user}) is True
     async with asyncio.timeout(20):
         while (await client.call("get_player", {"userid": user}))["player"]["is_ghost"]:

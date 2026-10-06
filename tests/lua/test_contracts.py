@@ -11,31 +11,53 @@ from pathlib import Path
 import pytest
 
 
-def test_driver(
-    lua: Callable[..., bytes], root: Path, scripts: Path, driver_scenario: str
-) -> None:
-    arguments = {
-        "print_boundary": (65536, "source"),
-        "print_mixed": ("source", "print", "log_error_event"),
-    }.get(driver_scenario, ())
-    result = lua(
-        root / "tests/lua/driver_spec.lua", root, driver_scenario, scripts, *arguments
-    )
-    assert result.splitlines()[-1] == b"ok"
-
-
 @pytest.mark.parametrize(
     "fixture",
-    ["rust_recovery", "rust_load", "rust_player_guard", "voting"],
+    [
+        "bootstrap_transport",
+        "driver",
+        "rust_recovery",
+        "rust_load",
+        "rust_player_guard",
+        "voting",
+    ],
 )
-def test_native_lifecycle(
+def test_native_contract(
     lua: Callable[..., bytes], root: Path, scripts: Path, fixture: str
 ) -> None:
     output = lua(root / f"tests/lua/{fixture}_spec.lua", root, scripts)
     assert output.splitlines()[-1] == b"ok"
 
 
-@pytest.mark.parametrize("scenario", ["default", "load", "catalog", "invalid"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "off",
+        "delayed_configuration",
+        "connections_install_failure",
+        "optional_failure",
+        "write_before",
+        "write_after",
+    ],
+)
+def test_runtime_publishes_ready(
+    lua: Callable[..., bytes], root: Path, scripts: Path, scenario: str
+) -> None:
+    output = lua(root / "tests/lua/bootstrap_spec.lua", root, scripts, scenario)
+    assert output.splitlines()[-1] == b"ok"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "default",
+        "load",
+        "catalog",
+        "invalid",
+        "observer_failure",
+        "recovery_observer_failure",
+    ],
+)
 def test_bootstrap(
     lua: Callable[..., bytes], root: Path, scripts: Path, scenario: str
 ) -> None:
@@ -43,61 +65,29 @@ def test_bootstrap(
     assert output.strip() == b"ok"
 
 
-@pytest.mark.parametrize(
-    "fixture",
-    [
-        "input_events_spec",
-        "gameplay_events_spec",
-        "messages_spec",
-        "lifecycle_contract",
-    ],
-)
-@pytest.mark.parametrize("profile", ["off", "critical", "history"])
+@pytest.mark.parametrize("fixture", ["event_contract", "messages_spec"])
+@pytest.mark.parametrize("profile", ["off", "timeline", "play"])
 def test_event_profiles(
     lua: Callable[..., bytes], root: Path, scripts: Path, fixture: str, profile: str
 ) -> None:
     lua(root / f"tests/lua/{fixture}.lua", root, scripts, profile)
 
 
-@pytest.mark.parametrize(
-    "scenario",
-    [
-        "critical",
-        "history",
-        "off",
-        "optional_failure",
-        "snapshot_failure",
-        "invalid_authentication",
-        "authentication_output_failure",
-        "steam_identity",
-        "metadata",
-        "cave",
-    ],
-)
-def test_connections(
-    lua: Callable[..., bytes], root: Path, scripts: Path, scenario: str
-) -> None:
-    lua(root / "tests/lua/connections_spec.lua", root, scripts, scenario)
+def test_gameplay_burst(lua: Callable[..., bytes], root: Path, scripts: Path) -> None:
+    assert (
+        lua(root / "tests/lua/event_contract.lua", root, scripts, "play", "burst")
+        == b"ok\n"
+    )
 
 
-@pytest.mark.parametrize(
-    "scenario",
-    ["passed", "failed", "cancelled", "custom", "secondary", "error", "capture_error"],
-)
+@pytest.mark.parametrize("scenario", ["complete", "secondary"])
 def test_votes(
     lua: Callable[..., bytes], root: Path, scripts: Path, scenario: str
 ) -> None:
     lua(root / "tests/lua/votes_spec.lua", root, scripts, scenario)
 
 
-@pytest.mark.parametrize("mode", ["forge", "gorge", "forge_no", "forge_tie"])
-def test_mode_votes(
-    lua: Callable[..., bytes], root: Path, scripts: Path, mode: str
-) -> None:
-    lua(root / "tests/lua/mode_votes_spec.lua", root, scripts, mode)
-
-
-@pytest.mark.parametrize("contract", ["event", "rpc", "announcement"])
+@pytest.mark.parametrize("contract", ["rpc", "announcement"])
 def test_game_contracts(
     lua: Callable[..., bytes], root: Path, scripts: Path, contract: str
 ) -> None:
@@ -107,6 +97,10 @@ def test_game_contracts(
         root / "tests/lua",
         scripts,
     )
+
+
+def test_vine_rescue(lua: Callable[..., bytes], root: Path, scripts: Path) -> None:
+    assert lua(root / "tests/lua/lifecycle_contract.lua", root, scripts) == b"ok\n"
 
 
 def test_settings_match_native_customization(

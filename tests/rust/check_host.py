@@ -38,10 +38,15 @@ if 'show' in sys.argv:
 """
 
 JOURNAL = """
-import json, sys, time
+import json, os, sys, time
+domain, = (arg for arg in sys.argv if arg in ('--system', '--user'))
+unit, = (arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--unit='))
+fields = {'_SYSTEMD_UNIT': unit} if domain == '--system' else {
+    '_SYSTEMD_UNIT': f'user@{os.getuid()}.service', '_SYSTEMD_USER_UNIT': unit,
+}
 print(json.dumps({
     '__CURSOR': 'host-log-1', '__REALTIME_TIMESTAMP': '1000000',
-    '_SYSTEMD_UNIT': 'dst-001.service', 'MESSAGE': 'host fixture log',
+    **fields, 'MESSAGE': domain,
 }), flush=True)
 if '--follow' in sys.argv:
     time.sleep(60)
@@ -59,6 +64,54 @@ def definition(number: int) -> Room:
             cluster_key="host-fixture-key",
         ).dump(secrets=True),
     })
+
+
+async def check_offline_failure(host: Host, root: Path) -> None:
+    failure = {
+        "attempt_id": "interrupted-attempt",
+        "cause": "agent_interrupted",
+        "trigger": {
+            "kind": "agent_interrupted",
+            "stage": "unknown",
+            "code": None,
+            "operation_id": None,
+            "observed_at_ms": 100,
+            "force_requested": False,
+        },
+        "shards": {},
+        "complete": False,
+        "classification": {"kind": "retryable"},
+        "catalog_error": None,
+        "decision": {
+            "action": "stay_closed",
+            "reason": "current_retries_exhausted",
+        },
+        "restarts_used": 2,
+        "recovery_attempt_id": "last-retry",
+        "result": "interrupted",
+    }
+    control_path = root / "001/.dst-server.json"
+    control = json.loads(control_path.read_text())
+    control["recovery"] = {
+        "restarts_used": 2,
+        "closed": "current_retries_exhausted",
+        "last_failure": failure,
+    }
+    control_path.write_text(json.dumps(control))
+    offline = await host.status(1)
+    assert offline["game"] is None
+    assert offline["recovery"]["last_failure"] == failure
+
+
+async def check_journal(host: Host, domain: str) -> None:
+    assert host.user == (domain == "--user")
+    logs = await host.journal([1], JournalQuery(limit=1))
+    assert logs.records[0].message == domain
+    assert logs.records[0].unit == "dst-001.service"
+    async with host.follow_journal([1], JournalQuery(grep=domain)) as stream:
+        record = await anext(stream)
+        assert record.unit == "dst-001.service"
+        assert record.message == domain
 
 
 async def check(directory: Path) -> tuple[Path, Path, Path]:  # ruff: ignore[too-many-statements]
@@ -99,6 +152,8 @@ async def check(directory: Path) -> tuple[Path, Path, Path]:  # ruff: ignore[too
         await host.edit_fields(1, [("/cluster/settings/cluster_name", "Updated name")])
         assert blocklist.read_bytes() == native_ban
         assert await host.blocklist(1) == ["KU_banned"]
+        assert await host.is_blocked(1, "KU_banned")
+        assert not await host.is_blocked(1, "KU_absent")
         assert await host.ban(1, "KU_second") is None
         assert await host.blocklist(1) == ["KU_banned", "KU_second"]
         assert blocklist.read_bytes() == native_ban + b"KU_second\n"
@@ -110,6 +165,7 @@ async def check(directory: Path) -> tuple[Path, Path, Path]:  # ruff: ignore[too
         assert not await host.is_admin(1, "KU_test_user")
         assert await host.unban(1, "KU_banned") is None
         assert await host.unban(1, "KU_banned") is None
+        assert not await host.is_blocked(1, "KU_banned")
 
         outcomes = await host.provision([definition(1), definition(2)])
         assert [entry["number"] for entry in outcomes] == [1, 2]
@@ -125,10 +181,11 @@ async def check(directory: Path) -> tuple[Path, Path, Path]:  # ruff: ignore[too
         assert all(entry["result"]["ok"] for entry in statuses)
         assert statuses[0]["result"]["value"]["active"] == "inactive"
         host.rooms.save(definition(299))
+        assert host.rooms.numbers() == [1, 2, 299]
         statuses = await host.list()
-        assert [entry["number"] for entry in statuses] == [1, 2, 299]
-        assert [entry["result"]["ok"] for entry in statuses] == [True, True, False]
+        assert [entry["number"] for entry in statuses] == [1, 2]
         assert (await host.status(1))["active"] == "inactive"
+        await check_offline_failure(host, root)
 
         trace = systemctl.with_suffix(".trace")
         before = trace.read_bytes()
@@ -149,10 +206,10 @@ async def check(directory: Path) -> tuple[Path, Path, Path]:  # ruff: ignore[too
         for action in ("start", "restart", "stop"):
             assert f"--no-block {action} -- dst-001.service" in commands
 
-        logs = await host.journal([1], JournalQuery(limit=1))
-        assert logs.records[0].message == "host fixture log"
-        async with host.follow_journal([1]) as stream:
-            assert (await anext(stream)).unit == "dst-001.service"
+        await check_journal(host, "--system")
+        await check_journal(
+            Host(root, units, journalctl=journalctl, user=True), "--user"
+        )
         assert (await host.diagnose(1))["logs"]["records"]
 
         try:
@@ -195,13 +252,51 @@ def main() -> None:
             True,
             False,
         ]
+        damaged = root / "002" / "cluster.ini"
+        damaged.unlink()
+        damaged.mkdir()
+        (units / "dst-298.container").write_text("[Container]\nImage=fixture\n")
         result = subprocess.run(
             [*command, "list"], capture_output=True, text=True, check=False, timeout=30
         )
-        assert result.returncode == 1, result.stderr
+        assert result.returncode == 0, result.stderr
         listed = json.loads(result.stdout)
-        assert [entry["number"] for entry in listed] == [1, 2, 299]
-        assert [entry["result"]["ok"] for entry in listed] == [True, True, False]
+        assert [entry["number"] for entry in listed] == [1, 2]
+        assert listed[1]["result"]["value"]["configuration_error"]
+        assert (
+            listed[0]["result"]["value"]["recovery"]["last_failure"]["cause"]
+            == "agent_interrupted"
+        )
+        result = subprocess.run(
+            [*command, "stop", "--all", "--no-wait"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        assert [entry["number"] for entry in json.loads(result.stdout)] == [1, 2]
+        trace = systemctl.with_suffix(".trace").read_bytes()
+        command[command.index(str(root))] = str(root.with_name("other-rooms"))
+        result = subprocess.run(
+            [*command, "stop", "--all", "--no-wait"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 1
+        assert systemctl.with_suffix(".trace").read_bytes() == trace
+        command[command.index(str(units))] = str(units.with_name("other-units"))
+        result = subprocess.run(
+            [*command, "stop", "--room", "1", "--no-wait"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 1
+        assert "no managed Quadlet" in result.stdout
+        assert systemctl.with_suffix(".trace").read_bytes() == trace
 
 
 if __name__ == "__main__":

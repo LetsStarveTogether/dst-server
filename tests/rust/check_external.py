@@ -58,7 +58,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/builds":
-            self.respond({"release": [736950, "736959"]})
+            self.respond({
+                "release": [736950, "unknown", "736959"],
+                "updatebeta": ["unknown"],
+            })
         elif self.path == "/regions":
             self.respond({"LobbyRegions": [{"Region": "us-east-1"}]})
         elif self.path == "/versions":

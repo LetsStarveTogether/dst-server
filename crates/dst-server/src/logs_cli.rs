@@ -2,11 +2,11 @@
 
 use std::{io::Write, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Args, Subcommand};
 use serde_json::json;
 
-use crate::logs::{JournalLogs, JournalQuery, NetdataLogQuery, NetdataLogs};
+use crate::logs::{JournalLogs, JournalQuery, JournalUnits, NetdataLogQuery, NetdataLogs};
 
 #[derive(Args)]
 pub struct Arguments {
@@ -34,6 +34,9 @@ enum Command {
         /// Repeat for additional systemd unit patterns; omitted means all units.
         #[arg(long = "unit")]
         units: Vec<String>,
+        /// Read the current user's journal. The default is the system journal.
+        #[arg(long)]
+        user: bool,
         /// JournalQuery JSON object, @filename, or - for stdin.
         #[arg(long, default_value = "{}")]
         query: String,
@@ -45,7 +48,6 @@ enum Command {
         limits: Limits,
     },
     /// Query Netdata's local otel-plugin with all native filters and fields.
-    #[command(alias = "netdata")]
     Telemetry {
         /// NetdataLogQuery JSON object, @filename, or - for stdin; since is required.
         query: String,
@@ -63,6 +65,10 @@ enum Command {
 }
 
 pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
+    // Keep the default signal action while synchronous input waits for EOF.
+    let value = match &arguments.command {
+        Command::Journal { query, .. } | Command::Telemetry { query, .. } => super::input(query)?,
+    };
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let cancelled = async {
@@ -75,21 +81,17 @@ pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
     match arguments.command {
         Command::Journal {
             units,
-            query,
+            user,
             follow,
             executable,
             limits,
+            ..
         } => {
-            let mut value = super::input(&query)?;
-            let fields = value
-                .as_object_mut()
-                .context("journal query must be a JSON object")?;
-            if follow {
-                fields.entry("direction").or_insert(json!("forward"));
-                fields.entry("limit").or_insert(json!(0));
-            }
-            let query: JournalQuery = serde_json::from_value(value)?;
-            let units = (!units.is_empty()).then_some(units.as_slice());
+            let query = JournalQuery::from_value(value)?;
+            let units = Some(JournalUnits::for_manager(
+                user,
+                (!units.is_empty()).then_some(units.as_slice()),
+            ));
             let reader = JournalLogs {
                 executable,
                 max_record_bytes: limits.max_record_bytes,
@@ -137,14 +139,14 @@ pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
             closed?;
         }
         Command::Telemetry {
-            query,
             executable,
             stock_config,
             config,
             max_concurrency,
             limits,
+            ..
         } => {
-            let query: NetdataLogQuery = serde_json::from_value(super::input(&query)?)?;
+            let query: NetdataLogQuery = serde_json::from_value(value)?;
             let reader = NetdataLogs::new(
                 executable,
                 stock_config,

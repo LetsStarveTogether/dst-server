@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value, json};
@@ -71,7 +71,8 @@ macro_rules! sparse_model {
     (
         $(#[$meta:meta])* $name:ident {
             required { $($(#[$required_meta:meta])* $required:ident: $required_ty:ty,)* }
-            optional { $($(#[$field_meta:meta])* $field:ident: $ty:ty = $default:expr,)* }
+            optional { $($(#[$field_meta:meta])* $field:ident: $ty:ty = $default:expr $(=> $adjust:ident)?,)* }
+            $(when_present { $($present:ident),+ })?
         }
     ) => {
         $(#[$meta])*
@@ -88,16 +89,21 @@ macro_rules! sparse_model {
 
         impl $name {
             $(pub fn $field(&self) -> $ty {
-                self.$field.clone().unwrap_or_else(|| $default)
+                self.$field.clone().unwrap_or_else(|| $default)$(.$adjust(self))?
             })*
         }
 
         impl Resolve for $name {
             fn resolved(&self) -> Value {
-                Value::Object([
+                let fields = [
                     $((stringify!($required).trim_start_matches("r#").into(), self.$required.resolved()),)*
                     $((stringify!($field).trim_start_matches("r#").into(), self.$field().resolved()),)*
-                ].into_iter().collect())
+                ].into_iter().collect();
+                $(
+                    let mut fields: serde_json::Map<_, _> = fields;
+                    $(if self.$present.is_none() { fields.remove(stringify!($present)); })+
+                )?
+                Value::Object(fields)
             }
         }
 
@@ -229,6 +235,27 @@ macro_rules! ini_model {
                     _ => bail!("unknown INI option"),
                 }
             }
+
+            pub(crate) fn from_ini(document: crate::files::IniDocument) -> Result<Self> {
+                use super::checks::Check;
+                let mut values = serde_json::Map::new();
+                for (section, fields) in document {
+                    let (_, options) = Self::SECTIONS.iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(&section))
+                        .context("unknown INI section")?;
+                    for (name, text) in fields {
+                        ensure!(options.contains(&name.as_str()), "unknown INI option");
+                        let value = Self::parse_field(&section, &name, &text)
+                            .with_context(|| format!("invalid {section}.{name}"))?;
+                        values.insert(name, value);
+                    }
+                }
+                let settings: Self = serde_path_to_error::deserialize(Value::Object(values))
+                    .map_err(|error| anyhow::anyhow!("invalid INI option at {}", error.path()))?;
+                settings.validate()?;
+                settings.check()?;
+                Ok(settings)
+            }
         }
     };
 }
@@ -257,6 +284,10 @@ fn unit_interval(value: &Number, _: &()) -> garde::Result {
     } else {
         Err(garde::Error::new("number must be between zero and one"))
     }
+}
+
+fn master_host(value: &str, _: &()) -> garde::Result {
+    crate::configuration::validate_host(value).map_err(|error| garde::Error::new(error.to_string()))
 }
 
 fn unique<T: Ord>(value: &Option<Vec<T>>, _: &()) -> garde::Result {

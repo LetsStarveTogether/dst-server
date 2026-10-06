@@ -1,4 +1,6 @@
 local bootstrap = require("dst_server.bootstrap")
+local connections = require("dst_server.connections")
+local state = require("dst_server.state")
 local telemetry = require("dst_server.telemetry")
 
 local Runtime = Class(function(self, inst)
@@ -9,33 +11,21 @@ end)
 function Runtime:Initialize()
     if self.installed == nil then
         self.installed = bootstrap.install()
-        if self.installed and not pcall(function()
-            require("dst_server.connections").install(self.inst)
-        end) then
-            telemetry.report("connections.install", "installation_failed")
+        if self.installed then
+            self.connections_ready = telemetry.install("connections", function() connections.install(self.inst) end)
         end
     end
     if self.installed and self.post_initialized and not self.reported then
         self.reported = true
-        -- Network initialization creates voters and lets modes replace player commands.
-        if not pcall(function() require("dst_server.voting").install() end) then
-            telemetry.report("voting.install", "installation_failed")
-        end
-        if require("dst_server.state").requested_profile ~= "off" then
-            telemetry.install("player_commands", function()
-                return require("dst_server.input_events").install_commands()
+        -- The network creates the standard voter during world initialization.
+        telemetry.install("voting", function() return require("dst_server.voting").install() end)
+        state.control_ready = self.connections_ready and state.capabilities.voting ~= "failed"
+        if state.telemetry_active then
+            telemetry.install("votes", function() return require("dst_server.vote_events").install() end)
+            telemetry.install("presence", function()
+                self.presence_task = connections.start(self.inst)
+                return self.presence_task ~= nil
             end)
-            if not pcall(function() require("dst_server.vote_events").install() end) then
-                telemetry.report("votes.install", "installation_failed")
-            end
-        end
-        local ok, task = pcall(function()
-            return require("dst_server.connections").start(self.inst)
-        end)
-        if ok then
-            self.presence_task = task
-        else
-            telemetry.report("connections.start", "installation_failed")
         end
         bootstrap.ready()
     end

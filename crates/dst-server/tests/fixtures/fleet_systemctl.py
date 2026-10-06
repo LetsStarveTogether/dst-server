@@ -17,6 +17,11 @@ def count(change: int) -> None:
         counts["active"] += change
         counts["peak"] = max(counts["peak"], counts["active"])
         counts["started" if change > 0 else "finished"] += 1
+        if change > 0 and "daemon-reload" in sys.argv:
+            counts["reloads"] = counts.get("reloads", 0) + 1
+            counts["last_reload_units"] = len(
+                list((root / "units").glob("*.container"))
+            )
         stream.seek(0)
         json.dump(counts, stream)
         stream.truncate()
@@ -25,6 +30,9 @@ def count(change: int) -> None:
 count(1)
 try:
     time.sleep(0.005)
+    if "daemon-reload" in sys.argv and (root / "fail-reload").exists():
+        sys.stderr.write("fixture reload failure\n")
+        sys.exit(1)
     if "show" in sys.argv:
         unit = sys.argv[-1]
         active = (root / "services-active").exists()

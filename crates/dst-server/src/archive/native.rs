@@ -1,13 +1,15 @@
 //! The native files and transformations shared by import and export.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::FileType;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
+use serde_json::Value;
 
 use crate::files::{self, IniDocument, RoomReader, render_ini};
-use crate::settings::ClusterConfig;
+use crate::settings::{ClusterConfig, event_game_mode};
 use crate::{configuration, lua};
 
 pub(super) const MAX_ENTRIES: usize = 100_000;
@@ -76,6 +78,43 @@ pub(super) fn noise(name: &str) -> bool {
         || name.starts_with("._")
 }
 
+pub(super) fn shard_directory(name: impl AsRef<Path>) -> bool {
+    let name = name.as_ref();
+    !name.as_os_str().is_empty() && name != Path::new("mods") && kind(name) == Some(Kind::Directory)
+}
+
+pub(super) fn select_shards(
+    conversion: Conversion,
+    mut with_file: impl FnMut(&Path) -> Result<BTreeSet<String>>,
+) -> Result<BTreeSet<String>> {
+    let shards = with_file(Path::new("server.ini"))?;
+    // Dedicated rooms retain saves after a shard is removed. Client slots can have only indexes.
+    if shards.is_empty() && conversion == Conversion::Import {
+        with_file(Path::new("save/shardindex"))
+    } else {
+        Ok(shards)
+    }
+}
+
+pub(super) fn directory_shards(
+    room: &RoomReader,
+    entries: &[(String, FileType)],
+    conversion: Conversion,
+) -> Result<BTreeSet<String>> {
+    select_shards(conversion, |marker| {
+        let mut shards = BTreeSet::new();
+        for (name, entry) in entries {
+            if entry.is_dir()
+                && shard_directory(name)
+                && room.has_file(&Path::new(name).join(marker))?
+            {
+                shards.insert(name.clone());
+            }
+        }
+        Ok(shards)
+    })
+}
+
 /// Include directory prefixes; raw Klei player IDs retain their significant case.
 #[derive(Default)]
 pub(super) struct Paths(BTreeMap<PathBuf, (PathBuf, bool)>);
@@ -124,32 +163,40 @@ pub(super) struct NativeFiles {
 }
 
 impl NativeFiles {
-    pub(super) fn read_directory(room: &RoomReader) -> Result<Self> {
+    pub(super) fn read_directory(room: &RoomReader, conversion: Conversion) -> Result<Self> {
+        let entries = room.list_directory("")?;
+        let shards = directory_shards(room, &entries, conversion)?;
         let mut files = Self::default();
-        files.visit(room, Path::new(""))?;
+        for (name, entry) in entries {
+            if entry.is_dir() && shard_directory(&name) && !shards.contains(&name) {
+                continue;
+            }
+            files.visit(room, Path::new(&name), entry)?;
+        }
         Ok(files)
     }
 
-    fn visit(&mut self, room: &RoomReader, parent: &Path) -> Result<()> {
-        for (name, entry) in room.list_directory(parent)? {
-            let path = parent.join(name);
-            let Some(kind) = kind(&path) else { continue };
-            validate_path(&path)?;
+    fn visit(&mut self, room: &RoomReader, path: &Path, entry: FileType) -> Result<()> {
+        let Some(kind) = kind(path) else {
+            return Ok(());
+        };
+        validate_path(path)?;
+        ensure!(
+            !entry.is_symlink() && (entry.is_dir() || entry.is_file()),
+            "save entry must be a regular file or directory"
+        );
+        if entry.is_dir() {
             ensure!(
-                !entry.is_symlink() && (entry.is_dir() || entry.is_file()),
-                "save entry must be a regular file or directory"
+                kind != Kind::Configuration,
+                "native configuration must be a regular file"
             );
-            if entry.is_dir() {
-                ensure!(
-                    kind != Kind::Configuration,
-                    "native configuration must be a regular file"
-                );
-                self.paths.insert(&path, true)?;
-                self.visit(room, &path)?;
-            } else if kind != Kind::Directory {
-                let mut file = room.open_regular(&path)?;
-                self.read(&path, file.metadata()?.len(), &mut file)?;
+            self.paths.insert(path, true)?;
+            for (name, child) in room.list_directory(path)? {
+                self.visit(room, &path.join(name), child)?;
             }
+        } else if kind != Kind::Directory {
+            let mut file = room.open_regular(path)?;
+            self.read(path, file.metadata()?.len(), &mut file)?;
         }
         Ok(())
     }
@@ -205,6 +252,76 @@ impl NativeFiles {
         ClusterConfig::from_files(&self.entries)
     }
 
+    fn normalized_index(
+        &self,
+        shard: &str,
+        encode: bool,
+        conversion: Conversion,
+    ) -> Result<Option<Vec<u8>>> {
+        let save = Path::new(shard).join("save");
+        let index = self.entries.get(&save.join("shardindex"));
+        ensure!(
+            index.is_some() || !self.entries.contains_key(&save.join("saveindex")),
+            "legacy saveindex must be migrated by the game before transfer"
+        );
+        let index = index
+            .map(|bytes| lua::parse_return_table(std::str::from_utf8(bytes)?))
+            .transpose()?;
+        let session = match index.as_ref().and_then(|index| index.get("session_id")) {
+            None | Some(Value::Null) => "",
+            Some(value) => value
+                .as_str()
+                .context("shard session ID must be a string")?,
+        };
+        if session.is_empty() {
+            ensure!(
+                !has_session_files(&self.entries, shard),
+                "shard {shard} has session files but no active session in shardindex"
+            );
+        } else {
+            self.validate_snapshot(shard, session)?;
+        }
+        index
+            .map(|index| sanitize_shard_index(index, encode, conversion))
+            .transpose()
+    }
+
+    fn validate_snapshot(&self, shard: &str, session: &str) -> Result<()> {
+        ensure!(
+            files::relative_components(Path::new(session))?.len() == 1,
+            "invalid shard session ID"
+        );
+        let directory = Path::new(shard).join("save/session").join(session);
+        let mut latest: Option<(u32, &[u8])> = None;
+        for (path, bytes) in self
+            .entries
+            .range(directory.clone()..)
+            .take_while(|(path, _)| path.starts_with(&directory))
+        {
+            if path.parent() != Some(directory.as_path()) {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_str().unwrap();
+            if name.len() != 10 || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
+            let id = name
+                .parse::<u32>()
+                .with_context(|| format!("invalid world snapshot number: {}", path.display()))?;
+            ensure!(id > 0, "world snapshot number must be positive");
+            // Fixed-width snapshot names sort by sequence in the file map.
+            latest = Some((id, bytes));
+        }
+        let (id, bytes) = latest.with_context(|| {
+            format!("shard {shard} has no world snapshot for its indexed session")
+        })?;
+        ensure!(
+            !bytes.is_empty(),
+            "shard {shard} has an empty latest world snapshot: {id:010}"
+        );
+        Ok(())
+    }
+
     pub(super) fn normalize(
         self,
         source: ClusterConfig,
@@ -212,39 +329,49 @@ impl NativeFiles {
         conversion: Conversion,
     ) -> Result<Self> {
         let configuration = replacement.unwrap_or(&source);
-        let source = source.resolved();
-        let target = configuration.resolved();
-        let shards = source["shards"]
-            .as_object()
-            .context("archive configuration has no shards")?;
-        let topology = |value: &serde_json::Value| -> BTreeMap<String, bool> {
-            value["shards"]
-                .as_object()
-                .unwrap()
-                .iter()
-                .map(|(name, shard)| (name.clone(), shard["settings"]["is_master"] == true))
-                .collect()
-        };
+        let shards = &source.data().shards;
+        let configured = &configuration.data().shards;
         ensure!(
-            topology(&source) == topology(&target),
+            shards.len() == configured.len()
+                && shards.iter().all(|(name, shard)| configured
+                    .get(name)
+                    .is_some_and(|other| shard.settings.is_master() == other.settings.is_master())),
             "archive configuration must match source shard topology"
         );
         ensure!(
             conversion != Conversion::ToClient || shards.len() == 2,
             "client export requires exactly two shards: one master and one secondary"
         );
+        if replacement.is_some() {
+            let from = source.data().settings().game_mode();
+            let to = configuration.data().settings().game_mode();
+            ensure!(
+                event_game_mode(&from) == event_game_mode(&to)
+                    || !shards
+                        .keys()
+                        .any(|name| has_session_files(&self.entries, name)),
+                "cannot export {from} saves with replacement game mode {to}"
+            );
+        }
         let mut targets = BTreeMap::new();
+        let mut output = Self::default();
         for (name, shard) in shards {
+            let encoded = shard.settings.encode_user_path();
+            ensure!(
+                shard.settings.is_master()
+                    || shard.settings.id() == configured[name].settings.id()
+                    || !has_session_files(&self.entries, name),
+                "archive configuration must preserve the source shard ID for saved world {name}"
+            );
             ensure!(
                 conversion != Conversion::None
-                    || shard["settings"]["encode_user_path"]
-                        == target["shards"][name]["settings"]["encode_user_path"],
+                    || encoded == configured[name].settings.encode_user_path(),
                 "archive configuration must preserve source player path encoding"
             );
             let target = match conversion {
-                Conversion::None => (name.as_str(), shard["settings"]["encode_user_path"] == true),
+                Conversion::None => (name.as_str(), encoded),
                 Conversion::ToClient => (
-                    if shard["settings"]["is_master"] == true {
+                    if shard.settings.is_master() {
                         "Master"
                     } else {
                         "Caves"
@@ -253,22 +380,19 @@ impl NativeFiles {
                 ),
                 Conversion::Import => (name.as_str(), false),
             };
+            if let Some(index) = self.normalized_index(name, target.1, conversion)? {
+                output.insert(Path::new(target.0).join("save/shardindex"), index)?;
+            }
             targets.insert(name.as_str(), target);
-            let save = Path::new(name).join("save");
-            ensure!(
-                !self.entries.contains_key(&save.join("saveindex"))
-                    || self.entries.contains_key(&save.join("shardindex")),
-                "legacy saveindex must be migrated by the game before transfer"
-            );
         }
         let remap = |path: &Path| {
-            let first = path.iter().next().unwrap().to_str().unwrap();
+            let mut parts = path.iter();
+            let first = parts.next().unwrap().to_str().unwrap();
             targets.get(first).map_or_else(
                 || path.to_owned(),
-                |(name, _)| Path::new(name).join(path.iter().skip(1).collect::<PathBuf>()),
+                |(name, _)| Path::new(name).join(parts.as_path()),
             )
         };
-        let mut output = Self::default();
         for (path, mut contents) in configuration.files()? {
             if kind(&path) != Some(Kind::Configuration) {
                 continue;
@@ -291,32 +415,28 @@ impl NativeFiles {
             output.insert(remap(&path), contents.into_bytes())?;
         }
         let mut players = BTreeMap::new();
-        for (path, mut bytes) in self.entries {
-            let parts: Vec<_> = path
-                .iter()
-                .map(|name| name.to_str().unwrap().to_owned())
-                .collect();
-            if parts.get(1).is_none_or(|part| part != "save") || parts[2] == "saveindex" {
+        for (path, bytes) in self.entries {
+            let mut parts = path.iter();
+            let name = parts.next().unwrap().to_str().unwrap();
+            let Ok(save_path) = parts.as_path().strip_prefix("save") else {
+                continue;
+            };
+            if save_path == Path::new("saveindex") || save_path == Path::new("shardindex") {
                 continue;
             }
             let shard = shards
-                .get(&parts[0])
+                .get(name)
                 .context("save files have no matching shard configuration")?;
-            let encoded = shard["settings"]["encode_user_path"] == true;
-            let (_, target_encoded) = targets[parts[0].as_str()];
+            let encoded = shard.settings.encode_user_path();
+            let (_, target_encoded) = targets[name];
             let mut target = remap(&path);
-            if parts[2] == "shardindex" {
-                bytes = sanitize_shard_index(
-                    std::str::from_utf8(&bytes).context("shard index is not UTF-8")?,
-                    target_encoded,
-                )?;
-            } else if (encoded != target_encoded || conversion == Conversion::Import)
-                && parts[2] == "session"
-                && parts.len() >= 6
+            if (encoded != target_encoded || conversion == Conversion::Import)
+                && save_path.starts_with("session")
+                && save_path.iter().count() >= 4
             {
                 let renamed = player_path(&path, target_encoded)?;
                 let player: PathBuf = renamed.iter().take(5).collect();
-                let original: PathBuf = parts.iter().take(5).collect();
+                let original: PathBuf = path.iter().take(5).collect();
                 if let Some(previous) = players.insert(player, original.clone()) {
                     ensure!(
                         previous == original,
@@ -329,6 +449,14 @@ impl NativeFiles {
         }
         Ok(output)
     }
+}
+
+pub(super) fn has_session_files(entries: &BTreeMap<PathBuf, Vec<u8>>, shard: &str) -> bool {
+    let sessions = Path::new(shard).join("save/session");
+    entries
+        .range(sessions.clone()..)
+        .next()
+        .is_some_and(|(path, _)| path.starts_with(&sessions))
 }
 
 fn sanitize_ini(ini: &mut IniDocument) {
@@ -350,8 +478,19 @@ fn sanitize_ini(ini: &mut IniDocument) {
     ini.retain(|_, fields| !fields.is_empty());
 }
 
-pub(super) fn sanitize_shard_index(source: &str, encode: bool) -> Result<Vec<u8>> {
-    let mut index = lua::parse_return_table(source)?;
+pub(super) fn sanitize_shard_index(
+    mut index: Value,
+    encode: bool,
+    conversion: Conversion,
+) -> Result<Vec<u8>> {
+    if conversion == Conversion::ToClient
+        && let Some(mods) = index
+            .get_mut("enabled_mods")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        // The client loads every entry as a Mod configuration table.
+        mods.remove("client_mods_disabled");
+    }
     let server = index
         .get_mut("server")
         .and_then(serde_json::Value::as_object_mut)

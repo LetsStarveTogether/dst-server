@@ -7,8 +7,8 @@ use clap::{Args, Subcommand};
 use serde_json::json;
 
 use crate::{
-    archive::{self, ExportOptions, ImportLevel, ImportSource, S3Options},
-    host::Host,
+    archive::{self, ClusterArchive, ExportOptions, ImportLevel, ImportSource, S3Options},
+    rooms::RoomStore,
     settings::ClusterConfig,
 };
 
@@ -16,12 +16,6 @@ use crate::{
 pub struct Arguments {
     #[arg(long, default_value = "/srv/dst", global = true)]
     root: PathBuf,
-    #[arg(long, default_value = "/etc/containers/systemd", global = true)]
-    quadlet_dir: PathBuf,
-    #[arg(long, default_value = "systemctl", global = true)]
-    systemctl: PathBuf,
-    #[arg(long, global = true)]
-    user: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -43,8 +37,8 @@ struct Source {
 }
 
 impl Source {
-    fn options(&self) -> Result<ExportOptions> {
-        Ok(ExportOptions {
+    async fn export(&self, rooms: &RoomStore) -> Result<ClusterArchive> {
+        let options = ExportOptions {
             room_id: self.room_id.clone(),
             client_compatible: self.client_compatible,
             configuration: self
@@ -52,7 +46,8 @@ impl Source {
                 .as_deref()
                 .map(|source| ClusterConfig::from_value(super::input(source)?))
                 .transpose()?,
-        })
+        };
+        archive::export_room(rooms, self.number, options, self.compression_level).await
     }
 }
 
@@ -102,9 +97,7 @@ enum Command {
 }
 
 pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
-    let mut host = Host::new(arguments.root, arguments.quadlet_dir);
-    host.systemd.executable = arguments.systemctl;
-    host.systemd.user = arguments.user;
+    let rooms = RoomStore::new(arguments.root);
     match arguments.command {
         Command::Import {
             source,
@@ -130,13 +123,7 @@ pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
             super::emit(&result, compact)?;
         }
         Command::Export { source, output } => {
-            let archive = archive::export_host(
-                &host,
-                source.number,
-                source.options()?,
-                source.compression_level,
-            )
-            .await?;
+            let archive = source.export(&rooms).await?;
             let filename = archive.filename.clone();
             archive.save(&output)?;
             super::emit(
@@ -155,10 +142,6 @@ pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
             object_prefix,
             url_prefix,
         } => {
-            let mut interrupt =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-            let mut terminate =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
             let store = S3Options {
                 bucket,
                 endpoint,
@@ -168,13 +151,11 @@ pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
                 session_token,
             }
             .build()?;
-            let archive = archive::export_host(
-                &host,
-                source.number,
-                source.options()?,
-                source.compression_level,
-            )
-            .await?;
+            let archive = source.export(&rooms).await?;
+            let mut interrupt =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+            let mut terminate =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
             let task = archive.start_upload(store, &object_prefix, url_prefix.as_deref())?;
             let result = task
                 .wait_until_cancelled(async move {

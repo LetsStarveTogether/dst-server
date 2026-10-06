@@ -42,27 +42,20 @@ def invoke(
     for line in result.stdout.splitlines():
         if line.startswith(b"DST_OTEL|"):
             record = json.loads(line.removeprefix(b"DST_OTEL|"))
-            assert record["v"] == 3
+            assert record.keys() == {
+                "nonce",
+                "generation",
+                "session_id",
+                "seq",
+                "event",
+                "tick",
+                "monotonic_ms",
+                "cycle",
+                "data",
+            }
             assert isinstance(record["data"], dict)
             assert isinstance(record["seq"], int)
     return result.stdout
-
-
-def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    if "driver_scenario" in metafunc.fixturenames:
-        names = (
-            invoke(
-                "lua5.1",
-                ROOT / "tests/lua/driver_spec.lua",
-                ROOT,
-                "--list",
-                metafunc.config.getoption("scripts").resolve(),
-            )
-            .decode()
-            .splitlines()
-        )
-        assert names, "driver_spec.lua must expose its scenarios"
-        metafunc.parametrize("driver_scenario", names)
 
 
 @pytest.fixture(scope="session")

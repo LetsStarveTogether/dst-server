@@ -22,22 +22,8 @@ from dst_server.settings import Room, RoomStore, build_template
 
 
 def arguments(directory: Path) -> list[str]:
-    program = (
-        sys.argv[1:]
-        if len(sys.argv) > 1
-        else [sys.executable, "-I", "-m", "dst_server"]
-    )
-    return [
-        *program,
-        "--json",
-        "archive",
-        "--root",
-        str(directory / "rooms"),
-        "--quadlet-dir",
-        str(directory / "units"),
-        "--systemctl",
-        str(directory / "systemctl"),
-    ]
+    program = sys.argv[1:] or [sys.executable, "-I", "-m", "dst_server"]
+    return [*program, "--json", "archive", "--root", str(directory / "rooms")]
 
 
 def command(
@@ -53,11 +39,6 @@ def command(
 
 
 def check(directory: Path) -> None:
-    systemctl = directory / "systemctl"
-    systemctl.write_text(
-        f"#!{sys.executable}\nraise SystemExit('export called systemctl')\n"
-    )
-    systemctl.chmod(0o755)
     store = RoomStore(directory / "rooms")
     store.save(
         Room({
@@ -285,7 +266,7 @@ def check_apply(directory: Path, client_input: Path, client_output: Path) -> Non
         timeout=30,
     )
     assert result.returncode == 1
-    assert "missing shardindex" in result.stderr
+    assert "no game saves" in result.stderr
     assert world.read_bytes() == before
 
     for cwd in [client_output, client_output / "Master"]:

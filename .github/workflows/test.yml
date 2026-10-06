@@ -51,6 +51,11 @@ jobs:
           uv sync --locked --only-group dev
           printf 'PYO3_PYTHON=%s\n' "$(uv python find)" >> "$GITHUB_ENV"
 
+      - name: Record verified build identity
+        run: |
+          test -z "$(git status --porcelain)"
+          printf 'SOURCE_REVISION=%s\nSOURCE_DIRTY=false\n' "$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Check Rust formatting and lints
         run: |
           cargo fmt --all -- --check
@@ -76,7 +81,9 @@ jobs:
         run: uv run --locked --no-sync pytest tests/lua
 
       - name: Build wheel from source distribution
-        run: uv build --clear --out-dir dist --no-sources -C 'maturin.build-args=--compatibility pypi'
+        run: |
+          test -z "$(git status --porcelain)"
+          uv build --clear --out-dir dist --no-sources -C 'maturin.build-args=--compatibility pypi'
 
       - name: Check isolated wheel and native process ownership
         shell: bash
@@ -84,16 +91,7 @@ jobs:
           set -euo pipefail
           uv venv .wheel-check
           uv pip install --python .wheel-check/bin/python --no-deps dist/*.whl
-          .wheel-check/bin/python -I tests/rust/check_binding.py "$PWD/target/debug/examples/rpc_fixture" "$PWD/target/debug/dst-server"
-          for check in tests/rust/check_*.py; do
-            case "$check" in */check_binding.py) continue ;; esac
-            .wheel-check/bin/python -I "$check"
-          done
-          for check in tests/rust/check_*_cli.py; do
-            .wheel-check/bin/python -I "$check" "$PWD/target/debug/dst-server"
-          done
-          .wheel-check/bin/dst-server --version
-          .wheel-check/bin/dst-server describe > /dev/null
+          sh tests/rust/run_sdk_checks.sh .wheel-check/bin/python "$PWD/target/debug/examples/rpc_fixture" "$PWD/target/debug/dst-server"
 
       - name: Verify release manifest generation
         run: |
@@ -139,9 +137,11 @@ jobs:
         env:
           GAME_VERSION: ${{ steps.game.outputs.version }}
         run: |
+          test -z "$(git status --porcelain)"
           sudo podman build --layers --network host --target game --file Containerfile \
             --build-arg GAME_VERSION="$GAME_VERSION" \
             --build-arg SOURCE_REVISION="$(git rev-parse HEAD)" \
+            --build-arg SOURCE_DIRTY=false \
             --build-arg NATIVE_SCRIPTS_REVISION="$(git -C dst-scripts/scripts rev-parse HEAD)" \
             --tag "$DST_SERVER_IMAGE" .
 

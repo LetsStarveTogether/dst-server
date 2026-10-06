@@ -10,7 +10,7 @@ lazy from typing import Any, Self
 lazy import dst_server
 
 lazy from ._native import Host as _Host
-lazy from .logs import JournalQuery, JournalResult, JournalStream, _journal_record
+lazy from .logs import JournalQuery, JournalResult, JournalStream, _journal_result
 lazy from .management import Permissions, VoteCommand, VoteStatus
 lazy from .settings import Room, RoomStore
 
@@ -46,6 +46,11 @@ class Host:  # ruff: ignore[too-many-public-methods]
             port_start=port_start,
             port_end=port_end,
         )
+
+    @property
+    def user(self) -> bool:
+        """Whether the room services belong to the current user's systemd manager."""
+        return self._host.user
 
     @property
     def rooms(self) -> RoomStore:
@@ -244,10 +249,7 @@ class Host:  # ruff: ignore[too-many-public-methods]
         result = await self._host.journal(
             numbers, (request or JournalQuery()).to_native()
         )
-        result["records"] = tuple(
-            _journal_record(record) for record in result["records"]
-        )
-        return JournalResult(**result)
+        return _journal_result(result)
 
     @asynccontextmanager
     async def follow_journal(
@@ -256,7 +258,7 @@ class Host:  # ruff: ignore[too-many-public-methods]
         async with JournalStream(
             await self._host.follow_journal(
                 numbers,
-                (request or JournalQuery(limit=0, direction="forward")).to_native(),
+                (request or JournalQuery()).to_native(),
             )
         ) as stream:
             yield stream

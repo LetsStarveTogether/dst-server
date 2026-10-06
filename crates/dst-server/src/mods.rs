@@ -8,12 +8,10 @@ use std::{
     net::UdpSocket,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
-use full_moon::ast::{
-    Call, Expression, FunctionArgs, FunctionCall, LastStmt, Prefix, Stmt, Suffix,
-};
+use full_moon::ast::{Expression, FunctionCall, LastStmt, Stmt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -21,12 +19,37 @@ use crate::{
     files::{self, PermissionFiles, RoomLock},
     lua,
     model::{Error, ErrorCode, Result},
-    process::{EventKind, GameProcess, ProcessSpec, StreamKind},
-    rpc::EventHub,
+    process::{EventKind, GameProcess, ProcessOutput, ProcessSpec, StreamKind},
+    telemetry::LogEvent,
 };
 
-mod manifest;
 pub(crate) mod monitor;
+
+const MAX_VERSION_BYTES: usize = 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateTarget {
+    pub version: String,
+    pub shards: BTreeSet<String>,
+}
+
+pub type UpdateTargets = BTreeMap<u64, UpdateTarget>;
+
+pub(crate) fn valid_version(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_VERSION_BYTES && !value.chars().any(char::is_control)
+}
+
+pub(crate) fn validate_targets(targets: &UpdateTargets) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        targets.iter().all(|(id, target)| *id != 0
+            && valid_version(&target.version)
+            && !target.shards.is_empty()
+            && target.shards.iter().all(|shard| !shard.is_empty())),
+        "invalid Mod update target"
+    );
+    Ok(())
+}
 
 pub const EXECUTABLE: &str = "bin64/dontstarve_dedicated_server_nullrenderer_x64";
 pub const UPDATE_PROCESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -75,45 +98,18 @@ pub fn scan_setup(source: &str) -> Result<Setup> {
 }
 
 fn collect_call(call: &FunctionCall, setup: &mut Setup) -> Result<()> {
-    let Prefix::Name(name) = call.prefix() else {
+    let Some((name, value)) = lua::string_call(call) else {
         return Ok(());
     };
-    let name = name.token().to_string();
-    let collection = match name.as_str() {
-        "ServerModSetup" => false,
-        "ServerModCollectionSetup" => true,
+    let items = match name {
+        "ServerModSetup" if !value.is_empty() => &mut setup.items,
+        "ServerModCollectionSetup" => &mut setup.collections,
         _ => return Ok(()),
     };
-    let mut suffixes = call.suffixes();
-    let Some(Suffix::Call(Call::AnonymousCall(arguments))) = suffixes.next() else {
-        return Ok(());
-    };
-    if suffixes.next().is_some() {
-        return Ok(());
-    }
-    let string = match arguments.as_ref() {
-        FunctionArgs::Parentheses { arguments, .. } if arguments.len() == 1 => {
-            match arguments.iter().next() {
-                Some(Expression::String(string)) => string,
-                _ => return Ok(()),
-            }
-        }
-        FunctionArgs::String(string) => string,
-        _ => return Ok(()),
-    };
-    // Native Lua strings are bytes; non-UTF-8/non-ASCII IDs are not declarations.
-    let Ok(value) = lua::string(string) else {
-        return Ok(());
-    };
-    if !value.is_ascii() || value.is_empty() && !collection {
-        return Ok(());
-    }
-    let item = crate::settings::workshop_id(&value)
-        .map_err(|error| Error::invalid("mods.setup", error.to_string()))?;
-    if collection {
-        setup.collections.insert(item);
-    } else {
-        setup.items.insert(item);
+    if value.is_ascii() {
+        let id = crate::settings::workshop_id(&value)
+            .map_err(|error| Error::invalid("mods.setup", error.to_string()))?;
+        items.insert(id);
     }
     Ok(())
 }
@@ -150,31 +146,50 @@ impl PreparedMods {
         })
     }
 
-    pub async fn update(&self, events: &EventHub) -> Result<Value> {
+    pub async fn update(&self, emit: &(impl Fn(LogEvent) + Sync)) -> Result<Value> {
         let (_keep_open, cancelled) = tokio::sync::watch::channel(0);
-        self.update_cancellable(events, cancelled).await
+        self.update_cancellable(emit, cancelled).await
     }
 
     /// An interruption returns only after the updater's process group has exited
     /// and all native output has drained, so the room may safely reopen afterward.
     pub async fn update_cancellable(
         &self,
-        events: &EventHub,
+        emit: &(impl Fn(LogEvent) + Sync),
         cancelled: tokio::sync::watch::Receiver<u64>,
     ) -> Result<Value> {
-        if self.setup.has_code {
-            update_once(
-                &self.executable,
-                &self.ugc,
-                self.proxy.as_deref(),
-                events,
-                UPDATE_PROCESS_TIMEOUT,
-                cancelled,
-            )
-            .await?;
+        if cancelled.has_changed().unwrap_or(true) {
+            return Err(Error::shutdown(ErrorCode::Unknown));
+        }
+        let process = self.spawn_update()?;
+        self.finish_update(process, emit, cancelled).await
+    }
+
+    pub(crate) fn spawn_update(&self) -> Result<Option<UpdateProcess>> {
+        self.setup
+            .has_code
+            .then(|| UpdateProcess::spawn(&self.executable, &self.ugc, self.proxy.as_deref()))
+            .transpose()
+    }
+
+    pub(crate) async fn finish_update(
+        &self,
+        process: Option<UpdateProcess>,
+        emit: &(impl Fn(LogEvent) + Sync),
+        cancelled: tokio::sync::watch::Receiver<u64>,
+    ) -> Result<Value> {
+        if let Some(process) = process {
+            process
+                .wait(
+                    self.proxy.as_deref(),
+                    emit,
+                    UPDATE_PROCESS_TIMEOUT,
+                    cancelled,
+                )
+                .await?;
         }
         Ok(
-            json!({"updated": self.setup.has_code, "items": self.setup.items, "collections": self.setup.collections}),
+            json!({"download_completed": self.setup.has_code, "items": self.setup.items, "collections": self.setup.collections}),
         )
     }
 }
@@ -298,14 +313,14 @@ pub async fn update_native(
     executable: &Path,
     ugc: &Path,
     proxy: Option<&str>,
-    events: &EventHub,
+    emit: &(impl Fn(LogEvent) + Sync),
 ) -> Result<()> {
     let (_keep_open, cancelled) = tokio::sync::watch::channel(0);
     update_once(
         executable,
         ugc,
         proxy,
-        events,
+        emit,
         UPDATE_PROCESS_TIMEOUT,
         cancelled,
     )
@@ -316,75 +331,109 @@ async fn update_once(
     executable: &Path,
     ugc: &Path,
     proxy: Option<&str>,
-    events: &EventHub,
+    emit: &(impl Fn(LogEvent) + Sync),
     timeout: Duration,
-    mut cancelled: tokio::sync::watch::Receiver<u64>,
+    cancelled: tokio::sync::watch::Receiver<u64>,
 ) -> Result<()> {
-    let environment = download_environment(proxy)?;
-    let executable = fs::canonicalize(executable).map_err(io_error)?;
-    let ugc = fs::canonicalize(ugc).map_err(io_error)?;
-    let temporary = tempfile::Builder::new()
-        .prefix("dst-mod-update-")
-        .tempdir()
+    UpdateProcess::spawn(executable, ugc, proxy)?
+        .wait(proxy, emit, timeout, cancelled)
+        .await
+}
+
+pub(crate) struct UpdateProcess {
+    process: GameProcess,
+    output: ProcessOutput,
+    _temporary: tempfile::TempDir,
+}
+
+impl UpdateProcess {
+    fn spawn(executable: &Path, ugc: &Path, proxy: Option<&str>) -> Result<Self> {
+        let environment = download_environment(proxy)?;
+        let executable = fs::canonicalize(executable).map_err(io_error)?;
+        let ugc = fs::canonicalize(ugc).map_err(io_error)?;
+        let temporary = tempfile::Builder::new()
+            .prefix("dst-mod-update-")
+            .tempdir()
+            .map_err(io_error)?;
+        fs::create_dir_all(temporary.path().join("conf/cluster/shard")).map_err(io_error)?;
+        // Hold both sockets until their distinct ephemeral port numbers are chosen.
+        let game_socket = UdpSocket::bind(("0.0.0.0", 0)).map_err(io_error)?;
+        let master_socket = UdpSocket::bind(("0.0.0.0", 0)).map_err(io_error)?;
+        let game_port = game_socket.local_addr().map_err(io_error)?.port();
+        let master_port = master_socket.local_addr().map_err(io_error)?.port();
+        let args = vec![
+            "-only_update_server_mods".into(),
+            "-monitor_parent_process".into(),
+            std::process::id().to_string().into(),
+            "-port".into(),
+            game_port.to_string().into(),
+            "-steam_master_server_port".into(),
+            master_port.to_string().into(),
+            "-ugc_directory".into(),
+            ugc.into_os_string(),
+            "-persistent_storage_root".into(),
+            temporary.path().as_os_str().to_owned(),
+            "-conf_dir".into(),
+            "conf".into(),
+            "-cluster".into(),
+            "cluster".into(),
+            "-shard".into(),
+            "shard".into(),
+        ];
+        drop((game_socket, master_socket));
+        let (process, output) = GameProcess::spawn_with_environment(
+            ProcessSpec {
+                cwd: executable
+                    .parent()
+                    .expect("canonical executable has a parent")
+                    .into(),
+                program: executable,
+                args,
+            },
+            environment,
+        )
         .map_err(io_error)?;
-    fs::create_dir_all(temporary.path().join("conf/cluster/shard")).map_err(io_error)?;
-    // Hold both sockets until their distinct ephemeral port numbers are chosen.
-    let game_socket = UdpSocket::bind(("0.0.0.0", 0)).map_err(io_error)?;
-    let master_socket = UdpSocket::bind(("0.0.0.0", 0)).map_err(io_error)?;
-    let game_port = game_socket.local_addr().map_err(io_error)?.port();
-    let master_port = master_socket.local_addr().map_err(io_error)?.port();
-    let args = vec![
-        "-only_update_server_mods".into(),
-        "-monitor_parent_process".into(),
-        std::process::id().to_string().into(),
-        "-port".into(),
-        game_port.to_string().into(),
-        "-steam_master_server_port".into(),
-        master_port.to_string().into(),
-        "-ugc_directory".into(),
-        ugc.into_os_string(),
-        "-persistent_storage_root".into(),
-        temporary.path().as_os_str().to_owned(),
-        "-conf_dir".into(),
-        "conf".into(),
-        "-cluster".into(),
-        "cluster".into(),
-        "-shard".into(),
-        "shard".into(),
-    ];
-    drop((game_socket, master_socket));
-    let process = GameProcess::spawn_with_environment(
-        ProcessSpec {
-            cwd: executable
-                .parent()
-                .expect("canonical executable has a parent")
-                .into(),
-            program: executable,
-            args,
-        },
-        environment,
-    )
-    .map_err(io_error)?;
-    let outcome = tokio::select! {
-        outcome = tokio::time::timeout(timeout, observe(&process, proxy, events)) => outcome,
-        _ = cancelled.changed() => {
-            process.kill().await.map_err(io_error)?;
-            return Err(Error::new(ErrorCode::Unknown, "DST Mod update was interrupted after downloader cleanup"));
-        }
-    };
-    match outcome {
-        Ok(result) => result,
-        Err(_) => {
-            process.kill().await.map_err(io_error)?;
-            Err(Error::new(ErrorCode::Timeout, "DST Mod updater timed out"))
+        Ok(Self {
+            process,
+            output,
+            _temporary: temporary,
+        })
+    }
+
+    async fn wait(
+        mut self,
+        proxy: Option<&str>,
+        emit: &(impl Fn(LogEvent) + Sync),
+        timeout: Duration,
+        mut cancelled: tokio::sync::watch::Receiver<u64>,
+    ) -> Result<()> {
+        let process = &self.process;
+        let outcome = tokio::select! {
+            outcome = tokio::time::timeout(timeout, observe(process, &mut self.output, proxy, emit)) => outcome,
+            _ = cancelled.changed() => {
+                process.kill().await.map_err(io_error)?;
+                return Err(Error::new(ErrorCode::Unknown, "DST Mod update was interrupted after downloader cleanup"));
+            }
+        };
+        match outcome {
+            Ok(result) => result,
+            Err(_) => {
+                process.kill().await.map_err(io_error)?;
+                Err(Error::new(ErrorCode::Timeout, "DST Mod updater timed out"))
+            }
         }
     }
 }
 
-async fn observe(process: &GameProcess, proxy: Option<&str>, events: &EventHub) -> Result<()> {
+async fn observe(
+    process: &GameProcess,
+    output: &mut ProcessOutput,
+    proxy: Option<&str>,
+    emit: &(impl Fn(LogEvent) + Sync),
+) -> Result<()> {
     let mut completed = false;
     let mut failure = None;
-    while let Some(event) = process.next_event().await {
+    while let Some(event) = output.next_event().await {
         if let EventKind::Line(bytes) = event.kind {
             if !matches!(event.stream, StreamKind::Stdout | StreamKind::Stderr) {
                 continue;
@@ -392,12 +441,16 @@ async fn observe(process: &GameProcess, proxy: Option<&str>, events: &EventHub) 
             let line = String::from_utf8_lossy(&bytes);
             let line = line.trim_end_matches(['\r', '\n']);
             let line = proxy.map_or_else(|| line.to_owned(), |proxy| line.replace(proxy, "***"));
-            let record = json!({
-                "event_name": "dst.mod_update", "body": line,
-                "severity_text": "INFO", "observed_timestamp_ns": timestamp(),
-                "attributes": {"stream": if event.stream == StreamKind::Stderr {"stderr"} else {"stdout"}},
-            });
-            events.publish("logs", &record);
+            let mut record = LogEvent::new("dst.mod_update", json!(line), "INFO");
+            record.attributes.insert(
+                "stream".into(),
+                json!(if event.stream == StreamKind::Stderr {
+                    "stderr"
+                } else {
+                    "stdout"
+                }),
+            );
+            emit(record);
             let message = line
                 .split_once("]: ")
                 .map_or(line.as_str(), |(_, message)| message)
@@ -449,14 +502,6 @@ async fn observe(process: &GameProcess, proxy: Option<&str>, events: &EventHub) 
         ));
     }
     Ok(())
-}
-
-fn timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .min(u64::MAX as u128) as u64
 }
 
 fn io_error(error: std::io::Error) -> Error {

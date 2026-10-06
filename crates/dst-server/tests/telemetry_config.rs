@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use dst_server::{
     driver::{DriverEvent, DriverEventKind},
+    model::MAX_SAFE_INTEGER,
     telemetry::{LogEvent, TelemetryConfig},
 };
 use opentelemetry_proto::tonic::common::v1::any_value::Value as Proto;
@@ -36,7 +37,7 @@ fn log_environment_precedence_preserves_encoded_headers_and_resource_types() -> 
         ("OTEL_BLRP_MAX_EXPORT_BATCH_SIZE", "2"),
         (
             "OTEL_RESOURCE_ATTRIBUTES",
-            "service.name=generic,team=a%2Cb,enabled=false,empty=",
+            "service.name=generic,service.instance.id=fixed,team=a%2Cb,enabled=false,empty=",
         ),
         ("OTEL_SERVICE_NAME", "dst-agent"),
     ])?;
@@ -60,13 +61,7 @@ fn log_environment_precedence_preserves_encoded_headers_and_resource_types() -> 
     assert_eq!(config.resource["team"], "a,b");
     assert_eq!(config.resource["enabled"], "false");
     assert_eq!(config.resource["empty"], "");
-    assert!(
-        config.resource["service.instance.id"]
-            .as_str()
-            .unwrap()
-            .parse::<ulid::Ulid>()
-            .is_ok()
-    );
+    assert!(!config.resource.contains_key("service.instance.id"));
     Ok(())
 }
 
@@ -139,39 +134,40 @@ fn invalid_transport_configuration_cannot_expose_credentials() {
 }
 
 fn telemetry_event() -> DriverEvent {
+    let nonce = ulid::Ulid::generate().to_string();
     DriverEvent {
         id: ulid::Ulid::generate().to_string(),
-        kind: DriverEventKind::Telemetry,
         shard: "Master".into(),
-        nonce: "attempt-fixture".into(),
+        nonce: nonce.clone(),
         observed_timestamp_ns: 1_700_000_000_123_456_789,
         generation: Some(7),
-        data: json!({
-            "v":3,"nonce":"attempt-fixture","generation":7,"seq":9007199254740993_u64,
-            "event":"dst.player.action","tick":9876,"monotonic_ms":123456,
-            "session_id":"","cycle":0,
-            "data":{"nested":[null,false,0,"",{"exact":9007199254740993_i64}],"success":false}
-        }),
+        kind: DriverEventKind::Telemetry(serde_json::from_value(json!({
+            "nonce":nonce,"generation":7,"seq":MAX_SAFE_INTEGER,
+            "event":"dst.player.dice_rolled","tick":9876,"monotonic_ms":123456,
+            "session_id":"S1","cycle":0,
+            "data":{"userid":"KU_test","prefab":"wilson","name":null,"rolls":[1,MAX_SAFE_INTEGER],"max":MAX_SAFE_INTEGER}
+        })).unwrap()),
     }
 }
 
 #[test]
 fn driver_event_identity_body_and_source_time_survive_both_sinks() -> anyhow::Result<()> {
     let source = telemetry_event();
-    let log = LogEvent::from_driver(&source, "cluster")?;
-    assert_eq!(log.event_name, "dst.player.action");
-    assert_eq!(log.body, source.data["data"]);
+    let log = LogEvent::from_driver(source.clone(), "cluster")?;
+    assert_eq!(log.event_name, "dst.player.dice_rolled");
+    assert_eq!(json!(&source)["kind"], "telemetry");
+    assert_eq!(log.body, json!(&source)["data"]["data"]);
     assert_eq!(log.observed_timestamp_ns, source.observed_timestamp_ns);
     assert_eq!(log.attributes["log.record.uid"], source.id);
     assert_eq!(source.id.parse::<ulid::Ulid>()?.to_string(), source.id);
     assert_eq!(log.attributes["dst.cluster.name"], "cluster");
     assert_eq!(log.attributes["dst.shard.name"], "Master");
-    assert_eq!(log.attributes["dst.session.id"], "");
+    assert_eq!(log.attributes["dst.session.id"], "S1");
     assert_eq!(log.attributes["dst.world.cycle"], 0);
-    assert_eq!(log.attributes["dst.event.sequence"], 9007199254740993_u64);
+    assert_eq!(log.attributes["dst.event.sequence"], MAX_SAFE_INTEGER);
     let local = serde_json::to_value(&log)?;
     let exported = log.to_otlp()?;
-    assert_eq!(exported.time_unix_nano, source.observed_timestamp_ns);
+    assert_eq!(exported.time_unix_nano, 0);
     assert_eq!(
         exported.observed_time_unix_nano,
         source.observed_timestamp_ns
@@ -193,25 +189,21 @@ fn driver_event_identity_body_and_source_time_survive_both_sinks() -> anyhow::Re
                 .into()
         ))
     );
-    assert_eq!(
-        LogEvent::from_driver(&source, "cluster")?.attributes["log.record.uid"],
-        log.attributes["log.record.uid"]
-    );
     let mut stale = source;
     stale.generation = Some(8);
-    assert!(LogEvent::from_driver(&stale, "cluster").is_err());
+    assert!(LogEvent::from_driver(stale, "cluster").is_err());
     Ok(())
 }
 
 #[test]
 fn operational_observations_keep_one_unique_id_per_record() -> anyhow::Result<()> {
     let mut source = telemetry_event();
-    source.kind = DriverEventKind::Lifecycle;
+    let ready = json!({"event":"ready","success":false,"empty":null});
+    source.kind = DriverEventKind::Lifecycle(ready.clone());
     source.generation = None;
-    source.data = json!({"event":"ready","success":false,"empty":null});
-    let log = LogEvent::from_driver(&source, "cluster")?;
+    let log = LogEvent::from_driver(source.clone(), "cluster")?;
     assert_eq!(log.event_name, "dst.server.ready");
-    assert_eq!(log.body, source.data);
+    assert_eq!(log.body, ready);
     assert!(!log.attributes.contains_key("dst.runtime.generation"));
     assert!(
         log.attributes["log.record.uid"]
@@ -224,24 +216,20 @@ fn operational_observations_keep_one_unique_id_per_record() -> anyhow::Result<()
         serde_json::to_value(log.clone())?,
         serde_json::to_value(&log)?
     );
+    assert_eq!(log.attributes["log.record.uid"], source.id);
+    source.kind = DriverEventKind::Control(ready);
     assert_eq!(
-        log.attributes["log.record.uid"],
-        LogEvent::from_driver(&source, "cluster")?.attributes["log.record.uid"]
-    );
-    source.kind = DriverEventKind::Control;
-    assert_eq!(
-        LogEvent::from_driver(&source, "cluster")?.event_name,
+        LogEvent::from_driver(source.clone(), "cluster")?.event_name,
         "dst.control.ready"
     );
-    source.kind = DriverEventKind::Log;
-    source.data = json!({"stream":"stderr", "line":"example\n"});
+    source.kind = DriverEventKind::Log(json!({"stream":"stderr","line":"example\n"}));
     assert_eq!(
-        LogEvent::from_driver(&source, "cluster")?.severity_text,
+        LogEvent::from_driver(source.clone(), "cluster")?.severity_text,
         "WARN"
     );
-    source.kind = DriverEventKind::Diagnostic;
+    source.kind = DriverEventKind::Diagnostic(json!({"error":"sample"}));
     assert_eq!(
-        LogEvent::from_driver(&source, "cluster")?.severity_text,
+        LogEvent::from_driver(source, "cluster")?.severity_text,
         "ERROR"
     );
     Ok(())

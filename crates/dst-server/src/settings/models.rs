@@ -14,13 +14,13 @@ ini_model! { ClusterSettings {
     "SHARD" {
         #[garde(skip)]
         shard_enabled: bool = false,
-        #[garde(ipv4, pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(ipv4, pattern(crate::configuration::INI_VALUE))]
         bind_ip: String = "127.0.0.1".into(),
-        #[garde(length(chars, min = 1), pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(inner(inner(custom(master_host))))]
         master_ip: Option<String> = None,
         #[garde(range(min = 1_024, max = 65_535))]
         master_port: u64 = 10_888,
-        #[garde(pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(pattern(crate::configuration::INI_VALUE))]
         cluster_key: Option<String> = None,
     }
     "STEAM" {
@@ -32,11 +32,11 @@ ini_model! { ClusterSettings {
         steam_group_admins: bool = false,
     }
     "NETWORK" {
-        #[garde(length(chars, max = 80), pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(length(chars, max = 80), pattern(crate::configuration::INI_VALUE))]
         cluster_name: Option<String> = None,
-        #[garde(length(chars, max = 254), pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(length(chars, max = 254), pattern(crate::configuration::INI_VALUE))]
         cluster_password: Option<String> = None,
-        #[garde(length(chars, max = 254), pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(length(chars, max = 254), pattern(crate::configuration::INI_VALUE))]
         cluster_description: String = "".into(),
         #[garde(range(min = 1, max = 60))]
         tick_rate: u64 = 15,
@@ -56,7 +56,7 @@ ini_model! { ClusterSettings {
         internet_broadcasting_enabled: bool = true,
         #[garde(range(max = 2_147_483_647))]
         idle_timeout: u64 = 1_800,
-        #[garde(pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(pattern(crate::configuration::INI_VALUE))]
         override_dns: Option<String> = None,
     }
     "GAMEPLAY" {
@@ -64,7 +64,7 @@ ini_model! { ClusterSettings {
         max_players: u64 = 16,
         #[garde(skip)]
         pvp: bool = false,
-        #[garde(length(chars, min = 1), pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(length(chars, min = 1), pattern(crate::configuration::INI_VALUE))]
         game_mode: String = "survival".into(),
         #[garde(skip)]
         pause_when_empty: bool = false,
@@ -77,17 +77,17 @@ ini_model! { ShardSettings {
     "SHARD" {
         #[garde(skip)]
         is_master: bool = true,
-        #[garde(length(chars, min = 1), pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(pattern(crate::configuration::INI_VALUE))]
         name: Option<String> = None,
         #[garde(range(min = 1, max = 4_294_967_295))]
         id: Option<u64> = None,
-        #[garde(ipv4, pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(ipv4, pattern(crate::configuration::INI_VALUE))]
         bind_ip: Option<String> = None,
-        #[garde(length(chars, min = 1), pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(inner(inner(custom(master_host))))]
         master_ip: Option<String> = None,
         #[garde(range(min = 1_024, max = 65_535))]
         master_port: Option<u64> = None,
-        #[garde(pattern("^[^\\x00\\r\\n]*$"))]
+        #[garde(pattern(crate::configuration::INI_VALUE))]
         cluster_key: Option<String> = None,
     }
     "STEAM" {
@@ -120,12 +120,13 @@ sparse_model! {
             #[garde(dive)]
             mod_settings: ModSettings = ModSettings::default(),
             #[garde(dive)]
-            settings: ClusterSettings = ClusterSettings::default(),
+            settings: ClusterSettings = ClusterSettings::default() => for_cluster,
             #[garde(pattern("^[!-~]*$"))]
             token: String = "".into(),
             #[garde(pattern("^[^\\x00\\r]*$"))]
             whitelist: String = "".into(),
         }
+        when_present { token, mod_settings, downloads }
     }
 }
 
@@ -146,19 +147,41 @@ sparse_model! {
     }
 }
 
-sparse_model! {
-    #[derive(Default)]
-    RoomPreset {
-        required {
+/// Presets are patches. An omitted field inherits from the preceding preset.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct RoomPreset {
+    #[garde(dive)]
+    #[serde(
+        deserialize_with = "validation::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mods: Option<ModOverrides>,
+    #[garde(dive)]
+    #[serde(
+        deserialize_with = "validation::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub settings: Option<ClusterSettings>,
+    #[garde(dive)]
+    #[serde(
+        deserialize_with = "validation::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub shards: Option<BTreeMap<String, ShardConfig>>,
+}
+
+scalar_resolve!(RoomPreset);
+
+impl ClusterSettings {
+    pub(super) fn for_shards(mut self, multi: bool) -> Self {
+        if multi {
+            self.shard_enabled.get_or_insert(true);
         }
-        optional {
-            #[garde(dive)]
-            mods: ModOverrides = ModOverrides::default(),
-            #[garde(dive)]
-            settings: ClusterSettings = ClusterSettings::default(),
-            #[garde(dive)]
-            shards: BTreeMap<String, ShardConfig> = BTreeMap::new(),
-        }
+        self
+    }
+    fn for_cluster(self, cluster: &ClusterConfig) -> Self {
+        self.for_shards(cluster.shards.len() > 1)
     }
 }
 
@@ -239,6 +262,7 @@ sparse_model! {
             #[garde(length(chars, min = 1))]
             worldgen_preset: Option<String> = None,
         }
+        when_present { overrides }
     }
 }
 

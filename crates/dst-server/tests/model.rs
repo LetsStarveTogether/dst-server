@@ -15,6 +15,42 @@ fn call(target: Target, method: &str, arguments: Value) -> dst_server::model::Re
 }
 
 #[test]
+fn configuration_field_edits_validate_scope_and_paths() {
+    for arguments in [
+        json!({}),
+        json!({"changes":[["/number",2]]}),
+        json!({"changes":[["/deployment/image","other"]]}),
+        json!({"unset":["/template"]}),
+        json!({"unset":["/cluster_other"]}),
+        json!({"unset":["/policy~1timezone"]}),
+    ] {
+        assert!(call(Target::Room, "edit_configuration", arguments).is_err());
+    }
+    let arguments =
+        json!({"changes":[["/policy/timezone","UTC"]],"unset":["/cluster/settings/max_snapshots"]});
+    assert!(call(Target::Room, "edit_configuration", arguments.clone()).is_ok());
+    assert!(
+        call(
+            Target::Shard("Master".into()),
+            "edit_configuration",
+            arguments
+        )
+        .is_err()
+    );
+    let method = describe(Scope::Room)
+        .into_iter()
+        .find(|method| method.name == "edit_configuration")
+        .unwrap();
+    for name in ["changes", "unset"] {
+        assert_eq!(method.arguments_schema["properties"][name]["type"], "array");
+        assert_eq!(
+            method.arguments_schema["properties"][name]["default"],
+            json!([])
+        );
+    }
+}
+
+#[test]
 fn account_and_vote_requests_validate_before_transport() {
     for method in ["kick", "ban", "unban", "is_blocked", "is_admin"] {
         assert!(
@@ -60,13 +96,29 @@ fn completion_wait_includes_requested_announcements_and_countdown() {
     )
     .unwrap();
     assert_eq!(repeated.timeout().unwrap().as_secs(), 120 + 270);
-    let stopped = call(
-        Target::Room,
-        "stop",
-        json!({"notice":{"template":"notice","delay":300,"interval":30,"parameters":{}}}),
-    )
-    .unwrap();
-    assert_eq!(stopped.timeout().unwrap().as_secs(), 160 + 300);
+    for (method, base) in [("stop", 160), ("restart", 1140), ("update_mods", 7140)] {
+        for (arguments, overhead) in [
+            (json!({}), 70),
+            (json!({"notice":null}), 0),
+            (json!({"notice":{"template":"notice","delay":300}}), 310),
+            (json!({"notice":{"template":"notice","delay":0}}), 10),
+        ] {
+            let request = call(Target::Room, method, arguments).unwrap();
+            assert_eq!(
+                request.timeout().unwrap().as_secs(),
+                base + overhead,
+                "{method}"
+            );
+            assert_eq!(
+                request.request.completion_timeout().unwrap(),
+                request.timeout().unwrap()
+            );
+            assert_eq!(
+                request.request.metadata().default_timeout,
+                (base + 70) as f64
+            );
+        }
+    }
     let mut short_wait = repeated.clone();
     short_wait.timeout = Some(1.0);
     assert_eq!(short_wait.timeout().unwrap().as_secs(), 1);
@@ -160,6 +212,16 @@ fn public_contract_validates_scope_defaults_and_nullable_notices() {
             .as_secs(),
         120
     );
+    let shard_methods = describe(Scope::Shard);
+    for method in ["start", "stop", "restart", "kill"] {
+        assert!(!shard_methods.iter().any(|entry| entry.name == method));
+        assert_eq!(
+            call(Target::Shard("Master".into()), method, json!({}))
+                .unwrap_err()
+                .code,
+            ErrorCode::Unsupported
+        );
+    }
     let default_stop = call(Target::Room, "stop", json!({})).unwrap();
     let Request::Stop {
         notice: Some(notice),
@@ -301,8 +363,15 @@ fn registry_is_the_discovery_contract_for_every_method() {
                 },
             );
         }
-        if method.name == "set_vitals" {
-            arguments.insert("health".into(), json!(1.0));
+        if let Some(alternatives) = description.arguments_schema["anyOf"].as_array() {
+            let field = alternatives[0]["required"][0].as_str().unwrap();
+            let value = match field {
+                "changes" => json!([["/policy/mod_auto_update", false]]),
+                "health" => json!(0.0),
+                other => panic!("provide a valid discovery example for {other}"),
+            };
+            assert!(alternatives[0]["properties"].get(field).is_some());
+            arguments.insert(field.into(), value);
         }
         let target = if method.scopes.contains(&Scope::Room) {
             Target::Room
@@ -430,7 +499,7 @@ fn world_identity_readiness_and_operation_results_are_unambiguous() {
         userid: "player".into(),
         shard: Some("World".into()),
         identity: Some(identity),
-        state: PlayerState::Migrating,
+        state: PlayerState::Departing,
         player: Value::Null,
     };
     assert_eq!(
@@ -465,13 +534,7 @@ fn world_identity_readiness_and_operation_results_are_unambiguous() {
             target: Target::Room,
             started_at_ns: 1_700_000_000_000_000_001,
             completed_at_ns: Some(1_700_000_000_000_000_010),
-            result: Some(Outcome::Failure {
-                error: Error::new(
-                    ErrorCode::PartialFailure,
-                    "not all shard commands were confirmed",
-                )
-                .with_details(json!(results)),
-            }),
+            error: Some(ErrorCode::PartialFailure),
         }),
     };
     let encoded = serde_json::to_vec(&history).unwrap();
@@ -479,7 +542,8 @@ fn world_identity_readiness_and_operation_results_are_unambiguous() {
         serde_json::from_slice::<OperationHistory>(&encoded).unwrap(),
         history
     );
-    let partial = &serde_json::to_value(history).unwrap()["last"]["result"]["error"]["details"];
+    assert_eq!(json!(history)["last"]["error"], "partial_failure");
+    let partial = json!(results);
     assert_eq!(
         partial[0]["result"],
         json!({"status":"success", "value":null})

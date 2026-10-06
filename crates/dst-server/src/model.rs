@@ -17,7 +17,8 @@ pub const START_TIMEOUT: f64 = 900.0;
 pub const RELOAD_TIMEOUT: f64 = 900.0;
 pub const STOP_TIMEOUT: f64 = 120.0;
 pub const OUTPUT_DRAIN_TIMEOUT: f64 = 30.0;
-pub const RESTART_TIMEOUT: f64 = 1200.0;
+pub const RESTART_TIMEOUT: f64 = 1210.0;
+pub(crate) const NOTICE_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -41,7 +42,8 @@ pub enum ErrorCode {
     Internal,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
+#[error("{message}")]
 #[serde(deny_unknown_fields)]
 pub struct Error {
     pub code: ErrorCode,
@@ -67,15 +69,16 @@ impl Error {
     pub fn invalid(field: &str, message: impl Into<String>) -> Self {
         Self::new(ErrorCode::Invalid, message).with_details(json!({ "field": field }))
     }
-}
 
-impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
+    pub(crate) fn shutdown(code: ErrorCode) -> Self {
+        Self::new(code, "room shutdown is in progress").with_details(json!({"reason":"shutdown"}))
+    }
+
+    pub(crate) fn is_shutdown(&self) -> bool {
+        matches!(self.code, ErrorCode::Unknown | ErrorCode::NotReady)
+            && self.details["reason"] == "shutdown"
     }
 }
-
-impl std::error::Error for Error {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -153,7 +156,7 @@ fn default_notice(message: &str) -> Option<Countdown> {
     })
 }
 
-fn shutdown_notice() -> Option<Countdown> {
+pub(crate) fn shutdown_notice() -> Option<Countdown> {
     default_notice("本房间{when}关闭，请提前安排游戏进度。")
 }
 
@@ -231,13 +234,16 @@ fn identifier_name(value: &str) -> bool {
         && chars.all(|character| character == '_' || character.is_alphanumeric())
 }
 
+mod schema;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Method {
     pub name: &'static str,
     pub mutation: bool,
     pub scopes: &'static [Scope],
     pub default_timeout: f64,
-    arguments: &'static [(&'static str, &'static str, &'static str)],
+    arguments: &'static [schema::Argument],
+    alternatives: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -252,25 +258,43 @@ pub struct MethodDescription {
 
 // One registry generates the enum and the metadata used by dispatch/discovery.
 macro_rules! requests {
-    ($($variant:ident { $($(#[$attribute:meta])* $field:ident: $kind:ty),* $(,)? }
+    ($($variant:ident { $($field:ident: $kind:ty $(= $default:expr)?),* $(,)? }
+        $(require_any($label:literal, $message:literal; $($alternative:ident),+))?
         => ($name:literal, $mutation:expr, $scopes:expr, $timeout:expr)),* $(,)?) => {
         #[derive(Debug, Clone, PartialEq, Serialize)]
-        #[serde(tag = "method", content = "arguments", rename_all = "snake_case")]
+        #[serde(tag = "method", content = "arguments")]
         pub enum Request {
-            $(#[serde(rename = $name)]
-            $variant { $($(#[$attribute])* $field: $kind),* }),*
+            $(#[serde(rename = $name)] $variant { $( $field: $kind ),* }),*
         }
+
+        #[repr(usize)]
+        enum MethodIndex { $($variant),* }
+
+        pub const METHODS: &[Method] = &[$(Method {
+            name: $name,
+            mutation: $mutation,
+            scopes: $scopes,
+            default_timeout: $timeout,
+            arguments: &[$(schema::Argument {
+                name: stringify!($field),
+                describe: <$kind as schema::ArgumentType>::schema,
+                optional: <$kind as schema::ArgumentType>::OPTIONAL,
+                default: requests!(@default $kind $(, $default)?),
+            }),*],
+            alternatives: &[$($(stringify!($alternative)),+)?],
+        }),*];
 
         impl<'de> Deserialize<'de> for Request {
             fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-                let wire = WireRequest::deserialize(deserializer)?;
-                // Serde's tagged-enum buffering loses arbitrary-precision JSON numbers.
-                // Decode the payload directly so finite floats and integer widths survive.
+                let mut wire = WireRequest::deserialize(deserializer)?;
+                // Decode the payload directly to retain arbitrary-precision JSON numbers.
                 match wire.method.as_str() {
                     $($name => {
                         #[derive(Deserialize)]
                         #[serde(deny_unknown_fields)]
-                        struct Arguments { $($(#[$attribute])* $field: $kind),* }
+                        struct Arguments { $($field: $kind),* }
+                        METHODS[MethodIndex::$variant as usize].apply_defaults(&mut wire.arguments)
+                            .map_err(serde::de::Error::custom)?;
                         let Arguments { $($field),* } = serde_json::from_value(wire.arguments)
                             .map_err(serde::de::Error::custom)?;
                         Ok(Self::$variant { $($field),* })
@@ -280,26 +304,29 @@ macro_rules! requests {
             }
         }
 
-        pub const METHODS: &[Method] = &[$(Method {
-            name: $name,
-            mutation: $mutation,
-            scopes: $scopes,
-            default_timeout: $timeout,
-            arguments: &[$((stringify!($field), stringify!($kind), stringify!($(#[$attribute])*))),*],
-        }),*];
-
         impl Request {
             pub fn metadata(&self) -> Method {
-                match self { $(Self::$variant { .. } => Method {
-                    name: $name,
-                    mutation: $mutation,
-                    scopes: $scopes,
-                    default_timeout: $timeout,
-                    arguments: &[$((stringify!($field), stringify!($kind), stringify!($(#[$attribute])*))),*],
-                }),* }
+                match self { $(Self::$variant { .. } => METHODS[MethodIndex::$variant as usize]),* }
+            }
+
+            pub fn validate(&self) -> Result<()> {
+                match self {
+                    $(Self::$variant { $($field),* } => {
+                        $(if !($(schema::Supplied::supplied($alternative))||+) {
+                            return Err(Error::invalid($label, $message));
+                        })?
+                        $(schema::ArgumentType::check($field, $name, stringify!($field))?;)*
+                        Ok(())
+                    }),*
+                }
             }
         }
     };
+    (@default $kind:ty, $default:expr) => { Some(|| {
+        let value: $kind = $default;
+        json!(value)
+    }) };
+    (@default $kind:ty) => { None };
 }
 
 #[derive(Deserialize)]
@@ -316,19 +343,24 @@ fn empty_arguments() -> Value {
 
 requests! {
     Status {} => ("status", false, BOTH, COMMAND_TIMEOUT),
-    Start {} => ("start", true, BOTH, START_TIMEOUT),
-    Stop { #[serde(default = "shutdown_notice")] notice: Option<Countdown> }
-        => ("stop", true, BOTH, 220.0),
-    Restart { #[serde(default = "restart_notice")] notice: Option<Countdown> }
-        => ("restart", true, BOTH, RESTART_TIMEOUT),
-    Kill {} => ("kill", true, BOTH, STOP_TIMEOUT + OUTPUT_DRAIN_TIMEOUT),
+    Start {} => ("start", true, ROOM, START_TIMEOUT),
+    Stop { notice: Option<Countdown> = shutdown_notice() }
+        => ("stop", true, ROOM, 230.0),
+    Restart { notice: Option<Countdown> = restart_notice() }
+        => ("restart", true, ROOM, RESTART_TIMEOUT),
+    Kill {} => ("kill", true, ROOM, STOP_TIMEOUT + OUTPUT_DRAIN_TIMEOUT),
     UpdateMods {
-        #[serde(default)] restart: bool,
-        #[serde(default = "mod_notice")] notice: Option<Countdown>,
-    } => ("update_mods", true, ROOM, 7200.0),
+        restart: bool = Default::default(),
+        notice: Option<Countdown> = mod_notice(),
+    } => ("update_mods", true, ROOM, 7210.0),
     ReadConfiguration {} => ("read_configuration", false, ROOM, COMMAND_TIMEOUT),
-    Configure { configuration: Value, #[serde(default)] replace_permissions: bool }
+    Configure { configuration: Value, replace_permissions: bool = Default::default() }
         => ("configure", true, ROOM, COMMAND_TIMEOUT),
+    EditConfiguration {
+        changes: Vec<(String, Value)> = Default::default(),
+        unset: Vec<String> = Default::default(),
+    } require_any("changes", "provide changes or unset fields"; changes, unset)
+        => ("edit_configuration", true, ROOM, COMMAND_TIMEOUT),
     SetPolicy { policy: Value } => ("set_policy", true, ROOM, COMMAND_TIMEOUT),
     Execute { source: String } => ("execute", true, SHARD, COMMAND_TIMEOUT),
     ExecuteJson { source: String } => ("execute_json", true, SHARD, COMMAND_TIMEOUT),
@@ -336,23 +368,23 @@ requests! {
     ExecuteAll { source: String } => ("execute_all", true, ROOM, COMMAND_TIMEOUT),
     Announce {
         message: String,
-        #[serde(default = "one")] count: u64,
-        #[serde(default = "notice_interval")] interval: f64,
+        count: u64 = one(),
+        interval: f64 = notice_interval(),
     } => ("announce", true, ROOM, COMMAND_TIMEOUT),
     Save {} => ("save", true, ROOM, COMMAND_TIMEOUT),
     Pause { paused: bool } => ("pause", true, BOTH, COMMAND_TIMEOUT),
     Reset {} => ("reset", true, ROOM, RELOAD_TIMEOUT),
-    Rollback { #[serde(default = "one")] count: u64 }
+    Rollback { count: u64 = one() }
         => ("rollback", true, ROOM, RELOAD_TIMEOUT),
     Regenerate {
-        #[serde(default)] expected_session_id: Option<String>,
-        #[serde(default)] require_empty: Option<bool>,
+        expected_session_id: Option<String>,
+        require_empty: Option<bool>,
     } => ("regenerate", true, ROOM, RELOAD_TIMEOUT),
-    RegenerateShard { #[serde(default = "yes")] preserve_settings: bool }
+    RegenerateShard { preserve_settings: bool = yes() }
         => ("regenerate_shard", true, SHARD, RELOAD_TIMEOUT),
     Snapshots {
-        #[serde(default = "hundred")] limit: u64,
-        #[serde(default)] before: Option<u64>,
+        limit: u64 = hundred(),
+        before: Option<u64>,
     } => ("list_snapshots", false, BOTH, COMMAND_TIMEOUT),
     RollbackToDay { day: u64 } => ("rollback_to_day", true, ROOM, RELOAD_TIMEOUT),
     RollbackToSnapshot { session_id: String, snapshot_id: u64 }
@@ -368,7 +400,7 @@ requests! {
     GetPlayer { userid: String } => ("get_player", false, BOTH, COMMAND_TIMEOUT),
     Inventory { userid: String } => ("inventory", false, BOTH, COMMAND_TIMEOUT),
     Kick { userid: String } => ("kick", true, ROOM, COMMAND_TIMEOUT),
-    Ban { userid: String, #[serde(default)] seconds: Option<u64> }
+    Ban { userid: String, seconds: Option<u64> }
         => ("ban", true, ROOM, COMMAND_TIMEOUT),
     Blocklist {} => ("blocklist", false, ROOM, COMMAND_TIMEOUT),
     IsBlocked { userid: String } => ("is_blocked", false, ROOM, COMMAND_TIMEOUT),
@@ -379,22 +411,23 @@ requests! {
         => ("set_admin", true, ROOM, COMMAND_TIMEOUT),
     SetVitals {
         userid: String,
-        #[serde(default)] health: Option<f64>,
-        #[serde(default)] hunger: Option<f64>,
-        #[serde(default)] sanity: Option<f64>,
-        #[serde(default)] temperature: Option<f64>,
-        #[serde(default)] moisture: Option<f64>,
-    } => ("set_vitals", true, BOTH, COMMAND_TIMEOUT),
+        health: Option<f64>,
+        hunger: Option<f64>,
+        sanity: Option<f64>,
+        temperature: Option<f64>,
+        moisture: Option<f64>,
+    } require_any("vitals", "at least one player vital must be supplied"; health, hunger, sanity, temperature, moisture)
+        => ("set_vitals", true, BOTH, COMMAND_TIMEOUT),
     KillPlayer { userid: String } => ("kill_player", true, BOTH, COMMAND_TIMEOUT),
     Revive { userid: String } => ("revive", true, BOTH, COMMAND_TIMEOUT),
     Despawn { userid: String } => ("despawn", true, BOTH, COMMAND_TIMEOUT),
-    Migrate { userid: String, shard_id: String, #[serde(default = "one")] portal_id: u64 }
+    Migrate { userid: String, shard_id: String, portal_id: u64 = one() }
         => ("migrate", true, BOTH, COMMAND_TIMEOUT),
     Teleport { userid: String, x: f64, y: f64, z: f64 }
         => ("teleport", true, BOTH, COMMAND_TIMEOUT),
-    Give { userid: String, item: String, #[serde(default = "one")] count: u64 }
+    Give { userid: String, item: String, count: u64 = one() }
         => ("give", true, BOTH, COMMAND_TIMEOUT),
-    Remove { userid: String, item: String, #[serde(default = "one")] count: u64 }
+    Remove { userid: String, item: String, count: u64 = one() }
         => ("remove", true, BOTH, COMMAND_TIMEOUT),
     IsWhitelisted { userid: String } => ("is_whitelisted", false, ROOM, COMMAND_TIMEOUT),
     Whitelist { userid: String } => ("whitelist", true, ROOM, COMMAND_TIMEOUT),
@@ -404,7 +437,7 @@ requests! {
     StartVote {
         command: String,
         starter_userid: String,
-        #[serde(default)] target_userid: Option<String>,
+        target_userid: Option<String>,
     } => ("start_vote", true, ROOM, COMMAND_TIMEOUT),
     CancelVote {} => ("cancel_vote", true, ROOM, COMMAND_TIMEOUT),
 }
@@ -424,7 +457,8 @@ impl Request {
                 count, interval, ..
             } => base + count.saturating_sub(1) as f64 * interval,
             Self::Stop { notice } | Self::Restart { notice } | Self::UpdateMods { notice, .. } => {
-                base - notice_delay() + notice.as_ref().map_or(0.0, |notice| notice.delay)
+                base - notice_delay() - 10.0
+                    + notice.as_ref().map_or(0.0, |notice| notice.delay + 10.0)
             }
             _ => base,
         };
@@ -465,168 +499,6 @@ impl Request {
             _ => None,
         }
     }
-
-    pub fn validate(&self) -> Result<()> {
-        if let Some(userid) = self.userid() {
-            identifier("userid", userid)?;
-        }
-        match self {
-            Self::StartVote {
-                command,
-                starter_userid,
-                target_userid,
-            } => {
-                identifier("command", command)?;
-                identifier("starter_userid", starter_userid)?;
-                if let Some(userid) = target_userid {
-                    identifier("target_userid", userid)?;
-                }
-            }
-            Self::Configure { configuration, .. } => {
-                if !configuration.is_object() {
-                    return Err(Error::invalid(
-                        "configuration",
-                        "configuration must be an object",
-                    ));
-                }
-            }
-            Self::SetPolicy { policy } => {
-                if !policy.is_object() {
-                    return Err(Error::invalid("policy", "policy must be an object"));
-                }
-            }
-            Self::Stop { notice } | Self::Restart { notice } | Self::UpdateMods { notice, .. } => {
-                if let Some(notice) = notice {
-                    notice.validate()?;
-                }
-            }
-            Self::Execute { source }
-            | Self::ExecuteJson { source }
-            | Self::Evaluate { source }
-            | Self::ExecuteAll { source } => text("source", source, MAX_SOURCE_BYTES)?,
-            Self::Announce {
-                message,
-                count,
-                interval,
-            } => {
-                text("message", message, MAX_SOURCE_BYTES)?;
-                integer("count", *count, 1, MAX_SAFE_INTEGER)?;
-                positive_duration("interval", *interval)?;
-            }
-            Self::Rollback { count } => integer("count", *count, 0, MAX_SAFE_INTEGER)?,
-            Self::Regenerate {
-                expected_session_id: Some(session),
-                ..
-            } => identifier("expected_session_id", session)?,
-            Self::Snapshots { limit, before } => {
-                integer("limit", *limit, 1, 100)?;
-                if let Some(before) = before {
-                    integer("before", *before, 0, MAX_SAFE_INTEGER)?;
-                }
-            }
-            Self::RollbackToDay { day } => integer("day", *day, 1, MAX_SAFE_INTEGER)?,
-            Self::RollbackToSnapshot {
-                session_id,
-                snapshot_id,
-            } => {
-                identifier("session_id", session_id)?;
-                integer("snapshot_id", *snapshot_id, 1, MAX_SAFE_INTEGER)?;
-            }
-            Self::Ban {
-                seconds: Some(seconds),
-                ..
-            } => integer("seconds", *seconds, 1, MAX_SAFE_INTEGER)?,
-            Self::SetVitals {
-                health,
-                hunger,
-                sanity,
-                temperature,
-                moisture,
-                ..
-            } => {
-                if [health, hunger, sanity, temperature, moisture]
-                    .iter()
-                    .all(|value| value.is_none())
-                {
-                    return Err(Error::invalid(
-                        "vitals",
-                        "at least one player vital must be supplied",
-                    ));
-                }
-                for (name, value) in [
-                    ("health", health),
-                    ("hunger", hunger),
-                    ("sanity", sanity),
-                    ("moisture", moisture),
-                ] {
-                    if value
-                        .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
-                    {
-                        return Err(Error::invalid(
-                            name,
-                            "player vital must be finite and between 0 and 1",
-                        ));
-                    }
-                }
-                if let Some(value) = temperature {
-                    finite("temperature", *value)?;
-                }
-            }
-            Self::Migrate {
-                shard_id,
-                portal_id,
-                ..
-            } => {
-                identifier("shard_id", shard_id)?;
-                integer("portal_id", *portal_id, 1, MAX_SAFE_INTEGER)?;
-            }
-            Self::Teleport { x, y, z, .. } => {
-                for (name, value) in [("x", x), ("y", y), ("z", z)] {
-                    finite(name, *value)?;
-                }
-            }
-            Self::Give { item, count, .. } | Self::Remove { item, count, .. } => {
-                text("item", item, MAX_SOURCE_BYTES)?;
-                integer(
-                    "count",
-                    *count,
-                    1,
-                    if matches!(self, Self::Give { .. }) {
-                        64
-                    } else {
-                        MAX_SAFE_INTEGER
-                    },
-                )?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
-
-impl Method {
-    pub fn description(self) -> MethodDescription {
-        let properties: serde_json::Map<String, Value> = self
-            .arguments
-            .iter()
-            .map(|(name, kind, _)| ((*name).to_owned(), argument_schema(self.name, name, kind)))
-            .collect();
-        let required: Vec<_> = self
-            .arguments
-            .iter()
-            .filter(|(_, kind, attributes)| {
-                !kind.starts_with("Option") && !attributes.contains("default")
-            })
-            .map(|(name, _, _)| *name)
-            .collect();
-        MethodDescription {
-            name: self.name.to_owned(),
-            mutation: self.mutation,
-            scopes: self.scopes.to_vec(),
-            default_timeout: self.default_timeout,
-            arguments_schema: json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false}),
-        }
-    }
 }
 
 pub fn describe(scope: Scope) -> Vec<MethodDescription> {
@@ -635,75 +507,6 @@ pub fn describe(scope: Scope) -> Vec<MethodDescription> {
         .filter(|method| method.scopes.contains(&scope))
         .map(|method| method.description())
         .collect()
-}
-
-fn argument_schema(method: &str, name: &str, kind: &str) -> Value {
-    let mut schema = if kind.contains("Countdown") {
-        json!({"type": "object", "required": ["template"], "additionalProperties": false, "properties": {
-            "template": {"type": "string", "minLength": 1},
-            "delay": {"type": "number", "minimum": 0, "default": 60},
-            "interval": {"type": "number", "exclusiveMinimum": 0, "default": 30},
-            "parameters": {"type": "object", "additionalProperties": {"type": ["string", "number"]}}
-        }})
-    } else if kind == "Value" {
-        json!({"type": "object"})
-    } else if kind.contains("String") {
-        let max = if [
-            "userid",
-            "shard_id",
-            "session_id",
-            "expected_session_id",
-            "command",
-            "starter_userid",
-            "target_userid",
-        ]
-        .contains(&name)
-        {
-            128
-        } else {
-            MAX_SOURCE_BYTES
-        };
-        json!({"type": "string", "minLength": 1, "maxLength": max})
-    } else if kind.contains("u64") {
-        let maximum = match name {
-            "limit" => 100,
-            "count" if method == "give" => 64,
-            _ => MAX_SAFE_INTEGER,
-        };
-        let minimum = u64::from(name != "before" && !(name == "count" && method == "rollback"));
-        json!({"type": "integer", "minimum": minimum, "maximum": maximum})
-    } else if kind.contains("bool") {
-        json!({"type": "boolean"})
-    } else {
-        let mut schema = json!({"type": "number"});
-        if ["health", "hunger", "sanity", "moisture"].contains(&name) {
-            schema["minimum"] = json!(0);
-            schema["maximum"] = json!(1);
-        } else if name == "interval" {
-            schema["exclusiveMinimum"] = json!(0);
-        }
-        schema
-    };
-    if kind.starts_with("Option") {
-        schema = json!({"anyOf": [schema, {"type": "null"}]});
-    }
-    match name {
-        "count" | "portal_id" => schema["default"] = json!(1),
-        "limit" => schema["default"] = json!(100),
-        "options" => schema["default"] = json!({}),
-        "interval" => schema["default"] = json!(30),
-        "preserve_settings" => schema["default"] = json!(true),
-        "restart" | "replace_permissions" => schema["default"] = json!(false),
-        "notice" => {
-            schema["default"] = match method {
-                "stop" => json!(shutdown_notice()),
-                "restart" => json!(restart_notice()),
-                _ => json!(mod_notice()),
-            }
-        }
-        _ => {}
-    }
-    schema
 }
 
 /// `timeout` limits the caller's wait; an accepted mutation continues in the Agent.
@@ -976,7 +779,14 @@ pub struct OperationStatus {
     pub target: Target,
     pub started_at_ns: u64,
     pub completed_at_ns: Option<u64>,
-    pub result: Option<Outcome<Value>>,
+    pub error: Option<ErrorCode>,
+}
+
+impl OperationStatus {
+    pub(crate) fn complete(&mut self, result: &Result<Value>) {
+        self.completed_at_ns = Some(crate::operation::timestamp());
+        self.error = result.as_ref().err().map(|error| error.code);
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1089,7 +899,7 @@ pub struct RoomStatus {
 pub enum PlayerState {
     Loading,
     Active,
-    Migrating,
+    Departing,
     Disconnected,
     Conflict,
 }
@@ -1109,7 +919,10 @@ impl PlayerLocation {
         identifier("userid", &self.userid)?;
         let (code, message) = match self.state {
             PlayerState::Loading => (ErrorCode::NotReady, "player character has not loaded"),
-            PlayerState::Migrating => (ErrorCode::NotReady, "player is migrating between shards"),
+            PlayerState::Departing => (
+                ErrorCode::NotReady,
+                "player is leaving the current character",
+            ),
             PlayerState::Disconnected => (ErrorCode::NotFound, "player is disconnected"),
             PlayerState::Conflict => (ErrorCode::Conflict, "player is active on multiple shards"),
             PlayerState::Active => {
@@ -1127,17 +940,11 @@ impl PlayerLocation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ShardStopped {
-    /// Exit status, or the negative signal number for signal termination.
-    pub returncode: Option<i32>,
-    pub forced: bool,
-    pub output_drained: bool,
-}
+pub type ShardStopped = crate::process::ExitSummary;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StopResult {
+    pub force_requested: bool,
     pub shards: Vec<ShardResult<ShardStopped>>,
 }

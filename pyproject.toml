@@ -1,12 +1,16 @@
 [project]
 name = "dst-server"
-version = "0.5.0"
+dynamic = ["version"]
 description = "Native SDK and room agent for Don't Starve Together."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "licenses/third-party/*"]
 requires-python = ">=3.15"
 dependencies = []
+
+[project.urls]
+Documentation = "https://github.com/LetsStarveTogether/dst-server/tree/main/docs"
+Repository = "https://github.com/LetsStarveTogether/dst-server"
 
 [project.scripts]
 dst-server = "dst_server.__main__:main"
@@ -32,6 +36,8 @@ module-name = "dst_server._native"
 compatibility = "pypi"
 features = ["pyo3/extension-module"]
 include = [
+    { path = "README.zh-Hans.md", format = "sdist" },
+    { path = "docs/*.md", format = "sdist" },
     { path = "resources/lua/**/*", format = "sdist" },
     { path = "crates/dst-server/resources/**/*", format = "sdist" },
     { path = "Cargo.lock", format = "sdist" },

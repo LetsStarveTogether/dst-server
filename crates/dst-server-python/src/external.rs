@@ -171,7 +171,7 @@ impl KleiClient {
         py: Python<'py>,
         rooms: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let value = from_python(rooms, 0, &mut 0)?;
+        let value = from_python(rooms)?;
         let rooms: Vec<RoomQuery> = serde_json::from_value(value).map_err(|_| {
             PyValueError::new_err("rooms must contain row_id and supported region fields")
         })?;

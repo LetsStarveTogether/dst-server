@@ -30,6 +30,23 @@ fn room_with_shards(shards: &[(&str, u16, u16)]) -> (tempfile::TempDir, Arc<Room
         fs::create_dir(root.join(name)).unwrap();
         let save = root.join(name).join(format!("save/session/S_{name}"));
         fs::create_dir_all(&save).unwrap();
+        let index = json!({
+            "session_id": format!("S_{name}"),
+            "server": {},
+            "world": {"options": {
+                "id": "CUSTOM", "name": name, "desc": "",
+                "location": if id == 1 { "forest" } else { "cave" },
+                "overrides": {"task_set": if id == 1 { "default" } else { "cave_default" }},
+            }},
+        });
+        fs::write(
+            root.join(name).join("save/shardindex"),
+            format!(
+                "KLEI     1 return {}",
+                dst_server::lua::render_literal(&index).unwrap()
+            ),
+        )
+        .unwrap();
         for id in 1..=4 {
             fs::write(save.join(format!("{id:010}")), "native-save").unwrap();
             fs::write(
@@ -46,7 +63,14 @@ fn room_with_shards(shards: &[(&str, u16, u16)]) -> (tempfile::TempDir, Arc<Room
     let game = temp.path().join("game.py");
     fs::write(&game, GAME).unwrap();
     fs::set_permissions(&game, fs::Permissions::from_mode(0o700)).unwrap();
-    let room = Room::open(&root, &game, DriverOptions::default(), EventHub::default()).unwrap();
+    let room = Room::open(
+        &root,
+        &game,
+        DriverOptions::default(),
+        EventHub::default(),
+        Default::default(),
+    )
+    .unwrap();
     (temp, room)
 }
 async fn invoke(
@@ -71,6 +95,29 @@ async fn until(room: &Arc<Room>, condition: impl Fn() -> bool) {
                 Phase::Running | Phase::Starting | Phase::Stopping
             )
     );
+}
+
+#[tokio::test]
+async fn repeated_start_and_restart_keep_status_history_bounded() {
+    let (_temp, room) = room();
+    for _ in 0..32 {
+        assert_eq!(
+            invoke(&room, Request::Start {}).await.unwrap()["phase"],
+            "running"
+        );
+    }
+    assert_eq!(
+        invoke(&room, Request::Restart { notice: None })
+            .await
+            .unwrap()["phase"],
+        "running"
+    );
+    let status = invoke(&room, Request::Status {}).await.unwrap();
+    assert_eq!(status["operations"]["last"]["method"], "restart");
+    assert!(status["operations"]["last"]["completed_at_ns"].is_u64());
+    assert!(status["operations"]["last"]["error"].is_null());
+    assert!(serde_json::to_vec(&status).unwrap().len() < 16 * 1024);
+    room.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -99,12 +146,62 @@ async fn start_waits_for_native_sync_during_runtime_and_connection_checks() {
 #[tokio::test]
 async fn invalid_launch_options_fail_before_starting_games() {
     let (temp, room) = room();
-    room.configure_driver_control(json!({"unknown":true}))
+    room.configure_driver_control(json!({"observe_loads":false}))
         .unwrap();
     assert!(invoke(&room, Request::Start {}).await.is_err());
     assert_eq!(room.status().phase, Phase::Failed);
     assert!(!temp.path().join("cluster/Master/native-lifecycle").exists());
     assert!(!temp.path().join("cluster/Caves/native-lifecycle").exists());
+}
+
+#[tokio::test]
+async fn preparation_failure_does_not_reuse_a_previous_driver() {
+    let (temp, room) = room();
+    invoke(&room, Request::Start {}).await.unwrap();
+    let previous_attempt = room
+        .with_lock(|lock| Ok(lock.read_state()?["agent_run"]["attempt_id"].clone()))
+        .unwrap();
+    invoke(&room, Request::Stop { notice: None }).await.unwrap();
+    let stopped = room.with_lock(|lock| lock.read_state()).unwrap();
+    invoke(&room, Request::Stop { notice: None }).await.unwrap();
+    let repeated = room.with_lock(|lock| lock.read_state()).unwrap();
+    assert_eq!(repeated["agent_run"], stopped["agent_run"]);
+    assert_eq!(repeated["recovery"], stopped["recovery"]);
+    room.with_lock(|lock| {
+        assert_eq!(lock.read_state()?["agent_run"]["active"], false);
+        Ok(())
+    })
+    .unwrap();
+    fs::write(
+        temp.path()
+            .join("cluster/mods/dedicated_server_mods_setup.lua"),
+        "ServerModSetup(",
+    )
+    .unwrap();
+    assert!(invoke(&room, Request::Start {}).await.is_err());
+    assert!(room.driver_states().is_empty());
+    room.with_lock(|lock| {
+        let record = dst_server::recovery::load(lock)?.last_failure.unwrap();
+        assert_ne!(json!(record.attempt_id), previous_attempt);
+        assert_eq!(lock.read_state()?["agent_run"]["active"], false);
+        assert_eq!(
+            record.trigger.stage,
+            dst_server::recovery::FailureStage::Prepare
+        );
+        assert!(
+            record
+                .shards
+                .values()
+                .all(|shard| shard.process_id.is_none() && shard.exit.is_none())
+        );
+        assert!(matches!(
+            record.classification,
+            dst_server::recovery::Failure::Unknown
+        ));
+        assert!(record.complete);
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[tokio::test]
@@ -153,9 +250,8 @@ async fn interrupted_stop_finishes_cleanup_and_retains_its_exit_reports() {
         let error = stopping.await.unwrap().unwrap_err();
         assert_eq!(error.code, ErrorCode::Unknown);
         assert!(
-            room.driver_states()
-                .values()
-                .all(|state| !state.running && state.output_drained)
+            room.driver_states().values().all(|state| !state.running
+                && state.exit.as_ref().is_some_and(|exit| exit.output_drained))
         );
         let cleanup: StopResult = if force {
             assert_eq!(error.details["cleanup"]["status"], "failure");
@@ -234,9 +330,8 @@ async fn stop_rejects_abnormal_exits_and_retains_every_shard_report() {
         assert_eq!(room.status().error, Some(error));
         assert!(room.requires_container_restart());
         assert!(
-            room.driver_states()
-                .values()
-                .all(|state| !state.running && state.output_drained)
+            room.driver_states().values().all(|state| !state.running
+                && state.exit.as_ref().is_some_and(|exit| exit.output_drained))
         );
         for pid in pids {
             assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
@@ -275,6 +370,43 @@ async fn repeated_announcements_complete_and_shutdown_cancels_future_notices() {
     sleep(Duration::from_millis(100)).await;
     assert_eq!(fs::read_to_string(&notices).unwrap(), delivered);
     assert!(delivered.lines().count() < 103);
+}
+
+#[tokio::test]
+async fn failed_stop_notice_still_saves_and_reaps_every_shard() {
+    for response in [
+        json!({"ok":false,"error":"lua_error"}),
+        json!({"ok":true,"data":false}),
+    ] {
+        let (temp, room) = room();
+        invoke(&room, Request::Start {}).await.unwrap();
+        let root = temp.path().join("cluster");
+        fs::write(root.join("announce-response.json"), response.to_string()).unwrap();
+        let notice =
+            serde_json::from_value(json!({"template":"stop {remaining}","delay":0.05})).unwrap();
+        invoke(
+            &room,
+            Request::Stop {
+                notice: Some(notice),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!room.requires_container_restart());
+        for name in ["Master", "Caves"] {
+            assert_eq!(
+                fs::read_to_string(root.join(name).join("native-lifecycle")).unwrap(),
+                "start\nshutdown\nshutdown_save\n"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("announcements"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
 }
 
 #[tokio::test]
@@ -325,9 +457,8 @@ async fn stop_countdown_renders_parameters_and_shutdown_cancels_later_notices() 
             }
         );
         assert!(
-            room.driver_states()
-                .values()
-                .all(|state| !state.running && state.output_drained)
+            room.driver_states().values().all(|state| !state.running
+                && state.exit.as_ref().is_some_and(|exit| exit.output_drained))
         );
     }
 }
@@ -427,6 +558,23 @@ async fn stopped_permission_edits_preserve_native_records_without_starting_games
         invoke(&room, Request::Blocklist {}).await.unwrap(),
         json!(["KU_existing", "KU_new"])
     );
+    for (userid, blocked) in [
+        ("KU_existing", true),
+        ("KU_new", true),
+        ("KU_absent", false),
+    ] {
+        assert_eq!(
+            invoke(
+                &room,
+                Request::IsBlocked {
+                    userid: userid.into()
+                }
+            )
+            .await
+            .unwrap(),
+            blocked
+        );
+    }
     for expected in [serde_json::Value::Null, serde_json::Value::Null] {
         assert_eq!(
             invoke(
@@ -441,6 +589,17 @@ async fn stopped_permission_edits_preserve_native_records_without_starting_games
         );
     }
     assert_eq!(fs::read(root.join("blocklist.txt")).unwrap(), existing);
+    assert_eq!(
+        invoke(
+            &room,
+            Request::IsBlocked {
+                userid: "KU_new".into()
+            }
+        )
+        .await
+        .unwrap(),
+        false
+    );
     let timed = invoke(
         &room,
         Request::Ban {
@@ -536,23 +695,23 @@ async fn native_optionals_and_permissions_use_the_master_authority() {
 
 #[tokio::test]
 async fn kick_handles_loading_and_migrating_connections_and_reports_partial_failures() {
-    for scenario in ["loading", "migrating", "partial"] {
+    for (scenario, state, shard) in [
+        ("lobby", "loading", None),
+        ("handshake", "loading", Some("Caves")),
+        ("migrating", "departing", Some("Master")),
+        ("leaving", "departing", Some("Master")),
+        ("partial", "active", Some("Master")),
+    ] {
         let (temp, room) = room();
         let root = temp.path().join("cluster");
         invoke(&room, Request::Start {}).await.unwrap();
-        if scenario == "loading" {
+        if scenario == "lobby" {
+            // Both shards list the lobby client before either has a character.
             fs::write(root.join("player-loading"), "").unwrap();
-            assert_eq!(
-                invoke(
-                    &room,
-                    Request::GetPlayer {
-                        userid: "KU_ABC".into()
-                    }
-                )
-                .await
-                .unwrap()["state"],
-                "loading"
-            );
+            fs::write(root.join("player-handshake"), "").unwrap();
+        } else if scenario == "handshake" {
+            fs::write(root.join("player-location"), "Caves").unwrap();
+            fs::write(root.join("player-handshake"), "").unwrap();
         } else if scenario == "migrating" {
             fs::write(root.join("hold-migration"), "").unwrap();
             invoke(
@@ -565,19 +724,34 @@ async fn kick_handles_loading_and_migrating_connections_and_reports_partial_fail
             )
             .await
             .unwrap();
-            assert_eq!(
-                invoke(
-                    &room,
-                    Request::GetPlayer {
-                        userid: "KU_ABC".into()
-                    }
-                )
-                .await
-                .unwrap()["state"],
-                "migrating"
-            );
+        } else if scenario == "leaving" {
+            fs::write(root.join("player-departing"), "").unwrap();
         } else {
             fs::write(root.join("invalid-kick-Caves"), "").unwrap();
+        }
+        let player = invoke(
+            &room,
+            Request::GetPlayer {
+                userid: "KU_ABC".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(player["state"], state);
+        assert_eq!(player["shard"].as_str(), shard);
+        assert_eq!(player["identity"].is_null(), shard.is_none());
+        assert_eq!(player["player"]["userid"], "KU_ABC");
+        if state != "active" {
+            let error = invoke(
+                &room,
+                Request::Inventory {
+                    userid: "KU_ABC".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::NotReady);
+            assert_eq!(error.details["state"], state);
         }
         let result = invoke(
             &room,
@@ -622,16 +796,12 @@ async fn vote_control_routes_to_master_and_preserves_native_rejections() {
         r#"{"error":{"code":"busy","message":"active vote"}}"#,
     )
     .unwrap();
-    let error = invoke(
-        &room,
-        Request::StartVote {
-            command: "kick".into(),
-            starter_userid: "KU_A".into(),
-            target_userid: Some("KU_B".into()),
-        },
-    )
-    .await
-    .unwrap_err();
+    let start = || Request::StartVote {
+        command: "kick".into(),
+        starter_userid: "KU_A".into(),
+        target_userid: Some("KU_B".into()),
+    };
+    let error = invoke(&room, start()).await.unwrap_err();
     assert_eq!(error.code, ErrorCode::Busy);
     let forwarded: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join("Master.vote-call")).unwrap()).unwrap();
@@ -639,8 +809,98 @@ async fn vote_control_routes_to_master_and_preserves_native_rejections() {
         forwarded["arguments"],
         json!({"command":"kick", "starter_userid":"KU_A", "target_userid":"KU_B"})
     );
+    fs::write(root.join("player-location"), "Caves").unwrap();
+    fs::write(
+        root.join("vote-access.json"),
+        r#"{"error":{"code":"invalid","message":"starter cannot access this command"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        invoke(&room, start()).await.unwrap_err().code,
+        ErrorCode::Invalid
+    );
+    let access: Value =
+        serde_json::from_slice(&fs::read(root.join("Caves.vote-access")).unwrap()).unwrap();
+    assert_eq!(access["userid"], "KU_A");
+    assert_eq!(access["_expected_session_id"], "S_Caves");
+    assert_eq!(access["_expected_generation"], 1);
+    assert!(access["_expected_guid"].as_u64().is_some());
+    fs::write(root.join("vote-access.json"), "42").unwrap();
+    let vote = json!({"enabled":true,"current":{"command":"kick","starter_userid":"KU_A","target_userid":"KU_B"}});
+    fs::write(root.join("vote-response.json"), vote.to_string()).unwrap();
+    assert_eq!(invoke(&room, start()).await.unwrap(), vote);
+    let forwarded: Value =
+        serde_json::from_slice(&fs::read(root.join("Master.vote-call")).unwrap()).unwrap();
+    assert_eq!(forwarded["arguments"]["_checked_command_hash"], 42);
+    assert!(!root.join("Caves.vote-call").exists());
     fs::write(root.join("vote-response.json"), "true").unwrap();
     assert_eq!(invoke(&room, Request::CancelVote {}).await.unwrap(), true);
+    room.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn configuration_field_edits_validate_all_changes_before_writing() {
+    let (temp, room) = room();
+    let before = invoke(&room, Request::ReadConfiguration {}).await.unwrap();
+    let invalid = invoke(
+        &room,
+        Request::EditConfiguration {
+            changes: vec![
+                (
+                    "/cluster/settings/cluster_name".into(),
+                    json!("must not be written"),
+                ),
+                ("/policy/timezone".into(), json!("invalid")),
+            ],
+            unset: vec![],
+        },
+    )
+    .await;
+    assert!(invalid.is_err());
+    assert_eq!(
+        invoke(&room, Request::ReadConfiguration {}).await.unwrap(),
+        before
+    );
+    let permission = temp.path().join("cluster/blocklist.txt");
+    fs::write(&permission, b"KU_banned\xba\xff\n").unwrap();
+    invoke(
+        &room,
+        Request::EditConfiguration {
+            changes: vec![
+                ("/cluster/settings/cluster_name".into(), json!("renamed")),
+                ("/policy/mod_auto_update".into(), json!(false)),
+            ],
+            unset: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read(&permission).unwrap(), b"KU_banned\xba\xff\n");
+    invoke(&room, Request::Start {}).await.unwrap();
+    invoke(
+        &room,
+        Request::EditConfiguration {
+            changes: vec![("/policy/timezone".into(), json!("UTC"))],
+            unset: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        invoke(
+            &room,
+            Request::EditConfiguration {
+                changes: vec![("/cluster/settings/max_players".into(), json!(12))],
+                unset: vec![],
+            }
+        )
+        .await
+        .is_err()
+    );
+    let saved = invoke(&room, Request::ReadConfiguration {}).await.unwrap();
+    assert_eq!(saved["cluster"]["settings"]["cluster_name"], "renamed");
+    assert_eq!(saved["policy"]["timezone"], "UTC");
+    assert_eq!(saved["policy"]["mod_auto_update"], false);
     room.shutdown().await.unwrap();
 }
 
@@ -812,9 +1072,9 @@ async fn room_owns_cancelled_mutation_and_reaps_all_shards() {
         fs::read_to_string(temp.path().join("cluster/executions")).unwrap(),
         "1"
     );
-    assert!(
-        matches!(room.status().operations.last.unwrap().result,Some(Outcome::Success{value}) if value=="captured")
-    );
+    let completed = room.status().operations.last.unwrap();
+    assert!(completed.completed_at_ns.is_some());
+    assert_eq!(completed.error, None);
     let saved = invoke(&room, Request::Save {}).await.unwrap();
     assert_eq!(saved, true);
     let moved = invoke(
@@ -902,17 +1162,20 @@ async fn save_returns_on_acceptance_and_unexpected_shard_exit_stops_the_room() {
     assert!(room.invoke(crash).await.is_err());
     until(&room, || {
         room.status().phase == Phase::Failed
-            && room
-                .driver_states()
-                .values()
-                .all(|state| !state.running && state.output_drained)
+            && room.driver_states().values().all(|state| {
+                !state.running && state.exit.as_ref().is_some_and(|exit| exit.output_drained)
+            })
     })
     .await;
     assert!(room.requires_container_restart());
     let states: Vec<_> = room.driver_states().into_values().collect();
     assert!(states.iter().all(|state| state.failure.is_none()));
     assert!(matches!(
-        dst_server::preloader::classify(&states),
+        room.with_lock(|lock| Ok(dst_server::recovery::load(lock)?
+            .last_failure
+            .unwrap()
+            .classification))
+            .unwrap(),
         dst_server::recovery::Failure::Retryable
     ));
     assert_eq!(
@@ -947,20 +1210,101 @@ async fn stopped_guard_excludes_start_and_cancelled_kill_keeps_cleanup_owned() {
     let _ = request.await;
     until(&room, || {
         room.status().operations.current.is_none()
-            && room
-                .driver_states()
-                .values()
-                .all(|state| !state.running && state.output_drained)
+            && room.driver_states().values().all(|state| {
+                !state.running && state.exit.as_ref().is_some_and(|exit| exit.output_drained)
+            })
     })
     .await;
     assert!(room.requires_container_restart());
 }
 
 #[tokio::test]
+async fn rollback_uses_clock_metadata_only_to_match_days() {
+    let (temp, room) = room();
+    let meta = |shard: &str, id: u64| {
+        temp.path().join(format!(
+            "cluster/{shard}/save/session/S_{shard}/{id:010}.meta"
+        ))
+    };
+    fs::write(meta("Master", 1), "broken").unwrap();
+    fs::copy(meta("Master", 3), meta("Master", 2)).unwrap();
+    fs::write(meta("Caves", 2), "broken").unwrap();
+    fs::remove_file(meta("Master", 4)).unwrap();
+    fs::write(meta("Caves", 4), "broken").unwrap();
+    invoke(&room, Request::Start {}).await.unwrap();
+
+    let catalog = invoke(
+        &room,
+        Request::Snapshots {
+            limit: 4,
+            before: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(catalog["snapshots"][0]["snapshot_id"], 4);
+    assert_eq!(catalog["snapshots"][0]["metadata"], Value::Null);
+    assert_eq!(catalog["snapshots"][1]["metadata"]["day"], 3);
+    assert_eq!(catalog["snapshots"][3]["metadata"], Value::Null);
+    let reset = invoke(&room, Request::Reset {}).await.unwrap();
+    assert_eq!(reset["snapshot_id"], 4);
+    assert_eq!(reset["metadata"], Value::Null);
+    invoke(
+        &room,
+        Request::RollbackToSnapshot {
+            session_id: "S_Master".into(),
+            snapshot_id: 4,
+        },
+    )
+    .await
+    .unwrap();
+    let selected = invoke(&room, Request::Rollback { count: 1 }).await.unwrap();
+    assert_eq!(selected["snapshot_id"], 3);
+    assert_eq!(selected["metadata"]["day"], 3);
+
+    let day = invoke(&room, Request::RollbackToDay { day: 3 })
+        .await
+        .unwrap();
+    assert_eq!(day["snapshot_id"], 3);
+    fs::copy(meta("Caves", 3), meta("Caves", 2)).unwrap();
+    let day = invoke(&room, Request::RollbackToDay { day: 3 })
+        .await
+        .unwrap();
+    assert_eq!(day["snapshot_id"], 2);
+    room.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn reload_confirms_every_generation_session_and_selected_snapshot() {
-    let (_temp, room) = room();
+    let (temp, room) = room();
     invoke(&room, Request::Start {}).await.unwrap();
     let before = room.driver_states();
+    let cave_world = temp
+        .path()
+        .join("cluster/Caves/save/session/S_Caves/0000000004");
+    fs::write(&cave_world, []).unwrap();
+    fs::remove_file(cave_world.with_extension("meta")).unwrap();
+    let error = invoke(
+        &room,
+        Request::RollbackToSnapshot {
+            session_id: "S_Master".into(),
+            snapshot_id: 4,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotFound);
+    fs::write(
+        temp.path()
+            .join("cluster/Master/save/session/S_Master/0000000004"),
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        invoke(&room, Request::Reset {}).await.unwrap_err().code,
+        ErrorCode::NotFound
+    );
+    assert!(!temp.path().join("cluster/reload-request").exists());
     let selected = invoke(&room, Request::RollbackToDay { day: 3 })
         .await
         .unwrap();
@@ -983,6 +1327,52 @@ async fn reload_confirms_every_generation_session_and_selected_snapshot() {
         assert_ne!(state.session_id, before[&name].session_id);
         assert_eq!(state.generation, Some(3));
     }
+    room.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn health_checks_each_native_self_id_and_waits_for_its_ready_peers() {
+    let (temp, room) = room();
+    invoke(&room, Request::Start {}).await.unwrap();
+    let caves = temp.path().join("cluster/Caves");
+    let runtime = caves.join("reload-during-runtime");
+    fs::write(&runtime, "").unwrap();
+    let response = caves.join("connected-shards.json");
+    for (peers, code) in [
+        (
+            json!([{"id":"2","name":"Caves","ready":true}]),
+            ErrorCode::Protocol,
+        ),
+        (
+            json!([{"id":"1","name":"Caves","is_current":true,"ready":true}]),
+            ErrorCode::Conflict,
+        ),
+    ] {
+        fs::write(&response, serde_json::to_vec(&peers).unwrap()).unwrap();
+        assert_eq!(room.refresh_health().await.unwrap_err().code, code);
+    }
+    let peers = json!([
+        {"id":"1","name":"Master","is_current":false,"ready":false},
+        {"id":"2","name":"Caves","is_current":true,"ready":true},
+    ]);
+    fs::write(&response, serde_json::to_vec(&peers).unwrap()).unwrap();
+    let check = {
+        let room = room.clone();
+        tokio::spawn(async move { room.refresh_health().await })
+    };
+    until(&room, || {
+        room.status()
+            .shards
+            .iter()
+            .any(|shard| shard.name == "Caves" && shard.readiness.missing_shards == ["Master"])
+    })
+    .await;
+    fs::remove_file(response).unwrap();
+    check.await.unwrap().unwrap();
+    assert!(
+        runtime.exists(),
+        "health requested runtime again in the same generation"
+    );
     room.shutdown().await.unwrap();
 }
 

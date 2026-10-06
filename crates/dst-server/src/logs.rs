@@ -2,7 +2,6 @@
 
 use std::{
     ffi::OsString,
-    fmt,
     future::{Future, pending},
     os::unix::process::ExitStatusExt,
     path::PathBuf,
@@ -27,7 +26,28 @@ const OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 const DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
-#[derive(Debug)]
+/// Paths relative to a gameplay event's body. Netdata uses `[]` for repeated fields.
+pub const EVENT_USERID_FIELDS: &[&str] = &[
+    "userid",
+    "player.userid",
+    "victim.userid",
+    "afflicter.userid",
+    "attributed_userid",
+    "feeder.userid",
+    "reviver.userid",
+    "giver.userid",
+    "chef_userid",
+    "source.userid",
+    "target.userid",
+    "rift.userid",
+    "starter_userid",
+    "target_userid",
+    "clients[]",
+    "players[].userid",
+];
+
+#[derive(Debug, thiserror::Error)]
+#[error("{} exited with status {returncode}: {diagnostics}", .command[0].to_string_lossy())]
 pub struct LogProcessError {
     pub command: Vec<OsString>,
     pub returncode: i32,
@@ -35,29 +55,11 @@ pub struct LogProcessError {
     pub diagnostics_truncated: bool,
 }
 
-impl fmt::Display for LogProcessError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} exited with status {}: {}",
-            self.command[0].to_string_lossy(),
-            self.returncode,
-            self.diagnostics
-        )
-    }
-}
-impl std::error::Error for LogProcessError {}
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("journal cursor is unavailable for the selected query")]
 pub struct JournalCursorError {
     pub cursor: String,
 }
-impl fmt::Display for JournalCursorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("journal cursor is unavailable for the selected query")
-    }
-}
-impl std::error::Error for JournalCursorError {}
 
 #[derive(Default)]
 struct Diagnostics {
@@ -126,10 +128,20 @@ impl LogOutput {
             };
             // Only this supervisor owns cleanup; cancelling a waiter cannot stop it.
             let (status, terminated) = if interrupted || outcome.is_err() {
-                let cleanup =
-                    terminate_and_reap(&mut child, pid, &mut stdout, &mut stderr, &captured).await;
+                let (status, drained) = tokio::join!(
+                    async {
+                        match exit_status {
+                            // Buffered lines can outlive the reaped process group.
+                            Some(status) => Ok((status, false)),
+                            None => terminate_and_reap(&mut child, pid).await,
+                        }
+                    },
+                    drain_output(&mut stdout, &mut stderr, &captured),
+                );
                 outcome?;
-                cleanup?
+                let status = status?;
+                drained?;
+                status
             } else {
                 (
                     exit_status.expect("completed reader reaped its child"),
@@ -271,33 +283,34 @@ fn signal_group(pid: u32, signal: i32) {
 }
 
 async fn reap(child: &mut Child, pid: u32) -> Result<ExitStatus> {
-    let status = child.wait().await;
+    let status = child.wait().await?;
     // Descendants must not survive the leader or keep its output pipes open.
     signal_group(pid, libc::SIGKILL);
-    Ok(status?)
+    Ok(status)
 }
 
-async fn terminate_and_reap<R: AsyncRead + Unpin, E: AsyncRead + Unpin>(
-    child: &mut Child,
-    pid: u32,
+async fn terminate_and_reap(child: &mut Child, pid: u32) -> Result<(ExitStatus, bool)> {
+    if let Some(status) = child.try_wait()? {
+        signal_group(pid, libc::SIGKILL);
+        return Ok((status, false));
+    }
+    signal_group(pid, libc::SIGTERM);
+    let status = match timeout(CLOSE_TIMEOUT, reap(child, pid)).await {
+        Ok(result) => result?,
+        Err(_) => {
+            signal_group(pid, libc::SIGKILL);
+            child.wait().await?
+        }
+    };
+    Ok((status, true))
+}
+
+async fn drain_output<R: AsyncRead + Unpin, E: AsyncRead + Unpin>(
     stdout: &mut R,
     stderr: &mut E,
     diagnostics: &Mutex<Diagnostics>,
-) -> Result<(ExitStatus, bool)> {
-    let terminated = child.try_wait()?.is_none();
-    if terminated {
-        signal_group(pid, libc::SIGTERM);
-    }
-    let reaped = async {
-        match timeout(CLOSE_TIMEOUT, reap(child, pid)).await {
-            Ok(result) => result,
-            Err(_) => {
-                signal_group(pid, libc::SIGKILL);
-                reap(child, pid).await
-            }
-        }
-    };
-    let drained = timeout(CLOSE_TIMEOUT + Duration::from_millis(100), async {
+) -> Result<()> {
+    timeout(CLOSE_TIMEOUT + Duration::from_millis(100), async {
         let mut sink = tokio::io::sink();
         let (output, errors) = tokio::join!(
             tokio::io::copy(stdout, &mut sink),
@@ -305,11 +318,9 @@ async fn terminate_and_reap<R: AsyncRead + Unpin, E: AsyncRead + Unpin>(
         );
         output?;
         errors
-    });
-    let (status, drained) = tokio::join!(reaped, drained);
-    let status = status?;
-    drained.context("log reader output did not close after termination")??;
-    Ok((status, terminated))
+    })
+    .await
+    .context("log reader output did not close after termination")?
 }
 
 fn check_status(
@@ -340,37 +351,33 @@ pub enum Direction {
     Backward,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct JournalQuery {
-    pub limit: usize,
-    pub direction: Direction,
+    pub limit: Option<usize>,
+    pub direction: Option<Direction>,
     pub cursor: Option<String>,
     pub since: Option<String>,
     pub until: Option<String>,
     pub namespace: Option<String>,
     pub grep: Option<String>,
 }
-impl Default for JournalQuery {
-    fn default() -> Self {
-        Self {
-            limit: 100,
-            direction: Direction::Backward,
-            cursor: None,
-            since: None,
-            until: None,
-            namespace: None,
-            grep: None,
-        }
-    }
-}
 impl JournalQuery {
+    const FOLLOW_LIMIT: usize = 0;
+
     pub fn follow() -> Self {
         Self {
-            direction: Direction::Forward,
-            limit: 0,
+            direction: Some(Direction::Forward),
+            limit: Some(Self::FOLLOW_LIMIT),
             ..Self::default()
         }
+    }
+    pub fn from_value(value: Value) -> Result<Self> {
+        ensure!(value.is_object(), "journal query must be a JSON object");
+        Ok(serde_json::from_value(value)?)
+    }
+    fn page_size(&self) -> usize {
+        self.limit.unwrap_or(100)
     }
     pub fn validate(&self) -> Result<()> {
         for value in [
@@ -455,7 +462,7 @@ impl JournalRecord {
             .unwrap_or_default()
     }
     pub fn unit(&self) -> String {
-        ["UNIT", "_SYSTEMD_UNIT", "_SYSTEMD_USER_UNIT"]
+        ["UNIT", "_SYSTEMD_USER_UNIT", "_SYSTEMD_UNIT"]
             .iter()
             .filter_map(|key| self.fields.get(*key))
             .find(|value| match value {
@@ -533,6 +540,23 @@ pub struct JournalResult {
     pub diagnostics_truncated: bool,
 }
 
+#[derive(Clone, Copy)]
+pub enum JournalUnits<'a> {
+    System(&'a [String]),
+    User(&'a [String]),
+    All { user: bool },
+}
+
+impl<'a> JournalUnits<'a> {
+    pub fn for_manager(user: bool, units: Option<&'a [String]>) -> Self {
+        match units {
+            Some(units) if user => Self::User(units),
+            Some(units) => Self::System(units),
+            None => Self::All { user },
+        }
+    }
+}
+
 pub struct JournalLogs {
     pub executable: PathBuf,
     pub max_record_bytes: usize,
@@ -550,17 +574,13 @@ impl Default for JournalLogs {
 impl JournalLogs {
     pub fn command(
         &self,
-        units: Option<&[String]>,
+        units: Option<JournalUnits<'_>>,
         request: &JournalQuery,
         follow: bool,
     ) -> Result<Vec<OsString>> {
         request.validate()?;
         ensure!(
-            units.is_none_or(|units| !units.is_empty()),
-            "journal logs require at least one explicit unit pattern"
-        );
-        ensure!(
-            !follow || request.direction == Direction::Forward,
+            !follow || request.direction != Some(Direction::Backward),
             "journal follow requires forward direction"
         );
         let mut command = vec![
@@ -569,27 +589,47 @@ impl JournalLogs {
             "--all".into(),
             "--output=json".into(),
         ];
-        let mut seen = std::collections::HashSet::new();
-        for unit in units.unwrap_or_default() {
-            ensure!(valid_unit(unit), "invalid journal unit pattern");
-            if seen.insert(unit) {
-                command.push(format!("--unit={unit}").into());
+        if let Some(scope) = units {
+            let (user, patterns) = match scope {
+                JournalUnits::System(units) => (false, Some(units)),
+                JournalUnits::User(units) => (true, Some(units)),
+                JournalUnits::All { user } => (user, None),
+            };
+            command.push(if user { "--user" } else { "--system" }.into());
+            if let Some(units) = patterns {
+                ensure!(
+                    !units.is_empty(),
+                    "journal logs require at least one explicit unit pattern"
+                );
+                let mut seen = std::collections::HashSet::new();
+                for unit in units {
+                    ensure!(valid_unit(unit), "invalid journal unit pattern");
+                    if seen.insert(unit) {
+                        command.push(format!("--unit={unit}").into());
+                    }
+                }
             }
         }
         if follow {
             command.extend([
                 "--follow".into(),
-                format!("--lines={}", request.limit).into(),
+                format!(
+                    "--lines={}",
+                    request.limit.unwrap_or(JournalQuery::FOLLOW_LIMIT)
+                )
+                .into(),
             ]);
         } else {
-            let count = request
-                .limit
+            let limit = request.page_size();
+            ensure!(limit > 0, "journal query limit must be positive");
+            let direction = request.direction.unwrap_or_default();
+            let count = limit
                 .checked_add(1 + usize::from(request.cursor.is_some()))
                 .context("journal limit is too large")?;
             command.push(
                 format!(
                     "--lines={}{count}",
-                    if request.direction == Direction::Forward {
+                    if direction == Direction::Forward {
                         "+"
                     } else {
                         ""
@@ -597,7 +637,7 @@ impl JournalLogs {
                 )
                 .into(),
             );
-            if request.direction == Direction::Backward {
+            if direction == Direction::Backward {
                 command.push("--reverse".into());
             }
         }
@@ -617,7 +657,7 @@ impl JournalLogs {
 
     pub async fn query(
         &self,
-        units: Option<&[String]>,
+        units: Option<JournalUnits<'_>>,
         request: &JournalQuery,
         completion_timeout: Duration,
     ) -> Result<JournalResult> {
@@ -628,7 +668,7 @@ impl JournalLogs {
     /// Await cancellation and child cleanup before returning an interrupted error.
     pub async fn query_cancellable(
         &self,
-        units: Option<&[String]>,
+        units: Option<JournalUnits<'_>>,
         request: &JournalQuery,
         completion_timeout: Duration,
         cancelled: impl Future<Output = ()>,
@@ -638,6 +678,7 @@ impl JournalLogs {
             "log completion timeout must be positive"
         );
         let command = self.command(units, request, false)?;
+        let limit = request.page_size();
         let output = LogOutput::spawn(
             command,
             self.max_record_bytes,
@@ -659,14 +700,14 @@ impl JournalLogs {
                 let mut count = 0;
                 while let Some(record) = stream.next_record().await? {
                     count += 1;
-                    if records.len() < request.limit {
+                    if records.len() < limit {
                         records.push(record);
                     }
                 }
                 Ok(JournalResult {
                     next_cursor: records.last().map(|record| record.cursor().to_owned()),
                     records,
-                    has_more: count > request.limit,
+                    has_more: count > limit,
                     diagnostics: stream.diagnostics(),
                     diagnostics_truncated: stream.diagnostics_truncated(),
                 })
@@ -678,7 +719,7 @@ impl JournalLogs {
 
     pub async fn follow(
         &self,
-        units: Option<&[String]>,
+        units: Option<JournalUnits<'_>>,
         request: &JournalQuery,
     ) -> Result<JournalStream> {
         ensure!(
@@ -974,12 +1015,11 @@ impl NetdataLogs {
             }
         }
         if let Some(userid) = &request.userid {
-            let fields = concat!(
-                "userid|starter_userid|target_userid|clients\\[\\]|",
-                "(?:player|actor|victim|target|initial_target_owner|afflicter|attributed_player|",
-                "reviver|feeder|attacker|redirected|weapon|holder|source|item|rift|trial|last_guard)\\.userid|",
-                "(?:clients|players|voters)\\[\\]\\.userid"
-            );
+            let fields = EVENT_USERID_FIELDS
+                .iter()
+                .map(|field| regex::escape(field))
+                .collect::<Vec<_>>()
+                .join("|");
             command.push(format!("--query=^body\\.(?:{fields})={}$", regex::escape(userid)).into());
         }
         if !request.filters.is_empty() {
@@ -1138,7 +1178,7 @@ fn matched_count(
             since == u64::from(request.since) && Some(until) == request.until.map(u64::from),
             "Netdata summary window does not match the query"
         );
-        return Ok(Some(matched));
+        return Ok((matched >= count).then_some(matched));
     }
     if let Some(until) = request.until {
         let stream = request
@@ -1171,25 +1211,14 @@ mod tests {
     use std::{cell::Cell, pin::Pin, task::Poll};
     use tokio::io::{AsyncWriteExt, ReadBuf};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cleanup_reports_a_pipe_that_does_not_close() -> Result<()> {
-        let mut child = Command::new("true").process_group(0).spawn()?;
-        let pid = child.id().unwrap();
-        timeout(Duration::from_secs(5), child.wait()).await??;
         let (mut writer, mut stderr) = tokio::io::duplex(64);
         writer.write_all(b"last warning").await?;
         let diagnostics = Mutex::new(Diagnostics::default());
-        // The real child is reaped; only the simulated pipe's drain timer remains.
-        tokio::time::pause();
-        let error = terminate_and_reap(
-            &mut child,
-            pid,
-            &mut tokio::io::empty(),
-            &mut stderr,
-            &diagnostics,
-        )
-        .await
-        .unwrap_err();
+        let error = drain_output(&mut tokio::io::empty(), &mut stderr, &diagnostics)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("output did not close"));
         assert_eq!(diagnostics.lock().unwrap().text(), "last warning");
         Ok(())

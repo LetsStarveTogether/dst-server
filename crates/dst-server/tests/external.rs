@@ -45,6 +45,7 @@ fn lobby_row(id: &str) -> Value {
         "fo": false, "lanonly": false, "mods": true, "password": false, "pvp": false,
         "serverpaused": false, "platform": 1, "session": "session-id", "guid": "guid",
         "intent": "social", "steamroom": "steam-room", "season": "dry",
+        "secondaries": {"2": {"id": "2", "__addr": "127.0.0.2", "port": 11000}, "3": {"id": "3"}},
         "future_field": {"integer": 9_007_199_254_740_993_i64, "value": null}})
 }
 
@@ -202,6 +203,7 @@ fn versions_and_lua_players_preserve_source_fields() -> anyhow::Result<()> {
     );
     assert!(versions[0].is_hotfix && versions[0].is_current_release);
     for html in [
+        "<html><title>Maintenance</title></html>".into(),
         "<li class='cCmsRecord_row'>broken</li>".into(),
         VERSION_HTML.replace("06/11/26", "02/29/26"),
         VERSION_HTML.replace("Release</span>", "unknown</span>"),
@@ -263,7 +265,13 @@ fn versions_and_lua_players_preserve_source_fields() -> anyhow::Result<()> {
 async fn endpoints_preserve_strict_data_and_successful_empty_results() -> anyhow::Result<()> {
     let server = Server::start(|request| async move {
         match request.path.as_str() {
-            "/builds" => Response::json(json!({"release": [736958, "736959"]})),
+            "/builds" => Response::json(json!({
+                "release": ["736959", 736958],
+                "updatebeta": [736960, "unknown", "736961", 736959],
+                "empty": [],
+                "unavailable": ["unknown", null, "+800000", -1],
+                "metadata": {"source":"fixture"}
+            })),
             "/versions" => Response {
                 body: VERSION_HTML.as_bytes().to_vec(),
                 ..Response::json(Value::Null)
@@ -296,10 +304,13 @@ async fn endpoints_preserve_strict_data_and_successful_empty_results() -> anyhow
     .await?;
     let client = KleiClient::new(server.config())?;
     assert_eq!(client.get_latest_build("release").await?, 736959);
-    assert_eq!(
-        client.get_latest_build("missing").await.unwrap_err().code,
-        ErrorCode::Protocol
-    );
+    assert_eq!(client.get_latest_build("updatebeta").await?, 736961);
+    for invalid in ["unavailable", "empty", "missing", "metadata"] {
+        assert_eq!(
+            client.get_latest_build(invalid).await.unwrap_err().code,
+            ErrorCode::Protocol
+        );
+    }
     assert_eq!(client.get_versions().await?[0].number, 736959);
     assert_eq!(client.get_regions().await?, ["us-east-1", "eu-central-1"]);
     let lobby = client
@@ -308,6 +319,9 @@ async fn endpoints_preserve_strict_data_and_successful_empty_results() -> anyhow
         .remove(0);
     assert_eq!(lobby.region, Region::UsEast);
     assert_eq!(lobby.connect_code(), "c_connect('127.0.0.1', 10999)");
+    let secondaries = lobby.secondaries.unwrap();
+    assert_eq!(secondaries["2"].addr.unwrap().octets(), [127, 0, 0, 2]);
+    assert!(secondaries["3"].addr.is_none());
     let room = client.room("row-1", Region::UsEast).await?.unwrap();
     assert_eq!(room.players[0].prefab, "workshop-123-character");
     assert_eq!(room.mods_info.unwrap()[1], Value::Null);
@@ -318,6 +332,65 @@ async fn endpoints_preserve_strict_data_and_successful_empty_results() -> anyhow
             .await?
             .is_empty()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn successful_http_responses_must_identify_results_for_the_query() -> anyhow::Result<()> {
+    let server = Server::start(|request| async move {
+        if request.method == "GET" {
+            return Response::json(json!({"error": "unavailable"}));
+        }
+        let payload: Value = serde_json::from_slice(&request.body).unwrap();
+        let id = payload["query"]["__rowId"].as_str().unwrap();
+        let response = match id {
+            "missing-field" => json!({}),
+            "positional" => json!([[]]),
+            "duplicate-field" => {
+                return Response {
+                    body: br#"{"GET":[],"GET":[]}"#.to_vec(),
+                    ..Response::json(Value::Null)
+                };
+            }
+            "different-row" => json!({"GET": [room_row("another-room")]}),
+            "multiple" => json!({"GET": [room_row(id), room_row(id)]}),
+            "different-region" => {
+                let mut row = room_row(id);
+                row["region"] = json!("eu-central-1");
+                json!({"GET": [row]})
+            }
+            _ => unreachable!(),
+        };
+        Response::json(response)
+    })
+    .await?;
+    let client = KleiClient::new(server.config())?;
+    assert_eq!(
+        client.get_regions().await.unwrap_err().code,
+        ErrorCode::Protocol
+    );
+    assert_eq!(
+        client
+            .lobby(Region::UsEast, Platform::Steam)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Protocol
+    );
+    for id in [
+        "missing-field",
+        "positional",
+        "duplicate-field",
+        "different-row",
+        "multiple",
+        "different-region",
+    ] {
+        assert_eq!(
+            client.room(id, Region::UsEast).await.unwrap_err().code,
+            ErrorCode::Protocol,
+            "{id}"
+        );
+    }
     Ok(())
 }
 

@@ -81,8 +81,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -z "$(git status --porcelain)"
           podman build --target distributions --file Containerfile \
             --build-arg SOURCE_REVISION="$GITHUB_SHA" \
+            --build-arg SOURCE_DIRTY=false \
             --build-arg NATIVE_SCRIPTS_REVISION="$(git -C dst-scripts/scripts rev-parse HEAD)" \
             --tag dst-server-distributions .
           container=$(podman create dst-server-distributions /bin/true)
@@ -99,17 +101,7 @@ jobs:
           cargo build --locked -p dst-server --example rpc_fixture
           uv venv .wheel-check
           uv pip install --python .wheel-check/bin/python --no-deps dist/python/*.whl
-          .wheel-check/bin/python -I tests/rust/check_binding.py "$PWD/target/debug/examples/rpc_fixture" "$PWD/dist/native/dst-server-linux-x86_64"
-          for check in tests/rust/check_*.py; do
-            case "$check" in */check_binding.py) continue ;; esac
-            .wheel-check/bin/python -I "$check"
-          done
-          for check in tests/rust/check_*_cli.py; do
-            .wheel-check/bin/python -I "$check" "$PWD/dist/native/dst-server-linux-x86_64"
-          done
-          .wheel-check/bin/dst-server --version
-          dist/native/dst-server-linux-x86_64 --version
-          dist/native/dst-server-linux-x86_64 describe > /dev/null
+          sh tests/rust/run_sdk_checks.sh .wheel-check/bin/python "$PWD/target/debug/examples/rpc_fixture" "$PWD/dist/native/dst-server-linux-x86_64"
 
       - name: Upload release distributions and manifest
         uses: actions/upload-artifact@v7
@@ -159,6 +151,8 @@ jobs:
     environment:
       name: testpypi
       url: https://test.pypi.org/project/dst-server/
+    env:
+      PACKAGE_INDEX: https://test.pypi.org/simple/
     permissions:
       id-token: write
     steps:
@@ -167,6 +161,16 @@ jobs:
         with:
           name: release-distributions
           path: dist
+
+      - &setup-publish-check
+        name: Set up uv for distribution checks
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: false
+
+      - &check-distributions
+        name: Check matching distributions in the index
+        run: uv publish --dry-run --no-cache --trusted-publishing never --check-url "$PACKAGE_INDEX" dist/python/*
 
       - name: Publish package distributions to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -186,8 +190,9 @@ jobs:
     environment:
       name: pypi
       url: https://pypi.org/project/dst-server/
+    env:
+      PACKAGE_INDEX: https://pypi.org/simple/
     permissions:
-      contents: write
       id-token: write
     steps:
       - name: Download distributions
@@ -196,11 +201,23 @@ jobs:
           name: release-distributions
           path: dist
 
+      - *setup-publish-check
+      - *check-distributions
+
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/python
+          skip-existing: true
 
+  publish-github:
+    name: Publish GitHub release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    needs: [verify-tag, publish-pypi]
+    permissions:
+      contents: write
+    steps:
       - name: Publish GitHub draft release
         uses: ncipollo/release-action@v1
         with:

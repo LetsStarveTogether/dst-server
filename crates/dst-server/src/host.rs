@@ -1,6 +1,6 @@
 //! Host lifecycle and configuration access through one room Agent and one service.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -12,9 +12,9 @@ use tokio::process::Command;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
 use crate::{
-    deployment::{ContainerUnit, PortAllocation, validate_real_directory},
+    deployment::{ContainerUnit, PortAllocation},
     files::{self, PermissionFiles, RoomLock},
-    logs::{JournalLogs, JournalQuery, JournalResult, JournalStream},
+    logs::{JournalLogs, JournalQuery, JournalResult, JournalStream, JournalUnits},
     model::{Envelope, Request, Target},
     policy::{ModPhase, Policy, PolicyState},
     recovery,
@@ -22,6 +22,8 @@ use crate::{
     rpc::Client,
     settings::ClusterConfig,
 };
+
+mod status;
 
 pub const DEFAULT_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(900);
 pub const AGENT_SOCKET: &str = ".dst-agent.sock";
@@ -202,6 +204,19 @@ fn validate_service(unit: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn applied_error(
+    number: u16,
+    stage: &str,
+    cause: impl std::fmt::Display,
+) -> anyhow::Error {
+    crate::model::Error::new(
+        crate::model::ErrorCode::PartialFailure,
+        format!("room {number:03} change was applied, {stage} failed: {cause}"),
+    )
+    .with_details(json!({"number":number, "applied":true, "stage":stage}))
+    .into()
+}
+
 pub struct Host {
     pub rooms: RoomStore,
     pub quadlet_dir: PathBuf,
@@ -223,9 +238,36 @@ impl Host {
     pub fn unit(number: u16) -> String {
         format!("dst-{number:03}.service")
     }
+    /// Discover managed services even when their native room files need repair.
+    pub fn managed_numbers(&self) -> Result<Vec<u16>> {
+        if !self.quadlet_dir.try_exists()? {
+            return Ok(Vec::new());
+        }
+        crate::deployment::validate_real_directory(&self.quadlet_dir)?;
+        let mut numbers = Vec::new();
+        for entry in std::fs::read_dir(&self.quadlet_dir)? {
+            let name = entry?.file_name();
+            let Some(digits) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix("dst-"))
+                .and_then(|name| name.strip_suffix(".container"))
+            else {
+                continue;
+            };
+            if digits.len() != 3 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            let number: u16 = digits.parse()?;
+            if number <= crate::rooms::MAX_ROOM_SLOT && self.managed_unit(number).is_ok() {
+                numbers.push(number);
+            }
+        }
+        numbers.sort_unstable();
+        Ok(numbers)
+    }
+
     pub fn units(&self, number: u16) -> Result<Vec<String>> {
-        self.rooms.path(number)?;
-        Ok(vec![Self::unit(number)])
+        self.units_for(&[number])
     }
     pub async fn connect(&self, number: u16) -> Result<Client> {
         Ok(Client::connect(self.rooms.path(number)?.join(AGENT_SOCKET)).await?)
@@ -235,24 +277,26 @@ impl Host {
         if crate::permissions::supports_offline(&request)
             && !self.systemd.status(&Self::unit(number)).await?.running()
         {
-            let mut lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
-            self.require_inactive(number).await?;
+            let mut lock = self.lock_inactive(number).await?;
             return crate::permissions::apply(&mut lock.while_stopped(), &request);
         }
         if matches!(
             request,
             Request::Restart { .. } | Request::UpdateMods { .. }
         ) {
-            ContainerUnit::load_for_room(
-                self.quadlet_dir.join(format!("dst-{number:03}.container")),
-                &self.rooms.path(number)?,
-            )?;
+            self.managed_unit(number)?.check_native_ports()?;
         }
         let client = self.connect(number).await?;
+        let mutating = request.mutating();
         let result = client.call(Envelope::new(Target::Room, request)?).await;
         let closed = client.close().await;
         let value = result?;
-        closed?;
+        if let Err(error) = closed {
+            if mutating {
+                return Err(applied_error(number, "connection_close", error));
+            }
+            return Err(error.into());
+        }
         Ok(value)
     }
     pub async fn load(&self, number: u16) -> Result<Room> {
@@ -260,119 +304,59 @@ impl Host {
         if !state.running() {
             return self.rooms.load(number);
         }
-        let configuration = self.call(number, Request::ReadConfiguration {}).await?;
+        self.load_online(number, &self.managed_unit(number)?).await
+    }
+
+    fn managed_unit(&self, number: u16) -> Result<ContainerUnit> {
+        let directory = self.rooms.path(number)?;
+        let path = self.quadlet_dir.join(format!("dst-{number:03}.container"));
+        ensure!(
+            path.try_exists()?,
+            "no managed Quadlet for room {number:03} in {}",
+            self.quadlet_dir.display()
+        );
+        ContainerUnit::load_for_room(path, &directory)
+    }
+
+    async fn load_online(&self, number: u16, unit: &ContainerUnit) -> Result<Room> {
+        let mut configuration = self.call(number, Request::ReadConfiguration {}).await?;
         let mut room = Room::new(
             number,
-            ClusterConfig::from_value(configuration["cluster"].clone())?,
+            ClusterConfig::from_value(configuration["cluster"].take())?,
         )?;
-        if let Some(policy) = configuration.get("policy") {
-            room.policy = serde_json::from_value(policy.clone())?;
-        }
-        room.template = configuration
-            .get("template")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        room.deployment = ContainerUnit::load_for_room(
-            self.quadlet_dir.join(format!("dst-{number:03}.container")),
-            &self.rooms.path(number)?,
-        )?
-        .options;
+        room.policy = serde_json::from_value(
+            configuration
+                .get_mut("policy")
+                .context("missing configuration.policy")?
+                .take(),
+        )
+        .context("invalid configuration.policy")?;
+        room.template = serde_json::from_value(configuration["template"].take())?;
+        unit.check_ports(crate::deployment::configured_ports(&room.cluster)?)?;
+        room.deployment = unit.options.clone();
         room.validate()?;
         Ok(room)
     }
-    pub async fn status(&self, number: u16, game: bool) -> Result<Value> {
-        let directory = self.rooms.path(number)?;
-        let mut state = self.systemd.status(&Self::unit(number)).await?;
-        let mut error = None;
-        let mut configuration_error = None;
-        let mut desired = None;
-        let mut policy = Value::Null;
-        let mut schedule = Value::Null;
-        let mut maintenance = Value::Null;
-        let mut recovery = Value::Null;
-        if !state.running() {
-            if self.rooms.load(number).is_err() {
-                configuration_error = Some("room configuration could not be loaded".to_owned());
-            }
-            let durable = (|| -> Result<_> {
-                let lock = RoomLock::try_acquire(&directory)?;
-                let policy = Policy::load(&lock)?;
-                let schedule = policy.schedule_at(chrono::Utc::now())?;
-                Ok((
-                    policy,
-                    schedule,
-                    PolicyState::load(&lock)?,
-                    recovery::load(&lock)?,
-                ))
-            })();
-            match durable {
-                Ok((saved_policy, saved_schedule, saved_state, saved_recovery)) => {
-                    desired = Some(saved_schedule.open);
-                    policy = serde_json::to_value(saved_policy)?;
-                    schedule = serde_json::to_value(saved_schedule)?;
-                    maintenance = serde_json::to_value(saved_state.mods)?;
-                    recovery = serde_json::to_value(saved_recovery)?;
-                }
-                Err(_) => {
-                    configuration_error = Some("room control state could not be loaded".into())
-                }
-            }
-            if configuration_error.is_some() {
-                let current = self.systemd.status(&Self::unit(number)).await?;
-                if current.running() {
-                    state = current;
-                    configuration_error = None;
-                }
-            }
-        }
-        let mut agent = Value::Null;
-        if game && state.running() {
-            match timeout(
-                Duration::from_secs(5),
-                self.call(number, Request::Status {}),
-            )
-            .await
-            {
-                Ok(Ok(value)) => {
-                    policy = value["agent"]["policy"].clone();
-                    schedule = value["agent"]["schedule"].clone();
-                    maintenance = value["agent"]["maintenance"].clone();
-                    recovery = value["agent"]["recovery"].clone();
-                    desired = schedule["open"].as_bool();
-                    agent = value;
-                }
-                Ok(Err(failure)) => error = Some(failure.to_string()),
-                Err(_) => error = Some("Agent status timed out".into()),
-            }
-        }
-        if !state.running() {
-            if !recovery["closed"].is_null() {
-                error = Some(format!(
-                    "room recovery is exhausted or unsafe: {}",
-                    recovery["closed"]
-                ));
-            } else if maintenance["phase"]["state"] == "failed" {
-                error = Some("Mod maintenance exhausted three attempts".into());
-            }
-        }
-        // Native configuration failures do not hide service state or diagnostic access.
-        if !directory.is_dir() {
-            configuration_error = Some("room directory is missing".into());
-        }
-        Ok(
-            json!({"number":number,"desired":desired,"running":state.running(),"load":state.load,"active":state.active,"sub":state.sub,"job_id":state.job_id,"units":{Self::unit(number):state},"game":agent,"policy":policy,"schedule":schedule,"maintenance":maintenance,"recovery":recovery,"error":error.or_else(||configuration_error.clone()),"configuration_error":configuration_error}),
-        )
+    fn units_for(&self, numbers: &[u16]) -> Result<Vec<String>> {
+        numbers
+            .iter()
+            .map(|&number| {
+                self.rooms.path(number)?;
+                Ok(Self::unit(number))
+            })
+            .collect()
+    }
+    fn journal_scope<'a>(&self, units: &'a [String]) -> JournalUnits<'a> {
+        JournalUnits::for_manager(self.systemd.user, Some(units))
     }
     pub async fn journal(&self, numbers: &[u16], query: &JournalQuery) -> Result<JournalResult> {
-        let units = numbers
-            .iter()
-            .map(|number| self.units(*number))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+        let units = self.units_for(numbers)?;
         self.journals
-            .query(Some(&units), query, Duration::from_secs(30))
+            .query(
+                Some(self.journal_scope(&units)),
+                query,
+                Duration::from_secs(30),
+            )
             .await
     }
     pub async fn follow_journal(
@@ -380,19 +364,15 @@ impl Host {
         numbers: &[u16],
         query: &JournalQuery,
     ) -> Result<JournalStream> {
-        let units = numbers
-            .iter()
-            .map(|number| self.units(*number))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        self.journals.follow(Some(&units), query).await
+        let units = self.units_for(numbers)?;
+        self.journals
+            .follow(Some(self.journal_scope(&units)), query)
+            .await
     }
     pub async fn diagnose(&self, number: u16) -> Result<Value> {
         let mut status = self.status(number, true).await?;
         let query = JournalQuery {
-            limit: 50,
+            limit: Some(50),
             ..Default::default()
         };
         match self.journal(&[number], &query).await {
@@ -403,6 +383,17 @@ impl Host {
     }
     pub async fn create(&self, definition: &Room) -> Result<Room> {
         definition.validate()?;
+        self.create_files(definition, &BTreeSet::new()).await?;
+        self.reload_after_write(definition.number).await?;
+        self.rooms
+            .load(definition.number)
+            .map_err(|e| applied_error(definition.number, "readback", e))
+    }
+    pub(crate) async fn create_files(
+        &self,
+        definition: &Room,
+        batch_ports: &BTreeSet<u16>,
+    ) -> Result<()> {
         let directory = self.rooms.path(definition.number)?;
         files::create_directory(self.rooms.root())?;
         files::create_directory(&self.quadlet_dir)?;
@@ -421,17 +412,20 @@ impl Host {
             "deployment already exists"
         );
         self.require_inactive(definition.number).await?;
-        self.save_locked(definition, &mut lock)?;
-        drop(lock);
-        self.systemd.reload().await?;
-        self.rooms.load(definition.number)
+        self.save_locked(
+            definition,
+            &mut lock,
+            PermissionFiles::ReplaceOffline,
+            batch_ports,
+        )
     }
     pub async fn edit(&self, definition: &Room) -> Result<Room> {
         definition.validate()?;
         let number = definition.number;
         let state = self.systemd.status(&Self::unit(number)).await?;
         if state.running() {
-            let current = self.load(number).await?;
+            let unit = self.managed_unit(number)?;
+            let current = self.load_online(number, &unit).await?;
             ensure!(
                 current.deployment == definition.deployment,
                 "deployment changes require an inactive room service"
@@ -440,49 +434,124 @@ impl Host {
                 current.template == definition.template,
                 "template changes require an inactive room service"
             );
-            if current.cluster.as_value() != definition.cluster.as_value() {
-                self.call(
-                    number,
-                    Request::Configure {
-                        configuration: definition.cluster.as_value().clone(),
-                        replace_permissions: false,
-                    },
-                )
-                .await?;
+            let mut changes = Vec::new();
+            let cluster = crate::rooms::without_permissions(definition.cluster.as_value());
+            if crate::rooms::without_permissions(current.cluster.as_value()) != cluster {
+                changes.push(("/cluster".into(), cluster));
             }
             if current.policy != definition.policy {
-                self.call(
-                    number,
-                    Request::SetPolicy {
-                        policy: serde_json::to_value(&definition.policy)?,
-                    },
-                )
-                .await?;
+                changes.push(("/policy".into(), serde_json::to_value(&definition.policy)?));
             }
-
-            return self.load(number).await;
+            if changes.is_empty() {
+                return Ok(current);
+            }
+            return self.edit_online(number, &unit, changes, Vec::new()).await;
         }
-        let mut lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
-        self.require_inactive(number).await?;
+        let lock = self.lock_inactive(number).await?;
         ensure!(
             lock.read_optional_text("cluster.ini")?.is_some(),
             "room does not exist"
         );
-        self.save_locked(definition, &mut lock)?;
-        drop(lock);
-        self.systemd.reload().await?;
-        self.rooms.load(number)
+        self.finish_offline_edit(definition.clone(), lock, false)
+            .await
     }
-    fn save_locked(&self, definition: &Room, lock: &mut RoomLock) -> Result<()> {
-        validate_real_directory(&self.quadlet_dir)?;
-        // Preflight the complete native unit before changing the game files.
-        let allocation = PortAllocation::reserve(
-            self.rooms.root(),
+    pub async fn edit_fields(
+        &self,
+        number: u16,
+        changes: &[(String, Value)],
+        unset: &[String],
+    ) -> Result<Room> {
+        self.rooms.path(number)?;
+        if self.systemd.status(&Self::unit(number)).await?.running() {
+            return self
+                .edit_online(
+                    number,
+                    &self.managed_unit(number)?,
+                    changes.to_vec(),
+                    unset.to_vec(),
+                )
+                .await;
+        }
+        let lock = self.lock_inactive(number).await?;
+        let definition = self
+            .rooms
+            .load_for_edit(number, &lock)?
+            .edited(changes, unset)?;
+        let explicit_ports = changes
+            .iter()
+            .map(|(path, _)| path)
+            .chain(unset)
+            .any(|path| {
+                matches!(path.as_str(), "/deployment" | "/deployment/ports")
+                    || path.starts_with("/deployment/ports/")
+            });
+        self.finish_offline_edit(definition, lock, explicit_ports)
+            .await
+    }
+
+    async fn edit_online(
+        &self,
+        number: u16,
+        unit: &ContainerUnit,
+        changes: Vec<(String, Value)>,
+        unset: Vec<String>,
+    ) -> Result<Room> {
+        self.call(number, Request::EditConfiguration { changes, unset })
+            .await?;
+        self.load_online(number, unit)
+            .await
+            .map_err(|e| applied_error(number, "readback", e))
+    }
+
+    async fn finish_offline_edit(
+        &self,
+        mut definition: Room,
+        mut lock: RoomLock,
+        explicit_ports: bool,
+    ) -> Result<Room> {
+        if !explicit_ports
+            && let Some(unit) = self.rooms.deployment(definition.number, lock.directory())?
+            && (definition.deployment.ports.is_empty()
+                || definition.deployment.ports == unit.options.ports)
+        {
+            definition.deployment.ports = unit.retained_ports(&definition.cluster)?;
+        }
+        self.save_locked(
+            &definition,
+            &mut lock,
+            PermissionFiles::Preserve,
+            &BTreeSet::new(),
+        )?;
+        let saved = self
+            .rooms
+            .load_locked(definition.number, &lock)
+            .map_err(|e| applied_error(definition.number, "readback", e));
+        drop(lock);
+        self.reload_after_write(definition.number).await?;
+        saved
+    }
+
+    async fn reload_after_write(&self, number: u16) -> Result<()> {
+        self.systemd
+            .reload()
+            .await
+            .map_err(|e| applied_error(number, "daemon_reload", e))
+    }
+
+    fn save_locked(
+        &self,
+        definition: &Room,
+        lock: &mut RoomLock,
+        permissions: PermissionFiles,
+        batch_ports: &BTreeSet<u16>,
+    ) -> Result<()> {
+        let allocation = PortAllocation::reserve_for_batch(
             &self.quadlet_dir,
             definition.number,
             &definition.cluster,
             &definition.deployment.ports,
             self.port_pool.clone(),
+            batch_ports,
         )?;
         let mut options = definition.deployment.clone();
         options.ports = allocation.mappings.clone();
@@ -492,18 +561,26 @@ impl Host {
             &definition.cluster,
             options,
         )?;
-        unit.validate_update(&self.quadlet_dir)?;
+        let prepared = unit.prepare_save(&self.quadlet_dir)?;
         lock.read_state()?;
-        {
-            let mut stopped = lock.while_stopped();
-            definition
-                .cluster
-                .save(&mut stopped, PermissionFiles::Preserve)?;
-        }
-        crate::rooms::save_policy(lock, definition)?;
-        unit.save(&self.quadlet_dir)?;
+        definition
+            .cluster
+            .save(&mut lock.while_stopped(), permissions)?;
+        crate::rooms::save_definition_fields(lock, definition)?;
+        prepared.publish().map_err(|error| {
+            applied_error(
+                definition.number,
+                "quadlet_publish",
+                format_args!("native configuration and policy are on disk. Check the Quadlet before starting the room. {error}"),
+            )
+        })?;
         drop(allocation);
         Ok(())
+    }
+    async fn lock_inactive(&self, number: u16) -> Result<RoomLock> {
+        let lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
+        self.require_inactive(number).await?;
+        Ok(lock)
     }
     async fn require_inactive(&self, number: u16) -> Result<()> {
         ensure!(
@@ -535,16 +612,13 @@ impl Host {
             .context("lifecycle timeout is out of range")?;
         timeout_at(deadline, async {
             let unit = Self::unit(number);
+            let deployment = self.managed_unit(number)?;
             if action != "stop" {
-                ContainerUnit::load_for_room(
-                    self.quadlet_dir.join(format!("dst-{number:03}.container")),
-                    &self.rooms.path(number)?,
-                )?;
+                deployment.check_native_ports()?;
                 self.systemd.reload().await?;
                 let state = self.systemd.status(&unit).await?;
-                if !state.running() {
-                    let mut lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
-                    self.require_inactive(number).await?;
+                if action == "start" && !state.running() {
+                    let mut lock = self.lock_inactive(number).await?;
                     let all_day = Policy::load(&lock)?
                         .schedule_at(chrono::Utc::now())?
                         .next_change
@@ -555,8 +629,8 @@ impl Host {
                     self.systemd.reset_failed(&unit).await?;
                 }
                 if action == "start" && state.running() {
-                    let status = self.status(number, true).await?;
-                    if !status["recovery"]["closed"].is_null() {
+                    let status = self.observe(number, true).await?;
+                    if status.recovery_closed() {
                         self.call(number, Request::Start {}).await?;
                     }
                 }
@@ -579,7 +653,12 @@ impl Host {
                 .await?;
             let state = &states[&unit];
             if action == "stop" {
-                ensure!(!state.running(), "room service did not stop");
+                ensure!(
+                    state.active == "inactive" && state.result == "success",
+                    "{unit} did not stop cleanly: ActiveState={}, Result={}",
+                    state.active,
+                    state.result
+                );
                 return self.status(number, false).await;
             }
             self.wait_ready(number, deadline.saturating_duration_since(Instant::now()))
@@ -594,30 +673,9 @@ impl Host {
         ensure!(!duration.is_zero(), "readiness timeout must be positive");
         timeout(duration, async {
             loop {
-                let status = self.status(number, true).await?;
-                require_no_failure(&status)?;
-                ensure!(
-                    status["recovery"]["closed"].is_null(),
-                    "room recovery is exhausted or unsafe: {}",
-                    status["recovery"]["closed"]
-                );
-                if status["running"] == false {
-                    bail!("room Agent service is stopped");
-                }
-                if !status["game"].is_null() {
-                    let game = &status["game"];
-                    ensure!(game["phase"] != "failed", "room games failed to start");
-                    let shards: Vec<crate::model::ShardStatus> =
-                        serde_json::from_value(game["shards"].clone())?;
-                    if game["agent"]["ready"] == true
-                        && !shards.is_empty()
-                        && (shards.iter().all(|shard| shard.readiness.ready())
-                            || status["desired"] == false
-                                && game["phase"] == "stopped"
-                                && shards.iter().all(|shard| !shard.readiness.process_running))
-                    {
-                        return Ok(status);
-                    }
+                let status = self.observe(number, true).await?;
+                if status.ready()? {
+                    return Ok(status.report());
                 }
                 sleep(Duration::from_millis(200)).await;
             }
@@ -657,56 +715,29 @@ impl Host {
             if state.running() {
                 self.call(number, request).await?;
             } else {
-                ContainerUnit::load_for_room(
-                    self.quadlet_dir.join(format!("dst-{number:03}.container")),
-                    &self.rooms.path(number)?,
-                )?;
+                self.managed_unit(number)?.check_native_ports()?;
                 {
-                    let mut lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
-                    self.require_inactive(number).await?;
+                    let mut lock = self.lock_inactive(number).await?;
                     let mut policy_state = PolicyState::load(&lock)?;
-                    ensure!(
-                        matches!(policy_state.mods.phase, ModPhase::Idle | ModPhase::Failed),
-                        "Mod maintenance is already pending"
-                    );
                     policy_state.queue_mod_update(restart)?;
                     policy_state.save(&mut lock)?;
                 }
-                self.systemd.reload().await?;
+                self.reload_after_write(number).await?;
                 if state.active == "failed" {
-                    self.systemd.reset_failed(&unit).await?;
+                    self.systemd
+                        .reset_failed(&unit)
+                        .await
+                        .map_err(|e| applied_error(number, "reset_failed", e))?;
                 }
-                self.systemd.start(&unit).await?;
+                self.systemd
+                    .start(&unit)
+                    .await
+                    .map_err(|e| applied_error(number, "start", e))?;
             }
             loop {
-                let status = self.status(number, true).await?;
-                require_no_failure(&status)?;
-                if status["maintenance"]["phase"]["state"] == "idle" {
-                    if status["running"] == false {
-                        ensure!(!restart, "room Agent service stopped after Mod maintenance");
-                        return Ok(json!({"updated":true,"restarted":false}));
-                    }
-                    if restart && !status["game"].is_null() {
-                        ensure!(
-                            status["desired"] == false || status["recovery"]["closed"].is_null(),
-                            "Mods updated, but room recovery remains closed: {}",
-                            status["recovery"]["closed"]
-                        );
-                        let shards: Vec<crate::model::ShardStatus> =
-                            serde_json::from_value(status["game"]["shards"].clone())?;
-                        if status["desired"] == false
-                            && status["game"]["agent"]["ready"] == true
-                            && status["game"]["agent"]["requires_container_restart"] == false
-                            && !shards.is_empty()
-                            && shards.iter().all(|shard| !shard.readiness.process_running)
-                        {
-                            return Ok(json!({"updated":true,"restarted":false}));
-                        }
-                        if !shards.is_empty() && shards.iter().all(|shard| shard.readiness.ready())
-                        {
-                            return Ok(json!({"updated":true,"restarted":true}));
-                        }
-                    }
+                let status = self.observe(number, true).await?;
+                if let Some(result) = status.completed_mod_update(restart)? {
+                    return Ok(result);
                 }
                 sleep(Duration::from_millis(200)).await;
             }
@@ -725,24 +756,11 @@ impl Host {
             )
             .await?;
         } else {
-            let mut lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
-            self.require_inactive(number).await?;
+            let mut lock = self.lock_inactive(number).await?;
             policy.save(&mut lock)?;
         }
         Ok(())
     }
-}
-
-fn require_no_failure(status: &Value) -> Result<()> {
-    if let Some(error) = status["configuration_error"].as_str() {
-        bail!("{error}");
-    }
-    ensure!(status["active"] != "failed", "room service failed");
-    ensure!(
-        status["maintenance"]["phase"]["state"] != "failed",
-        "Mod maintenance exhausted three attempts"
-    );
-    Ok(())
 }
 
 #[cfg(test)]
@@ -780,6 +798,280 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn offline_edits_keep_each_shards_game_and_query_host_ports() {
+        use crate::deployment::PortMapping;
+
+        let (_temporary, host) = offline_host().await;
+        let directory = host.rooms.path(1).unwrap();
+        let ini = directory.join("cluster.ini");
+        let without_key = std::fs::read_to_string(&ini)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with("cluster_key ="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&ini, without_key).unwrap();
+        assert!(crate::configuration::discover(&directory).is_err());
+        host.rooms.save(&host.load(1).await.unwrap()).unwrap();
+        assert!(crate::configuration::discover(&directory).is_ok());
+
+        let port = |room: &Room, container: u16| {
+            room.deployment
+                .ports
+                .iter()
+                .find(|port| port.container == container)
+                .unwrap()
+                .host
+        };
+        let mut room = host.load(1).await.unwrap();
+        let fixed = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        room.deployment.ports = vec![PortMapping {
+            container: 10999,
+            host: fixed,
+        }];
+        let room = host.edit(&room).await.unwrap();
+        let query = port(&room, 27016);
+        assert_eq!(port(&room, 10999), fixed);
+
+        let game_field = "/cluster/shards/forest/settings/server_port";
+        let query_field = "/cluster/shards/forest/settings/master_server_port";
+        let swapped = room
+            .edit_many(
+                &[(game_field, json!(27016)), (query_field, json!(10999))],
+                &[],
+            )
+            .unwrap();
+        assert!(host.rooms.save(&swapped).is_err());
+        let change_deployment = room
+            .edit("/deployment/start_on_boot", json!(false), false)
+            .unwrap();
+        assert!(host.rooms.save(&change_deployment).is_err());
+        assert_eq!(host.load(1).await.unwrap().get(game_field).unwrap(), 10999);
+
+        let swapped = host.edit(&swapped).await.unwrap();
+        assert_eq!(
+            (port(&swapped, 27016), port(&swapped, 10999)),
+            (fixed, query)
+        );
+        let edited = host
+            .edit_fields(
+                1,
+                &[(game_field.into(), json!(19388))],
+                &["/cluster/shards/cave".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited.deployment.ports.len(), 2);
+        assert_eq!((port(&edited, 19388), port(&edited, 10999)), (fixed, query));
+        assert_eq!(
+            host.managed_unit(1).unwrap().published_game_ports,
+            [("forest".into(), fixed)].into()
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_field_edits_keep_the_requested_mapping_when_shard_ports_swap() {
+        let (_temporary, host) = offline_host().await;
+        let game = "/cluster/shards/forest/settings/server_port";
+        let query = "/cluster/shards/forest/settings/master_server_port";
+        let mut room = host.load(1).await.unwrap();
+        let published = |room: &Room| {
+            room.deployment
+                .ports
+                .iter()
+                .map(|port| (port.container, port.host))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let requested = published(&room);
+        for path in [
+            "/deployment/ports",
+            "/deployment/ports/0/host",
+            "/deployment",
+        ] {
+            let changes = [
+                (game.into(), room.get(query).unwrap()),
+                (query.into(), room.get(game).unwrap()),
+                (path.into(), room.get(path).unwrap()),
+            ];
+            room = host.edit_fields(1, &changes, &[]).await.unwrap();
+            assert_eq!(published(&room), requested, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn native_port_drift_blocks_start_and_both_offline_edits_can_repair_it() {
+        let (_temporary, host) = offline_host().await;
+        let native = RoomStore::new(host.rooms.root());
+        let field = "/cluster/shards/forest/settings/server_port";
+        let initial = host.managed_unit(1).unwrap().published_game_ports;
+        for (port, restore_definition) in [(19388, false), (19389, true)] {
+            let before = host.load(1).await.unwrap();
+            let changed = native
+                .load(1)
+                .unwrap()
+                .edit(field, json!(port), false)
+                .unwrap();
+            native.save(&changed).unwrap();
+            let status = host.status(1, false).await.unwrap();
+            assert!(
+                status["configuration_error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("host edit")
+            );
+            assert!(
+                host.load(1)
+                    .await
+                    .unwrap_err()
+                    .is::<crate::deployment::PublishedPortMismatch>()
+            );
+            assert!(
+                host.start(1, false, Duration::from_secs(2))
+                    .await
+                    .unwrap_err()
+                    .is::<crate::deployment::PublishedPortMismatch>()
+            );
+            if restore_definition {
+                host.edit(&before).await.unwrap();
+            } else {
+                host.edit_fields(1, &[(field.into(), json!(port))], &[])
+                    .await
+                    .unwrap();
+            }
+            let room = host.load(1).await.unwrap();
+            assert_eq!(room.get(field).unwrap(), 19388);
+            assert_eq!(host.managed_unit(1).unwrap().published_game_ports, initial);
+            host.start(1, false, Duration::from_secs(2)).await.unwrap();
+        }
+        let before = host.load(1).await.unwrap();
+        let cave = "/cluster/shards/cave/settings/master_server_port";
+        let forest = "/cluster/shards/forest/settings/master_server_port";
+        let changes = [
+            (cave.into(), before.get(forest).unwrap()),
+            (forest.into(), before.get(cave).unwrap()),
+        ];
+        let changed = native
+            .load(1)
+            .unwrap()
+            .edited(&changes, &[] as &[String])
+            .unwrap();
+        native.save(&changed).unwrap();
+        assert!(host.status(1, false).await.unwrap()["configuration_error"].is_string());
+        assert!(host.start(1, false, Duration::from_secs(2)).await.is_err());
+        let after = host.edit_fields(1, &changes, &[]).await.unwrap();
+        assert!(
+            before
+                .deployment
+                .ports
+                .iter()
+                .map(|port| port.host)
+                .eq(after.deployment.ports.iter().map(|port| port.host))
+        );
+        host.start(1, false, Duration::from_secs(2)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn offline_field_edits_do_not_overwrite_another_edit() {
+        let (temporary, host) = offline_host().await;
+        let paused = temporary.path().join("paused-systemctl");
+        std::fs::write(&paused, include_str!("../tests/fixtures/edit_systemctl.py")).unwrap();
+        std::fs::set_permissions(&paused, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(temporary.path().join("service-state"), "inactive").unwrap();
+        let mut first = Host::new(host.rooms.root(), &host.quadlet_dir);
+        first.systemd.executable = paused;
+        let editing = tokio::spawn(async move {
+            first
+                .edit_fields(
+                    1,
+                    &[("/cluster/settings/cluster_name".into(), json!("renamed"))],
+                    &[],
+                )
+                .await
+        });
+        timeout(Duration::from_secs(5), async {
+            while !temporary.path().join("waiting").exists() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let changes = [("/cluster/settings/max_players".into(), json!(12))];
+        let second = host.edit_fields(1, &changes, &[]).await;
+        std::fs::write(temporary.path().join("release"), "").unwrap();
+        editing.await.unwrap().unwrap();
+        if second.is_err() {
+            host.edit_fields(1, &changes, &[]).await.unwrap();
+        }
+        let saved = host.load(1).await.unwrap();
+        assert_eq!(
+            saved.get("/cluster/settings/cluster_name").unwrap(),
+            "renamed"
+        );
+        assert_eq!(saved.get("/cluster/settings/max_players").unwrap(), 12);
+    }
+
+    #[tokio::test]
+    async fn offline_edit_and_store_save_cancel_only_applied_mod_participants() {
+        use crate::{mods::UpdateTarget, policy::PolicyState, settings::ClusterConfig};
+        let (_temporary, host) = offline_host().await;
+        let mut room = host.rooms.load(1).unwrap();
+        let mut cluster = room.cluster.clone().into_value();
+        let shards: Vec<_> = cluster["shards"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        for shard in &shards {
+            cluster["shards"][shard]["mods"] = json!({"entries":{"workshop-42":{"enabled":true}}});
+        }
+        room.cluster = ClusterConfig::from_value(cluster).unwrap();
+        host.edit(&room).await.unwrap();
+        let directory = host.rooms.path(1).unwrap();
+        let mut lock = RoomLock::try_acquire(&directory).unwrap();
+        let mut state = PolicyState::default();
+        state.mods.enter_pending();
+        state.mods.phase = ModPhase::Verifying;
+        state.mods.attempts = 1;
+        state.mods.targets = [(
+            42,
+            UpdateTarget {
+                version: "2".into(),
+                shards: shards.iter().cloned().collect(),
+            },
+        )]
+        .into();
+        state.save(&mut lock).unwrap();
+        drop(lock);
+        for (index, shard) in shards.iter().enumerate() {
+            room = host.rooms.load(1).unwrap();
+            let mut cluster = room.cluster.into_value();
+            cluster["shards"][shard]["mods"] = json!({});
+            room.cluster = ClusterConfig::from_value(cluster).unwrap();
+            if index == 0 {
+                host.edit(&room).await.unwrap();
+            } else {
+                host.rooms.save(&room).unwrap();
+            }
+            let lock = RoomLock::try_acquire(&directory).unwrap();
+            let remaining = PolicyState::load(&lock).unwrap();
+            if index + 1 == shards.len() {
+                assert_eq!(remaining.mods, Default::default());
+            } else {
+                assert_eq!(
+                    remaining.mods.targets[&42].shards,
+                    shards[index + 1..].iter().cloned().collect()
+                );
+            }
+            assert_eq!(Policy::load(&lock).unwrap(), room.policy);
+        }
+    }
+
+    #[tokio::test]
     async fn a_closed_schedule_still_requires_a_resident_agent() {
         let (_temporary, host) = offline_host().await;
         host.set_policy(1, &closed_policy()).await.unwrap();
@@ -801,16 +1093,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mismatched_quadlet_cannot_start_a_room_or_queue_maintenance() {
+    async fn mismatched_quadlet_cannot_edit_or_start_a_room_or_queue_maintenance() {
         let (_temporary, host) = offline_host().await;
+        let edit = host
+            .load(1)
+            .await
+            .unwrap()
+            .edit("/cluster/settings/max_players", json!(12), false)
+            .unwrap();
         let path = host.quadlet_dir.join("dst-001.container");
         let mut unit = ContainerUnit::load(&path).unwrap();
         unit.cluster = host.rooms.path(2).unwrap();
-        std::fs::write(&path, unit.render().unwrap()).unwrap();
+        let foreign = unit.render().unwrap();
+        std::fs::write(&path, &foreign).unwrap();
         let directory = host.rooms.path(1).unwrap();
+        let ini = std::fs::read(directory.join("cluster.ini")).unwrap();
         let before = std::fs::read(directory.join(crate::files::STATE_FILE)).unwrap();
         let expected = "Quadlet must mount the selected room directory";
+        assert!(host.managed_numbers().unwrap().is_empty());
+        assert_eq!(
+            host.stop(1, false, Duration::from_secs(2))
+                .await
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
         assert_eq!(host.load(1).await.unwrap_err().to_string(), expected);
+        assert_eq!(host.edit(&edit).await.unwrap_err().to_string(), expected);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), foreign);
+        assert_eq!(std::fs::read(directory.join("cluster.ini")).unwrap(), ini);
         for (active, sub) in [("inactive", "dead"), ("active", "running")] {
             std::fs::write(&host.systemd.executable, format!(
                 "#!/bin/sh\ncase \"$*\" in *show*) printf 'Id=dst-001.service\\nLoadState=loaded\\nActiveState={active}\\nSubState={sub}\\nJob=0\\nResult=success\\n';; *) exit 1;; esac\n"
@@ -874,6 +1185,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropins_must_preserve_both_room_volumes() {
+        let (_temporary, host) = offline_host().await;
+        let room = host.load(1).await.unwrap();
+        let directory = host.rooms.path(1).unwrap();
+        let mounts = format!(
+            "Volume={}:/cluster\nVolume={}/mods:/install/mods\n",
+            directory.display(),
+            directory.display()
+        );
+        let global = host.quadlet_dir.join("container.d");
+        let local = host.quadlet_dir.join("dst-001.container.d");
+        std::fs::create_dir(&global).unwrap();
+        std::fs::create_dir(&local).unwrap();
+        std::fs::write(global.join("10-reset.conf"), "[Container]\nVolume=\n").unwrap();
+        let path = local.join("20-volumes.conf");
+        for invalid in [
+            mounts.replace(":/cluster", "-old:/cluster"),
+            mounts.replace("/mods:/install/mods", "/old:/install/mods"),
+            mounts.lines().next().unwrap().to_owned(),
+            format!("{mounts}Volume=/cluster/"),
+        ] {
+            std::fs::write(&path, format!("[Container]\n{invalid}\n")).unwrap();
+            assert!(host.load(1).await.is_err());
+            assert!(host.edit(&room).await.is_err());
+            assert!(host.start(1, false, Duration::from_secs(2)).await.is_err());
+        }
+        std::fs::write(
+            path,
+            format!("[Container]\n{mounts}Volume=/srv/extra:/extra:ro\n"),
+        )
+        .unwrap();
+        host.edit(&room).await.unwrap();
+        host.start(1, false, Duration::from_secs(2)).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn starting_agent_lock_is_not_reported_as_corrupt_configuration() {
         let (temporary, host) = offline_host().await;
         let marker = temporary.path().join("starting");
@@ -897,6 +1244,11 @@ mod tests {
     async fn offline_failures_remain_visible_and_only_explicit_all_day_start_resets_recovery() {
         let (_temporary, host) = offline_host().await;
         let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
+        lock.update_state(|document| {
+            document.insert("recovery".into(), json!({"restarts_used":2}));
+            Ok(())
+        })
+        .unwrap();
         recovery::on_failure(
             &mut lock,
             recovery::Failure::Configuration,
@@ -908,6 +1260,7 @@ mod tests {
         drop(lock);
         let status = host.status(1, true).await.unwrap();
         assert_eq!(status["recovery"]["closed"], "configuration");
+        assert_eq!(status["recovery"]["restarts_used"], 2);
         assert!(status["error"].as_str().unwrap().contains("configuration"));
         assert!(
             host.wait_ready(1, Duration::from_secs(1))
@@ -916,8 +1269,17 @@ mod tests {
                 .to_string()
                 .contains("configuration")
         );
+        host.restart(1, false, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            host.status(1, true).await.unwrap()["recovery"],
+            status["recovery"]
+        );
         host.start(1, false, Duration::from_secs(2)).await.unwrap();
-        assert!(host.status(1, true).await.unwrap()["recovery"]["closed"].is_null());
+        let restarted = host.status(1, true).await.unwrap();
+        assert!(restarted["recovery"]["closed"].is_null());
+        assert_eq!(restarted["recovery"]["restarts_used"], 0);
         host.set_policy(1, &closed_policy()).await.unwrap();
         let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
         recovery::on_failure(
@@ -942,6 +1304,7 @@ mod tests {
         host.set_policy(1, &closed_policy()).await.unwrap();
         let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
         let mut state = PolicyState::default();
+        state.mods.enter_pending();
         state.mods.phase = ModPhase::Failed;
         state.mods.attempts = crate::policy::MOD_ATTEMPTS;
         state.save(&mut lock).unwrap();
@@ -976,6 +1339,11 @@ mod tests {
         let control = host.rooms.path(1).unwrap().join(files::STATE_FILE);
         let observed = temporary.path().join("observed.json");
         let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
+        let mut maintenance = PolicyState::load(&lock).unwrap();
+        maintenance.mods.enter_pending();
+        let targets = json!({"42":{"version":"2","shards":["Master"]}});
+        maintenance.mods.targets = serde_json::from_value(targets.clone()).unwrap();
+        maintenance.save(&mut lock).unwrap();
         recovery::on_failure(
             &mut lock,
             recovery::Failure::Mods,
@@ -988,12 +1356,52 @@ mod tests {
         std::fs::write(
             &host.systemd.executable,
             format!(
-                "#!/usr/bin/env python3\nimport json, pathlib, sys\ncontrol = pathlib.Path({})\nif 'start' in sys.argv:\n    state = json.loads(control.read_text())\n    mods = state['policy_state']['mods']\n    assert mods['phase']['state'] == 'pending' and mods['manual']\n    pathlib.Path({}).write_text(json.dumps(mods))\n    state['policy_state']['mods'] = {{}}\n    control.write_text(json.dumps(state))\nif 'show' in sys.argv:\n    print('Id=dst-001.service\\nLoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nJob=0\\nResult=success')\n",
+                r#"#!/usr/bin/env python3
+import json, pathlib, sys
+control = pathlib.Path({})
+observed = pathlib.Path({})
+if 'daemon-reload' in sys.argv and observed.with_name('reject-reload').exists():
+    sys.exit('reload failed')
+if 'start' in sys.argv:
+    state = json.loads(control.read_text())
+    mods = state['policy_state']['mods']
+    assert mods['phase']['state'] == 'pending' and mods['manual']
+    observed.write_text(json.dumps(mods))
+    state['policy_state']['mods'] = json.loads({idle_mods:?})
+    control.write_text(json.dumps(state))
+if 'show' in sys.argv:
+    print('Id=dst-001.service\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nJob=0\nResult=success')
+"#,
                 serde_json::to_string(&control).unwrap(),
                 serde_json::to_string(&observed).unwrap(),
+                idle_mods = serde_json::to_string(&crate::policy::ModMaintenance::default()).unwrap(),
             ),
         )
         .unwrap();
+        let reject_reload = temporary.path().join("reject-reload");
+        std::fs::write(&reject_reload, "").unwrap();
+        let error = host.update_mods(1, false, None).await.unwrap_err();
+        let error = error.downcast_ref::<crate::model::Error>().unwrap();
+        assert_eq!(error.code, crate::model::ErrorCode::PartialFailure);
+        assert_eq!(
+            error.details,
+            json!({"number":1, "stage":"daemon_reload", "applied":true})
+        );
+        let state: Value = serde_json::from_slice(&std::fs::read(&control).unwrap()).unwrap();
+        let pending = &state["policy_state"]["mods"];
+        assert!(pending["origin"]["operation_id"].is_string());
+        assert_eq!(pending["origin"]["source"], "manual");
+        assert_eq!(pending["targets"], targets);
+        std::fs::remove_file(reject_reload).unwrap();
+        assert!(
+            host.update_mods(1, true, None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("already pending")
+        );
+        assert!(!observed.exists());
+
         for restart in [false, true] {
             let result = host.update_mods(1, restart, None).await;
             if restart {
@@ -1002,23 +1410,17 @@ mod tests {
                     "room Agent service stopped after Mod maintenance"
                 );
             } else {
-                assert_eq!(result.unwrap(), json!({"updated":true,"restarted":false}));
+                assert_eq!(
+                    result.unwrap(),
+                    json!({"restarted":false,"verification_pending":false})
+                );
             }
             let intent: Value = serde_json::from_slice(&std::fs::read(&observed).unwrap()).unwrap();
             assert_eq!(intent["resume_game"], restart);
+            if !restart {
+                assert_eq!(&intent, pending);
+            }
         }
-        let mut lock = RoomLock::try_acquire(host.rooms.path(1).unwrap()).unwrap();
-        let mut state = PolicyState::default();
-        state.queue_mod_update(false).unwrap();
-        state.save(&mut lock).unwrap();
-        drop(lock);
-        assert!(
-            host.update_mods(1, false, None)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("already pending")
-        );
     }
 
     #[tokio::test]
@@ -1030,10 +1432,27 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut host = Host::new(&root, temporary.path().join("units"));
         host.systemd.executable = script;
-        let cluster =
-            crate::rooms::build_template("pure_survival", 1, "token", None, None).unwrap();
-        host.create(&Room::new(1, cluster).unwrap()).await.unwrap();
+        let mut cluster = crate::rooms::build_template("pure_survival", 1, "token", None, None)
+            .unwrap()
+            .into_value();
+        cluster["blocklist"] = json!("KU_initial_ban\n");
+        cluster["adminlist"] = json!("KU_initial_admin\n");
+        cluster["whitelist"] = json!("KU_initial_guest\n");
+        let definition = Room::new(1, ClusterConfig::from_value(cluster).unwrap()).unwrap();
+        let definition = definition
+            .edit("/cluster", definition.as_value()["cluster"].take(), false)
+            .unwrap()
+            .edit("/cluster/settings/max_players", json!(10), false)
+            .unwrap();
+        host.create(&definition).await.unwrap();
         let room = root.join("001");
+        for (name, contents) in [
+            ("blocklist.txt", "KU_initial_ban\n"),
+            ("adminlist.txt", "KU_initial_admin\n"),
+            ("whitelist.txt", "KU_initial_guest\n"),
+        ] {
+            assert_eq!(std::fs::read_to_string(room.join(name)).unwrap(), contents);
+        }
         let first = b"KU_first\xba\xba1790989763\xba\xbaRoom \xff\xba\n";
         let second = b"KU_second\xbaName\xba1790989764\xba\xbaOther room\xba\n";
         let native = [first.as_slice(), second.as_slice()].concat();
@@ -1110,6 +1529,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provisioning_retries_a_rejected_quadlet_and_initializes_permission_lists() {
+        let (_temporary, host) = offline_host().await;
+        let mut cluster = crate::rooms::build_template("pure_survival", 2, "token", None, None)
+            .unwrap()
+            .into_value();
+        cluster["adminlist"] = json!("KU_owner\n");
+        cluster["blocklist"] = json!("");
+        cluster.as_object_mut().unwrap().remove("whitelist");
+        let definition = Room::new(2, ClusterConfig::from_value(cluster).unwrap()).unwrap();
+        let mut oversized_label = definition.clone();
+        oversized_label.template = Some("界".repeat(86));
+        assert!(host.create(&oversized_label).await.is_err());
+        assert!(!host.rooms.path(2).unwrap().exists());
+        let mut too_large = definition.clone();
+        too_large
+            .deployment
+            .environment
+            .insert("TEST_VALUE".into(), "x".repeat(files::MAX_FILE_BYTES));
+        let error = host.create(&too_large).await.unwrap_err();
+        assert!(
+            error.to_string().contains("host file exceeds limit"),
+            "{error}"
+        );
+        let directory = host.rooms.path(2).unwrap();
+        assert!(
+            std::fs::read_dir(&directory)
+                .unwrap()
+                .all(|entry| { entry.unwrap().file_name() == files::ROOM_LOCK_FILE })
+        );
+        assert!(!host.quadlet_dir.join("dst-002.container").exists());
+        let result = host
+            .provision(std::slice::from_ref(&definition))
+            .await
+            .unwrap();
+        assert_eq!(result[0]["result"]["ok"], true, "{result:?}");
+        assert_eq!(
+            std::fs::read(directory.join("adminlist.txt")).unwrap(),
+            b"KU_owner\n"
+        );
+        for name in ["blocklist.txt", "whitelist.txt"] {
+            assert!(std::fs::read(directory.join(name)).unwrap().is_empty());
+        }
+        std::fs::write(directory.join("adminlist.txt"), b"KU_new_owner\n").unwrap();
+        assert_eq!(
+            host.create(&definition).await.unwrap_err().to_string(),
+            "room already exists"
+        );
+        assert_eq!(
+            std::fs::read(directory.join("adminlist.txt")).unwrap(),
+            b"KU_new_owner\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn waited_stop_reports_systemd_failures() {
+        let (_temporary, host) = offline_host().await;
+        for (active, result) in [("failed", "timeout"), ("inactive", "exit-code")] {
+            std::fs::write(
+                &host.systemd.executable,
+                format!(
+                    "#!/bin/sh\ncase \"$*\" in *show*) printf 'LoadState=loaded\\nActiveState={active}\\nJob=0\\nResult={result}\\n';; esac\n"
+                ),
+            )
+            .unwrap();
+            let error = host
+                .stop(1, true, Duration::from_secs(2))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("ActiveState={active}, Result={result}")),
+                "{error}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn deployment_preflight_and_room_lock_protect_native_edits() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("rooms");
@@ -1150,22 +1646,42 @@ mod tests {
             .unwrap();
         assert!(host.edit(&changed).await.is_err());
         assert_eq!(std::fs::read(root.join("001/cluster.ini")).unwrap(), native);
+        std::fs::remove_file(dropin.join("image.conf")).unwrap();
+        let unit_path = units.join("dst-001.container");
+        let current = std::fs::read_to_string(&unit_path).unwrap();
+        let old = current
+            .replace("StopSignal=SIGTERM\n", "")
+            .replace("StopTimeout=540", "StopTimeout=360")
+            .replace("TimeoutStopSec=600", "TimeoutStopSec=420");
+        std::fs::write(&unit_path, &old).unwrap();
+        assert!(
+            host.edit(&changed)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported or inconsistent managed Quadlet fields")
+        );
+        assert_eq!(std::fs::read(root.join("001/cluster.ini")).unwrap(), native);
+        assert_eq!(std::fs::read_to_string(&unit_path).unwrap(), old);
+        std::fs::write(&unit_path, current).unwrap();
+        host.edit(&changed).await.unwrap();
+        assert!(
+            std::fs::read_to_string(unit_path)
+                .unwrap()
+                .contains("StopSignal=SIGTERM\nStopTimeout=540\n")
+        );
     }
 
     #[tokio::test]
     async fn corrupt_room_still_has_status_and_stop_uses_only_its_service() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("rooms");
-        let units = temporary.path().join("units");
-        files::create_directory(root.join("001")).unwrap();
-        files::create_directory(&units).unwrap();
+        let (temporary, mut host) = offline_host().await;
+        let root = host.rooms.root();
         std::fs::write(root.join("001/cluster.ini"), "broken").unwrap();
         std::fs::write(root.join("001/.dst-server.json"), "[bad").unwrap();
         let script = temporary.path().join("systemctl");
         let trace = temporary.path().join("calls");
         std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *show*) printf 'Id=dst-001.service\\nLoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nJob=0\\nResult=success\\n';; esac\n", trace.display())).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut host = Host::new(&root, units);
         host.systemd.executable = script;
         let status = host.status(1, true).await.unwrap();
         assert!(status["configuration_error"].is_string());

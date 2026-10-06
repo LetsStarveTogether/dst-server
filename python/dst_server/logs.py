@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from math import ceil, floor
 from os import PathLike
 from typing import Any, Literal, Self
 
@@ -34,8 +35,10 @@ def _utc(value: datetime) -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class JournalQuery:
-    limit: int = 100
-    direction: Literal["forward", "backward"] = "backward"
+    """Queries default to 100 recent records. Following starts at the live tail."""
+
+    limit: int | None = None
+    direction: Literal["forward", "backward"] | None = None
     cursor: str | None = None
     since: str | datetime | None = None
     until: str | datetime | None = None
@@ -54,7 +57,7 @@ class JournalQuery:
         for name in ("since", "until"):
             if isinstance(value[name], datetime):
                 value[name] = _utc(value[name]).strftime("%Y-%m-%d %H:%M:%S.%f UTC")
-        return value
+        return {key: item for key, item in value.items() if item is not None}
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +83,11 @@ class JournalResult:
     has_more: bool
     diagnostics: str
     diagnostics_truncated: bool
+
+
+def _journal_result(value: dict[str, Any]) -> JournalResult:
+    value["records"] = tuple(map(_journal_record, value["records"]))
+    return JournalResult(**value)
 
 
 class JournalStream:
@@ -132,11 +140,12 @@ class JournalLogs:
         self,
         executable: str | PathLike[str] = "journalctl",
         *,
+        user: bool = False,
         max_record_bytes: int = 4 * 1024 * 1024,
         max_output_bytes: int = 64 * 1024 * 1024,
     ) -> None:
         self._reader = _native.JournalLogs(
-            executable, max_record_bytes, max_output_bytes
+            executable, max_record_bytes, max_output_bytes, user
         )
 
     async def query(
@@ -149,10 +158,7 @@ class JournalLogs:
         result = await self._reader.query(
             units, (request or JournalQuery()).to_native(), completion_timeout
         )
-        result["records"] = tuple(
-            _journal_record(record) for record in result["records"]
-        )
-        return JournalResult(**result)
+        return _journal_result(result)
 
     @asynccontextmanager
     async def follow(
@@ -161,7 +167,7 @@ class JournalLogs:
         async with JournalStream(
             await self._reader.follow(
                 units,
-                (request or JournalQuery(limit=0, direction="forward")).to_native(),
+                (request or JournalQuery()).to_native(),
             )
         ) as stream:
             yield stream
@@ -169,6 +175,8 @@ class JournalLogs:
 
 @dataclass(frozen=True, slots=True)
 class NetdataLogQuery:
+    """Query whole seconds, rounding fractional datetime bounds outwards."""
+
     since: datetime | int
     until: datetime | int | None = None
     service_name: str | None = None
@@ -181,9 +189,16 @@ class NetdataLogQuery:
 
     def to_native(self) -> dict[str, Any]:
         value = asdict(self)
-        for name in ("since", "until"):
-            if isinstance(value[name], datetime):
-                value[name] = int(_utc(value[name]).replace(microsecond=0).timestamp())
+        since, until = self.since, self.until
+        if isinstance(since, datetime):
+            since = _utc(since).timestamp()
+            value["since"] = floor(since)
+        if isinstance(until, datetime):
+            until = _utc(until).timestamp()
+            value["until"] = ceil(until)
+        if until is not None and until <= since:
+            message = "Netdata query until must be later than since"
+            raise ValueError(message)
         return value
 
 

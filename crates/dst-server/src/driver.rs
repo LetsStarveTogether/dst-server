@@ -1,73 +1,58 @@
-//! Persistent shard control. Caller cancellation never replays or cancels a command.
+//! Persistent shard control. Written commands keep the native channel until their reply or deadline.
+
+mod protocol;
+use protocol::handle_line;
 
 use std::{
-    collections::VecDeque,
+    collections::BTreeMap,
     ffi::OsString,
-    fmt,
     path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use anyhow::{Context, Result as SetupResult, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
-    sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
+    sync::{Mutex as AsyncMutex, Semaphore, mpsc, oneshot, watch},
     time::{Instant, sleep, timeout_at},
 };
 use ulid::Ulid;
 
 use crate::{
+    bounded,
     configuration::Cluster,
+    events::{JsonPosition, RejectionReason},
     files::RoomLock,
     process::{
-        EventKind, ExitReport, GameProcess, MAX_PROTOCOL_LINE_BYTES, MAX_REQUEST_BYTES,
-        ProcessSpec, StreamKind, native_message,
+        EventKind, ExitReport, ExitSummary, GameProcess, MAX_PROTOCOL_LINE_BYTES,
+        MAX_REQUEST_BYTES, NativeDiagnostics, ProcessOutput, ProcessSpec, StreamKind,
+        native_message, write_request,
     },
 };
 
 const MAX_PENDING: usize = 64;
-const CONTROL_HISTORY: usize = 128;
-const SUBSCRIPTION_LINES: usize = 1024;
-const SUBSCRIPTION_BYTES: usize = 8 * 1024 * 1024;
+const RELAY_SLOTS: usize = 1024;
+const RELAY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-pub const DEFAULT_ACTIONS: &[&str] = &[
-    "ACTIVATE",
-    "ADDFUEL",
-    "CASTAOE",
-    "CASTSPELL",
-    "CONSTRUCT",
-    "COOK",
-    "EXTINGUISH",
-    "FERTILIZE",
-    "FISH",
-    "FISH_OCEAN",
-    "GIVE",
-    "GIVETOPLAYER",
-    "HARVEST",
-    "HEAL",
-    "LIGHT",
-    "MIGRATE",
-    "MURDER",
-    "PICK",
-    "PICKUP",
-    "PLANT",
-    "REPAIR",
-    "REVIVE_CORPSE",
-    "UNLOCK",
-    "UPGRADE",
-];
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum TelemetryProfile {
+    Off,
+    Timeline,
+    #[default]
+    Play,
+}
 
 #[derive(Clone, Debug)]
 pub struct DriverOptions {
-    pub profile: String,
-    pub actions: Vec<String>,
-    /// Native load observation and, optionally, a fixed pre-load recovery target.
+    pub profile: TelemetryProfile,
+    /// Optional recovery request to run before loading the world.
     pub control: Value,
     pub extra_args: Vec<OsString>,
 }
@@ -75,40 +60,37 @@ pub struct DriverOptions {
 impl Default for DriverOptions {
     fn default() -> Self {
         Self {
-            profile: "history".into(),
-            actions: DEFAULT_ACTIONS
-                .iter()
-                .map(|action| (*action).into())
-                .collect(),
-            control: json!({"observe_loads": true}),
+            profile: TelemetryProfile::default(),
+            control: json!({}),
             extra_args: vec!["-skip_update_server_mods".into()],
         }
     }
 }
 
 impl DriverOptions {
-    /// Save one launch configuration while all games are stopped.
-    /// Every shard in this room attempt reads the same configuration, including after Lua reloads.
-    pub fn save(&self, room: &mut RoomLock) -> SetupResult<String> {
-        validate_options(self)?;
+    /// The shards about to launch read the same nonce and options on every Lua reload.
+    pub fn save<'a>(
+        &self,
+        room: &RoomLock,
+        shards: impl IntoIterator<Item = &'a str>,
+    ) -> SetupResult<String> {
+        validate_control(&self.control)?;
         let nonce = Ulid::generate().to_string();
-        let options = json!({"nonce": nonce, "profile": self.profile,
-            "actions": self.actions, "control": self.control});
-        let encoded = serde_json::to_vec(&json!({"driver": options}))?;
+        let encoded = serde_json::to_vec(&json!({
+            "driver": {"nonce": nonce, "profile": self.profile, "control": self.control}
+        }))?;
         ensure!(
             encoded.len() < MAX_PROTOCOL_LINE_BYTES,
             "driver options exceed the native size limit"
         );
-        room.update_state(|state| {
-            state.insert("driver".into(), options);
-            Ok(())
-        })?;
-        room.write_driver_options(&encoded)?;
+        for shard in shards {
+            room.write_driver_options(shard, &encoded)?;
+        }
         Ok(nonce)
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DriverErrorCode {
     InvalidRequest,
@@ -124,8 +106,39 @@ pub enum DriverErrorCode {
     Protocol,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlFailureReason {
+    Json,
+    Identity,
+    Generation,
+    Bootstrap,
+    Rpc,
+    Control,
+    Lifecycle,
+    Length,
+    Transport,
+    InvalidFrame,
+}
+
+impl ControlFailureReason {
+    fn error(self, message: impl Into<String>) -> DriverError {
+        let code = match self {
+            Self::Transport => DriverErrorCode::Transport,
+            _ => DriverErrorCode::Protocol,
+        };
+        DriverError {
+            reason: Some(self),
+            ..DriverError::new(code, message)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, thiserror::Error)]
+#[error("{code:?}: {message}")]
 pub struct DriverError {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ControlFailureReason>,
     pub code: DriverErrorCode,
     pub message: String,
     pub request_id: Option<String>,
@@ -137,6 +150,7 @@ impl DriverError {
     fn new(code: DriverErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
+            reason: None,
             message: message.into(),
             request_id: None,
             written: false,
@@ -144,13 +158,6 @@ impl DriverError {
         }
     }
 }
-
-impl fmt::Display for DriverError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{:?}: {}", self.code, self.message)
-    }
-}
-impl std::error::Error for DriverError {}
 
 pub type DriverResult<T> = Result<T, DriverError>;
 
@@ -162,7 +169,6 @@ pub struct RequestRecord {
     pub written: bool,
     pub accepted: bool,
     pub completed: bool,
-    pub result: Option<Value>,
     pub error: Option<DriverError>,
 }
 
@@ -178,72 +184,128 @@ pub struct DriverState {
     pub ready: bool,
     pub running: bool,
     pub stopping: bool,
-    /// Exit code or negative terminating signal; None until an exit is observed.
-    pub returncode: Option<i32>,
-    pub forced: bool,
-    pub output_drained: bool,
+    pub exit: Option<ExitSummary>,
+    pub native_diagnostics: NativeDiagnostics,
     pub load_failure: Option<Value>,
     pub session_id: Option<String>,
     pub health: Option<Value>,
     pub runtime: Option<Value>,
     pub last_native_save: Option<Value>,
     pub last_control: Option<Value>,
-    /// Required evidence is retained before optional subscriber delivery.
-    pub control_records: VecDeque<Value>,
-    pub failure: Option<String>,
+    /// Required evidence in this generation, including repeated acknowledgements.
+    pub control_count: u64,
+    /// Driver control errors remain separate from the Process exit report.
+    pub failure: Option<DriverError>,
     pub telemetry_sequence: u64,
     pub telemetry_gaps: u64,
     pub invalid_telemetry: u64,
     pub stale_telemetry: u64,
+    pub telemetry_rejections: BTreeMap<RejectionReason, u64>,
+    pub last_telemetry_rejection: Option<TelemetryRejection>,
     pub unmatched_replies: u64,
     pub recent_request: Option<RequestRecord>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, Serialize)]
+pub struct TelemetryRejection {
+    pub source: StreamKind,
+    pub bytes: Option<usize>,
+    pub reason: RejectionReason,
+    pub position: Option<JsonPosition>,
+}
+
+impl DriverState {
+    pub fn login_retry_permitted(&self) -> bool {
+        self.native_diagnostics.login_transport.is_some()
+            && self.generation.is_none()
+            && !self.native_ready
+            && self.runtime.is_none()
+            && self.session_id.is_none()
+            && self.last_native_save.is_none()
+    }
+
+    fn reject_telemetry(
+        &mut self,
+        source: StreamKind,
+        bytes: Option<usize>,
+        reason: RejectionReason,
+        position: Option<JsonPosition>,
+    ) {
+        if matches!(
+            reason,
+            RejectionReason::Generation | RejectionReason::Sequence
+        ) {
+            self.stale_telemetry += 1;
+        } else {
+            self.invalid_telemetry += 1;
+        }
+        *self.telemetry_rejections.entry(reason).or_default() += 1;
+        self.last_telemetry_rejection = Some(TelemetryRejection {
+            source,
+            bytes,
+            reason,
+            position,
+        });
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum DriverEventKind {
-    Lifecycle,
-    Control,
-    Telemetry,
-    Log,
-    Diagnostic,
+    Lifecycle(Value),
+    Control(Value),
+    Telemetry(Box<crate::events::GameEvent>),
+    Log(Value),
+    Diagnostic(Value),
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DriverEvent {
     pub id: String,
+    #[serde(flatten)]
     pub kind: DriverEventKind,
     pub shard: String,
     pub nonce: String,
     pub observed_timestamp_ns: u64,
     pub generation: Option<u64>,
-    pub data: Value,
 }
 
-struct QueuedEvent {
-    event: Arc<DriverEvent>,
-    _bytes: OwnedSemaphorePermit,
-}
-
-pub struct Subscription {
-    events: mpsc::Receiver<QueuedEvent>,
+pub struct DriverEventSender {
+    events: bounded::Sender<DriverEvent>,
     dropped: Arc<AtomicU64>,
 }
 
-impl Subscription {
-    pub async fn recv(&mut self) -> Option<Arc<DriverEvent>> {
-        self.events.recv().await.map(|event| event.event)
+/// Events from one game process, including all of its world generations.
+pub struct DriverEvents {
+    events: mpsc::Receiver<bounded::Item<DriverEvent>>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl DriverEvents {
+    /// Create the event sender to pass when starting one shard.
+    pub fn channel() -> (DriverEventSender, Self) {
+        let (tx, events) = bounded::channel(RELAY_SLOTS, RELAY_BYTES);
+        let dropped = Arc::new(AtomicU64::new(0));
+        (
+            DriverEventSender {
+                events: tx,
+                dropped: dropped.clone(),
+            },
+            Self { events, dropped },
+        )
+    }
+
+    pub async fn recv(&mut self) -> Option<DriverEvent> {
+        self.events.recv().await.map(bounded::Item::into_inner)
     }
 
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
-}
 
-struct Subscriber {
-    events: mpsc::Sender<QueuedEvent>,
-    bytes: Arc<Semaphore>,
-    dropped: Arc<AtomicU64>,
+    pub(crate) fn drop_counter(&self) -> Arc<AtomicU64> {
+        self.dropped.clone()
+    }
 }
 
 struct Pending {
@@ -257,6 +319,7 @@ impl Pending {
     fn error(&self, code: DriverErrorCode, message: &str) -> DriverError {
         DriverError {
             code,
+            reason: None,
             message: message.into(),
             request_id: Some(self.record.id.clone()),
             written: self.record.written,
@@ -266,13 +329,7 @@ impl Pending {
 
     fn deliver(&mut self, result: DriverResult<Value>) {
         self.record.completed = true;
-        match &result {
-            Ok(data) => {
-                self.record.result = Some(data.clone());
-                self.record.error = None;
-            }
-            Err(error) => self.record.error = Some(error.clone()),
-        }
+        self.record.error = result.as_ref().err().cloned();
         if let Some(response) = self.response.take() {
             let _ = response.send(result);
         }
@@ -290,74 +347,57 @@ struct Shared {
 
 type StopCompletion = Option<DriverResult<ExitReport>>;
 
+#[derive(Clone, Copy)]
+pub(crate) struct StopDeadlines {
+    pub native: Instant,
+    pub terminate: Instant,
+}
+
+struct Stopping {
+    completion: watch::Receiver<StopCompletion>,
+    deadlines: watch::Sender<StopDeadlines>,
+}
+
+impl Stopping {
+    fn tighten(&self, deadlines: StopDeadlines) {
+        self.deadlines.send_if_modified(|current| {
+            let native = current.native.min(deadlines.native);
+            let terminate = current.terminate.min(deadlines.terminate);
+            let changed = native != current.native || terminate != current.terminate;
+            *current = StopDeadlines { native, terminate };
+            changed
+        });
+    }
+}
+
 struct Inner {
-    process: Arc<GameProcess>,
+    process: GameProcess,
     shared: Mutex<Shared>,
     snapshots: watch::Sender<DriverState>,
-    native_command: AsyncMutex<()>,
+    native_command: Arc<AsyncMutex<()>>,
     slots: Arc<Semaphore>,
-    subscribers: Mutex<Vec<Subscriber>>,
     pump_finished: watch::Receiver<bool>,
-    stop: Mutex<Option<watch::Receiver<StopCompletion>>>,
+    stop: Mutex<Option<Stopping>>,
 }
 
 impl Inner {
     fn change<T>(&self, change: impl FnOnce(&mut Shared) -> T) -> T {
         let mut shared = self.shared.lock().expect("driver state lock");
         let result = change(&mut shared);
+        shared.state.native_diagnostics = self.process.native_diagnostics();
         self.snapshots.send_replace(shared.state.clone());
         result
     }
 
     fn snapshot(&self) -> DriverState {
-        self.shared.lock().expect("driver state lock").state.clone()
+        let mut state = self.shared.lock().expect("driver state lock").state.clone();
+        state.native_diagnostics = self.process.native_diagnostics();
+        state
     }
 
-    fn publish(&self, kind: DriverEventKind, data: Value) {
-        let mut subscribers = self.subscribers.lock().expect("subscriber lock");
-        subscribers.retain(|subscriber| !subscriber.events.is_closed());
-        if subscribers.is_empty() {
-            return;
-        }
-        let state = self.snapshots.borrow();
-        let event = Arc::new(DriverEvent {
-            id: Ulid::generate().to_string(),
-            kind,
-            shard: state.shard.clone(),
-            nonce: state.nonce.clone(),
-            observed_timestamp_ns: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-                .min(u64::MAX as u128) as u64,
-            generation: state.generation,
-            data,
-        });
-        drop(state);
-        let size = serde_json::to_vec(&*event).map_or(SUBSCRIPTION_BYTES + 1, |bytes| bytes.len());
-        for subscriber in subscribers.iter() {
-            let permit = u32::try_from(size)
-                .ok()
-                .and_then(|size| subscriber.bytes.clone().try_acquire_many_owned(size).ok());
-            let sent = permit.is_some_and(|permit| {
-                subscriber
-                    .events
-                    .try_send(QueuedEvent {
-                        event: event.clone(),
-                        _bytes: permit,
-                    })
-                    .is_ok()
-            });
-            if !sent {
-                subscriber.dropped.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    fn fail(&self, message: impl Into<String>) {
-        let message = message.into();
+    fn fail(&self, error: DriverError) {
         self.change(|shared| {
-            shared.state.failure.get_or_insert(message.clone());
+            shared.state.failure.get_or_insert(error);
             shared.state.ready = false;
             if let Some(active) = &mut shared.active {
                 active.deliver(Err(active.error(
@@ -367,7 +407,6 @@ impl Inner {
                 shared.state.recent_request = Some(active.record.clone());
             }
         });
-        self.publish(DriverEventKind::Diagnostic, json!({"error": message}));
         self.process.request_kill();
     }
 
@@ -405,12 +444,14 @@ pub struct Driver {
 }
 
 impl Driver {
+    /// Launch a shard with optional event delivery. Control-only callers can pass `None`.
     pub fn spawn(
         cluster: &Cluster,
         executable: &Path,
         shard: &str,
         nonce: &str,
         extra_args: Vec<OsString>,
+        events: Option<DriverEventSender>,
     ) -> SetupResult<Self> {
         ensure!(
             cluster
@@ -458,11 +499,17 @@ impl Driver {
             },
             nonce.to_owned(),
             shard.to_owned(),
+            events,
         )
     }
 
     /// Attach the same driver to an explicit launch command, useful for isolated tests.
-    pub fn attach(spec: ProcessSpec, nonce: String, shard: String) -> SetupResult<Self> {
+    pub fn attach(
+        spec: ProcessSpec,
+        nonce: String,
+        shard: String,
+        events: Option<DriverEventSender>,
+    ) -> SetupResult<Self> {
         ensure!(
             Ulid::from_string(&nonce).is_ok_and(|id| id.to_string() == nonce),
             "nonce must be a canonical ULID"
@@ -471,7 +518,17 @@ impl Driver {
             !shard.is_empty() && shard.len() <= 255 && !shard.contains(['\0', '\r', '\n']),
             "invalid shard name"
         );
-        let process = Arc::new(GameProcess::spawn(spec)?);
+        let (process, output) = GameProcess::spawn(spec)?;
+        Ok(Self::start_pump(process, output, nonce, shard, events))
+    }
+
+    fn start_pump(
+        process: GameProcess,
+        output: ProcessOutput,
+        nonce: String,
+        shard: String,
+        events: Option<DriverEventSender>,
+    ) -> Self {
         let state = DriverState {
             shard,
             pid: process.pid(),
@@ -483,21 +540,22 @@ impl Driver {
             ready: false,
             running: true,
             stopping: false,
-            returncode: None,
-            forced: false,
-            output_drained: false,
+            exit: None,
+            native_diagnostics: NativeDiagnostics::default(),
             load_failure: None,
             session_id: None,
             health: None,
             runtime: None,
             last_native_save: None,
             last_control: None,
-            control_records: VecDeque::new(),
+            control_count: 0,
             failure: None,
             telemetry_sequence: 0,
             telemetry_gaps: 0,
             invalid_telemetry: 0,
             stale_telemetry: 0,
+            telemetry_rejections: BTreeMap::new(),
+            last_telemetry_rejection: None,
             unmatched_replies: 0,
             recent_request: None,
         };
@@ -512,16 +570,19 @@ impl Driver {
                 active: None,
             }),
             snapshots,
-            native_command: AsyncMutex::new(()),
+            native_command: Arc::new(AsyncMutex::new(())),
             slots: Arc::new(Semaphore::new(MAX_PENDING)),
-            subscribers: Mutex::new(Vec::new()),
             pump_finished,
             stop: Mutex::new(None),
         });
-        tokio::spawn(pump(inner.clone(), finished));
-        Ok(Self {
+        let pump = Pump {
+            inner: inner.clone(),
+            events,
+        };
+        tokio::spawn(pump.run(output, finished));
+        Self {
             handle: Arc::new(Handle { inner }),
-        })
+        }
     }
 
     pub fn snapshot(&self) -> DriverState {
@@ -531,6 +592,10 @@ impl Driver {
     pub fn watch(&self) -> watch::Receiver<DriverState> {
         self.handle.inner.snapshots.subscribe()
     }
+    pub(crate) fn same_process(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.handle, &other.handle)
+    }
+
     pub fn pid(&self) -> u32 {
         self.handle.inner.process.pid()
     }
@@ -543,22 +608,20 @@ impl Driver {
         self.handle.inner.process.request_kill();
     }
 
-    pub fn subscribe(&self) -> Subscription {
-        let (events, receiver) = mpsc::channel(SUBSCRIPTION_LINES);
-        let dropped = Arc::new(AtomicU64::new(0));
-        self.handle
+    pub(crate) fn request_shutdown(&self, deadline: Instant) {
+        self.handle.inner.process.request_shutdown(deadline);
+    }
+
+    pub(crate) fn tighten_stop(&self, deadlines: StopDeadlines) {
+        if let Some(stop) = self
+            .handle
             .inner
-            .subscribers
+            .stop
             .lock()
-            .expect("subscriber lock")
-            .push(Subscriber {
-                events,
-                bytes: Arc::new(Semaphore::new(SUBSCRIPTION_BYTES)),
-                dropped: dropped.clone(),
-            });
-        Subscription {
-            events: receiver,
-            dropped,
+            .expect("stop state lock")
+            .as_ref()
+        {
+            stop.tighten(deadlines);
         }
     }
 
@@ -575,7 +638,7 @@ impl Driver {
                     DriverErrorCode::NotReady,
                     snapshot
                         .failure
-                        .unwrap_or_else(|| "game process exited".into()),
+                        .map_or_else(|| "game process exited".into(), |error| error.message),
                 ));
             }
             timeout_at(deadline, state.changed())
@@ -590,7 +653,7 @@ impl Driver {
         }
     }
 
-    /// Submit once. Cancelling this future abandons only the caller's wait.
+    /// Cancellation discards an unsent command. After writing, the Driver owns its completion.
     pub async fn request(
         &self,
         method: &str,
@@ -617,7 +680,7 @@ impl Driver {
         let id = Ulid::generate().to_string();
         let frame = format!(
             "DST_RPC|{}\n",
-            json!({"v": 1, "nonce": state.nonce, "id": id,
+            json!({"nonce": state.nonce, "id": id,
             "generation": generation, "method": method, "arguments": arguments})
         )
         .into_bytes();
@@ -646,14 +709,19 @@ impl Driver {
             written: false,
             accepted: false,
             completed: false,
-            result: None,
             error: None,
         };
-        let (response, receive) = oneshot::channel();
         let inner = self.handle.inner.clone();
+        let native = timeout_at(deadline, inner.native_command.clone().lock_owned())
+            .await
+            .map_err(|_| {
+                DriverError::new(DriverErrorCode::Timeout, "request expired before dispatch")
+            })?;
+        let pending = dispatch(&inner, &record, &frame, deadline).await?;
+        let (mut response, receive) = oneshot::channel();
         tokio::spawn(async move {
-            let _permit = permit;
-            let result = execute(&inner, record, frame, deadline).await;
+            let _permits = (permit, native);
+            let result = finish(&inner, &record, &frame, deadline, pending, &mut response).await;
             let _ = response.send(result);
         });
         receive
@@ -673,18 +741,30 @@ impl Driver {
     /// Native saving shutdown, followed by SIGTERM and SIGKILL when its deadline expires.
     /// The shared worker continues even when every stop caller cancels its wait.
     pub async fn stop(&self, grace: Duration) -> DriverResult<ExitReport> {
-        let deadline = deadline(grace)?;
+        let native = deadline(grace)?;
+        let terminate = native.checked_add(Duration::from_secs(10)).ok_or_else(|| {
+            DriverError::new(DriverErrorCode::InvalidRequest, "timeout is too large")
+        })?;
+        self.stop_until(StopDeadlines { native, terminate }).await
+    }
+
+    pub(crate) async fn stop_until(&self, deadlines: StopDeadlines) -> DriverResult<ExitReport> {
         let mut completion = {
             let mut stop = self.handle.inner.stop.lock().expect("stop state lock");
-            stop.get_or_insert_with(|| {
+            let stopping = stop.get_or_insert_with(|| {
                 let (complete, completion) = watch::channel(None);
+                let (deadlines, changes) = watch::channel(deadlines);
                 let inner = self.handle.inner.clone();
                 tokio::spawn(async move {
-                    complete.send_replace(Some(stop_native(&inner, deadline).await));
+                    complete.send_replace(Some(stop_native(&inner, changes).await));
                 });
-                completion
-            })
-            .clone()
+                Stopping {
+                    completion,
+                    deadlines,
+                }
+            });
+            stopping.tighten(deadlines);
+            stopping.completion.clone()
         };
         loop {
             if let Some(result) = completion.borrow_and_update().clone() {
@@ -722,33 +802,17 @@ fn safe_integer(value: &Value) -> Option<u64> {
     value.as_u64().filter(|value| *value <= MAX_SAFE_INTEGER)
 }
 
-fn validate_options(options: &DriverOptions) -> SetupResult<()> {
-    ensure!(
-        ["off", "critical", "history"].contains(&options.profile.as_str()),
-        "invalid telemetry profile"
-    );
-    ensure!(
-        options.actions.len() <= 1024
-            && options.actions.iter().all(|action| !action.is_empty()
-                && action.len() <= 128
-                && action.bytes().all(|byte| byte.is_ascii_uppercase()
-                    || byte == b'_'
-                    || byte.is_ascii_digit())),
-        "invalid telemetry action list"
-    );
-    let control = options
-        .control
+pub(crate) fn control_ready(health: &Value) -> bool {
+    health["control_ready"] == true
+}
+
+fn validate_control(control: &Value) -> SetupResult<()> {
+    let control = control
         .as_object()
         .context("control options must be an object")?;
     ensure!(
-        control
-            .keys()
-            .all(|key| ["observe_loads", "recovery"].contains(&key.as_str())),
+        control.keys().all(|key| key == "recovery"),
         "unknown control option"
-    );
-    ensure!(
-        control.get("observe_loads").is_none_or(Value::is_boolean),
-        "observe_loads must be boolean"
     );
     if let Some(recovery) = control.get("recovery") {
         let request = recovery.as_object().context("recovery must be an object")?;
@@ -794,78 +858,86 @@ fn validate_options(options: &DriverOptions) -> SetupResult<()> {
     Ok(())
 }
 
-async fn execute(
-    inner: &Arc<Inner>,
-    record: RequestRecord,
-    frame: Vec<u8>,
+async fn dispatch(
+    inner: &Inner,
+    record: &RequestRecord,
+    frame: &[u8],
     deadline: Instant,
-) -> DriverResult<Value> {
-    let _native = timeout_at(deadline, inner.native_command.lock())
-        .await
-        .map_err(|_| {
-            DriverError::new(DriverErrorCode::Timeout, "request expired before dispatch")
-        })?;
-    loop {
-        let (response, receive) = oneshot::channel();
+) -> DriverResult<oneshot::Receiver<DriverResult<Value>>> {
+    let expired = || DriverError::new(DriverErrorCode::Timeout, "request expired before dispatch");
+    let send = inner.process.with_writable_input(|input| {
         inner.change(|shared| {
+            if Instant::now() >= deadline {
+                return Ok(Err(expired()));
+            }
             if !shared.state.ready
                 || shared.state.stopping
                 || shared.state.generation != Some(record.generation)
             {
-                return Err(DriverError::new(
+                return Ok(Err(DriverError::new(
                     DriverErrorCode::NotReady,
                     "shard generation or readiness changed before dispatch",
-                ));
+                )));
             }
             if shared
                 .active
                 .as_ref()
                 .is_some_and(|active| !active.record.completed)
             {
-                return Err(DriverError::new(
+                return Ok(Err(DriverError::new(
                     DriverErrorCode::NotReady,
                     "previous native command is still pending",
-                ));
+                )));
             }
-            // An expired command may have been consumed without a Lua context,
-            // producing neither Busy nor Done. A new correlated response can
-            // establish framing again; never replay the expired command.
-            let synchronized = shared.active.is_none();
+            // Holding the state lock across the atomic write registers even an immediate reply.
+            write_request(input, frame)?;
+            let (response, receive) = oneshot::channel();
+            let mut record = record.clone();
+            record.written = true;
             shared.state.recent_request = Some(record.clone());
+            // Only a correlated reply can establish framing after an expired command.
             shared.active = Some(Pending {
-                record: record.clone(),
+                synchronized: shared.active.is_none(),
+                record,
                 result: None,
                 response: Some(response),
-                synchronized,
             });
-            Ok(())
-        })?;
-        match timeout_at(deadline, inner.process.send(&frame)).await {
-            Ok(Ok(())) => inner.change(|shared| {
-                if let Some(active) = &mut shared.active {
-                    active.record.written = true;
-                    shared.state.recent_request = Some(active.record.clone());
-                }
-            }),
-            result => {
-                let message = match result {
-                    Err(_) => "native request write deadline exceeded".into(),
-                    Ok(Err(error)) => format!("native request write failed: {error}"),
-                    Ok(Ok(())) => unreachable!(),
-                };
-                return expire(inner, &record.id, &message);
-            }
-        }
-        match timeout_at(deadline, receive).await {
+            Ok(Ok(receive))
+        })
+    });
+    timeout_at(deadline, send)
+        .await
+        .map_err(|_| expired())?
+        .map_err(|error| DriverError::new(DriverErrorCode::Transport, error.to_string()))?
+}
+
+async fn finish(
+    inner: &Inner,
+    record: &RequestRecord,
+    frame: &[u8],
+    deadline: Instant,
+    mut pending: oneshot::Receiver<DriverResult<Value>>,
+    caller: &mut oneshot::Sender<DriverResult<Value>>,
+) -> DriverResult<Value> {
+    loop {
+        match timeout_at(deadline, pending).await {
             Ok(Ok(Err(error))) if error.code == DriverErrorCode::Busy && !error.accepted => {
-                timeout_at(deadline, sleep(Duration::from_millis(100)))
-                    .await
-                    .map_err(|_| {
-                        DriverError::new(
-                            DriverErrorCode::Timeout,
-                            "native Lua remained busy without accepting the request",
-                        )
-                    })?;
+                let retry = async {
+                    timeout_at(deadline, sleep(Duration::from_millis(100)))
+                        .await
+                        .map_err(|_| {
+                            DriverError::new(
+                                DriverErrorCode::Timeout,
+                                "native Lua remained busy without accepting the request",
+                            )
+                        })?;
+                    dispatch(inner, record, frame, deadline).await
+                };
+                pending = tokio::select! {
+                    biased;
+                    _ = caller.closed() => return Err(error),
+                    result = retry => result?,
+                };
             }
             Ok(Ok(result)) => return result,
             _ => {
@@ -900,440 +972,201 @@ fn expire(inner: &Inner, id: &str, message: &str) -> DriverResult<Value> {
     })
 }
 
-async fn stop_native(inner: &Arc<Inner>, deadline: Instant) -> DriverResult<ExitReport> {
+async fn stop_native(
+    inner: &Arc<Inner>,
+    mut deadlines: watch::Receiver<StopDeadlines>,
+) -> DriverResult<ExitReport> {
     inner.change(|shared| {
         shared.stop_requested = true;
         shared.state.stopping = true;
         shared.state.ready = false;
     });
     if inner.snapshot().running {
-        if let Ok(_native) = timeout_at(deadline, inner.native_command.lock()).await {
-            let _ = timeout_at(deadline, inner.process.send(b"c_shutdown()\n")).await;
+        {
+            let native = async {
+                {
+                    let _native = inner.native_command.lock().await;
+                    let _ = inner.process.send(b"c_shutdown()\n").await;
+                }
+                inner.process.wait().await
+            };
+            tokio::pin!(native);
+            loop {
+                let at = *deadlines.borrow_and_update();
+                tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(at.native) => break,
+                    _ = &mut native => return inner.waited().await,
+                    _ = deadlines.changed() => {},
+                }
+            }
         }
-        if timeout_at(deadline, inner.process.wait()).await.is_err() {
-            inner
-                .process
-                .shutdown(Duration::from_secs(10))
-                .await
-                .map_err(|error| DriverError::new(DriverErrorCode::Transport, error.to_string()))?;
+        loop {
+            let at = *deadlines.borrow_and_update();
+            inner.process.request_shutdown(at.terminate);
+            tokio::select! {
+                _ = inner.process.wait() => break,
+                _ = deadlines.changed() => {},
+            }
         }
     }
     inner.waited().await
 }
 
-async fn pump(inner: Arc<Inner>, finished: watch::Sender<bool>) {
-    while let Some(event) = inner.process.next_event().await {
-        let outcome = match event.kind {
-            EventKind::Line(line) => handle_line(&inner, event.stream, &line),
-            EventKind::Oversized
-                if matches!(event.stream, StreamKind::Reply | StreamKind::Lifecycle) =>
-            {
-                Err("mandatory frame exceeded its line limit".into())
-            }
-            EventKind::Oversized => {
-                inner.publish(
-                    DriverEventKind::Diagnostic,
-                    json!({"error": "oversized_output"}),
-                );
-                Ok(())
-            }
-            EventKind::ReadError(error) => Err(error),
-        };
-        if let Err(message) = outcome {
-            inner.fail(message);
-        }
-    }
-    let report = inner.process.wait().await;
-    inner.change(|shared| {
-        shared.state.running = false;
-        shared.state.ready = false;
-        match &report {
-            Ok(report) => {
-                shared.state.returncode = report.returncode();
-                shared.state.forced = report.forced;
-                shared.state.output_drained = report.output_drained;
-                if let Some(error) = &report.protocol_error {
-                    shared.state.failure.get_or_insert(error.clone());
-                }
-                if !report.output_drained {
-                    shared
-                        .state
-                        .failure
-                        .get_or_insert("game output did not drain".into());
-                }
-            }
-            Err(error) => {
-                shared.state.failure.get_or_insert(error.to_string());
-            }
-        }
-        if let Some(mut active) = shared.active.take() {
-            let result = active.result.take().unwrap_or_else(|| {
-                Err(active.error(
-                    DriverErrorCode::Unknown,
-                    "game exited before command completion",
-                ))
-            });
-            active.deliver(result);
-            shared.state.recent_request = Some(active.record);
-        }
-    });
-    inner.subscribers.lock().expect("subscriber lock").clear();
-    finished.send_replace(true);
+struct Pump {
+    inner: Arc<Inner>,
+    events: Option<DriverEventSender>,
 }
 
-fn handle_line(inner: &Inner, stream: StreamKind, line: &[u8]) -> Result<(), String> {
-    let line = native_message(line).trim_ascii_end();
-    match stream {
-        StreamKind::Reply => {
-            if line == b"DST_RemoteCommandDone" || line == b"DST_LuaBusy" {
-                native_barrier(inner, line);
-                return Ok(());
-            }
-            if let Some(payload) = line.strip_prefix(b"DST_RPC|") {
-                return rpc(inner, payload);
-            }
-            if let Some(payload) = line.strip_prefix(b"DST_CONTROL|") {
-                return control(inner, payload);
-            }
-        }
-        StreamKind::Lifecycle => return lifecycle(inner, line),
-        StreamKind::Stdout => {
-            if let Some(payload) = line.strip_prefix(b"DST_DRIVER|") {
-                return bootstrap(inner, payload);
-            }
-            if let Some(payload) = line.strip_prefix(b"DST_CONTROL|") {
-                return control(inner, payload);
-            }
-            if let Some(payload) = line.strip_prefix(b"DST_OTEL|") {
-                telemetry(inner, payload);
-                return Ok(());
-            }
-        }
-        StreamKind::Stderr => (),
-    }
-    if !line.starts_with(b"DST_Stats|") {
-        inner.publish(DriverEventKind::Log, json!({"stream": format!("{stream:?}").to_ascii_lowercase(), "line": String::from_utf8_lossy(line)}));
-    }
-    Ok(())
-}
-
-fn mandatory_record(inner: &Inner, payload: &[u8]) -> Result<Value, String> {
-    let value: Value =
-        serde_json::from_slice(payload).map_err(|_| "malformed mandatory JSON frame")?;
-    if !value.is_object()
-        || value["nonce"].as_str() != Some(inner.snapshots.borrow().nonce.as_str())
-    {
-        return Err("mandatory frame has an invalid nonce or envelope".into());
-    }
-    Ok(value)
-}
-
-fn advance_generation(shared: &mut Shared, generation: u64) -> bool {
-    if shared
-        .state
-        .generation
-        .is_some_and(|current| current > generation)
-    {
-        return false;
-    }
-    if shared.state.generation == Some(generation) {
-        return true;
-    }
-    if shared.state.generation.is_some() {
-        shared.state.generation_changes += 1;
-        shared.state.session_id = None;
-    }
-    shared.state.generation = Some(generation);
-    shared.state.stopping = shared.stop_requested;
-    shared.state.ready = false;
-    shared.state.health = None;
-    shared.state.runtime = None;
-    shared.state.last_control = None;
-    shared.state.load_failure = None;
-    shared.state.control_records.clear();
-    shared.state.telemetry_sequence = 0;
-    shared.observation = None;
-    if let Some(active) = &mut shared.active
-        && active.record.generation != generation
-    {
-        active.deliver(Err(active.error(
-            DriverErrorCode::Unknown,
-            "world generation changed while the command was pending",
-        )));
-        shared.state.recent_request = Some(active.record.clone());
-    }
-    true
-}
-
-fn recompute_ready(state: &mut DriverState) {
-    state.ready = state.running
-        && !state.stopping
-        && state.failure.is_none()
-        && state.native_ready
-        && state.health.as_ref().is_some_and(|health| {
-            safe_integer(&health["generation"]) == state.generation
-                && health["protocol"] == 3
-                && health["capabilities"]["players"] == "active"
-        });
-}
-
-fn bootstrap(inner: &Inner, payload: &[u8]) -> Result<(), String> {
-    let record = mandatory_record(inner, payload)?;
-    if record.get("error").is_some() {
-        if safe_integer(&record["generation"])
-            .zip(inner.snapshots.borrow().generation)
-            .is_some_and(|(received, current)| received < current)
-        {
-            return Ok(());
-        }
-        return Err(format!("driver bootstrap failed: {}", record["error"]));
-    }
-    let health = record.get("health");
-    let generation = safe_integer(&health.unwrap_or(&record)["generation"])
-        .ok_or("invalid driver generation")?;
-    if health.is_some_and(|health| {
-        health["protocol"] != 3
-            || !health["capabilities"].is_object()
-            || !["disabled", "active", "degraded", "failed"]
-                .iter()
-                .any(|status| health["telemetry_status"] == *status)
-    }) {
-        return Err("invalid driver health".into());
-    }
-    inner.change(|shared| {
-        if !advance_generation(shared, generation) {
+impl Pump {
+    fn publish(&self, payload_bytes: usize, payload: impl FnOnce() -> DriverEventKind) {
+        let Some(sender) = self.events.as_ref().filter(|tx| !tx.events.is_closed()) else {
             return;
-        }
-        if let Some(health) = health {
-            shared.state.health = Some(health.clone());
-        }
-        recompute_ready(&mut shared.state);
-    });
-    Ok(())
-}
-
-fn rpc(inner: &Inner, payload: &[u8]) -> Result<(), String> {
-    let response = mandatory_record(inner, payload)?;
-    if response["v"] != 1
-        || safe_integer(&response["generation"]).is_none()
-        || !response["id"].is_string()
-    {
-        return Err("invalid RPC response header".into());
-    }
-    inner.change(|shared| {
-        let Some(active) = shared
-            .active
-            .as_mut()
-            .filter(|active| response["id"] == active.record.id)
-        else {
-            shared.state.unmatched_replies += 1;
-            return Ok(());
         };
-        let rejected = response["result"]["ok"] == false
-            && !active.record.accepted
-            && ["invalid_request", "not_ready", "stale_generation"]
-                .iter()
-                .any(|error| response["result"]["error"] == *error);
-        if safe_integer(&response["generation"]) != Some(active.record.generation) && !rejected {
-            return Err("RPC response generation does not match its request".into());
+        let (shard, nonce, generation) = {
+            let state = self.inner.snapshots.borrow();
+            (state.shard.clone(), state.nonce.clone(), state.generation)
+        };
+        let event = DriverEvent {
+            id: Ulid::generate().to_string(),
+            kind: payload(),
+            shard,
+            nonce,
+            observed_timestamp_ns: crate::operation::timestamp(),
+            generation,
+        };
+        let bytes = size_of::<DriverEvent>()
+            + event.id.len()
+            + event.shard.len()
+            + event.nonce.len()
+            + payload_bytes;
+        let result = sender.events.try_send(event, bytes);
+        if matches!(
+            result,
+            Err(bounded::TrySendError::Slots | bounded::TrySendError::Bytes)
+        ) {
+            sender.dropped.fetch_add(1, Ordering::Relaxed);
         }
-        active.record.written = true;
-        active.synchronized = true;
-        if response["accepted"] == true && response.get("result").is_none() {
-            active.record.accepted = true;
-        } else if let Some(result) = response.get("result") {
-            if active.result.is_some() {
-                return Err("duplicate RPC result".into());
-            }
-            if result["ok"] == true && result.get("data").is_some() {
-                active.record.accepted = true;
-                let mut data = result["data"].clone();
-                if active.record.method == "presence"
-                    && shared.state.generation == Some(active.record.generation)
-                {
-                    let fields = data.as_object_mut().ok_or("invalid presence result")?;
-                    let epoch = fields
-                        .remove("observation_epoch")
-                        .as_ref()
-                        .and_then(safe_integer)
-                        .ok_or("invalid presence observation epoch")?;
-                    if shared
-                        .observation
-                        .as_ref()
-                        .is_none_or(|(previous, _)| *previous != epoch)
-                    {
-                        shared.observation = Some((epoch, Ulid::generate().to_string()));
+    }
+
+    async fn run(self, mut output: ProcessOutput, finished: watch::Sender<bool>) {
+        let inner = &self.inner;
+        while let Some(event) = output.next_event().await {
+            // Let pipe readers and pending commands run during bursts of CPU-heavy frames.
+            tokio::task::consume_budget().await;
+            let outcome = match event.kind {
+                EventKind::Line(line) => handle_line(&self, event.stream, &line),
+                EventKind::Oversized { mandatory: true } => {
+                    Err(ControlFailureReason::Length
+                        .error("mandatory frame exceeded its line limit"))
+                }
+                EventKind::Oversized { mandatory: false } => {
+                    if event.stream == StreamKind::Reply {
+                        inner.change(|shared| {
+                            shared.state.reject_telemetry(
+                                event.stream,
+                                None,
+                                RejectionReason::Length,
+                                None,
+                            );
+                        });
                     }
-                    fields.insert(
-                        "observation".into(),
-                        json!(shared.observation.as_ref().unwrap().1),
-                    );
+                    self.publish(32, || {
+                        DriverEventKind::Diagnostic(json!({"error":"oversized_output"}))
+                    });
+                    Ok(())
                 }
-                if active.record.method == "runtime"
-                    && shared.state.generation == Some(active.record.generation)
-                {
-                    shared.state.runtime = Some(data.clone());
-                    shared.state.session_id = data["session_id"].as_str().map(str::to_owned);
-                }
-                if active.record.method == "health"
-                    && shared.state.generation == Some(active.record.generation)
-                {
-                    shared.state.health = Some(data.clone());
-                    recompute_ready(&mut shared.state);
-                }
-                active.result = Some(Ok(data));
-            } else if result["ok"] == false {
-                let error = result["error"].as_str().ok_or("invalid RPC error")?;
-                if !rejected {
-                    active.record.accepted = true;
-                }
-                let code = match error {
-                    "invalid_request" | "rejected" => DriverErrorCode::InvalidRequest,
-                    "not_ready" | "stale_generation" => DriverErrorCode::NotReady,
-                    "unsupported" => DriverErrorCode::Unsupported,
-                    "not_found" => DriverErrorCode::NotFound,
-                    "stale_reference" => DriverErrorCode::StaleReference,
-                    "indeterminate" => DriverErrorCode::Unknown,
-                    "lua_error" | "invalid_json_value" | "invalid_utf8" | "response_too_large" => {
-                        DriverErrorCode::Lua
-                    }
-                    _ => return Err("unknown RPC error code".into()),
-                };
-                active.result = Some(Err(active.error(code, error)));
-            } else {
-                return Err("invalid RPC result".into());
+                EventKind::ReadError(error) => Err(ControlFailureReason::Transport.error(error)),
+            };
+            if let Err(error) = outcome {
+                self.publish(error.message.len() + 64, || {
+                    DriverEventKind::Diagnostic(
+                        json!({"error": error.message, "reason": error.reason}),
+                    )
+                });
+                inner.fail(error);
             }
-        } else {
-            return Err("RPC response lacks an acceptance or result".into());
         }
-        shared.state.recent_request = Some(active.record.clone());
-        Ok(())
-    })
-}
-
-fn native_barrier(inner: &Inner, line: &[u8]) {
-    inner.change(|shared| {
-        let Some(mut active) = shared.active.take() else {
-            shared.state.unmatched_replies += 1;
-            return;
-        };
-        if !active.synchronized {
-            shared.state.unmatched_replies += 1;
-            shared.active = Some(active);
-            return;
-        }
-        if line == b"DST_LuaBusy" {
-            if active.record.accepted || active.result.is_some() {
-                shared.state.unmatched_replies += 1;
-                shared.active = Some(active);
-                return;
-            }
-            active.deliver(Err(active.error(
-                DriverErrorCode::Busy,
-                "native Lua rejected the request before acceptance",
-            )));
-        } else {
-            let result = active.result.take().unwrap_or_else(|| {
-                Err(active.error(
-                    DriverErrorCode::Unknown,
-                    "native command completed without a structured result",
-                ))
-            });
-            active.deliver(result);
-        }
-        shared.state.recent_request = Some(active.record);
-    });
-}
-
-fn control(inner: &Inner, payload: &[u8]) -> Result<(), String> {
-    let record = mandatory_record(inner, payload)?;
-    let generation = safe_integer(&record["generation"]).ok_or("invalid control generation")?;
-    if record["v"] != 1 || !record["event"].as_str().is_some_and(valid_method) {
-        return Err("invalid control record".into());
-    }
-    inner.change(|shared| {
-        if !advance_generation(shared, generation) {
-            return;
-        }
-        if record["event"] == "world_load_failed" {
-            shared.state.load_failure = Some(record.clone());
-        }
-        shared.state.last_control = Some(record.clone());
-        if shared.state.control_records.len() == CONTROL_HISTORY {
-            shared.state.control_records.pop_front();
-        }
-        shared.state.control_records.push_back(record.clone());
-    });
-    inner.publish(DriverEventKind::Control, record);
-    Ok(())
-}
-
-fn lifecycle(inner: &Inner, line: &[u8]) -> Result<(), String> {
-    if line.starts_with(b"DST_Stats|") {
-        return Ok(());
-    }
-    let text = std::str::from_utf8(line).map_err(|_| "invalid lifecycle UTF-8")?;
-    let record = if text == "DST_Master_Ready" || text.starts_with("DST_Master_Ready|") {
+        let report = inner.process.wait().await;
         inner.change(|shared| {
-            shared.state.native_ready = true;
-            recompute_ready(&mut shared.state);
-        });
-        json!({"event": "ready", "detail": text.split_once('|').map_or("", |(_, detail)| detail)})
-    } else if let Some(session) = text.strip_prefix("DST_SessionId|") {
-        if session.is_empty() || session.len() > 128 {
-            return Err("invalid native session identity".into());
-        }
-        inner.change(|shared| {
-            shared.state.session_id = Some(session.into());
-            shared.state.native_ready = true;
-            recompute_ready(&mut shared.state);
-        });
-        json!({"event": "session", "session_id": session})
-    } else if text == "DST_Saved" || text.starts_with("DST_Saved|") {
-        let path = text.split_once('|').map_or("", |(_, path)| path);
-        let snapshot = path
-            .rsplit('/')
-            .next()
-            .and_then(|value| value.parse::<u64>().ok());
-        let record = json!({"event": "saved", "path": path, "snapshot": snapshot});
-        inner.change(|shared| shared.state.last_native_save = Some(record.clone()));
-        record
-    } else if text == "DST_Stopping" || text == "DST_Shutdown" {
-        inner.change(|shared| {
-            shared.state.stopping = true;
+            shared.state.running = false;
             shared.state.ready = false;
+            match &report {
+                Ok(report) => {
+                    shared.state.exit = Some(report.into());
+                }
+                Err(error) => {
+                    shared.state.failure.get_or_insert_with(|| {
+                        ControlFailureReason::Transport.error(error.to_string())
+                    });
+                }
+            }
+            if let Some(mut active) = shared.active.take() {
+                let result = active.result.take().unwrap_or_else(|| {
+                    Err(active.error(
+                        DriverErrorCode::Unknown,
+                        "game exited before command completion",
+                    ))
+                });
+                active.deliver(result);
+                shared.state.recent_request = Some(active.record);
+            }
         });
-        json!({"event": if text == "DST_Stopping" { "stopping" } else { "shutdown" }})
-    } else {
-        json!({"event": "unknown", "line": text})
-    };
-    inner.publish(DriverEventKind::Lifecycle, record);
-    Ok(())
+        // The remaining exit fields are bounded counters, flags, timestamps and identifiers.
+        let bytes = 1024
+            + report
+                .as_ref()
+                .ok()
+                .and_then(|report| report.protocol_error.as_ref())
+                .map_or(0, String::len);
+        self.publish(bytes, || {
+            let state = inner.snapshots.borrow();
+            DriverEventKind::Lifecycle(json!({
+                "event":"process_exited", "process_id":state.process_id, "exit":state.exit,
+                "control_error":state.failure.as_ref().map(|error| error.code),
+                "native_diagnostics":state.native_diagnostics,
+            }))
+        });
+        drop(self.events);
+        finished.send_replace(true);
+    }
 }
 
-fn telemetry(inner: &Inner, payload: &[u8]) {
-    let record = crate::events::parse(payload).ok();
+fn telemetry(pump: &Pump, payload: &[u8]) {
+    let inner = &pump.inner;
+    let record = crate::events::parse(payload);
     let mut shared = inner.shared.lock().expect("driver state lock");
-    let accepted = (|| {
-        let Some(record) = &record else {
-            shared.state.invalid_telemetry += 1;
-            return false;
+    let rejection = (|| {
+        let record = match &record {
+            Ok(record) => record,
+            Err(error) => {
+                let reason = serde_json::from_value(error.details["reason"].clone())
+                    .expect("event parser supplies a fixed rejection reason");
+                let position = serde_json::from_value(error.details["position"].clone())
+                    .expect("event parser supplies an optional JSON position");
+                return Some((reason, position));
+            }
         };
-        if record.nonce() != shared.state.nonce {
-            shared.state.invalid_telemetry += 1;
-            return false;
+        if record.nonce != shared.state.nonce {
+            return Some((RejectionReason::Nonce, None));
         }
-        let sequence = record.sequence();
-        if Some(record.generation()) != shared.state.generation
-            || sequence <= shared.state.telemetry_sequence
-        {
-            shared.state.stale_telemetry += 1;
-            return false;
+        let sequence = record.seq.0;
+        if Some(record.generation.0) != shared.state.generation {
+            return Some((RejectionReason::Generation, None));
+        }
+        if sequence <= shared.state.telemetry_sequence {
+            return Some((RejectionReason::Sequence, None));
         }
         shared.state.telemetry_gaps += sequence - shared.state.telemetry_sequence - 1;
         shared.state.telemetry_sequence = sequence;
-        true
+        None
     })();
+    let accepted = rejection.is_none();
+    if let Some((reason, position)) = rejection {
+        shared
+            .state
+            .reject_telemetry(StreamKind::Reply, Some(payload.len()), reason, position);
+    }
     inner.snapshots.send_if_modified(|snapshot| {
         let state = &shared.state;
         let changed = snapshot.telemetry_gaps != state.telemetry_gaps
@@ -1343,20 +1176,78 @@ fn telemetry(inner: &Inner, payload: &[u8]) {
         snapshot.telemetry_gaps = state.telemetry_gaps;
         snapshot.invalid_telemetry = state.invalid_telemetry;
         snapshot.stale_telemetry = state.stale_telemetry;
+        if changed {
+            snapshot.telemetry_rejections = state.telemetry_rejections.clone();
+            snapshot.last_telemetry_rejection = state.last_telemetry_rejection.clone();
+        }
         changed
     });
     drop(shared);
     if accepted {
-        inner.publish(
-            DriverEventKind::Telemetry,
-            record.expect("validated event").into_value(),
-        );
+        pump.publish(payload.len(), || {
+            DriverEventKind::Telemetry(Box::new(record.expect("validated event")))
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queued_frames_keep_their_generation_when_bootstrap_overtakes_play() {
+        let nonce = Ulid::generate().to_string();
+        let play = |generation| {
+            json!({
+                "nonce":nonce, "generation":generation, "session_id":null, "seq":1,
+                "event":"dst.world.state_changed", "tick":1, "monotonic_ms":1, "cycle":null,
+                "data":{"name":"cycles","value":1}
+            })
+        };
+        let mut frames = String::new();
+        for (prefix, value) in [
+            ("DST_DRIVER", json!({"nonce":nonce,"generation":1})),
+            ("DST_OTEL", play(1)),
+            ("DST_DRIVER", json!({"nonce":nonce,"generation":2})),
+            (
+                "DST_CONTROL",
+                json!({"nonce":nonce,"generation":1,"event":"world_load_failed"}),
+            ),
+            ("DST_OTEL", play(2)),
+        ] {
+            use std::fmt::Write;
+            writeln!(frames, "{prefix}|{value}").unwrap();
+        }
+        let (process, output) = GameProcess::spawn(ProcessSpec {
+            program: "python3".into(),
+            args: vec![
+                "-c".into(),
+                "import os, sys; os.write(4, sys.argv[1].encode())".into(),
+                frames.into(),
+            ],
+            cwd: std::env::temp_dir(),
+        })
+        .unwrap();
+        // Both queues contain their complete input before the pump can read either one.
+        assert!(process.wait().await.unwrap().output_drained);
+        let (sender, mut events) = DriverEvents::channel();
+        let driver = Driver::start_pump(process, output, nonce, "Master".into(), Some(sender));
+        driver.wait().await.unwrap();
+        let state = driver.snapshot();
+        assert_eq!(state.telemetry_rejections[&RejectionReason::Generation], 1);
+        assert_eq!((state.telemetry_sequence, state.telemetry_gaps), (1, 0));
+        assert_eq!(state.control_count, 0);
+        assert!(state.last_control.is_none() && state.load_failure.is_none());
+        let play = events.recv().await.unwrap();
+        assert!(matches!(play.kind, DriverEventKind::Telemetry(_)));
+        assert_eq!(play.generation, Some(2));
+        assert_eq!(json!(&play)["data"]["generation"], 2);
+        assert_eq!(
+            json!(events.recv().await.unwrap())["data"]["event"],
+            "process_exited"
+        );
+        assert!(events.recv().await.is_none());
+    }
 
     #[tokio::test]
     async fn telemetry_sequence_updates_do_not_wake_control_watchers() {
@@ -1369,41 +1260,155 @@ mod tests {
             },
             nonce.clone(),
             "Master".into(),
+            None,
         )
         .unwrap();
         let inner = &driver.handle.inner;
         inner.change(|shared| shared.state.generation = Some(1));
         let mut states = driver.watch();
-        let mut subscription = driver.subscribe();
+        let (sender, mut events) = DriverEvents::channel();
+        let pump = Pump {
+            inner: inner.clone(),
+            events: Some(sender),
+        };
         let mut event = json!({
-            "v":3,"nonce":nonce,"generation":1,"session_id":null,"seq":1,
+            "nonce":nonce,"generation":1,"session_id":null,"seq":1,
             "event":"dst.world.state_changed","tick":1,"monotonic_ms":1,"cycle":null,
             "data":{"name":"cycles","value":1}
         });
-        telemetry(inner, &serde_json::to_vec(&event).unwrap());
+        telemetry(&pump, &serde_json::to_vec(&event).unwrap());
         assert!(!states.has_changed().unwrap());
         assert_eq!(states.borrow().telemetry_sequence, 1);
         assert_eq!(driver.snapshot().telemetry_sequence, 1);
-        assert_eq!(subscription.recv().await.unwrap().data, event);
+        assert_eq!(json!(events.recv().await.unwrap())["data"], event);
 
-        telemetry(inner, &serde_json::to_vec(&event).unwrap());
+        telemetry(&pump, &serde_json::to_vec(&event).unwrap());
         assert!(states.has_changed().unwrap());
         assert_eq!(states.borrow_and_update().stale_telemetry, 1);
-        telemetry(inner, b"{invalid");
+        telemetry(&pump, b"{invalid");
         assert!(states.has_changed().unwrap());
         assert_eq!(states.borrow_and_update().invalid_telemetry, 1);
         event["nonce"] = json!(Ulid::generate().to_string());
-        telemetry(inner, &serde_json::to_vec(&event).unwrap());
+        telemetry(&pump, &serde_json::to_vec(&event).unwrap());
         assert_eq!(states.borrow_and_update().invalid_telemetry, 2);
 
         event["nonce"] = json!(nonce);
         event["seq"] = json!(3);
-        telemetry(inner, &serde_json::to_vec(&event).unwrap());
+        telemetry(&pump, &serde_json::to_vec(&event).unwrap());
         assert!(states.has_changed().unwrap());
         assert_eq!(states.borrow_and_update().telemetry_gaps, 1);
-        assert_eq!(subscription.recv().await.unwrap().data, event);
+        assert_eq!(json!(events.recv().await.unwrap())["data"], event);
         assert_eq!(driver.snapshot().telemetry_sequence, 3);
-        assert_eq!(subscription.dropped(), 0);
+        assert_eq!(events.dropped(), 0);
+        event["generation"] = json!(0);
+        telemetry(&pump, &serde_json::to_vec(&event).unwrap());
+        event["generation"] = json!(1);
+        let mut invalid = event.clone();
+        invalid["data"] = json!({"SECRET_TOKEN": "private chat"});
+        for (payload, reason) in [
+            (
+                vec![b' '; crate::events::MAX_EVENT_BYTES + 1],
+                RejectionReason::Length,
+            ),
+            (br#"{"SECRET_TOKEN":"#.to_vec(), RejectionReason::JsonEof),
+            (
+                b"{invalid SECRET_TOKEN}".to_vec(),
+                RejectionReason::JsonSyntax,
+            ),
+            (
+                format!("{}0{}", "[".repeat(66), "]".repeat(66)).into_bytes(),
+                RejectionReason::Complexity,
+            ),
+            (
+                serde_json::to_vec(&invalid).unwrap(),
+                RejectionReason::Schema,
+            ),
+        ] {
+            telemetry(&pump, &payload);
+            let snapshot = states.borrow_and_update();
+            let rejection = snapshot.last_telemetry_rejection.as_ref().unwrap();
+            assert_eq!(rejection.reason, reason);
+            assert_eq!(rejection.bytes, Some(payload.len()));
+            assert_eq!(rejection.source, StreamKind::Reply);
+            let metadata = serde_json::to_string(rejection).unwrap();
+            assert!(!metadata.contains("SECRET_TOKEN") && !metadata.contains("private chat"));
+            assert!(!metadata.contains("field") && !metadata.contains("nonce"));
+        }
+        let snapshot = driver.snapshot();
+        assert_eq!(snapshot.invalid_telemetry, 7);
+        assert_eq!(snapshot.stale_telemetry, 2);
+        assert_eq!(
+            snapshot.telemetry_rejections[&RejectionReason::JsonSyntax],
+            2
+        );
+        assert_eq!(snapshot.telemetry_rejections[&RejectionReason::Nonce], 1);
+        assert_eq!(
+            snapshot.telemetry_rejections[&RejectionReason::Generation],
+            1
+        );
+        assert_eq!(snapshot.telemetry_rejections[&RejectionReason::Sequence], 1);
+        event["seq"] = json!(4);
+        telemetry(&pump, &serde_json::to_vec(&event).unwrap());
+        assert!(!states.has_changed().unwrap());
+        assert_eq!(json!(events.recv().await.unwrap())["data"], event);
+        let maximum = crate::events::MAX_EVENT_BYTES;
+        for (bytes, ending, accepted) in [
+            (maximum, "\n", true),
+            (maximum - 1, "\r\n", true),
+            (maximum, "\r\n", false),
+            (maximum, "", true),
+            (maximum + 1, "\n", false),
+        ] {
+            event["seq"] = json!(driver.snapshot().telemetry_sequence + 1);
+            let payload = format!("{:bytes$}", event.to_string());
+            let frame = format!("DST_OTEL|{payload}{ending}");
+            handle_line(&pump, StreamKind::Reply, frame.as_bytes()).unwrap();
+            assert_eq!(states.has_changed().unwrap(), !accepted);
+            let snapshot = states.borrow_and_update();
+            if accepted {
+                assert_eq!(snapshot.telemetry_sequence, event["seq"].as_u64().unwrap());
+            } else {
+                let rejection = snapshot.last_telemetry_rejection.as_ref().unwrap();
+                assert_eq!(rejection.reason, RejectionReason::Length);
+                assert_eq!(rejection.bytes, Some(bytes + usize::from(ending == "\r\n")));
+            }
+            drop(snapshot);
+            if accepted {
+                assert_eq!(json!(events.recv().await.unwrap())["data"], event);
+            }
+        }
+        for (stream, prefix) in [
+            (StreamKind::Reply, "[0:00:01]: DST_OTEL|"),
+            (StreamKind::Reply, "xDST_OTEL|"),
+            (StreamKind::Reply, "DST_OTELx|"),
+            (StreamKind::Stdout, "[0:00:01]: [0:00:02]: DST_OTEL|"),
+        ] {
+            handle_line(&pump, stream, format!("{prefix}{{invalid\n").as_bytes()).unwrap();
+            assert!(!states.has_changed().unwrap());
+            assert!(matches!(
+                events.recv().await.unwrap().kind,
+                DriverEventKind::Log(_)
+            ));
+        }
+        for generation in [2, 3] {
+            event["generation"] = json!(generation);
+            event["seq"] = json!(1);
+            telemetry(&pump, &serde_json::to_vec(&event).unwrap());
+            assert_eq!(driver.snapshot().generation, Some(generation - 1));
+            handle_line(
+                &pump,
+                StreamKind::Reply,
+                format!(
+                    "DST_DRIVER|{}\n",
+                    json!({"nonce":nonce,"generation":generation})
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            assert_eq!(driver.snapshot().generation, Some(generation));
+            telemetry(&pump, &serde_json::to_vec(&event).unwrap());
+            assert_eq!(driver.snapshot().telemetry_sequence, 1);
+        }
         driver.kill().await.unwrap();
     }
 }

@@ -5,6 +5,11 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.default.overrides]]
 filter = "test(wall_clock_opens_and_closes_games_without_an_external_trigger)"
 slow-timeout = { period = "30s", terminate-after = 7 }
+priority = 100
+
+[[profile.default.overrides]]
+filter = "test(termination_announces_for_sixty_seconds_before_native_shutdown)"
+priority = 100
 
 [profile.ci]
 fail-fast = false

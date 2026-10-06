@@ -6,11 +6,15 @@ use serde_json::{Map, Number, Value};
 use crate::model::{Countdown, Envelope, Error, ErrorCode, Request, Target};
 use crate::room_capnp as wire;
 
-use super::{MAX_MESSAGE, Result};
+use super::{MAX_MESSAGE, MAX_OUTCOME, Result, transport};
 
 const MAX_DEPTH: usize = 64;
 
-pub(super) type ValueMessage = TypedBuilder<wire::value::Owned>;
+pub(super) struct EncodedValue {
+    pub message: TypedBuilder<wire::value::Owned>,
+    pub expanded_bytes: usize,
+    pub native_bytes: usize,
+}
 pub(super) type EnvelopeMessage = TypedBuilder<wire::envelope::Owned>;
 
 fn message<T: capnp::traits::Owned>() -> TypedBuilder<T> {
@@ -81,18 +85,21 @@ fn check_depth(depth: usize) -> Result<()> {
     }
 }
 
-pub(super) fn encode_value(value: &Value, limit: usize) -> Result<ValueMessage> {
+pub(super) fn encode_value(value: &Value, limit: usize) -> Result<EncodedValue> {
     let mut encoded = message::<wire::value::Owned>();
-    write_value(encoded.init_root(), value, &mut Budget::new(limit), 0)?;
-    check_size(
-        encoded
-            .get_root_as_reader()
-            .map_err(invalid)?
-            .total_size()
-            .map_err(invalid)?,
-        limit,
-    )?;
-    Ok(encoded)
+    let mut budget = Budget::new(limit);
+    write_value(encoded.init_root(), value, &mut budget, 0)?;
+    let size = encoded
+        .get_root_as_reader()
+        .map_err(invalid)?
+        .total_size()
+        .map_err(invalid)?;
+    check_size(size, limit)?;
+    Ok(EncodedValue {
+        message: encoded,
+        expanded_bytes: limit - budget.0,
+        native_bytes: size.word_count as usize * 8,
+    })
 }
 
 fn write_value(
@@ -325,33 +332,48 @@ error_codes! {
     Transport, Timeout, Overflow, StaleReference, Lua, Protocol, Internal,
 }
 
-fn write_error(mut builder: wire::error::Builder<'_>, error: &Error) -> Result<()> {
-    let mut budget = Budget::new(MAX_MESSAGE);
-    budget.text(&error.message)?;
-    builder.set_code(write_error_code(error.code));
-    builder.set_message(error.message.as_str());
-    write_value(builder.init_details(), &error.details, &mut budget, 0)
-}
-
-pub(super) fn read_error(reader: wire::error::Reader<'_>) -> Result<Error> {
-    Ok(Error {
-        code: read_error_code(reader.get_code().map_err(invalid)?),
-        message: text(reader.get_message())?,
-        details: read_value(reader.get_details().map_err(invalid)?)?,
+/// A decoded application error confirms a reply just as a decoded value does.
+pub(super) fn read_outcome(reader: wire::outcome::Reader<'_>) -> Result<Result<Value>> {
+    check_size(reader.total_size().map_err(transport)?, MAX_OUTCOME)?;
+    let mut budget = Budget::new(MAX_OUTCOME);
+    Ok(match reader.which().map_err(transport)? {
+        wire::outcome::Value(value) => {
+            Ok(
+                read_value_with_budget(value.map_err(transport)?, &mut budget, 0)
+                    .map_err(transport)?,
+            )
+        }
+        wire::outcome::Error(error) => {
+            let error = error.map_err(transport)?;
+            let message = text(error.get_message()).map_err(transport)?;
+            budget.text(&message)?;
+            Err(Error {
+                code: read_error_code(error.get_code().map_err(transport)?),
+                message,
+                details: read_value_with_budget(
+                    error.get_details().map_err(transport)?,
+                    &mut budget,
+                    0,
+                )
+                .map_err(transport)?,
+            })
+        }
     })
 }
 
 pub(super) fn encode_outcome(result: &Result<Value>) -> Result<TypedBuilder<wire::outcome::Owned>> {
     let mut encoded = message::<wire::outcome::Owned>();
     let builder: wire::outcome::Builder<'_> = encoded.init_root();
+    let mut budget = Budget::new(MAX_OUTCOME);
     match result {
-        Ok(value) => write_value(
-            builder.init_value(),
-            value,
-            &mut Budget::new(MAX_MESSAGE),
-            0,
-        )?,
-        Err(error) => write_error(builder.init_error(), error)?,
+        Ok(value) => write_value(builder.init_value(), value, &mut budget, 0)?,
+        Err(error) => {
+            budget.text(&error.message)?;
+            let mut output = builder.init_error();
+            output.set_code(write_error_code(error.code));
+            output.set_message(error.message.as_str());
+            write_value(output.init_details(), &error.details, &mut budget, 0)?;
+        }
     }
     check_size(
         encoded
@@ -359,7 +381,7 @@ pub(super) fn encode_outcome(result: &Result<Value>) -> Result<TypedBuilder<wire
             .map_err(invalid)?
             .total_size()
             .map_err(invalid)?,
-        MAX_MESSAGE,
+        MAX_OUTCOME,
     )?;
     Ok(encoded)
 }
@@ -400,6 +422,22 @@ fn write_request(mut builder: wire::request::Builder<'_>, request: &Request) -> 
                 0,
             )?;
             args.set_replace_permissions(*replace_permissions);
+        }
+        Request::EditConfiguration { changes, unset } => {
+            let mut args = builder.init_edit_configuration();
+            let mut budget = Budget::new(MAX_MESSAGE);
+            write_value(
+                args.reborrow().init_changes(),
+                &serde_json::to_value(changes).map_err(invalid)?,
+                &mut budget,
+                0,
+            )?;
+            budget.list(unset.len(), 8)?;
+            let mut pointers = args.init_unset(unset.len() as u32);
+            for (index, pointer) in unset.iter().enumerate() {
+                budget.text(pointer)?;
+                pointers.set(index as u32, pointer.as_str());
+            }
         }
         Request::SetPolicy { policy } => {
             let mut args = builder.init_set_policy();
@@ -676,6 +714,19 @@ fn read_request(reader: wire::request::Reader<'_>) -> Result<Request> {
             Request::Configure {
                 configuration: read_value(args.get_configuration().map_err(invalid)?)?,
                 replace_permissions: args.get_replace_permissions(),
+            }
+        }
+        Which::EditConfiguration(args) => {
+            let args = args.map_err(invalid)?;
+            Request::EditConfiguration {
+                changes: serde_json::from_value(read_value(args.get_changes().map_err(invalid)?)?)
+                    .map_err(invalid)?,
+                unset: args
+                    .get_unset()
+                    .map_err(invalid)?
+                    .iter()
+                    .map(text)
+                    .collect::<Result<_>>()?,
             }
         }
         Which::SetPolicy(args) => {
@@ -972,21 +1023,32 @@ mod tests {
             "text": "洞穴\u{0}🌲",
         });
         let encoded = encode_value(&value, MAX_MESSAGE).unwrap();
-        let bytes = capnp::serialize::write_message_to_words(encoded.borrow_inner());
+        let bytes = capnp::serialize::write_message_to_words(encoded.message.borrow_inner());
         let reader =
-            capnp::serialize::read_message(&bytes[..], super::super::READER_OPTIONS).unwrap();
+            capnp::serialize::read_message(&bytes[..], super::super::reader_options(MAX_MESSAGE))
+                .unwrap();
         let restored = read_value(reader.get_root().unwrap()).unwrap();
         assert_eq!(restored, value);
         assert!(restored["numbers"][4].as_f64().unwrap().is_sign_negative());
 
         let scalar = encode_value(&json!(0.25), MAX_MESSAGE).unwrap();
         assert!(matches!(
-            scalar.get_root_as_reader().unwrap().which().unwrap(),
+            scalar
+                .message
+                .get_root_as_reader()
+                .unwrap()
+                .which()
+                .unwrap(),
             wire::value::Float(0.25)
         ));
         let integer = encode_value(&json!(u64::MAX), MAX_MESSAGE).unwrap();
         assert!(matches!(
-            integer.get_root_as_reader().unwrap().which().unwrap(),
+            integer
+                .message
+                .get_root_as_reader()
+                .unwrap()
+                .which()
+                .unwrap(),
             wire::value::Unsigned(u64::MAX)
         ));
     }
@@ -1046,9 +1108,10 @@ mod tests {
             nested = json!({"next": nested});
         }
         let encoded = encode_value(&nested, MAX_MESSAGE).unwrap();
-        let bytes = capnp::serialize::write_message_to_words(encoded.borrow_inner());
+        let bytes = capnp::serialize::write_message_to_words(encoded.message.borrow_inner());
         let reader =
-            capnp::serialize::read_message(&bytes[..], super::super::READER_OPTIONS).unwrap();
+            capnp::serialize::read_message(&bytes[..], super::super::reader_options(MAX_MESSAGE))
+                .unwrap();
         assert_eq!(read_value(reader.get_root().unwrap()).unwrap(), nested);
 
         for invalid in [
@@ -1085,7 +1148,8 @@ mod tests {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
         let reader =
-            capnp::serialize::read_message(&bytes[..], super::super::READER_OPTIONS).unwrap();
+            capnp::serialize::read_message(&bytes[..], super::super::reader_options(MAX_MESSAGE))
+                .unwrap();
         let value = reader.get_root::<wire::value::Reader<'_>>().unwrap();
         check_size(value.total_size().unwrap(), MAX_MESSAGE).unwrap();
         assert_eq!(read_value(value).unwrap_err().code, ErrorCode::Overflow);

@@ -12,9 +12,11 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
+from native_agent import call, check_profile_log, exercise_profile, ready, stop
 from prepare_probe import prepare
 
 
@@ -28,6 +30,44 @@ def save_hashes(cluster: Path) -> dict[str, str]:
         for path in cluster.rglob("*")
         if path.is_file() and "save" in path.relative_to(cluster).parts
     }
+
+
+def check_save(binary: Path, fixture: Path, state: dict, report: dict) -> None:
+    names = {shard["name"] for shard in state["shards"]}
+    assert names == {"surface", "world-2"}, state
+    before = {
+        name: call(binary, fixture, report, "runtime", shard=name) for name in names
+    }
+    existing = {
+        file
+        for name in names
+        for file in (fixture / "cluster" / name / "save" / "session").glob("*/*")
+    }
+    assert call(binary, fixture, report, "save") is True
+    deadline = time.monotonic() + 120
+    saved = {}
+    while names - saved.keys():
+        for name in names - saved.keys():
+            runtime = call(binary, fixture, report, "runtime", shard=name)
+            assert runtime["session_id"] == before[name]["session_id"], runtime
+            if runtime["snapshot"] > before[name]["snapshot"]:
+                catalog = call(binary, fixture, report, "list_snapshots", shard=name)
+                assert catalog["session_id"] == runtime["session_id"], catalog
+                worlds = (
+                    fixture / "cluster" / name / "save" / entry["world_file"]
+                    for entry in catalog["snapshots"]
+                    if entry["world_file"]
+                    and entry["snapshot_id"] >= before[name]["snapshot"]
+                )
+                if any(
+                    world not in existing and world.is_file() and world.stat().st_size
+                    for world in worlds
+                ):
+                    saved[name] = runtime
+        if names - saved.keys():
+            assert time.monotonic() < deadline, ("native save did not finish", saved)
+            time.sleep(0.2)
+    report["saved"] = saved
 
 
 def main() -> None:  # ruff: ignore[too-many-locals, too-many-statements]
@@ -57,13 +97,9 @@ def main() -> None:  # ruff: ignore[too-many-locals, too-many-statements]
         parser.error("run as root with rootful Podman (for example: sudo -E python3)")
     mapping = "idmap=uids=0-1000-1;gids=0-1000-1"
 
-    def run(
-        room: str, label: str, command: str, *arguments: str, success: bool = True
-    ) -> dict[str, Any] | None:
-        fixture = root / room
-        cluster = fixture / "cluster"
-        name = f"dst-native-{os.getpid()}-{room}"
-        command_line = [
+    def container(room: str, profile: str = "play") -> list[str]:
+        cluster = root / room / "cluster"
+        return [
             "podman",
             "run",
             "--rm",
@@ -72,7 +108,11 @@ def main() -> None:  # ruff: ignore[too-many-locals, too-many-statements]
             "--network",
             "none",
             "--name",
-            name,
+            container_name(room),
+            "-e",
+            "OTEL_SDK_DISABLED=true",
+            "-e",
+            f"DST_SERVER_TELEMETRY_PROFILE={profile}",
             "-v",
             f"{cluster}:/p0/cluster:{mapping}",
             "-v",
@@ -84,6 +124,25 @@ def main() -> None:  # ruff: ignore[too-many-locals, too-many-statements]
             "--entrypoint",
             "/p0/dst-server",
             args.image,
+        ]
+
+    def container_name(room: str) -> str:
+        return f"dst-native-{os.getpid()}-{room}"
+
+    def remove(room: str) -> None:
+        subprocess.run(
+            ["podman", "rm", "--force", "--ignore", container_name(room)],
+            capture_output=True,
+            check=True,
+            timeout=45,
+        )
+
+    def run(
+        room: str, label: str, command: str, *arguments: str, success: bool = True
+    ) -> dict[str, Any] | None:
+        fixture = root / room
+        command_line = [
+            *container(room),
             command,
             "--cluster",
             "/p0/cluster",
@@ -105,18 +164,48 @@ def main() -> None:  # ruff: ignore[too-many-locals, too-many-statements]
                 json.loads((fixture / f"{label}.json").read_text()) if success else None
             )
         finally:
-            # This unique test container may still exist after a runner timeout.
-            subprocess.run(
-                ["podman", "rm", "--force", "--ignore", name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
+            remove(room)
 
     for room, count in (("one", 1), ("two", 2), ("five", 5)):
         prepare(root / room, count)
         report = run(room, "normal", "probe", "--rounds", "2")
         assert report["passed"]
+    fixture = root / "agent"
+    cluster = prepare(fixture, 2)
+    (cluster / ".dst-server.json").write_text(
+        json.dumps({"policy": {"mod_auto_update": False}})
+    )
+    for profile in ("play", "off", "timeline"):
+        agent_log = fixture / f"{profile}.log"
+        with (
+            agent_log.open("wb") as log,
+            subprocess.Popen(
+                [
+                    *container("agent", profile),
+                    "agent",
+                    "--cluster",
+                    "/p0/cluster",
+                    "--offline",
+                ],
+                stdout=log,
+                stderr=log,
+            ) as process,
+        ):
+            try:
+                report = {"calls": [], "exits": []}
+                state = ready(binary, fixture, report, process)
+                exercise_profile(binary, fixture, report, profile)
+                if profile == "play":
+                    check_save(binary, fixture, state, report)
+                    lifecycle = report
+                stop(binary, fixture, report, process)
+            finally:
+                remove("agent")
+        check_profile_log(agent_log, profile)
+    assert {entry["shard"] for entry in lifecycle["exits"][0]["shards"]} == set(
+        lifecycle["saved"]
+    )
+    (fixture / "lifecycle.json").write_text(json.dumps(lifecycle, indent=2) + "\n")
     catalog = run("five", "recovery-catalog", "probe-recovery")
     assert catalog["passed"]
     assert not catalog["worlds_loaded"]
@@ -225,6 +314,8 @@ def main() -> None:  # ruff: ignore[too-many-locals, too-many-statements]
         "bundle_sha256": digest(bundle),
         "normal_world_counts": [1, 2, 5],
         "normal_rounds": 2,
+        "profiles": ["off", "timeline", "play"],
+        "agent_saved_shards": sorted(lifecycle["saved"]),
         "recovery_fixed_targets": targets,
         "recovery_repeat_changed": False,
         "invalid_session_unchanged_files": len(before),

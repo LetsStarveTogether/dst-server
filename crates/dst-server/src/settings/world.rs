@@ -1220,18 +1220,5 @@ impl WorldValues {
     }
 }
 
-impl Resolve for WorldValues {
-    fn resolved(&self) -> Value {
-        let (kind, values) = match self {
-            Self::World(values) => ("world", values.resolved()),
-            Self::Forest(values) => ("forest", values.resolved()),
-            Self::Cave(values) => ("cave", values.resolved()),
-            Self::Quagmire(values) => ("quagmire", values.resolved()),
-            Self::LavaArena(values) => ("lavaarena", values.resolved()),
-            Self::Custom(values) => ("custom", values.resolved()),
-            Self::LoadedForest(values) => ("loaded_forest", values.resolved()),
-            Self::LoadedCave(values) => ("loaded_cave", values.resolved()),
-        };
-        json!({"kind": kind, "values": values})
-    }
-}
+// Missing overrides inherit the selected native preset, including its Mod settings.
+scalar_resolve!(WorldValues);

@@ -220,9 +220,16 @@ function commands.reload_permissions()
     return true
 end
 
-function commands.set_vitals(args)
+local function living_player(args)
     local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
-    if player == nil or player:HasTag("playerghost") then
+    if player and not IsEntityDeadOrGhost(player) and not player:HasTag("corpse") then
+        return player
+    end
+end
+
+function commands.set_vitals(args)
+    local player = living_player(args)
+    if player == nil then
         return false
     end
     local percentages = {}
@@ -250,12 +257,18 @@ function commands.set_vitals(args)
 end
 
 function commands.kill_player(args)
-    local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
-    if player == nil or player.components.health == nil then
+    local player = living_player(args)
+    local health = player and player.components.health
+    if health == nil then
         return false
     end
-    player.components.health:ForceKill()
-    return true
+    health:SetPercent(0)
+    local dead = health:IsDead()
+    if dead and player.components.oldager ~= nil then
+        -- A pending heal from Wanda's Ageless Watch can restore health on the next tick.
+        player.components.oldager:StopDamageOverTime()
+    end
+    return dead
 end
 
 function commands.revive(args)
@@ -349,6 +362,18 @@ function commands.give(args)
     return created
 end
 
+local function consume(storage, prefab, count, readonly_overflow)
+    local _, found = storage:Has(prefab, count)
+    if readonly_overflow then
+        -- Inventory:Has counts read-only backpack slots that ConsumeByName skips.
+        local _, locked = readonly_overflow:Has(prefab, count)
+        found = found - locked
+    end
+    local removed = math.min(found, count)
+    storage:ConsumeByName(prefab, removed)
+    return removed
+end
+
 function commands.remove(args)
     local player = LookupPlayerInstByUserID(values.required_string(args, "userid"))
     if player == nil or player.components.inventory == nil then
@@ -357,9 +382,21 @@ function commands.remove(args)
     local prefab = string.lower(values.required_string(args, "item"))
     local count = values.required_integer(args, "count", 1)
     local inventory = player.components.inventory
-    local _, found = inventory:Has(prefab, count)
-    local removed = math.min(found, count)
-    inventory:ConsumeByName(prefab, removed)
+    local overflow = inventory:GetOverflowContainer()
+    local readonly = overflow and overflow.readonlycontainer
+    local removed = consume(inventory, prefab, count, readonly and overflow)
+    if removed == count then return removed end
+    -- Native inventory consumption includes loose backpack contents. GiveItem also uses its pouches.
+    local carried = { inventory, not readonly and overflow or nil }
+    for _, storage in ipairs(carried) do
+        for _, pouch in ipairs(storage:GetSpecializedContainers() or {}) do
+            if not pouch.readonlycontainer then
+                removed = removed + consume(pouch, prefab, count - removed)
+                if removed == count then return removed end
+                carried[#carried + 1] = pouch
+            end
+        end
+    end
     return removed
 end
 

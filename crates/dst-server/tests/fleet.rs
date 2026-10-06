@@ -15,7 +15,9 @@ use std::{
 use dst_server::{
     host::{AGENT_SOCKET, Host},
     host_operations::HostOperation,
-    model::{Error, ErrorCode, Request},
+    model::{Error, ErrorCode, Phase, Readiness, Request, RoomStatus, ShardStatus},
+    policy::{ModMaintenance, Policy},
+    recovery::RecoveryState,
     rooms,
     rpc::{self, EventHub, Incoming},
 };
@@ -61,7 +63,41 @@ struct Calls {
     release_saves: Notify,
 }
 
+fn agent_status(number: u16) -> Value {
+    let name = format!("Master-{number}");
+    let shard = ShardStatus {
+        name: name.clone(),
+        is_master: true,
+        phase: Phase::Running,
+        pid: Some(1000 + u32::from(number)),
+        identity: None,
+        error: None,
+        readiness: Readiness {
+            process_running: true,
+            world_loaded: true,
+            control_ready: true,
+            missing_shards: Vec::new(),
+        },
+    };
+    let mut status = json!(RoomStatus {
+        phase: Phase::Running,
+        master: name,
+        shards: vec![shard],
+        operations: Default::default(),
+        error: None,
+    });
+    let policy = Policy::default();
+    status["agent"] = json!({
+        "ready":true, "requires_container_restart":false, "error":null,
+        "policy":policy, "schedule":policy.schedule_at(chrono::Utc::now()).unwrap(),
+        "maintenance":ModMaintenance::default(), "recovery":RecoveryState::default(),
+        "mod_check":{"targets":{}, "unavailable":{}, "versions":{}}, "telemetry":{},
+    });
+    status
+}
+
 async fn actor(number: u16, mut incoming: mpsc::Receiver<Incoming>, calls: Arc<Calls>) {
+    let status = agent_status(number);
     while let Some(message) = incoming.recv().await {
         let active = calls.active.fetch_add(1, Ordering::SeqCst) + 1;
         calls.peak.fetch_max(active, Ordering::SeqCst);
@@ -77,8 +113,10 @@ async fn actor(number: u16, mut incoming: mpsc::Receiver<Incoming>, calls: Arc<C
         }
         let result = if number == 42 && !save {
             Err(Error::new(ErrorCode::NotReady, "injected room failure"))
+        } else if save {
+            Ok(json!(true))
         } else {
-            Ok(json!({"number": number, "phase": "running", "saved": save}))
+            Ok(status.clone())
         };
         calls.active.fetch_sub(1, Ordering::SeqCst);
         let _ = message.reply.send(result);
@@ -118,7 +156,10 @@ fn ordered_outcomes(outcomes: &[Value], numbers: &[u16], systemd_status: bool) {
             if *number == 42 {
                 assert_eq!(result["value"]["error"], "injected room failure");
             } else {
-                assert_eq!(result["value"]["game"]["number"], *number);
+                assert_eq!(
+                    result["value"]["game"]["master"],
+                    format!("Master-{number}")
+                );
                 assert_eq!(result["value"]["error"], Value::Null);
             }
         } else if *number == 42 {
@@ -126,7 +167,7 @@ fn ordered_outcomes(outcomes: &[Value], numbers: &[u16], systemd_status: bool) {
             assert_eq!(result["error"]["code"], "not_ready");
         } else {
             assert_eq!(result["ok"], true);
-            assert_eq!(result["value"]["number"], *number);
+            assert_eq!(result["value"]["master"], format!("Master-{number}"));
         }
     }
 }
@@ -302,7 +343,9 @@ async fn all_fleet_rooms_keep_bounded_batches_and_resources_after_cancellation()
             assert_eq!(systemd["active"], 0);
             assert_eq!(systemd["started"], systemd["finished"]);
             assert!((2..=8).contains(&systemd["peak"].as_u64().unwrap()));
-            assert_eq!(systemd["started"], numbers.len() * 7);
+            assert_eq!(systemd["reloads"], 1);
+            assert_eq!(systemd["last_reload_units"], numbers.len());
+            assert_eq!(systemd["started"], numbers.len() * 6 + 1);
             let report = json!({
                 "rooms": numbers.len(), "shards": shard_count, "families": families,
                 "published_udp_ports": ports.len(), "mock_systemd": systemd,

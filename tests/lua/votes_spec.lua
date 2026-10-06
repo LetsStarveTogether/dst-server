@@ -1,105 +1,87 @@
 local root, scripts, scenario = assert(arg[1]), assert(arg[2]), assert(arg[3])
 dofile(root .. "/tests/lua/setup.lua")(root, scripts)
-require("class")
-Entity = {}
-require("entityscript")
 local state = require("dst_server.state")
-state.nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-state.generation = 4
-state.requested_profile = "critical"
-state.telemetry_active = true
+state.nonce, state.generation = "01ARZ3NDEKTSV4RRFFQ69G5FAV", 4
+state.requested_profile, state.telemetry_active = "timeline", true
 GetTick = function() return 10 end
 GetTimeReal = function() return 20 end
-local outputs = {}
-nolineprint = function(line) outputs[#outputs + 1] = line:sub(10) end
-MAX_VOTE_OPTIONS = 6
-STRINGS = { UI = { VOTEDIALOG = {YES = "Yes", NO = "No"} } }
-local command = {
-    name = scenario == "custom" and "mod_test" or "kick",
-    voteoptions = scenario == "custom" and {"Opt A", "自定义", "Opt C"} or nil,
-}
-local failure, calls = {}, 0
-local selected = scenario == "custom" and 3 or 1
-local params = {user = "KU_TARGET"}
-local counts = { total = 3, total_voted = 2, total_not_voted = 0,
-    options = scenario == "custom" and {0, 0, 2} or {2, 0} }
-local commands = {
-    GetCommandFromHash = function(hash) return hash ~= 0 and command or nil end,
-    FinishVote = function(_, received_params, received_counts)
-        calls = calls + 1
-        assert(received_params == params and received_counts == counts)
-        if scenario == "error" then error(failure, 0) end
-        if scenario ~= "failed" then params.voteselection, params.votecount = selected, 2 end
-        if scenario == "capture_error" then
-            params.user = nil
-            setmetatable(params, {__index = function() error("capture failed", 0) end})
-        end
-        return scenario ~= "failed", nil, "preserved"
+local update
+TheWorld = {
+    ismastershard = scenario ~= "secondary", net = { components = { worldvoter = {} } },
+    meta = { session_identifier = "SESSION" }, state = { cycles = 2 },
+    ListenForEvent = function(_, name, callback)
+        assert(update == nil and name == "master_worldvoterupdate")
+        update = callback
     end,
 }
-package.loaded.usercommands = commands
-TheWorld = setmetatable({
-    GUID = 1, ismastershard = scenario ~= "secondary",
-    meta = {session_identifier = "SESSION"}, state = {cycles = 2},
-}, {__index = EntityScript})
-local closed = {countdown = 0, commandid = 0, starteruserid = "", targetuserid = ""}
-local voter = { OnUpdate = function()
-    TheWorld:PushEvent("master_worldvoterupdate", closed)
-    return commands.FinishVote(command.name, params, counts)
+local records = {}
+dofile(root .. "/tests/lua/capture_remote.lua")(function(line)
+    records[#records + 1] = require("dst_server.wire").decode(line:sub(10))
+    io.write(line:sub(10), "\n")
+end)
+
+package.loaded["screens/redux/popupdialog"], package.loaded.stats = {}, {}
+IsRail = function() return false end
+smallhash = function() return 42 end
+local commands = require("usercommands")
+local passed, announced, executed = true, 0, 0
+AddUserCommand("kick", { vote = true,
+    voteresultfn = function() return passed and 1 or nil, 2 end,
+    serverfn = function() executed = executed + 1 end,
+})
+local native_finish = commands.FinishVote
+local failure = {}
+-- Preserve a mod wrapper's return tuple and errors while exercising the actual FinishVote.
+commands.FinishVote = function(name, params, counts)
+    if params == failure then error(failure, 0) end
+    return native_finish(name, params, counts), nil, false, nil
+end
+local before_install = commands.FinishVote
+local installed = require("dst_server.vote_events").install()
+if scenario == "secondary" then
+    assert(installed == false and update == nil and commands.FinishVote == before_install)
+    return
+end
+assert(scenario == "complete" and installed)
+TheNet = { AnnounceVoteResult = function(_, hash, _, outcome)
+    assert(hash == 42 and outcome == passed)
+    announced = announced + 1
 end }
-local update = voter.OnUpdate
-TheWorld.net = {components = {worldvoter = voter}}
-require("dst_server.vote_events").install()
-assert(voter.OnUpdate == update, "vote capture must not wrap frame updates")
-TheWorld:PushEvent("master_worldvoterupdate", closed)
-assert(#outputs == 0, "idle initialization is not a vote")
-local snapshot = {
-    countdown = 30, commandid = 42, targetuserid = "KU_TARGET", starteruserid = "KU_A",
-    voters = {KU_A = 7, KU_B = 7},
-}
-TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-if scenario == "secondary" then assert(#outputs == 0); return end
-assert(#outputs == 1)
-for countdown = 29, 20, -1 do
-    snapshot.countdown = countdown
-    TheWorld:PushEvent("master_worldvoterupdate", snapshot)
+UserToName = function() return nil end
+local counts = {total = 2, total_voted = 2, total_not_voted = 0, options = {2, 0}}
+local params = {user = "KU_TARGET", username = "Target"}
+local ballot = {commandid = 42, starteruserid = "KU_A", targetuserid = "KU_TARGET"}
+local cleared = {commandid = 0}
+local function begin()
+    local before = #records
+    update(TheWorld, ballot)
+    ballot.voters = {KU_A = 1, KU_B = 0}
+    update(TheWorld, ballot)
+    assert(#records == before + 1 and records[#records].event == "dst.vote.started")
+    assert(records[#records].data.starter_userid == "KU_A" and records[#records].data.target_userid == "KU_TARGET")
+    update(TheWorld, cleared)
+    assert(#records == before + 1, "the native voter clears on both settlement and cancellation")
 end
-assert(#outputs == 1, "countdown updates do not repeat unchanged ballots")
-snapshot.voters.KU_A = selected
-TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-assert(#outputs == 2, "native voters are mutated in place")
-snapshot.voters.KU_B = selected
-TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-assert(#outputs == 3)
-if scenario == "cancelled" then
-    TheWorld:PushEvent("master_worldvoterupdate", closed)
-    assert(#outputs == 4, "cancellation must not invent a result")
-else
-    local results = require("dst_server.telemetry").pack(pcall(voter.OnUpdate))
-    if scenario == "error" then
-        assert(results[1] == false and results[2] == failure and #outputs == 4)
-    else
-        assert(results.n == 4 and results[1] and results[2] == (scenario ~= "failed") and results[3] == nil and results[4] == "preserved")
-        assert(calls == 1 and #outputs == 5)
-    end
+
+update(TheWorld, cleared)
+begin() -- Cancelled vote. The next one may have the same command and players.
+for _, outcome in ipairs({true, false}) do
+    passed = outcome
+    begin()
+    local results = require("dst_server.telemetry").pack(commands.FinishVote("kick", params, counts))
+    assert(results.n == 4 and results[1] == passed and results[3] == false and results[4] == nil)
+    local last = records[#records]
+    assert(last.event == "dst.vote.result" and last.data.passed == passed)
+    assert(last.data.target_userid == "KU_TARGET" and last.data.starter_userid == "KU_A")
 end
-local recorded = #outputs
-TheWorld:PushEvent("master_worldvoterupdate", closed)
-assert(#outputs == recorded, "repeated closing notifications are ignored")
-TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-assert(#outputs == recorded + 1, "the same command can start a new vote")
-snapshot.voters.KU_C = 7
-TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-snapshot.voters.KU_B = nil
-TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-assert(#outputs == recorded + 3, "added and removed voters change the snapshot")
-snapshot.targetuserid = "KU_NEW_TARGET"
-TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-snapshot.starteruserid = "KU_NEW_STARTER"
-TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-snapshot.commandid = 43
-TheWorld:PushEvent("master_worldvoterupdate", snapshot)
-assert(#outputs == recorded + 6, "vote identity changes are recorded")
-assert(state.errors == (scenario == "capture_error" and 1 or 0))
-for _, line in ipairs(outputs) do io.write(line, "\n") end
+assert(announced == 2 and executed == 1)
+
+begin()
+local before = #records
+assert(not commands.FinishVote("kick", {user = "KU_TARGET"}, counts))
+assert(announced == 2 and #records == before, "FinishVote returned early without announcing a failure")
+begin()
+before = #records
+local ok, err = pcall(commands.FinishVote, "kick", failure, counts)
+assert(not ok and err == failure and #records == before)
+assert(state.errors == 0)

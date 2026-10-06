@@ -2,71 +2,53 @@ local telemetry = require("dst_server.telemetry")
 local values = require("dst_server.values")
 local message_events = {}
 
-local function after(original, capture)
-    return function(...)
-        local results = telemetry.pack(original(...))
-        capture(...)
-        return telemetry.unpack(results)
+function message_events.install_public_chat()
+    local say = Networking_Say
+    assert(type(say) == "function", "Networking_Say is unavailable")
+    local capture_chat = telemetry.guard("player.public_chat", function(guid, userid, name, prefab, message, _, _, emote)
+        if type(message) ~= "string" or #message > MAX_CHAT_INPUT_LENGTH and message:utf8len() > MAX_CHAT_INPUT_LENGTH then
+            return
+        end
+        local sender = values.userid(userid)
+        if sender == nil then
+            local player = Ents[guid]
+            if player ~= nil and player:IsValid() and player:HasTag("player") then
+                sender = values.entity_userid(player)
+            end
+        end
+        telemetry.emit("dst.player.public_chat", {
+            userid = sender or json.null,
+            name = name or json.null,
+            prefab = prefab ~= "" and prefab or json.null,
+            message = message,
+            emote = not not emote,
+        })
+    end)
+    Networking_Say = function(...)
+        if select(7, ...) then return say(...) end
+        local results = telemetry.pack(say(...))
+        capture_chat(...)
+        return unpack(results, 1, results.n)
     end
 end
 
-function message_events.install()
-    local say, announcement = Networking_Say, Networking_Announcement
-    local skin, system, roll = Networking_SkinAnnouncement, Networking_SystemMessage, Networking_RollAnnouncement
-    assert(type(say) == "function", "Networking_Say is unavailable")
-    assert(type(announcement) == "function", "Networking_Announcement is unavailable")
-    assert(type(skin) == "function", "Networking_SkinAnnouncement is unavailable")
-    assert(type(system) == "function", "Networking_SystemMessage is unavailable")
+function message_events.install_dice()
+    local roll = Networking_RollAnnouncement
     assert(type(roll) == "function", "Networking_RollAnnouncement is unavailable")
-
-    local capture_chat = telemetry.guard("player.chat", function(guid, userid, name, prefab, message, colour, whisper, emote)
-        -- Match native acceptance, without the client HUD's whisper-distance filter.
-        if message == nil or message:utf8len() > MAX_CHAT_INPUT_LENGTH then return end
-        telemetry.emit("dst.player.chat", {
-            userid = userid or json.null,
-            name = name or json.null,
-            prefab = (prefab ~= "" and prefab) or json.null,
-            message = message,
-            whisper = not not whisper,
-            emote = not not emote,
-            player = values.entity_ref(Ents[guid]),
-        })
-    end)
-    Networking_Say = after(say, capture_chat)
-
-    local capture_announcement = telemetry.guard("server.announcement", function(message, colour, kind)
-        if not message then return end
-        telemetry.emit("dst.server.announcement", {
-            kind = (kind and kind ~= "") and kind or "default",
-            message = message,
-        })
-    end)
-    Networking_Announcement = after(announcement, capture_announcement)
-
-    local capture_skin = telemetry.guard("player.skin_received", function(name, colour, skin_name)
-        if not (name and colour and skin_name) then return end
-        -- The native callback supplies a display name, not an account identity.
-        telemetry.emit("dst.player.skin_received", { name = name, skin = skin_name })
-    end)
-    Networking_SkinAnnouncement = after(skin, capture_skin)
-
-    local capture_system = telemetry.guard("server.system_message", function(message)
-        if not message then return end
-        telemetry.emit("dst.server.system_message", { message = message })
-    end)
-    Networking_SystemMessage = after(system, capture_system)
-
-    local capture_roll = telemetry.guard("player.dice_rolled", function(userid, name, prefab, colour, rolls, maximum)
+    local capture_roll = telemetry.guard("player.dice_rolled", function(userid, name, prefab, _, rolls, maximum)
         telemetry.emit("dst.player.dice_rolled", {
-            userid = userid or json.null,
+            userid = values.userid(userid) or json.null,
             name = name or json.null,
-            prefab = (prefab ~= "" and prefab) or json.null,
+            prefab = prefab ~= "" and prefab or json.null,
             rolls = rolls,
             max = maximum,
         })
     end)
-    -- The announcement preserves displayed text; this fact preserves native dice values.
-    Networking_RollAnnouncement = after(roll, capture_roll)
+    Networking_RollAnnouncement = function(...)
+        local results = telemetry.pack(roll(...))
+        capture_roll(...)
+        return unpack(results, 1, results.n)
+    end
 end
 
 return message_events

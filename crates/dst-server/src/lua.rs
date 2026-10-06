@@ -108,15 +108,47 @@ pub fn literal_calls(source: &str) -> Result<Vec<(String, Vec<Value>)>> {
     Ok(calls)
 }
 
-fn literal_call(call: &FunctionCall) -> Result<(String, Vec<Value>)> {
+fn direct_call(call: &FunctionCall) -> Option<(&str, &FunctionArgs)> {
     let Prefix::Name(name) = call.prefix() else {
-        bail!("expected a named function");
+        return None;
     };
-    let suffixes: Vec<_> = call.suffixes().collect();
-    let [Suffix::Call(Call::AnonymousCall(arguments))] = suffixes.as_slice() else {
-        bail!("expected one direct function call");
+    let TokenType::Identifier { identifier } = name.token_type() else {
+        return None;
     };
-    let arguments = match arguments.as_ref() {
+    let mut suffixes = call.suffixes();
+    match (suffixes.next(), suffixes.next()) {
+        (Some(Suffix::Call(Call::AnonymousCall(args))), None) => Some((identifier.as_str(), args)),
+        _ => None,
+    }
+}
+
+pub(crate) fn unparenthesized(mut value: &Expression) -> &Expression {
+    while let Expression::Parentheses { expression, .. } = value {
+        value = expression;
+    }
+    value
+}
+
+/// Recognize a named call taking one literal string without evaluating any Lua.
+pub(crate) fn string_call(call: &FunctionCall) -> Option<(&str, String)> {
+    let (name, arguments) = direct_call(call)?;
+    let token = match arguments {
+        FunctionArgs::String(token) => token,
+        FunctionArgs::Parentheses { arguments, .. } if arguments.len() == 1 => {
+            let Expression::String(token) = unparenthesized(arguments.iter().next()?) else {
+                return None;
+            };
+            token
+        }
+        _ => return None,
+    };
+    Some((name, string(token).ok()?))
+}
+
+fn literal_call(call: &FunctionCall) -> Result<(String, Vec<Value>)> {
+    let (name, arguments) =
+        direct_call(call).context("expected one direct call to a named function")?;
+    let arguments = match arguments {
         FunctionArgs::Parentheses { arguments, .. } => arguments
             .iter()
             .map(|argument| value(argument, 0))
@@ -124,7 +156,7 @@ fn literal_call(call: &FunctionCall) -> Result<(String, Vec<Value>)> {
         FunctionArgs::String(string_token) => vec![Value::String(string(string_token)?)],
         _ => bail!("unsupported literal function arguments"),
     };
-    Ok((name.token().to_string(), arguments))
+    Ok((name.to_owned(), arguments))
 }
 
 fn parse(source: &str, calls: bool) -> Result<Ast> {
@@ -349,7 +381,7 @@ fn number(token: &TokenReference, negative: bool) -> Result<Value> {
         .context("Lua number must be finite")
 }
 
-pub(crate) fn string(token: &TokenReference) -> Result<String> {
+fn string(token: &TokenReference) -> Result<String> {
     if let TokenType::StringLiteral {
         literal,
         quote_type: StringLiteralQuoteType::Brackets,

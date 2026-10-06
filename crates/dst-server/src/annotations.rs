@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::lua::unparenthesized;
 use anyhow::{Context, Result, ensure};
 use full_moon::{
     ast::{self, BinOp, Expression, FunctionBody, Index, Parameter, Prefix, Suffix, Var},
@@ -19,13 +20,6 @@ fn identifier(token: &TokenReference) -> &str {
         TokenType::Identifier { identifier } => identifier.as_str(),
         _ => "arg",
     }
-}
-
-fn unparenthesized(mut value: &Expression) -> &Expression {
-    while let Expression::Parentheses { expression, .. } = value {
-        value = expression;
-    }
-    value
 }
 
 fn prefix_name(prefix: &Prefix) -> Option<&str> {

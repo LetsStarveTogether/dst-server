@@ -1,4 +1,5 @@
 local json = require("json")
+local telemetry = require("dst_server.telemetry")
 local wire = require("dst_server.wire")
 local bootstrap = {}
 local prefix = "DST_DRIVER|"
@@ -6,13 +7,15 @@ local options
 local component
 local started = false
 local announced = false
-local control_requested = false
+local recovery_requested = false
 
 local function publish(record)
     record.nonce = options ~= nil and options.nonce or json.null
-    return pcall(function()
-        nolineprint(prefix .. wire.encode(record, 64 * 1024 - #prefix))
-    end)
+    local ok, encoded = pcall(wire.encode, record, 64 * 1024 - #prefix - 1)
+    if not ok then return false end
+    local sent, failure = wire.write_line(prefix .. encoded)
+    telemetry.output(sent, failure)
+    return sent
 end
 
 function bootstrap.report(category)
@@ -20,7 +23,6 @@ function bootstrap.report(category)
 end
 
 local function control(record)
-    record.v = 1
     record.nonce = options ~= nil and options.nonce or json.null
     record.generation = options ~= nil and options.generation or json.null
     local ok = pcall(function()
@@ -35,22 +37,19 @@ local function configure(encoded)
     assert(wire.is_object(document))
     local value = document.driver
     assert(wire.is_object(value))
-    control_requested = value.control ~= nil
+    recovery_requested = wire.is_object(value.control) and value.control.recovery ~= nil
     assert(type(value.nonce) == "string" and #value.nonce == 26
         and value.nonce:match("^[0-7][0-9A-HJKMNP-TV-Z]+$"))
-    assert(value.profile == "off" or value.profile == "critical" or value.profile == "history")
-    assert(type(value.actions) == "table" and not wire.is_object(value.actions))
-    for index, action in pairs(value.actions) do
-        assert(type(index) == "number" and index >= 1 and index <= #value.actions
-            and index == math.floor(index) and type(action) == "string" and action ~= "")
+    assert(value.profile == "off" or value.profile == "timeline" or value.profile == "play")
+    for key in pairs(value) do
+        assert(key == "nonce" or key == "profile" or key == "control")
     end
     local generation = TheSim:GetNumLaunches()
     assert(type(generation) == "number" and generation >= 0 and generation <= 9007199254740991
         and generation == math.floor(generation))
-    if control_requested then
+    if value.control ~= nil then
         assert(wire.is_object(value.control))
-        for key in pairs(value.control) do assert(key == "observe_loads" or key == "recovery") end
-        assert(value.control.observe_loads == nil or type(value.control.observe_loads) == "boolean")
+        for key in pairs(value.control) do assert(key == "recovery") end
         if value.control.recovery ~= nil then
             assert(wire.is_object(value.control.recovery))
             require("dst_server.recovery").validate(value.control.recovery)
@@ -59,7 +58,6 @@ local function configure(encoded)
     return {
         nonce = value.nonce,
         profile = value.profile,
-        actions = value.actions,
         generation = generation,
         control = value.control,
     }
@@ -87,37 +85,55 @@ function bootstrap.attach(runtime)
 end
 
 function bootstrap.ready()
-    local ok = pcall(function()
-        local health = require("dst_server").health()
-        if not publish({ health = health }) then error("publication_failed", 0) end
+    local ok, sent = pcall(function()
+        return publish({ health = require("dst_server").health() })
     end)
-    if not ok then bootstrap.report("publication_failed") end
+    if not ok or not sent then bootstrap.report("publication_failed") end
 end
 
 function bootstrap.start()
     if started then return end
     started = true
     -- Register before reading asynchronous configuration: native index loading may finish first.
-    local resolve_recovery = require("dst_server.recovery").gate(control)
+    local gate_ok, resolve_recovery = pcall(function() return require("dst_server.recovery").gate(control) end)
+    if not gate_ok then
+        resolve_recovery = nil
+        telemetry.report("recovery_gate.install", "installation_failed")
+    end
     local original = SpawnPrefabFromSim
     if type(original) ~= "function" then
         bootstrap.report("installation_failed")
         return
     end
-    local world_started = false
-    SpawnPrefabFromSim = function(...)
-        local guid = original(...)
-        local inst = Ents[guid]
-        if inst ~= nil and inst == TheWorld and inst.ismastersim and not world_started then
-            world_started = true
+    local watch_spawn
+    local function after_spawn(...)
+        local guid = ...
+        local inst = watch_spawn and Ents[guid]
+        if inst ~= nil and inst == TheWorld and inst.ismastersim then
+            if SpawnPrefabFromSim == watch_spawn then SpawnPrefabFromSim = original end
+            watch_spawn = nil
             announce()
             if not pcall(inst.AddComponent, inst, "dst_server_runtime") then
                 bootstrap.report("installation_failed")
             end
         end
-        return guid
+        return ...
     end
+    watch_spawn = function(...)
+        -- A mod installed after us may still call this wrapper after the world has spawned.
+        if watch_spawn == nil then return original(...) end
+        return after_spawn(original(...))
+    end
+    SpawnPrefabFromSim = watch_spawn
     local received = false
+    local function abandon_configuration()
+        if resolve_recovery then
+            resolve_recovery(recovery_requested and { mode = "invalid" } or nil)
+        elseif recovery_requested then
+            control({ event = "recovery_failed", error = "invalid_configuration" })
+            Shutdown()
+        end
+    end
     local function configured(success, encoded)
         if received then return end
         received = true
@@ -127,36 +143,28 @@ function bootstrap.start()
         end)
         if not ok then
             bootstrap.report("configuration_failed")
-            if resolve_recovery ~= nil then
-                resolve_recovery(control_requested and { mode = "invalid" } or nil)
-            end
+            abandon_configuration()
             return
         end
         options = value
-        if options.control ~= nil then
-            local installed = pcall(function()
-                assert(resolve_recovery ~= nil, "native index loading hook is unavailable")
-                if options.control.observe_loads then
-                    require("dst_server.load_observer").install(control)
-                end
-            end)
-            if not installed then
-                bootstrap.report("installation_failed")
-                control({ event = "recovery_failed", error = "installation_failed" })
-                Shutdown()
-                return
-            end
+        local recovery = options.control and options.control.recovery
+        local observed = telemetry.install("load_observer", function()
+            assert(require("dst_server.load_observer").install(control))
+        end)
+        if recovery and (resolve_recovery == nil or not observed) then
+            bootstrap.report("installation_failed")
+            control({ event = "recovery_failed", error = "installation_failed" })
+            Shutdown()
+            return
         end
         if not pcall(function() require("dst_server.rpc").install(options) end) then
             bootstrap.report("installation_failed")
-            if resolve_recovery ~= nil then
-                resolve_recovery(options.control ~= nil and { mode = "invalid" } or nil)
-            end
+            abandon_configuration()
             options = nil
             return
         end
         if resolve_recovery ~= nil then
-            resolve_recovery(options.control ~= nil and options.control.recovery or nil)
+            resolve_recovery(recovery)
         end
         if component ~= nil and not pcall(component.Initialize, component) then
             bootstrap.report("installation_failed")

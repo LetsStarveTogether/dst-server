@@ -5,19 +5,26 @@ local values = require("dst_server.values")
 local world_events = {}
 
 function world_events.install_players()
-    TheWorld:ListenForEvent("ms_playerjoined", telemetry.guard("world.ms_playerjoined", function(_, player)
-        player_events.attach(player)
-        if state.telemetry_active then
-            telemetry.emit("dst.player.shard_entered", { player = values.entity_ref(player) })
-        end
-    end, true))
-    for _, player in ipairs(AllPlayers) do
-        player_events.attach(player)
-    end
+    local attach = telemetry.guard("player.attach", player_events.attach, true)
+    TheWorld:ListenForEvent("ms_playerjoined", function(_, player) attach(player) end)
+    for _, player in ipairs(AllPlayers) do attach(player) end
 end
 
+local function listen(name, callback)
+    TheWorld:ListenForEvent(name, telemetry.guard("world." .. name, callback))
+end
+
+local function watch(name)
+    TheWorld:WatchWorldState(name, telemetry.guard("world." .. name, function(_, value)
+        telemetry.emit("dst.world.state_changed", { name = name, value = value })
+    end))
+end
+
+local owner_userid = telemetry.guard("death.owner", values.owner_userid)
+
 function world_events.install_world()
-    TheWorld:ListenForEvent("serverpauseddirty", telemetry.guard("world.serverpauseddirty", function(_, data)
+    local play = state.requested_profile == "play"
+    listen("serverpauseddirty", function(_, data)
         telemetry.emit("dst.server.pause_changed", {
             domain = "server",
             pause = not not data.pause,
@@ -25,120 +32,77 @@ function world_events.install_world()
             gameautopause = not not data.gameautopause,
             source = data.source or json.null,
         })
-    end))
-    TheWorld:ListenForEvent("ms_playerleft", telemetry.guard("world.ms_playerleft", function(_, player)
-        telemetry.emit("dst.player.shard_left", { player = values.entity_ref(player) })
-    end))
-    TheWorld:ListenForEvent("ms_playerdisconnected", telemetry.guard("world.ms_playerdisconnected", function(_, data)
-        telemetry.emit("dst.player.disconnected", {
-            player = values.entity_ref(data.player),
-            expected = data.wasExpected == true,
-        })
-    end))
-    TheWorld:ListenForEvent("ms_playerdespawnandmigrate", telemetry.guard("world.ms_playerdespawnandmigrate", function(_, data)
+    end)
+    listen("ms_playerleft", player_events.shard_left)
+    listen("ms_playerdespawnandmigrate", function(_, data)
         telemetry.emit("dst.player.migration_started", {
-            player = values.entity_ref(data.player),
-            destination_shard_id = tostring(data.worldid),
-            portal_id = type(data.portalid) == "string" and data.portalid or values.optional_json_number(data.portalid),
-            destination = values.position(data),
-        })
-    end))
-    TheWorld:ListenForEvent("ms_newplayerspawned", telemetry.guard("world.ms_newplayerspawned", function(_, player)
-        -- New-spawn notification precedes final placement by playerspawner.
-        local reference = values.entity_ref(player)
-        reference.position = json.null
-        telemetry.emit("dst.player.spawned", { player = reference })
-    end))
-    TheWorld:ListenForEvent("entity_death", telemetry.guard("world.entity_death", function(_, data)
-        local victim = data.inst
-        if victim == nil then return end
-        local attributed = values.player_for(data.afflicter)
-        if victim.userid == nil and not victim:HasTag("player")
-            and not victim:HasTag("epic") and attributed == nil then return end
-        telemetry.emit("dst.entity.death", {
-            victim = values.entity_ref(victim),
-            age_seconds = values.player_age(victim),
-            cause = values.text(data.cause, 256),
-            afflicter = values.entity_ref(data.afflicter),
-            attributed_player = values.entity_ref(attributed),
-            corpsing = data.corpsing == true,
-        })
-    end))
-    TheWorld:ListenForEvent("master_shardbossdefeated", telemetry.guard("world.master_shardbossdefeated", function(_, data)
-        telemetry.emit("dst.world.shard_boss_defeated", {
-            prefab = tostring(data.bossprefab),
-            shard_id = tostring(data.shardid),
-        })
-    end))
-    TheWorld:ListenForEvent("lunarrift_opened", telemetry.guard("world.lunarrift_opened", function()
-        telemetry.emit("dst.world.rift_unlocked", { kind = "lunar" })
-    end))
-    TheWorld:ListenForEvent("shadowrift_opened", telemetry.guard("world.shadowrift_opened", function()
-        telemetry.emit("dst.world.rift_unlocked", { kind = "shadow" })
-    end))
-    TheWorld:ListenForEvent("ms_riftaddedtopool", telemetry.guard("world.ms_riftaddedtopool", function(_, data)
-        telemetry.emit("dst.world.rift_changed", {
-            rift = values.entity_ref(data.rift),
-            active = true,
-        })
-    end))
-    TheWorld:ListenForEvent("ms_riftremovedfrompool", telemetry.guard("world.ms_riftremovedfrompool", function(_, data)
-        telemetry.emit("dst.world.rift_changed", {
-            rift = values.entity_ref(data.rift),
-            active = false,
-        })
-    end))
-
-    if state.requested_profile == "history" then
-        TheWorld:ListenForEvent("itemplanted", telemetry.guard("world.itemplanted", function(_, data)
-            local player = data.doer
-            if player ~= nil and player.userid ~= nil and player:HasTag("player") then
-                local event = values.player_data(player)
-                event.position = values.position(data.pos)
-                telemetry.emit("dst.player.planted", event)
-            end
-        end))
-    end
-
-    local state_names = {
-        "cycles",
-        TheWorld:HasTag("cave") and "cavephase" or "phase",
-        "season",
-        TheWorld:HasTag("cave") and "cavemoonphase" or "moonphase",
-        "nightmarephase",
-        "israining",
-        "issnowing",
-        "isacidraining",
-        "islunarhailing",
-    }
-    for _, name in ipairs(state_names) do
-        local state_name = name
-        TheWorld:WatchWorldState(state_name, telemetry.guard("world." .. state_name, function(_, value)
-            telemetry.emit("dst.world.state_changed", {
-                name = state_name,
-                value = value,
-            })
-        end))
-    end
-end
-
-function world_events.install_shard()
-    if type(Shard_UpdateWorldState) ~= "function" then
-        error("Shard_UpdateWorldState is unavailable")
-    end
-    local original = Shard_UpdateWorldState
-    local capture = telemetry.guard("shard.update", function(world_id, shard_state, tags, _, shard_name)
-        telemetry.emit("dst.shard.connection_changed", {
-            shard_id = tostring(world_id),
-            name = tostring(shard_name or ""),
-            ready = shard_state == REMOTESHARDSTATE.READY,
-            tags = values.tags(tags),
+            player = values.entity_ref(data.player), destination_shard_id = tostring(data.worldid),
         })
     end)
-    Shard_UpdateWorldState = function(...)
-        local results = telemetry.pack(original(...))
-        capture(...)
-        return telemetry.unpack(results)
+    listen("entity_death", function(_, data)
+        local victim = data.inst
+        if victim == nil then return end
+        local is_epic = victim:HasTag("epic")
+        local major = is_epic or values.is_player(victim)
+        if not play and not major then return end
+
+        local direct = values.player_userid(data.afflicter)
+        local owner
+        if direct == nil and data.afflicter ~= nil then owner = owner_userid(data.afflicter) end
+        if not major and direct == nil and owner == nil then return end
+        local emit = major and telemetry.emit or telemetry.play
+        emit("dst.entity.death", {
+            victim = values.entity_ref(victim), afflicter = values.entity_ref(data.afflicter),
+            attributed_userid = owner or json.null, is_epic = is_epic,
+            age_seconds = values.player_age(victim), cause = values.text(data.cause, 256),
+            corpsing = data.corpsing == true, position = values.entity_position(victim),
+        })
+    end)
+    if TheWorld.ismastershard then
+        listen("master_shardbossdefeated", function(_, data)
+            if data.bossprefab == "daywalker" then
+                telemetry.emit("dst.world.daywalker_defeated", { shard_id = tostring(data.shardid) })
+            end
+        end)
+        watch("cycles")
+        watch("season")
+    end
+
+    listen("lunarrift_opened", function()
+        telemetry.emit("dst.world.rift_unlocked", { kind = "lunar" })
+    end)
+    listen("shadowrift_opened", function()
+        telemetry.emit("dst.world.rift_unlocked", { kind = "shadow" })
+    end)
+    local function rift_changed(rift, active)
+        -- LoadPostPass adds existing rifts back to the pool while the world is populating.
+        if not POPULATING then
+            telemetry.emit("dst.world.rift_changed", { rift = values.entity_ref(rift), active = active })
+        end
+    end
+    listen("ms_riftaddedtopool", function(_, data) rift_changed(data.rift, true) end)
+    listen("ms_riftremovedfrompool", function(_, data) rift_changed(data.rift, false) end)
+
+    watch("israining")
+    if TheWorld:HasTag("cave") then
+        watch("cavephase")
+        watch("cavemoonphase")
+        watch("nightmarephase")
+        watch("isacidraining")
+    else
+        watch("phase")
+        watch("moonphase")
+        watch("issnowing")
+        watch("islunarhailing")
+    end
+    if play then
+        listen("itemplanted", function(_, data)
+            if data.doer and data.doer:HasTag("player") then
+                telemetry.play("dst.player.planted", {
+                    player = values.entity_ref(data.doer), position = values.position(data.pos),
+                })
+            end
+        end)
     end
 end
 

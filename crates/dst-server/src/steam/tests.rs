@@ -455,13 +455,46 @@ async fn request_uses_anonymous_indexed_form_and_exact_ids() {
 }
 
 #[tokio::test]
+async fn agent_connects_directly_with_an_ambient_proxy() {
+    const ENDPOINT: &str = "DST_TEST_STEAM_DIRECT_ENDPOINT";
+    if let Ok(endpoint) = std::env::var(ENDPOINT) {
+        let mut client = Client::with_explicit_proxy(None).unwrap();
+        client.endpoint = endpoint;
+        client.published_file_details(&IDS).await.unwrap();
+        return;
+    }
+    let server = Server::start(vec![response(200, "", FIXTURE)]).await;
+    let proxy = Server::start(vec![response(403, "", b"")]).await;
+    let result = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "steam::tests::agent_connects_directly_with_an_ambient_proxy",
+        ])
+        .env(ENDPOINT, &server.endpoint)
+        .env("http_proxy", &proxy.endpoint)
+        .env("HTTP_PROXY", &proxy.endpoint)
+        .env("no_proxy", "")
+        .env("NO_PROXY", "")
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert_eq!((server.count(), proxy.count()), (1, 0));
+}
+
+#[tokio::test]
 async fn explicit_proxy_receives_https_tunnels_and_preserves_safe_errors() {
     const SECRET: &str = "private-proxy-password";
     let mut proxy = Server::start(vec![response(407, "", SECRET.as_bytes())]).await;
     let mut url = Url::parse(&proxy.endpoint).unwrap();
     url.set_username("user").unwrap();
     url.set_password(Some(SECRET)).unwrap();
-    let mut client = Client::with_proxy(Some(url.as_str())).unwrap();
+    let mut client = Client::with_explicit_proxy(Some(url.as_str())).unwrap();
     client.endpoint =
         "https://steam.invalid/ISteamRemoteStorage/GetPublishedFileDetails/v1/".into();
     let error = client.published_file_details(&IDS).await.unwrap_err();

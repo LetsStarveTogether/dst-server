@@ -1,41 +1,113 @@
 //! Numbered native rooms, gameplay templates and validated configuration edits.
 
 use std::{
+    collections::BTreeMap,
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::LazyLock,
+    sync::{LazyLock, OnceLock},
 };
 
 use anyhow::{Context, Result, bail, ensure};
+use chrono::Timelike;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
-    deployment::{ContainerUnit, DeploymentOptions, PortMapping, Protocol},
-    files::{self, PermissionFiles, RoomLock},
-    policy::Policy,
-    settings::{self, ClusterConfig, ClusterSettings},
+    deployment::{ContainerUnit, DeploymentOptions, PortMapping, configured_ports},
+    files::{self, PermissionFiles, RoomLock, RoomReader},
+    policy::{DailyWindow, Policy},
+    settings::{self, ClusterConfig, RoomPreset, types::Resolve},
 };
 
 pub const MAX_ROOM_SLOT: u16 = 299;
 
-static PRESETS: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../resources/settings/presets.json"))
-        .expect("valid bundled room presets")
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Presets {
+    deployment: DeploymentOptions,
+    schedules: Vec<FleetSchedule>,
+    parts: BTreeMap<String, RoomPreset>,
+    shared: BTreeMap<String, RoomPreset>,
+    templates: Vec<Template>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FleetSchedule {
+    label: String,
+    window: DailyWindow,
+    rooms: Vec<[u16; 2]>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Template {
+    name: String,
+    label: String,
+    rooms: Vec<[u16; 2]>,
+    #[serde(default)]
+    parts: Vec<String>,
+    #[serde(rename = "preset")]
+    changes: RoomPreset,
+    #[serde(skip)]
+    composed: OnceLock<RoomPreset>,
+}
+
+impl Template {
+    fn preset(&self) -> &RoomPreset {
+        self.composed.get_or_init(|| {
+            let mut parts = vec![PRESETS.shared["common"].clone()];
+            for name in &self.parts {
+                parts.push(
+                    PRESETS
+                        .parts
+                        .get(name)
+                        .or_else(|| PRESETS.shared.get(name))
+                        .expect("known template part")
+                        .clone(),
+                );
+            }
+            parts.push(self.changes.clone());
+            RoomPreset::compose(&parts).expect("valid bundled template")
+        })
+    }
+}
+
+static PRESETS: LazyLock<Presets> = LazyLock::new(|| {
+    let mut presets: Presets =
+        serde_json::from_str(include_str!("../resources/settings/presets.json"))
+            .expect("valid bundled room presets");
+    for schedule in &presets.schedules {
+        schedule.window.validate().expect("valid fleet window");
+        assert!(
+            schedule.window.start.minute() == 0 && schedule.window.end.minute() == 0,
+            "fleet opening hours must be whole hours"
+        );
+    }
+    for (name, first, second) in [
+        ("FOREST_CAVES", "FOREST", "CAVES"),
+        ("ENDLESS", "ENDLESS_SETTINGS", "ENDLESS_GENERATION"),
+    ] {
+        let parts = [presets.parts[first].clone(), presets.parts[second].clone()];
+        presets.parts.insert(
+            name.into(),
+            RoomPreset::compose(&parts).expect("valid bundled preset"),
+        );
+    }
+    presets
 });
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone)]
 pub struct Room {
     pub number: u16,
     pub template: Option<String>,
-    #[serde(serialize_with = "serialize_cluster")]
     pub cluster: ClusterConfig,
     pub deployment: DeploymentOptions,
     pub policy: Policy,
 }
 
-fn without_permissions(mut cluster: Value) -> Value {
+pub(crate) fn without_permissions(mut cluster: Value) -> Value {
     if let Some(fields) = cluster.as_object_mut() {
         for field in settings::PERMISSION_FIELDS {
             fields.remove(field);
@@ -44,11 +116,16 @@ fn without_permissions(mut cluster: Value) -> Value {
     cluster
 }
 
-fn serialize_cluster<S: Serializer>(
-    cluster: &ClusterConfig,
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    without_permissions(settings::redact(cluster.as_value().clone())).serialize(serializer)
+impl Serialize for Room {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        settings::redact(self.as_value()).serialize(serializer)
+    }
+}
+
+impl std::fmt::Debug for Room {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Room({})", settings::redact(self.as_value()))
+    }
 }
 
 impl<'de> Deserialize<'de> for Room {
@@ -102,6 +179,12 @@ impl Room {
 
     pub fn validate(&self) -> Result<()> {
         validate_number(self.number)?;
+        ensure!(
+            self.template
+                .as_ref()
+                .is_none_or(|label| label.len() <= 256),
+            "room template label exceeds 256 UTF-8 bytes"
+        );
         self.deployment.validate()?;
         self.policy.validate()?;
         Ok(())
@@ -109,9 +192,13 @@ impl Room {
 
     /// The editable representation retains sparse native fields and secret values.
     pub fn as_value(&self) -> Value {
-        let mut value = serde_json::to_value(self).expect("room JSON serialization");
-        value["cluster"] = without_permissions(self.cluster.as_value().clone());
-        value
+        json!({
+            "number": self.number,
+            "template": self.template,
+            "cluster": without_permissions(self.cluster.as_value()),
+            "deployment": self.deployment,
+            "policy": self.policy,
+        })
     }
 
     pub fn resolved(&self) -> Value {
@@ -139,17 +226,48 @@ impl Room {
     }
 
     pub fn edit_many(&self, changes: &[(&str, Value)], unset: &[&str]) -> Result<Self> {
-        self.validate()?;
-        let mut value = self.as_value();
-        let defaults = self.resolved();
-        for (pointer, change) in changes {
-            edit_pointer(&mut value, &defaults, pointer, change, false)?;
-        }
-        for pointer in unset {
-            edit_pointer(&mut value, &defaults, pointer, &Value::Null, true)?;
-        }
-        Self::from_value(value)
+        self.edited(changes, unset)
     }
+
+    pub(crate) fn edited<S: AsRef<str>, U: AsRef<str>>(
+        &self,
+        changes: &[(S, Value)],
+        unset: &[U],
+    ) -> Result<Self> {
+        self.validate()?;
+        let mut edited = Self::from_value(edit_fields(
+            self.as_value(),
+            self.resolved(),
+            changes,
+            unset,
+        )?)?;
+        edited.cluster.copy_permissions_from(&self.cluster);
+        Ok(edited)
+    }
+}
+
+pub(crate) fn edit_fields<S: AsRef<str>, U: AsRef<str>>(
+    mut value: Value,
+    mut defaults: Value,
+    changes: &[(S, Value)],
+    unset: &[U],
+) -> Result<Value> {
+    if let Some(cluster) = defaults.get_mut("cluster").and_then(Value::as_object_mut) {
+        // A field edit can supply part of a previously inherited native file.
+        cluster
+            .entry("mod_settings")
+            .or_insert_with(|| settings::types::ModSettings::default().resolved());
+        cluster
+            .entry("downloads")
+            .or_insert_with(|| settings::types::WorkshopDownloads::default().resolved());
+    }
+    for (pointer, change) in changes {
+        edit_pointer(&mut value, &defaults, pointer.as_ref(), change, false)?;
+    }
+    for pointer in unset {
+        edit_pointer(&mut value, &defaults, pointer.as_ref(), &Value::Null, true)?;
+    }
+    Ok(value)
 }
 
 fn validate_number(number: u16) -> Result<()> {
@@ -244,18 +362,20 @@ fn edit_pointer(
         );
     }
     let mut target = data;
-    let mut fallback = defaults.clone();
+    let mut fallback = Some(defaults);
     for part in &parts[..parts.len() - 1] {
-        fallback = pointer_item(&fallback, part)
-            .or_else(|_| pointer_item(target, part))?
-            .clone();
+        fallback = fallback.and_then(|parent| pointer_item(parent, part).ok());
         if let Value::Object(object) = target
             && !object.contains_key(part)
         {
-            if fallback.is_object() {
-                object.insert(part.clone(), json!({}));
-            } else if fallback.is_array() {
-                object.insert(part.clone(), fallback.clone());
+            match fallback {
+                Some(Value::Object(_)) => {
+                    object.insert(part.clone(), json!({}));
+                }
+                Some(Value::Array(array)) => {
+                    object.insert(part.clone(), Value::Array(array.clone()));
+                }
+                _ => {}
             }
         }
         target = pointer_item_mut(target, part)?;
@@ -289,6 +409,12 @@ pub struct RoomStore {
     quadlet_dir: Option<PathBuf>,
 }
 
+fn saved_template(state: &serde_json::Map<String, Value>) -> Result<Option<String>> {
+    Ok(serde_json::from_value(
+        state.get("template").cloned().unwrap_or(Value::Null),
+    )?)
+}
+
 impl RoomStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
@@ -318,50 +444,84 @@ impl RoomStore {
                 state?;
             }
         }
+        let root = RoomReader::open(&self.root)?;
         let mut numbers = Vec::new();
-        for name in files::directory_names(&self.root)? {
-            if name.len() != 3 || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+        for (name, kind) in root.list_directory("")? {
+            if !kind.is_dir() || name.len() != 3 || !name.bytes().all(|byte| byte.is_ascii_digit())
+            {
                 continue;
             }
             let number: u16 = name.parse()?;
-            if number > MAX_ROOM_SLOT {
-                continue;
-            }
-            match fs::symlink_metadata(self.path(number)?.join("cluster.ini")) {
-                Ok(state) => {
-                    ensure!(state.is_file(), "cluster.ini must be a regular file");
-                    numbers.push(number);
-                }
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+            if number <= MAX_ROOM_SLOT && root.has_file(&Path::new(&name).join("cluster.ini"))? {
+                numbers.push(number);
             }
         }
         Ok(numbers)
     }
 
+    pub(crate) fn template(&self, number: u16) -> Result<Option<String>> {
+        let state = RoomReader::open(self.path(number)?)?.read_state()?;
+        saved_template(&state)
+    }
+
     pub fn load(&self, number: u16) -> Result<Room> {
         let guard = RoomLock::try_acquire(self.path(number)?)?;
-        let mut control = guard.read_state()?;
+        self.load_locked(number, &guard)
+    }
+
+    pub(crate) fn load_locked(&self, number: u16, guard: &RoomLock) -> Result<Room> {
+        self.load_from_state(number, guard, &guard.read_state()?)
+    }
+
+    pub(crate) fn load_from_state(
+        &self,
+        number: u16,
+        guard: &RoomLock,
+        control: &serde_json::Map<String, Value>,
+    ) -> Result<Room> {
+        self.read_room(number, guard, control, true)
+    }
+
+    pub(crate) fn load_for_edit(&self, number: u16, guard: &RoomLock) -> Result<Room> {
+        self.read_room(number, guard, &guard.read_state()?, false)
+    }
+
+    fn read_room(
+        &self,
+        number: u16,
+        guard: &RoomLock,
+        control: &serde_json::Map<String, Value>,
+        check_ports: bool,
+    ) -> Result<Room> {
         let mut room = Room {
             number,
-            template: serde_json::from_value(control.remove("template").unwrap_or(Value::Null))?,
-            cluster: ClusterConfig::load(&guard)?,
+            template: saved_template(control)?,
+            cluster: ClusterConfig::load(guard)?,
             deployment: DeploymentOptions::default(),
-            policy: serde_json::from_value(control.remove("policy").unwrap_or_else(|| json!({})))?,
+            policy: serde_json::from_value(
+                control.get("policy").cloned().unwrap_or_else(|| json!({})),
+            )?,
         };
-        if let Some(directory) = &self.quadlet_dir {
-            let path = directory.join(format!("dst-{number:03}.container"));
-            match fs::symlink_metadata(&path) {
-                Ok(_) => {
-                    room.deployment =
-                        ContainerUnit::load_for_room(path, guard.directory())?.options;
-                }
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+        if let Some(unit) = self.deployment(number, guard.directory())? {
+            if check_ports {
+                unit.check_ports(configured_ports(&room.cluster)?)?;
             }
+            room.deployment = unit.options;
         }
         room.validate()?;
         Ok(room)
+    }
+
+    pub(crate) fn deployment(&self, number: u16, room: &Path) -> Result<Option<ContainerUnit>> {
+        let Some(directory) = &self.quadlet_dir else {
+            return Ok(None);
+        };
+        let path = directory.join(format!("dst-{number:03}.container"));
+        match fs::symlink_metadata(&path) {
+            Ok(_) => Ok(Some(ContainerUnit::load_for_room(path, room)?)),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn list(&self) -> Result<Vec<Room>> {
@@ -376,12 +536,24 @@ impl RoomStore {
         let directory = self.path(room.number)?;
         files::create_directory(&directory)?;
         let mut guard = RoomLock::try_acquire(&directory)?;
+        if let Some(unit) = self.deployment(room.number, &directory)? {
+            ensure!(
+                room.deployment == unit.options,
+                "use Host.edit to change a managed deployment"
+            );
+            unit.check_ports(configured_ports(&room.cluster)?)?;
+        } else {
+            ensure!(
+                room.deployment == DeploymentOptions::default(),
+                "use Host.create or Host.edit to save deployment options"
+            );
+        }
         guard.read_state()?;
         let changed = {
             let mut stopped = guard.while_stopped();
             room.cluster.save(&mut stopped, PermissionFiles::Preserve)?
         };
-        save_policy(&mut guard, room)?;
+        save_definition_fields(&mut guard, room)?;
         Ok(changed
             .into_iter()
             .map(|path| directory.join(path))
@@ -389,13 +561,12 @@ impl RoomStore {
     }
 
     pub fn save_policy(&self, room: &Room) -> Result<()> {
-        room.validate()?;
         let mut guard = RoomLock::try_acquire(self.path(room.number)?)?;
-        save_policy(&mut guard, room)
+        room.policy.save(&mut guard)
     }
 }
 
-pub(crate) fn save_policy(guard: &mut RoomLock, room: &Room) -> Result<()> {
+pub(crate) fn save_definition_fields(guard: &mut RoomLock, room: &Room) -> Result<()> {
     guard.update_state(|control| {
         control.insert("template".into(), serde_json::to_value(&room.template)?);
         control.insert("policy".into(), serde_json::to_value(&room.policy)?);
@@ -404,30 +575,27 @@ pub(crate) fn save_policy(guard: &mut RoomLock, room: &Room) -> Result<()> {
 }
 
 pub fn template_names() -> Vec<&'static str> {
-    PRESETS["template_names"]
-        .as_array()
-        .expect("template names")
+    PRESETS
+        .templates
         .iter()
-        .map(|value| value.as_str().expect("template name"))
+        .map(|template| template.name.as_str())
         .collect()
 }
 
 pub fn preset_names() -> Vec<&'static str> {
-    PRESETS["parts"]
-        .as_object()
-        .expect("preset parts")
-        .keys()
-        .map(String::as_str)
-        .collect()
+    PRESETS.parts.keys().map(String::as_str).collect()
 }
 
-pub fn preset(name: &str) -> Result<settings::RoomPreset> {
-    settings::RoomPreset::from_value(
-        PRESETS["parts"]
-            .get(name)
-            .context("unknown room preset")?
-            .clone(),
-    )
+pub fn preset(name: &str) -> Result<RoomPreset> {
+    PRESETS
+        .parts
+        .get(name)
+        .cloned()
+        .context("unknown room preset")
+}
+
+fn cluster_name(number: u16, label: &str) -> String {
+    format!("LST-朗诵团-{number:03}-{label}")
 }
 
 pub fn build_template(
@@ -435,129 +603,136 @@ pub fn build_template(
     number: u16,
     token: &str,
     cluster_key: Option<&str>,
-    settings: Option<&ClusterSettings>,
+    settings: Option<Map<String, Value>>,
 ) -> Result<ClusterConfig> {
     validate_number(number)?;
-    let template = PRESETS["templates"]
-        .get(name)
+    let template = PRESETS
+        .templates
+        .iter()
+        .find(|template| template.name == name)
         .context("unknown gameplay template")?;
-    let mut cluster = template["cluster"].clone();
-    cluster["token"] = Value::String(token.into());
-    cluster["settings"]["cluster_name"] = Value::String(format!(
-        "LST-朗诵团-{number:03}-{}",
-        template["label"].as_str().expect("template label")
-    ));
-    if let Some(settings) = settings {
-        cluster["settings"]
-            .as_object_mut()
-            .expect("template settings")
-            .extend(
-                settings
-                    .as_value()
-                    .as_object()
-                    .expect("validated settings")
-                    .clone(),
-            );
-    }
-    if let Some(key) = cluster_key {
-        cluster["settings"]["cluster_key"] = Value::String(key.into());
-    }
-    ClusterConfig::from_value(cluster)
+    let mut values = settings.unwrap_or_default();
+    values
+        .entry("cluster_name")
+        .or_insert_with(|| json!(cluster_name(number, &template.label)));
+    template.preset().build(token, cluster_key, Some(values))
 }
 
-fn fleet_definition(number: u16) -> Result<&'static Value> {
-    PRESETS["fleet"]
-        .as_array()
-        .expect("fleet definitions")
+fn contains_room(ranges: &[[u16; 2]], number: u16) -> bool {
+    ranges
         .iter()
-        .find(|room| room["number"].as_u64() == Some(u64::from(number)))
+        .any(|&[start, end]| (start..=end).contains(&number))
+}
+
+fn fleet_template(number: u16) -> Result<&'static Template> {
+    PRESETS
+        .templates
+        .iter()
+        .find(|template| contains_room(&template.rooms, number))
         .context("LST room number must be in 000-100 or 200-219")
 }
 
 pub fn room_numbers() -> Vec<u16> {
-    PRESETS["fleet"]
-        .as_array()
-        .expect("fleet definitions")
+    let mut numbers = PRESETS
+        .templates
         .iter()
-        .map(|room| room["number"].as_u64().expect("room number") as u16)
-        .collect()
+        .flat_map(|template| template.rooms.iter().flat_map(|&[start, end]| start..=end))
+        .collect::<Vec<_>>();
+    numbers.sort_unstable();
+    numbers
 }
 
 pub fn room(number: u16) -> Result<(&'static str, &'static str, u8)> {
-    let definition = fleet_definition(number)?;
-    let name = definition["template"].as_str().expect("template name");
-    Ok((
-        name,
-        PRESETS["templates"][name]["label"]
-            .as_str()
-            .expect("template label"),
-        definition["max_players"].as_u64().expect("max players") as u8,
+    let template = fleet_template(number)?;
+    let capacity = template
+        .preset()
+        .data()
+        .settings
+        .as_ref()
+        .expect("fleet template has shared settings")
+        .max_players()
+        .try_into()?;
+    Ok((&template.name, &template.label, capacity))
+}
+
+const BETA_ROOM: u16 = 100;
+
+fn fleet_schedule(number: u16) -> Option<&'static FleetSchedule> {
+    PRESETS
+        .schedules
+        .iter()
+        .find(|schedule| contains_room(&schedule.rooms, number))
+}
+
+pub fn room_name(number: u16) -> Result<String> {
+    let template = fleet_template(number)?;
+    let label = if number == BETA_ROOM {
+        "测试尝鲜"
+    } else {
+        &template.label
+    };
+    let name = cluster_name(number, label);
+    let Some(schedule) = fleet_schedule(number) else {
+        return Ok(name);
+    };
+    let start = schedule.window.start.hour();
+    let end = schedule.window.end.hour();
+    Ok(format!(
+        "{name}-{} | 每日 {start}-{} 开放",
+        schedule.label,
+        if end == 0 { 24 } else { end }
     ))
 }
 
-pub fn room_name(number: u16) -> Result<&'static str> {
-    Ok(fleet_definition(number)?["name"]
-        .as_str()
-        .expect("room name"))
-}
-
 pub fn room_schedule(number: u16) -> Result<Option<(&'static str, u8, u8)>> {
-    Ok(fleet_definition(number)?["schedule"]
-        .as_array()
-        .map(|schedule| {
-            (
-                schedule[0].as_str().expect("schedule label"),
-                schedule[1].as_u64().expect("start hour") as u8,
-                schedule[2].as_u64().expect("end hour") as u8,
-            )
-        }))
+    fleet_template(number)?;
+    Ok(fleet_schedule(number).map(|schedule| {
+        (
+            schedule.label.as_str(),
+            schedule.window.start.hour() as u8,
+            schedule.window.end.hour() as u8,
+        )
+    }))
 }
 
 pub fn build(number: u16, token: &str, cluster_key: Option<&str>) -> Result<ClusterConfig> {
-    let settings = ClusterSettings::from_value(json!({"cluster_name": room_name(number)?}))?;
-    build_template(room(number)?.0, number, token, cluster_key, Some(&settings))
+    let template = fleet_template(number)?;
+    let settings = Map::from_iter([("cluster_name".into(), room_name(number)?.into())]);
+    template.preset().build(token, cluster_key, Some(settings))
 }
 
 pub fn fleet_room(number: u16, token: &str, cluster_key: Option<&str>) -> Result<Room> {
-    let definition = fleet_definition(number)?;
     let cluster = build(number, token, cluster_key)?;
-    let mut deployment: DeploymentOptions =
-        serde_json::from_value(definition["deployment"].clone())?;
-    deployment.ports.clear();
-    for shard in cluster.resolved()["shards"]
-        .as_object()
-        .context("missing fleet shards")?
-        .values()
-    {
-        let settings = &shard["settings"];
-        let base = 30000 + number * 10 + if settings["is_master"] == true { 0 } else { 2 };
-        for (field, offset) in [("server_port", 0), ("master_server_port", 1)] {
+    let mut deployment = PRESETS.deployment.clone();
+    if number == BETA_ROOM {
+        deployment.image = crate::deployment::BETA_IMAGE.into();
+    }
+    for shard in cluster.data().shards.values() {
+        let settings = &shard.settings;
+        let base = 30000 + number * 10 + if settings.is_master() { 0 } else { 2 };
+        for (offset, port) in [
+            (0, settings.server_port()),
+            (1, settings.master_server_port()),
+        ] {
             deployment.ports.push(PortMapping {
                 host: base + offset,
-                container: settings[field]
-                    .as_u64()
-                    .context("missing fleet shard UDP port")?
-                    .try_into()?,
-                protocol: Protocol::Udp,
+                container: port.try_into()?,
             });
         }
     }
-    // On host boot, the Agent opens the room only during its scheduled hours.
-    deployment.start_on_boot = true;
-    let mut policy = json!({});
-    if let Some((_, start, end)) = room_schedule(number)? {
-        policy["schedule"] =
-            json!([{"start": format!("{start:02}:00"), "end": format!("{end:02}:00")}]);
-    }
-    if definition["recycle"] == true {
-        policy["idle_regeneration"] = json!(true);
-    }
     let room = Room {
         number,
-        template: Some(room(number)?.0.into()),
+        template: Some(fleet_template(number)?.name.clone()),
         cluster,
         deployment,
-        policy: serde_json::from_value(policy)?,
+        policy: Policy {
+            idle_regeneration: number <= 100,
+            schedule: fleet_schedule(number)
+                .map(|schedule| schedule.window.clone())
+                .into_iter()
+                .collect(),
+            ..Policy::default()
+        },
     };
     room.validate()?;
     Ok(room)
@@ -665,6 +840,17 @@ mod tests {
                 fleet.cluster.resolved()["settings"]["cluster_name"],
                 room_name(number).unwrap()
             );
+            if let Some((label, start, end)) = room_schedule(number).unwrap() {
+                assert!(!label.is_empty());
+                assert_eq!(fleet.policy.schedule.len(), 1);
+                let window = &fleet.policy.schedule[0];
+                assert_eq!(window.start.hour(), u32::from(start));
+                assert_eq!(window.end.hour(), u32::from(end));
+                assert_eq!(window.start.minute(), 0);
+                assert_eq!(window.end.minute(), 0);
+            } else {
+                assert!(fleet.policy.schedule.is_empty());
+            }
         }
         assert_eq!(room_schedule(16).unwrap(), Some(("白饭", 10, 18)));
         assert_eq!(room_schedule(20).unwrap(), Some(("晚宴", 18, 0)));
@@ -674,12 +860,16 @@ mod tests {
         assert!(!ordinary().policy.idle_regeneration);
         for number in [101, 199, 220, 299] {
             assert!(fleet_room(number, "", None).is_err());
+            assert!(room_schedule(number).is_err());
         }
         assert!(build_template("pure_survival", 300, "", None, None).is_err());
         assert!(build_template("unknown", 0, "", None, None).is_err());
-        let settings =
-            ClusterSettings::from_value(json!({"cluster_name":"Custom", "max_players":7})).unwrap();
-        let customized = build_template("afk", 250, "test-token", None, Some(&settings)).unwrap();
+        let settings = Map::from_iter([
+            ("cluster_name".into(), "Custom".into()),
+            ("max_players".into(), 7.into()),
+            ("steam_group_only".into(), true.into()),
+        ]);
+        let customized = build_template("afk", 250, "test-token", None, Some(settings)).unwrap();
         assert_eq!(customized.resolved()["settings"]["cluster_name"], "Custom");
         assert_eq!(customized.resolved()["settings"]["max_players"], 7);
         assert_eq!(customized.resolved()["settings"]["tick_rate"], 1);
@@ -687,12 +877,17 @@ mod tests {
 
     #[test]
     fn edits_validate_once_preserve_secrets_and_handle_defaults_arrays_and_escapes() {
-        let original = ordinary();
+        let mut original = ordinary();
+        original.deployment.environment.insert(
+            "OTEL_EXPORTER_OTLP_LOGS_HEADERS".into(),
+            "authorization=fixture-credential".into(),
+        );
         let changed = original
             .edit_many(
                 &[
                     ("/cluster/settings/whitelist_slots", json!(12)),
                     ("/cluster/settings/max_players", json!(12)),
+                    ("/cluster/mod_settings/force_enabled/-", json!("local")),
                     (
                         "/policy/schedule/-",
                         json!({"start":"22:00", "end":"05:00"}),
@@ -708,6 +903,21 @@ mod tests {
             12
         );
         assert_eq!(changed.get("/policy/schedule/0/end").unwrap(), "06:00");
+        assert_eq!(
+            changed
+                .get("/cluster/mod_settings/force_enabled/0")
+                .unwrap(),
+            "local"
+        );
+        assert!(
+            !serde_json::to_string(&changed)
+                .unwrap()
+                .contains("fixture-credential")
+        );
+        assert_eq!(
+            changed.as_value()["deployment"]["environment"]["OTEL_EXPORTER_OTLP_LOGS_HEADERS"],
+            "authorization=fixture-credential"
+        );
         assert_eq!(changed.cluster.resolved()["token"], "test-token");
         assert_eq!(original.get("/cluster/settings/max_players").unwrap(), 9);
         assert!(original.policy.schedule.is_empty());
@@ -793,7 +1003,9 @@ mod tests {
         let store = RoomStore::new(directory.path().join("rooms"));
         assert!(store.numbers().unwrap().is_empty());
         assert!(!store.root().exists());
-        let room = fleet_room(16, "test-token", None).unwrap();
+        let mut room = fleet_room(16, "test-token", None).unwrap();
+        assert!(store.save(&room).is_err());
+        room.deployment = DeploymentOptions::default();
         let written = store.save(&room).unwrap();
         let root = store.path(16).unwrap();
         assert!(written.contains(&root.join("cluster.ini")));
@@ -807,16 +1019,10 @@ mod tests {
         fs::create_dir_all(root.join("cave/save/session")).unwrap();
         fs::write(root.join("cave/save/session/world"), b"world\0\xff").unwrap();
         let mut guard = RoomLock::try_acquire(&root).unwrap();
-        guard
-            .update_state(|control| {
-                control.insert(
-                    "policy_state".into(),
-                    json!({"activity":{"sessions":{"forest":"current"}}}),
-                );
-                control.insert("recovery".into(), json!({"attempt":2}));
-                Ok(())
-            })
-            .unwrap();
+        let mut state = crate::policy::PolicyState::load(&guard).unwrap();
+        state.queue_mod_update(false).unwrap();
+        state.save(&mut guard).unwrap();
+        crate::recovery::begin_run(&mut guard, "first-run".into()).unwrap();
         assert!(store.save(&room).is_err());
         assert_eq!(store.numbers().unwrap(), [16]);
         drop(guard);
@@ -840,25 +1046,21 @@ mod tests {
                 .is_none()
         );
         assert_eq!(loaded.cluster.resolved()["settings"]["cluster_key"], key);
-        let changed = loaded
-            .edit_many(
-                &[
-                    ("/template", json!("custom")),
-                    ("/policy/mod_auto_update", json!(false)),
-                ],
-                &[],
-            )
+        let new_label = loaded.edit("/template", json!("custom"), false).unwrap();
+        store.save(&new_label).unwrap();
+        let policy_edit = loaded
+            .edit("/policy/mod_auto_update", json!(false), false)
             .unwrap();
         let native = fs::read(root.join("cluster.ini")).unwrap();
-        store.save_policy(&changed).unwrap();
+        store.save_policy(&policy_edit).unwrap();
         assert_eq!(fs::read(root.join("cluster.ini")).unwrap(), native);
         let guard = RoomLock::try_acquire(&root).unwrap();
         let control = guard.read_state().unwrap();
-        assert_eq!(
-            control["policy_state"]["activity"]["sessions"]["forest"],
-            "current"
-        );
-        assert_eq!(control["recovery"]["attempt"], 2);
+        assert_eq!(control["template"], "custom");
+        assert_eq!(control["policy"]["mod_auto_update"], false);
+        assert_eq!(crate::policy::PolicyState::load(&guard).unwrap(), state);
+        assert_eq!(control["agent_run"]["attempt_id"], "first-run");
+        assert_eq!(control["recovery"]["restarts_used"], 0);
         assert!(!control.contains_key("cluster"));
         assert!(!control.contains_key("deployment"));
         drop(guard);

@@ -1,4 +1,6 @@
 local state = require("dst_server.state")
+local telemetry = require("dst_server.telemetry")
+local connections = require("dst_server.connections")
 local driver = {}
 local methods = {}
 
@@ -19,12 +21,14 @@ function driver.health()
         or state.telemetry_active and (next(state.faults) ~= nil and "degraded" or "active")
         or "failed"
     return {
-        protocol = state.protocol,
         generation = state.generation,
+        control_ready = state.control_ready,
+        profile = state.requested_profile,
         telemetry_status = telemetry_status,
         last_error = state.last_error or json.null,
         events_emitted = state.sequence,
         errors = state.errors,
+        play_queue_dropped = state.play_queue_dropped,
         revision = state.health_revision,
         capabilities = require("dst_server.wire").object(state.capabilities),
         faults = require("dst_server.wire").object(state.faults),
@@ -43,23 +47,13 @@ function driver.install(options)
         error("nonce must be a canonical ULID")
     end
     local profile = options.profile
-    if profile ~= "off" and profile ~= "critical" and profile ~= "history" then
+    if profile ~= "off" and profile ~= "timeline" and profile ~= "play" then
         error("unknown telemetry profile")
-    end
-    if type(options.actions) ~= "table" then
-        error("actions must be a table")
     end
     local generation = options.generation
     if type(generation) ~= "number" or generation < 0 or generation > 9007199254740991
         or generation ~= math.floor(generation) then
         error("generation must be a non-negative safe integer")
-    end
-    local action_allowlist = {}
-    for _, action_id in pairs(options.actions) do
-        if type(action_id) ~= "string" or action_id == "" then
-            error("action IDs must be non-empty strings")
-        end
-        action_allowlist[action_id] = true
     end
     if TheWorld == nil or not TheWorld.ismastersim then
         error("master simulation is unavailable")
@@ -67,13 +61,11 @@ function driver.install(options)
     state.nonce = nonce
     state.generation = generation
     state.requested_profile = profile
-    state.action_allowlist = action_allowlist
 
     local original = Networking_ModOutOfDateAnnouncement
     if type(original) ~= "function" then
         error("Networking_ModOutOfDateAnnouncement is unavailable")
     end
-    local telemetry = require("dst_server.telemetry")
     Networking_ModOutOfDateAnnouncement = function(...)
         local mod = ...
         if type(mod) == "string" then
@@ -81,46 +73,35 @@ function driver.install(options)
             for _, name in ipairs(state.outdated_mods) do if name == mod then found = true end end
             if not found then state.outdated_mods[#state.outdated_mods + 1] = mod end
         end
-        -- This is required control state, including when optional telemetry is off.
-        -- Capture first so announcement failures cannot hide the native detection.
-        pcall(telemetry.emit, "dst.mod.outdated", { name = mod })
         return original(...)
     end
     state.installed = true
-    for _, name in ipairs({ "players", "player_lifecycle", "shards", "world", "messages", "actions", "votes", "gorge_voter", "lobbyvote",
-        "player_commands", "appearance", "map_deliveries", "vault_trials", "container_transfers", "teleporters" }) do
+    for _, name in ipairs({ "connections", "voting", "players", "player_lifecycle", "world", "public_chat", "votes",
+        "presence", "picking", "cooking", "deployment", "actions", "dice" }) do
         state.capabilities[name] = "disabled"
     end
-    local installed = false
-    local function install(name, callback)
-        if telemetry.install(name, callback) then installed = true end
-    end
-    install("players", function() require("dst_server.world_events").install_players() end)
     if profile == "off" then return driver.health() end
     if type(GetTick) ~= "function" or type(GetTimeReal) ~= "function" then
         telemetry.report("clocks.install", "installation_failed")
         return driver.health()
     end
-    install("player_lifecycle", function() require("dst_server.player_events").install_lifecycle() end)
-    install("shards", function() require("dst_server.world_events").install_shard() end)
-    install("world", function() require("dst_server.world_events").install_world() end)
-    install("messages", function() require("dst_server.message_events").install() end)
-    install("appearance", function() return require("dst_server.input_events").install_appearance() end)
-    install("map_deliveries", function() return require("dst_server.gameplay_events").install_deliveries() end)
-    install("vault_trials", function() return require("dst_server.gameplay_events").install_vault_trials() end)
-    install("teleporters", function() require("dst_server.gameplay_events").install_teleporters() end)
-    if profile == "history" then
-        install("container_transfers", function() require("dst_server.container_events").install() end)
+    state.telemetry_active = true
+    telemetry.install("players", function() require("dst_server.world_events").install_players() end)
+    telemetry.install("player_lifecycle", function() require("dst_server.player_events").install_lifecycle() end)
+    telemetry.install("world", function() require("dst_server.world_events").install_world() end)
+    telemetry.install("public_chat", function() return require("dst_server.message_events").install_public_chat() end)
+    if profile == "play" then
+        telemetry.install("dice", function() return require("dst_server.message_events").install_dice() end)
+        telemetry.install("picking", function() return require("dst_server.gameplay_events").install_picking() end)
+        telemetry.install("cooking", function() return require("dst_server.gameplay_events").install_cooking() end)
+        telemetry.install("deployment", function() require("dst_server.gameplay_events").install_deployment() end)
+        telemetry.install("actions", function() return require("dst_server.gameplay_actions").install() end)
     end
-    if profile == "history" and next(action_allowlist) ~= nil then
-        install("actions", function() require("dst_server.actions").install() end)
-    end
-    state.telemetry_active = installed
     return driver.health()
 end
 
 methods.health = driver.health
-methods.presence = function() return require("dst_server.connections").presence() end
+methods.presence = connections.presence
 
 function driver.call(name, args)
     if not state.installed then
@@ -137,7 +118,7 @@ function driver.call(name, args)
             or TheWorld.meta.session_identifier ~= args._expected_session_id
             or state.generation ~= args._expected_generation
             or player == nil or not player:IsValid() or player._despawning
-            or player.GUID ~= args._expected_guid then
+            or player.GUID ~= args._expected_guid or connections.loaded(player) == false then
             require("dst_server.wire").stale_reference()
         end
     end

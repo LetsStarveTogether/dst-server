@@ -10,18 +10,23 @@ use dst_server::{
 use pyo3::{
     exceptions::PyValueError,
     prelude::*,
-    types::{PyDict, PyMapping},
+    types::{PyDict, PyMapping, PySequence},
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{anyhow_error as error, from_python, to_python};
 
-fn input(value: &Bound<'_, PyAny>) -> PyResult<Value> {
-    from_python(value, 0, &mut 0)
+fn settings_patch(source: &Bound<'_, PyAny>) -> PyResult<Map<String, Value>> {
+    match from_python(source)? {
+        Value::Object(fields) => Ok(fields),
+        _ => Err(PyValueError::new_err(
+            "settings overrides must be a mapping",
+        )),
+    }
 }
 
 fn configuration_input(model: &str, source: &Bound<'_, PyAny>) -> PyResult<Value> {
-    let mut value = input(source)?;
+    let mut value = from_python(source)?;
     if matches!(model, "WorldgenOverride" | "LevelDataOverride")
         && let Ok(fields) = source.cast::<PyMapping>()
         && fields.contains("overrides")?
@@ -335,14 +340,9 @@ impl Configuration {
         if self.model != "RoomPreset" {
             return Err(PyValueError::new_err("build requires a RoomPreset"));
         }
-        let settings = settings
-            .map(input)
-            .transpose()?
-            .map(native::ClusterSettings::from_value)
-            .transpose()
-            .map_err(error)?;
+        let settings = settings.map(settings_patch).transpose()?;
         native::RoomPreset::from_value(self.value.clone())
-            .and_then(|preset| preset.build(token, cluster_key, settings.as_ref()))
+            .and_then(|preset| preset.build(token, cluster_key, settings))
             .map(Self::from_cluster)
             .map_err(error)
     }
@@ -363,12 +363,15 @@ impl Room {
     #[new]
     #[pyo3(signature = (value=None, **fields))]
     fn new(value: Option<&Bound<'_, PyAny>>, fields: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut value = value.map(input).transpose()?.unwrap_or_else(|| json!({}));
+        let mut value = value
+            .map(from_python)
+            .transpose()?
+            .unwrap_or_else(|| json!({}));
         if let Some(fields) = fields {
             value
                 .as_object_mut()
                 .ok_or_else(|| PyValueError::new_err("room must be an object"))?
-                .extend(input(fields.as_any())?.as_object().unwrap().clone());
+                .extend(from_python(fields.as_any())?.as_object().unwrap().clone());
         }
         rooms::Room::from_value(value)
             .map(|inner| Self { inner })
@@ -407,7 +410,7 @@ impl Room {
         self.inner
             .edit(
                 pointer,
-                value.map(input).transpose()?.unwrap_or(Value::Null),
+                value.map(from_python).transpose()?.unwrap_or(Value::Null),
                 unset,
             )
             .map(|inner| Self { inner })
@@ -416,13 +419,20 @@ impl Room {
     #[pyo3(signature = (changes=None, *, unset=None))]
     fn edit_many(
         &self,
-        changes: Option<&Bound<'_, PyAny>>,
+        changes: Option<&Bound<'_, PySequence>>,
         unset: Option<Vec<String>>,
     ) -> PyResult<Self> {
-        let changes = changes.map(input).transpose()?.unwrap_or_else(|| json!([]));
         let changes = changes
-            .as_array()
-            .ok_or_else(|| PyValueError::new_err("changes must contain (pointer,value) pairs"))?
+            .map(|sequence| {
+                let mut nodes = 1; // Include the outer sequence in the JSON conversion budget.
+                sequence
+                    .try_iter()?
+                    .map(|pair| crate::read_json_value(&pair?, 1, &mut nodes))
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let changes = changes
             .iter()
             .map(|pair| {
                 let pair = pair
@@ -449,7 +459,7 @@ impl Room {
             .map_err(error)
     }
     fn __repr__(&self) -> String {
-        format!("Room({})", native::redact(self.inner.as_value()))
+        format!("{:?}", self.inner)
     }
 }
 
@@ -460,7 +470,7 @@ pub(crate) struct RoomStore {
 }
 
 fn number(value: &Bound<'_, PyAny>) -> PyResult<u16> {
-    input(value)?
+    from_python(value)?
         .as_u64()
         .and_then(|value| value.try_into().ok())
         .ok_or_else(|| PyValueError::new_err("room number must be an unsigned integer"))
@@ -541,13 +551,8 @@ fn build_template(
     settings: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Configuration> {
     let number = number.map(self::number).transpose()?.unwrap_or(0);
-    let settings = settings
-        .map(input)
-        .transpose()?
-        .map(native::ClusterSettings::from_value)
-        .transpose()
-        .map_err(error)?;
-    rooms::build_template(name, number, token, cluster_key, settings.as_ref())
+    let settings = settings.map(settings_patch).transpose()?;
+    rooms::build_template(name, number, token, cluster_key, settings)
         .map(Configuration::from_cluster)
         .map_err(error)
 }
@@ -563,7 +568,7 @@ fn fleet_room(
         .map_err(error)
 }
 #[pyfunction]
-fn room_name(room_number: &Bound<'_, PyAny>) -> PyResult<&'static str> {
+fn room_name(room_number: &Bound<'_, PyAny>) -> PyResult<String> {
     rooms::room_name(number(room_number)?).map_err(error)
 }
 #[pyfunction]
@@ -627,7 +632,7 @@ fn parse_lua_return_table(py: Python<'_>, source: &str) -> PyResult<Py<PyAny>> {
 }
 #[pyfunction]
 fn render_lua_literal(value: &Bound<'_, PyAny>) -> PyResult<String> {
-    lua::render_literal(&input(value)?).map_err(error)
+    lua::render_literal(&from_python(value)?).map_err(error)
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

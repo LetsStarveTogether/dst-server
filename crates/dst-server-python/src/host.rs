@@ -3,6 +3,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use dst_server::{
+    deployment::validate_port_pool,
     host as native,
     host_operations::{self, HostOperation},
     rooms,
@@ -17,14 +18,14 @@ use crate::{
 };
 
 fn operation(value: &Bound<'_, PyAny>) -> PyResult<HostOperation> {
-    let operation: HostOperation = serde_json::from_value(from_python(value, 0, &mut 0)?)
+    let operation: HostOperation = serde_json::from_value(from_python(value)?)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     operation.validate().map_err(error)?;
     Ok(operation)
 }
 
 pub(crate) fn room_number(value: &Bound<'_, PyAny>) -> PyResult<u16> {
-    from_python(value, 0, &mut 0)?
+    from_python(value)?
         .as_u64()
         .filter(|number| *number <= u64::from(rooms::MAX_ROOM_SLOT))
         .map(|number| number as u16)
@@ -55,11 +56,8 @@ impl Host {
         port_start: u16,
         port_end: u16,
     ) -> PyResult<Self> {
-        if port_start == 0 || port_start > port_end {
-            return Err(PyValueError::new_err(
-                "port pool must be a nonempty range from 1 to 65535",
-            ));
-        }
+        let port_pool = port_start..=port_end;
+        validate_port_pool(&port_pool).map_err(|error| PyValueError::new_err(error.to_string()))?;
         let mut host = native::Host::new(root, quadlet_dir);
         host.systemd.user = user;
         host.systemd.command_timeout = host_operations::duration(command_timeout).map_err(error)?;
@@ -69,10 +67,15 @@ impl Host {
         if let Some(executable) = journalctl {
             host.journals.executable = executable;
         }
-        host.port_pool = port_start..=port_end;
+        host.port_pool = port_pool;
         Ok(Self {
             inner: Arc::new(host),
         })
+    }
+
+    #[getter]
+    fn user(&self) -> bool {
+        self.inner.systemd.user
     }
 
     #[getter]
@@ -129,9 +132,8 @@ impl Host {
         unset: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let number = room_number(number)?;
-        let changes: Vec<(String, Value)> =
-            serde_json::from_value(from_python(changes, 0, &mut 0)?)
-                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let changes: Vec<(String, Value)> = serde_json::from_value(from_python(changes)?)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let host = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let inner = host

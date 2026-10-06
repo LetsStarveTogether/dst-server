@@ -15,8 +15,9 @@ use serde_json::Value;
 pub struct Arguments {
     #[arg(long, default_value = "/srv/dst", global = true)]
     root: PathBuf,
-    #[arg(long, default_value = "/etc/containers/systemd", global = true)]
-    quadlet_dir: PathBuf,
+    /// Quadlet directory for the selected systemd manager.
+    #[arg(long, global = true)]
+    quadlet_dir: Option<PathBuf>,
     #[arg(long, default_value = "systemctl", global = true)]
     systemctl: PathBuf,
     #[arg(long, global = true)]
@@ -136,26 +137,16 @@ fn numbers(values: &[String]) -> Result<Vec<u16>> {
     Ok(result.into_iter().collect())
 }
 
-async fn select(host: &Host, selection: &Selection) -> Result<Vec<u16>> {
+fn select(host: &Host, selection: &Selection) -> Result<Vec<u16>> {
     ensure!(
         selection.all || !selection.rooms.is_empty() || selection.template.is_some(),
         "select --room, --template or --all explicitly"
     );
-    let mut selected = Vec::new();
-    for number in if selection.rooms.is_empty() {
-        host.rooms.numbers()?
+    if selection.rooms.is_empty() {
+        host.managed_numbers()
     } else {
-        numbers(&selection.rooms)?
-    } {
-        if let Some(template) = &selection.template
-            && host.load(number).await?.template.as_ref() != Some(template)
-        {
-            continue;
-        }
-        selected.push(number);
+        numbers(&selection.rooms)
     }
-    ensure!(!selected.is_empty(), "no rooms matched the selection");
-    Ok(selected)
 }
 
 fn emit_batch(values: &[Value], compact: bool) -> Result<bool> {
@@ -164,7 +155,17 @@ fn emit_batch(values: &[Value], compact: bool) -> Result<bool> {
 }
 
 pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
-    let mut host = Host::new(arguments.root, arguments.quadlet_dir);
+    let quadlet_dir = match arguments.quadlet_dir {
+        Some(directory) => directory,
+        None if arguments.user => std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| std::env::home_dir().map(|home| home.join(".config")))
+            .context("cannot locate the user Quadlet directory")?
+            .join("containers/systemd"),
+        None => PathBuf::from("/etc/containers/systemd"),
+    };
+    let mut host = Host::new(arguments.root, quadlet_dir);
     host.systemd.executable = arguments.systemctl;
     host.systemd.user = arguments.user;
     let (selection, operation) = match arguments.command {
@@ -285,8 +286,12 @@ pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
         }
     };
     operation.validate()?;
-    let selected = select(&host, &selection).await?;
-    emit_batch(&host.batch(&selected, &operation).await?, compact)
+    let selected = select(&host, &selection)?;
+    let results = host
+        .batch_matching(&selected, &operation, selection.template.as_deref())
+        .await?;
+    ensure!(!results.is_empty(), "no rooms matched the selection");
+    emit_batch(&results, compact)
 }
 
 #[cfg(test)]

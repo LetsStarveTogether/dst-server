@@ -13,46 +13,27 @@ use serde::{Deserialize, Serialize};
 use crate::settings::ClusterConfig;
 
 pub const DEFAULT_IMAGE: &str = "quay.io/wh2099/dst-server:latest";
+pub(crate) const BETA_IMAGE: &str = "quay.io/wh2099/dst-server:beta";
 pub const PUBLISHED_PORTS_ENV: &str = "DST_SERVER_PUBLISHED_PORTS";
+pub(crate) const SYSTEMD_UNIT_ENV: &str = "PODMAN_SYSTEMD_UNIT";
 const OWNER: &str = "# Managed by dst-server: room container v1";
 const LIMIT: u64 = 1024 * 1024;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Protocol {
-    #[default]
-    Udp,
-    Tcp,
-}
-impl Protocol {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Udp => "udp",
-            Self::Tcp => "tcp",
-        }
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortMapping {
     pub host: u16,
     pub container: u16,
-    #[serde(default)]
-    pub protocol: Protocol,
 }
 impl PortMapping {
     pub fn parse(value: &str) -> Result<Self> {
-        let (ports, protocol) = value.split_once('/').context("missing port protocol")?;
+        let ports = value
+            .strip_suffix("/udp")
+            .context("DST publication requires UDP")?;
         let (host, container) = ports.split_once(':').context("missing host port")?;
         let mapping = Self {
             host: host.parse()?,
             container: container.parse()?,
-            protocol: match protocol {
-                "udp" => Protocol::Udp,
-                "tcp" => Protocol::Tcp,
-                _ => bail!("unsupported port protocol"),
-            },
         };
         mapping.validate()?;
         Ok(mapping)
@@ -65,7 +46,7 @@ impl PortMapping {
         Ok(())
     }
     pub fn render(&self) -> String {
-        format!("{}:{}/{}", self.host, self.container, self.protocol.label())
+        format!("{}:{}/udp", self.host, self.container)
     }
 }
 
@@ -102,8 +83,8 @@ impl DeploymentOptions {
             ensure!(valid_environment_name(name), "invalid environment name");
             literal(value)?;
             ensure!(
-                name != PUBLISHED_PORTS_ENV,
-                "{PUBLISHED_PORTS_ENV} is managed by the deployment"
+                name != PUBLISHED_PORTS_ENV && name != SYSTEMD_UNIT_ENV,
+                "{name} is managed by the deployment"
             );
         }
         if let Some(value) = &self.userns {
@@ -116,16 +97,9 @@ impl DeploymentOptions {
         let mut containers = BTreeSet::new();
         for mapping in &self.ports {
             mapping.validate()?;
+            ensure!(hosts.insert(mapping.host), "duplicate host port");
             ensure!(
-                mapping.protocol == Protocol::Udp,
-                "DST publication requires UDP"
-            );
-            ensure!(
-                hosts.insert((mapping.protocol, mapping.host)),
-                "duplicate host port"
-            );
-            ensure!(
-                containers.insert((mapping.protocol, mapping.container)),
+                containers.insert(mapping.container),
                 "duplicate container port"
             );
         }
@@ -140,41 +114,50 @@ pub struct ContainerUnit {
     pub options: DeploymentOptions,
     pub published_game_ports: BTreeMap<String, u16>,
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "native shard game or query ports differ from the managed Quadlet; stop the service and use host edit to reconcile the ports"
+)]
+pub(crate) struct PublishedPortMismatch;
+
 impl ContainerUnit {
     pub fn for_cluster(
         name: &str,
         cluster: impl AsRef<Path>,
         configuration: &ClusterConfig,
-        options: DeploymentOptions,
+        mut options: DeploymentOptions,
     ) -> Result<Self> {
-        options.validate()?;
-        let endpoints = endpoints(configuration)?;
-        let expected: BTreeSet<_> = endpoints
-            .iter()
-            .map(|endpoint| endpoint.container)
-            .collect();
-        let actual: BTreeSet<_> = options
-            .ports
-            .iter()
-            .map(|mapping| mapping.container)
-            .collect();
+        let name = escape_unit_name(name)?;
+        let shards = configured_ports(configuration)?;
         ensure!(
-            expected == actual,
-            "publish exactly the game and query ports for every shard"
+            options.ports.len() == shards.len() * 2,
+            "publish two ports per shard"
         );
-        let ports: BTreeMap<_, _> = options
+        let hosts: BTreeMap<_, _> = options
             .ports
-            .iter()
+            .into_iter()
             .map(|mapping| (mapping.container, mapping.host))
             .collect();
+        // Each shard's game mapping precedes its query mapping in shard-name order.
+        options.ports = shards
+            .values()
+            .flatten()
+            .map(|&container| {
+                let host = *hosts.get(&container)?;
+                Some(PortMapping { host, container })
+            })
+            .collect::<Option<_>>()
+            .context("publish exactly the game and query ports for every shard")?;
+        let published_game_ports = shards
+            .keys()
+            .zip(options.ports.as_chunks::<2>().0)
+            .map(|(&name, [game, _])| (name.to_owned(), game.host))
+            .collect();
         let unit = Self {
-            name: escape_unit_name(name)?,
+            name,
             cluster: cluster.as_ref().to_owned(),
-            published_game_ports: endpoints
-                .into_iter()
-                .filter(|endpoint| endpoint.game)
-                .map(|endpoint| (endpoint.shard, ports[&endpoint.container]))
-                .collect(),
+            published_game_ports,
             options,
         };
         unit.validate()?;
@@ -182,6 +165,26 @@ impl ContainerUnit {
     }
     pub fn service(&self) -> String {
         format!("{}.service", self.name)
+    }
+    pub(crate) fn check_native_ports(&self) -> Result<()> {
+        self.check_ports(native_ports(&crate::configuration::discover(
+            &self.cluster,
+        )?))
+    }
+    pub(crate) fn check_ports(&self, shards: BTreeMap<&str, [u16; 2]>) -> Result<()> {
+        ensure!(
+            shards
+                .keys()
+                .copied()
+                .eq(self.published_game_ports.keys().map(String::as_str))
+                && shards.values().flatten().copied().eq(self
+                    .options
+                    .ports
+                    .iter()
+                    .map(|mapping| mapping.container)),
+            PublishedPortMismatch
+        );
+        Ok(())
     }
     pub fn filename(&self) -> String {
         format!("{}.container", self.name)
@@ -198,14 +201,19 @@ impl ContainerUnit {
             !self.published_game_ports.is_empty(),
             "deployment requires at least one shard"
         );
-        for (name, host) in &self.published_game_ports {
+        ensure!(
+            self.options.ports.len() == self.published_game_ports.len() * 2,
+            "publish two ports per shard"
+        );
+        for ((name, host), pair) in self
+            .published_game_ports
+            .iter()
+            .zip(self.options.ports.as_chunks::<2>().0)
+        {
             crate::configuration::validate_shard_name(name)?;
             ensure!(
-                self.options
-                    .ports
-                    .iter()
-                    .any(|mapping| mapping.host == *host && mapping.protocol == Protocol::Udp),
-                "published game port is missing from mappings"
+                pair[0].host == *host,
+                "the game mapping must precede the query mapping for shard {name}"
             );
         }
         Ok(())
@@ -213,14 +221,11 @@ impl ContainerUnit {
     pub fn render(&self) -> Result<String> {
         self.validate()?;
         let mut source = format!(
-            "{OWNER}\n[Unit]\nDescription=Don't Starve Together {}\n\n[Container]\nImage={}\nPull=never\nRunInit=true\nTimezone=local\nExec=/usr/local/bin/dst-server agent --cluster /cluster\nStopTimeout=360\n",
+            "{OWNER}\n[Unit]\nDescription=Don't Starve Together {}\n\n[Container]\nImage={}\nPull=never\nRunInit=true\nTimezone=local\nLogDriver=passthrough\nExec=/usr/local/bin/dst-server agent\nStopSignal=SIGTERM\nStopTimeout=540\n",
             escape(&self.name),
             quote(&self.options.image)
         );
-        if matches!(
-            self.options.image.as_str(),
-            DEFAULT_IMAGE | "quay.io/wh2099/dst-server:beta"
-        ) {
+        if matches!(self.options.image.as_str(), DEFAULT_IMAGE | BETA_IMAGE) {
             source.push_str("AutoUpdate=registry\n");
         }
         let suffix = self
@@ -246,18 +251,18 @@ impl ContainerUnit {
         for mapping in &self.options.ports {
             source.push_str(&format!("PublishPort={}\n", mapping.render()));
         }
-        let mut environment = self.options.environment.clone();
-        environment.insert(
-            PUBLISHED_PORTS_ENV.into(),
-            serde_json::to_string(&self.published_game_ports)?,
-        );
-        for (name, value) in environment {
+        let published = serde_json::to_string(&self.published_game_ports)?;
+        source.push_str(&format!(
+            "Environment={SYSTEMD_UNIT_ENV}\nEnvironment={}\n",
+            quote(&format!("{PUBLISHED_PORTS_ENV}={published}"))
+        ));
+        for (name, value) in &self.options.environment {
             source.push_str(&format!(
                 "Environment={}\n",
                 quote(&format!("{name}={value}"))
             ));
         }
-        source.push_str("\n[Service]\nRestart=on-failure\nRestartSec=5\nTimeoutStartSec=900\nTimeoutStopSec=420\n");
+        source.push_str("\n[Service]\nRestart=on-failure\nRestartSec=5\nTimeoutStartSec=900\nTimeoutStopSec=600\n");
         if self.options.start_on_boot {
             source.push_str("\n[Install]\nWantedBy=default.target\n");
         }
@@ -265,16 +270,31 @@ impl ContainerUnit {
     }
     pub(crate) fn load_for_room(path: impl AsRef<Path>, directory: &Path) -> Result<Self> {
         let unit = Self::load(path)?;
+        unit.check_room_directory(directory)?;
+        Ok(unit)
+    }
+
+    fn check_room_directory(&self, directory: &Path) -> Result<()> {
         ensure!(
-            unit.cluster == std::path::absolute(directory)?,
+            self.cluster == std::path::absolute(directory)?,
             "Quadlet must mount the selected room directory"
         );
-        Ok(unit)
+        Ok(())
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let source = read_regular(path)?;
+        let (unit, fields) = Self::load_source(path, &source)?;
+        unit.validate_dropins(
+            path.parent().context("unit needs parent")?,
+            Some(&fields),
+            &fields,
+        )?;
+        Ok(unit)
+    }
+
+    fn load_source(path: &Path, source: &str) -> Result<(Self, Fields)> {
         ensure!(
             source.lines().next() == Some(OWNER),
             "unrelated Quadlet file: {}",
@@ -286,7 +306,7 @@ impl ContainerUnit {
             .and_then(|name| name.strip_suffix(".container"))
             .context("expected a .container unit")?
             .to_owned();
-        let fields = parse_sections(&source)?;
+        let fields = parse_sections(source)?;
         let get = |section: &str, key: &str| -> Result<String> {
             let values = fields
                 .get(&(section.into(), key.into()))
@@ -294,35 +314,11 @@ impl ContainerUnit {
             ensure!(values.len() == 1, "duplicate {section}.{key}");
             Ok(values[0].clone())
         };
-        for (section, key, value) in [
-            ("Container", "Pull", "never"),
-            ("Container", "RunInit", "true"),
-            ("Container", "Timezone", "local"),
-            (
-                "Container",
-                "Exec",
-                "/usr/local/bin/dst-server agent --cluster /cluster",
-            ),
-            ("Container", "StopTimeout", "360"),
-            ("Service", "Restart", "on-failure"),
-            ("Service", "RestartSec", "5"),
-            ("Service", "TimeoutStartSec", "900"),
-            ("Service", "TimeoutStopSec", "420"),
-        ] {
-            ensure!(get(section, key)? == value, "unsupported {section}.{key}");
-        }
         let mut options = DeploymentOptions {
             image: unquote(&get("Container", "Image")?)?,
-            start_on_boot: false,
+            start_on_boot: fields.contains_key(&("Install".into(), "WantedBy".into())),
             ..Default::default()
         };
-        if fields.contains_key(&("Install".into(), "WantedBy".into())) {
-            ensure!(
-                get("Install", "WantedBy")? == "default.target",
-                "unsupported install target"
-            );
-            options.start_on_boot = true;
-        }
         if fields.contains_key(&("Container".into(), "UserNS".into())) {
             options.userns = Some(unquote(&get("Container", "UserNS")?)?);
         }
@@ -358,45 +354,22 @@ impl ContainerUnit {
         {
             options.ports.push(PortMapping::parse(value)?);
         }
-        let mut published_game_ports = None;
-        for value in fields
-            .get(&("Container".into(), "Environment".into()))
-            .into_iter()
-            .flatten()
-        {
-            let assignment = unquote(value)?;
-            let (name, value) = assignment
-                .split_once('=')
-                .context("invalid environment assignment")?;
-            if name == PUBLISHED_PORTS_ENV {
-                ensure!(
-                    published_game_ports.is_none(),
-                    "duplicate managed environment"
-                );
-                published_game_ports = Some(serde_json::from_str(value)?);
-            } else {
-                ensure!(
-                    options
-                        .environment
-                        .insert(name.into(), value.into())
-                        .is_none(),
-                    "duplicate environment variable"
-                );
-            }
-        }
+        options.environment = unit_environment(&fields)?;
+        let published = options
+            .environment
+            .remove(PUBLISHED_PORTS_ENV)
+            .context("missing published game ports")?;
         let unit = Self {
             name,
             cluster: cluster.into(),
             options,
-            published_game_ports: published_game_ports.context("missing published game ports")?,
+            published_game_ports: serde_json::from_str(&published)?,
         };
-        unit.validate()?;
-        // Comparing parsed fields also rejects unknown directives rather than silently deleting them.
         ensure!(
             parse_sections(&unit.render()?)? == fields,
             "unsupported or inconsistent managed Quadlet fields"
         );
-        Ok(unit)
+        Ok((unit, fields))
     }
     pub fn validate_update(&self, directory: impl AsRef<Path>) -> Result<()> {
         let directory = directory.as_ref();
@@ -404,94 +377,221 @@ impl ContainerUnit {
         let path = directory.join(self.filename());
         let updated = parse_sections(&self.render()?)?;
         let old = if path.try_exists()? {
-            Some(parse_sections(&Self::load(&path)?.render()?)?)
+            let source = read_regular(&path)?;
+            let (unit, fields) = Self::load_source(&path, &source)?;
+            unit.check_room_directory(&self.cluster)?;
+            Some(fields)
         } else {
             None
         };
-        let changed: BTreeSet<_> = updated
-            .keys()
-            .chain(old.iter().flat_map(|fields| fields.keys()))
-            .filter(|key| old.as_ref().and_then(|fields| fields.get(*key)) != updated.get(*key))
-            .cloned()
-            .collect();
-        for path in dropins(directory, &self.name)? {
+        self.validate_dropins(directory, old.as_ref(), &updated)
+    }
+    fn validate_dropins(
+        &self,
+        directory: &Path,
+        old: Option<&Fields>,
+        updated: &Fields,
+    ) -> Result<()> {
+        let volume = ("Container".into(), "Volume".into());
+        let required = &updated[&volume];
+        let mut volumes = required.clone();
+        let mut fixed = BTreeMap::new();
+        for path in dropins(directory, &self.name, "container")? {
             let fields = parse_sections(&read_regular(&path)?)?;
-            for (key, values) in fields {
-                if changed.contains(&key) {
-                    if key == ("Container".into(), "Environment".into()) {
-                        let changed_names = changed_environment(old.as_ref(), &updated)?;
-                        let overlap =
-                            values
-                                .iter()
-                                .try_fold(false, |overlap, value| -> Result<bool> {
-                                    if value.is_empty() {
-                                        return Ok(true);
-                                    }
-                                    let assignment = unquote(value)?;
-                                    let name = assignment
-                                        .split_once('=')
-                                        .context("invalid drop-in environment")?
-                                        .0;
-                                    Ok(overlap || changed_names.contains(name))
-                                })?;
-                        ensure!(
-                            !overlap,
-                            "drop-in overrides changed environment: {}",
-                            path.display()
-                        );
-                    } else {
-                        bail!("drop-in overrides {}.{}: {}", key.0, key.1, path.display());
+            for (key, mut values) in fields {
+                if key == volume {
+                    for value in values {
+                        if value.is_empty() {
+                            volumes.clear();
+                        } else {
+                            volumes.push(value);
+                        }
                     }
+                    continue;
+                }
+                if matches!(
+                    (key.0.as_str(), key.1.as_str()),
+                    ("Container", "ServiceName" | "StopSignal" | "StopTimeout")
+                        | (
+                            "Service",
+                            "TimeoutStopSec" | "SuccessExitStatus" | "RestartForceExitStatus"
+                        )
+                ) {
+                    fixed.insert(
+                        key,
+                        (values.pop().expect("parsed assignment"), path.clone()),
+                    );
+                    continue;
+                }
+                if key.0 == "Container" && key.1 == "PublishPort" {
+                    bail!("drop-in overrides managed ports: {}", path.display());
+                }
+                if key.0 == "Container" && key.1 == "Environment" {
+                    let changed = changed_environment(old, updated)?;
+                    for value in values {
+                        validate_dropin_environment(&value, &changed).with_context(|| {
+                            format!("drop-in overrides managed environment: {}", path.display())
+                        })?;
+                    }
+                } else if old.and_then(|fields| fields.get(&key)) != updated.get(&key) {
+                    bail!("drop-in overrides {}.{}: {}", key.0, key.1, path.display());
                 }
             }
         }
-        Ok(())
+        for (key, (actual, path)) in fixed {
+            let (actual, required) = if key.1 == "ServiceName" {
+                // Quadlet uses the last value, including an explicit empty name.
+                let name = actual.strip_prefix('"').and_then(|v| v.strip_suffix('"'));
+                (name.unwrap_or(&actual), self.name.as_str())
+            } else {
+                let required = updated
+                    .get(&key)
+                    .and_then(|values| values.last())
+                    .map_or("", String::as_str);
+                (actual.as_str(), required)
+            };
+            ensure!(
+                actual == required,
+                "drop-in overrides {}.{}: {}",
+                key.0,
+                key.1,
+                path.display()
+            );
+        }
+        validate_room_volumes(required, &volumes)
     }
     pub fn save(&self, directory: impl AsRef<Path>) -> Result<PathBuf> {
-        let directory = directory.as_ref();
+        self.prepare_save(directory.as_ref())?.publish()
+    }
+
+    pub(crate) fn prepare_save(&self, directory: &Path) -> Result<PreparedUnit> {
+        let source = self.render()?;
+        ensure!(source.len() as u64 <= LIMIT, "host file exceeds limit");
         self.validate_update(directory)?;
         let path = directory.join(self.filename());
-        atomic_write(&path, self.render()?.as_bytes())?;
-        Ok(path)
+        let replace = match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                ensure!(metadata.is_file(), "refusing to replace a non-regular file");
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+        temporary.write_all(source.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        Ok(PreparedUnit {
+            temporary,
+            path,
+            replace,
+        })
     }
 }
 
-#[derive(Clone, Debug)]
-struct Endpoint {
-    shard: String,
-    container: u16,
-    game: bool,
-}
-fn endpoints(configuration: &ClusterConfig) -> Result<Vec<Endpoint>> {
-    let resolved = configuration.resolved();
-    let shards = resolved["shards"].as_object().context("missing shards")?;
-    let mut result = Vec::new();
-    let mut used = BTreeSet::new();
-    let master_port = resolved["settings"]["master_port"]
-        .as_u64()
-        .context("missing internal master port")?;
-    for (shard, value) in shards {
-        for (field, game) in [("server_port", true), ("master_server_port", false)] {
-            let container: u16 = value["settings"][field]
-                .as_u64()
-                .context("missing shard UDP port")?
-                .try_into()?;
-            ensure!(
-                container >= 1024 && u64::from(container) != master_port && used.insert(container),
-                "conflicting container UDP port"
-            );
-            result.push(Endpoint {
-                shard: shard.clone(),
-                container,
-                game,
-            });
+fn validate_room_volumes(required: &[String], volumes: &[String]) -> Result<()> {
+    let mut mounted = [false; 2];
+    for volume in volumes {
+        // A one-field Volume creates an anonymous volume at that destination.
+        let literal = volume_unescape(volume.split(':').nth(1).unwrap_or(volume))
+            .context("cannot resolve Quadlet volume destination")?;
+        let destination = Path::new(&literal);
+        validate_directory_path(destination).context("invalid Quadlet volume destination")?;
+        for (index, target) in ["/cluster", "/install/mods"].iter().enumerate() {
+            if destination == Path::new(target) {
+                ensure!(
+                    !mounted[index] && *volume == required[index],
+                    "drop-in overrides the managed {target} volume"
+                );
+                mounted[index] = true;
+            }
         }
     }
-    ensure!(!result.is_empty(), "room requires at least one shard");
-    Ok(result)
+    ensure!(
+        mounted == [true; 2],
+        "drop-in removes a managed room volume"
+    );
+    Ok(())
 }
 
-/// Hold the host lock until the Quadlet containing these mappings has been saved.
+pub(crate) struct PreparedUnit {
+    temporary: tempfile::NamedTempFile,
+    path: PathBuf,
+    replace: bool,
+}
+
+impl PreparedUnit {
+    pub(crate) fn publish(self) -> Result<PathBuf> {
+        if self.replace {
+            self.temporary.persist(&self.path)
+        } else {
+            self.temporary.persist_noclobber(&self.path)
+        }
+        .map_err(|error| error.error)?;
+        File::open(self.path.parent().context("file needs parent")?)?.sync_all()?;
+        Ok(self.path)
+    }
+}
+
+pub(crate) fn configured_ports(configuration: &ClusterConfig) -> Result<BTreeMap<&str, [u16; 2]>> {
+    configuration
+        .data()
+        .shards
+        .iter()
+        .map(|(name, shard)| {
+            Ok((
+                name.as_str(),
+                [
+                    shard.settings.server_port().try_into()?,
+                    shard.settings.master_server_port().try_into()?,
+                ],
+            ))
+        })
+        .collect()
+}
+
+fn native_ports(cluster: &crate::configuration::Cluster) -> BTreeMap<&str, [u16; 2]> {
+    cluster
+        .shards
+        .iter()
+        .map(|shard| {
+            (
+                shard.name.as_str(),
+                [shard.server_port, shard.master_server_port],
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn same_shard_ports(
+    previous: &crate::configuration::Cluster,
+    next: &ClusterConfig,
+) -> Result<bool> {
+    Ok(native_ports(previous) == configured_ports(next)?)
+}
+
+impl ContainerUnit {
+    pub(crate) fn retained_ports(&self, next: &ClusterConfig) -> Result<Vec<PortMapping>> {
+        let mut ports = Vec::new();
+        let next = configured_ports(next)?;
+        for (name, pair) in self
+            .published_game_ports
+            .keys()
+            .zip(self.options.ports.as_chunks::<2>().0)
+        {
+            if let Some(containers) = next.get(name.as_str()) {
+                for (&container, mapping) in containers.iter().zip(pair) {
+                    ports.push(PortMapping {
+                        host: mapping.host,
+                        container,
+                    });
+                }
+            }
+        }
+        Ok(ports)
+    }
+}
+
+/// Hold the Quadlet directory's allocation lock until the unit has been published.
 pub struct PortAllocation {
     _lock: File,
     owner_pid: u32,
@@ -508,22 +608,43 @@ impl Drop for PortAllocation {
     }
 }
 
+pub fn validate_port_pool(pool: &std::ops::RangeInclusive<u16>) -> Result<()> {
+    ensure!(
+        *pool.start() >= 1024 && !pool.is_empty(),
+        "port pool must be a nonempty range from 1024 to 65535"
+    );
+    Ok(())
+}
+
 impl PortAllocation {
     pub fn reserve(
-        root: impl AsRef<Path>,
         quadlets: impl AsRef<Path>,
         room: u16,
         configuration: &ClusterConfig,
         requested: &[PortMapping],
         pool: std::ops::RangeInclusive<u16>,
     ) -> Result<Self> {
-        let root = root.as_ref();
-        validate_real_directory(root)?;
-        validate_real_directory(quadlets.as_ref())?;
-        ensure!(
-            *pool.start() >= 1024 && pool.start() <= pool.end(),
-            "invalid UDP port pool"
-        );
+        Self::reserve_for_batch(
+            quadlets,
+            room,
+            configuration,
+            requested,
+            pool,
+            &BTreeSet::new(),
+        )
+    }
+
+    pub(crate) fn reserve_for_batch(
+        quadlets: impl AsRef<Path>,
+        room: u16,
+        configuration: &ClusterConfig,
+        requested: &[PortMapping],
+        pool: std::ops::RangeInclusive<u16>,
+        batch_ports: &BTreeSet<u16>,
+    ) -> Result<Self> {
+        let quadlets = quadlets.as_ref();
+        validate_real_directory(quadlets)?;
+        validate_port_pool(&pool)?;
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -531,7 +652,7 @@ impl PortAllocation {
             .truncate(false)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .mode(0o600)
-            .open(root.join(".dst-host.lock"))?;
+            .open(quadlets.join(".dst-host.lock"))?;
         ensure!(
             lock.metadata()?.is_file(),
             "host lock is not a regular file"
@@ -546,27 +667,22 @@ impl PortAllocation {
         let mut occupied = BTreeSet::new();
         let mut old = BTreeMap::new();
         let current = format!("dst-{room:03}.container");
-        for entry in fs::read_dir(quadlets.as_ref())? {
+        for entry in fs::read_dir(quadlets)? {
             let path = entry?.path();
-            if path
-                .extension()
-                .is_none_or(|extension| extension != "container")
-            {
-                continue;
-            }
+            let (extension, group) = match path.extension().and_then(|value| value.to_str()) {
+                Some("container") => ("container", "Container"),
+                Some("pod") => ("pod", "Pod"),
+                _ => continue,
+            };
+            let name = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .context("invalid Quadlet name")?;
             if path
                 .file_name()
                 .is_some_and(|name| name == current.as_str())
             {
                 let unit = ContainerUnit::load(&path)?;
-                for path in dropins(quadlets.as_ref(), &unit.name)? {
-                    ensure!(
-                        !parse_sections(&read_regular(&path)?)?
-                            .contains_key(&("Container".into(), "PublishPort".into())),
-                        "drop-in overrides managed ports: {}",
-                        path.display()
-                    );
-                }
                 old.extend(
                     unit.options
                         .ports
@@ -574,63 +690,61 @@ impl PortAllocation {
                         .map(|mapping| (mapping.container, mapping.host)),
                 );
             } else {
-                let mut fields = parse_sections(&read_regular(&path)?)?;
-                let key = ("Container".into(), "PublishPort".into());
-                let mut ports = fields.remove(&key).unwrap_or_default();
-                let name = path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .context("invalid Quadlet name")?;
-                for path in dropins(quadlets.as_ref(), name)? {
-                    for value in parse_sections(&read_regular(&path)?)?
-                        .remove(&key)
-                        .unwrap_or_default()
-                    {
-                        ports.push(value);
-                    }
+                let mut ports = Vec::new();
+                let overrides = dropins(quadlets, name, extension)?;
+                for file in std::iter::once(path).chain(overrides) {
+                    visit_fields(&read_regular(&file)?, |section, key, value| {
+                        if section == group && key == "PublishPort" {
+                            if value.is_empty() {
+                                ports.clear();
+                            } else {
+                                ports.push(value.to_owned());
+                            }
+                        }
+                    })?;
                 }
-                let mut used = BTreeSet::new();
                 for value in ports {
-                    if value.is_empty() {
-                        used.clear();
+                    let value = if value.starts_with('"') {
+                        unquote(&value)?
                     } else {
-                        let value = if value.starts_with('"') {
-                            unquote(&value)?
-                        } else {
-                            value
-                        };
-                        used.extend(existing_udp_ports(&value)?);
-                    }
+                        value
+                    };
+                    occupied.extend(existing_udp_ports(&value)?);
                 }
-                occupied.extend(used);
             }
         }
-        let endpoints = endpoints(configuration)?;
-        let container_ports: BTreeSet<_> = endpoints
-            .iter()
-            .map(|endpoint| endpoint.container)
-            .collect();
-        let mut explicit = BTreeMap::new();
+        let shards = configured_ports(configuration)?;
+        let container_ports: BTreeSet<_> = shards.values().flatten().copied().collect();
+        let mut preferred = BTreeMap::new();
+        let mut reserved = BTreeSet::new();
         for mapping in requested {
             mapping.validate()?;
             ensure!(
-                mapping.protocol == Protocol::Udp && container_ports.contains(&mapping.container),
+                container_ports.contains(&mapping.container),
                 "explicit mapping must refer to a shard game or query port"
             );
             ensure!(
-                explicit.insert(mapping.container, mapping.host).is_none(),
+                preferred.insert(mapping.container, mapping.host).is_none(),
                 "duplicate explicit container port"
+            );
+            ensure!(
+                reserved.insert(mapping.host),
+                "duplicate explicit host port"
             );
         }
         let owned: BTreeSet<_> = old.values().copied().collect();
+        for (container, host) in old {
+            if container_ports.contains(&container)
+                && !preferred.contains_key(&container)
+                && reserved.insert(host)
+            {
+                preferred.insert(container, host);
+            }
+        }
         let mut mappings = Vec::new();
         let mut available = pool;
-        for endpoint in endpoints {
-            let selected = explicit
-                .get(&endpoint.container)
-                .copied()
-                .or_else(|| old.get(&endpoint.container).copied());
-            let host = if let Some(host) = selected {
+        for &container in shards.values().flatten() {
+            let host = if let Some(&host) = preferred.get(&container) {
                 ensure!(
                     !occupied.contains(&host),
                     "UDP host port {host} is allocated to another endpoint"
@@ -644,24 +758,16 @@ impl PortAllocation {
                 available
                     .find(|candidate| {
                         !occupied.contains(candidate)
+                            && !reserved.contains(candidate)
+                            && !batch_ports.contains(candidate)
                             && (owned.contains(candidate) || udp_available(*candidate))
                     })
                     .context("UDP port pool is exhausted")?
             };
             occupied.insert(host);
-            mappings.push(PortMapping {
-                host,
-                container: endpoint.container,
-                protocol: Protocol::Udp,
-            });
+            mappings.push(PortMapping { host, container });
         }
         allocation.mappings = mappings;
-        let legacy = root.join(".dst-ports.json");
-        if legacy.try_exists()? {
-            read_regular(&legacy)?;
-            fs::remove_file(legacy)?;
-            File::open(root)?.sync_all()?;
-        }
         Ok(allocation)
     }
 }
@@ -670,19 +776,20 @@ fn existing_udp_ports(value: &str) -> Result<BTreeSet<u16>> {
     let Some(ports) = value.strip_suffix("/udp") else {
         return Ok(BTreeSet::new());
     };
-    let host = ports
-        .rsplit(':')
-        .nth(1)
-        .context("cannot determine existing Quadlet UDP host port")?;
-    let (first, last) = host.split_once('-').unwrap_or((host, host));
-    let first: u16 = first.parse().context("invalid existing UDP host port")?;
-    let last: u16 = last
-        .parse()
-        .context("invalid existing UDP host port range")?;
+    let mut parts = ports.rsplit(':');
+    let container = parts.next().unwrap_or_default();
+    let host = parts.next().unwrap_or_default();
+    let range = if host.is_empty() { container } else { host };
+    let (first, last) = range.split_once('-').unwrap_or((range, range));
+    let first: u16 = first.parse().context("invalid existing UDP port")?;
+    let last: u16 = last.parse().context("invalid existing UDP port range")?;
     ensure!(
         first > 0 && first <= last,
-        "invalid existing UDP host port range"
+        "invalid existing UDP port range"
     );
+    if host.is_empty() {
+        return Ok(BTreeSet::new());
+    }
     Ok((first..=last).collect())
 }
 
@@ -813,49 +920,92 @@ fn validate_unit_name(value: &str) -> Result<()> {
     Ok(())
 }
 type Fields = BTreeMap<(String, String), Vec<String>>;
-fn parse_sections(source: &str) -> Result<Fields> {
-    let mut result: Fields = BTreeMap::new();
-    let mut section = "";
-    for line in source
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with(['#', ';']))
-    {
-        if let Some(value) = line
+
+fn visit_fields(source: &str, mut field: impl FnMut(&str, &str, &str)) -> Result<()> {
+    let mut section = String::new();
+    let mut continued = String::new();
+    let mut lines = source.lines().map(str::trim).peekable();
+    while let Some(line) = lines.next() {
+        if line.is_empty() || line.starts_with(['#', ';']) {
+            continue;
+        }
+        // Quadlet concatenates trimmed lines at each trailing backslash.
+        let line = if let Some(prefix) = line.strip_suffix('\\') {
+            if lines.peek().is_some() {
+                continued.push_str(prefix);
+                continue;
+            }
+            prefix
+        } else {
+            line
+        };
+        let line = if continued.is_empty() {
+            line
+        } else {
+            continued.push_str(line);
+            &continued
+        };
+        if let Some(group) = line
             .strip_prefix('[')
             .and_then(|line| line.strip_suffix(']'))
         {
-            section = value;
-            continue;
+            section.clear();
+            section.push_str(group);
+        } else {
+            let (key, value) = line.split_once('=').context("invalid Quadlet line")?;
+            ensure!(
+                !section.is_empty() && !key.trim().is_empty(),
+                "invalid Quadlet assignment"
+            );
+            field(&section, key.trim(), value.trim());
         }
-        let (key, value) = line.split_once('=').context("invalid Quadlet line")?;
-        ensure!(
-            !section.is_empty() && !key.trim().is_empty() && !value.ends_with('\\'),
-            "invalid or continued Quadlet line"
-        );
-        result
-            .entry((section.into(), key.trim().into()))
-            .or_default()
-            .push(value.trim().into());
+        continued.clear();
     }
+    Ok(())
+}
+
+fn parse_sections(source: &str) -> Result<Fields> {
+    let mut result: Fields = BTreeMap::new();
+    visit_fields(source, |section, key, value| {
+        // systemd applies TimeoutSec to the stop timeout at this position in the unit.
+        if section == "Service" && key == "TimeoutSec" {
+            result
+                .entry((section.into(), "TimeoutStopSec".into()))
+                .or_default()
+                .push(value.into());
+        }
+        result
+            .entry((section.into(), key.into()))
+            .or_default()
+            .push(value.into());
+    })?;
     Ok(result)
 }
-fn changed_environment(old: Option<&Fields>, new: &Fields) -> Result<BTreeSet<String>> {
-    let environment = |fields: Option<&Fields>| -> Result<BTreeMap<String, String>> {
-        let mut values = BTreeMap::new();
-        for value in fields
-            .and_then(|fields| fields.get(&("Container".into(), "Environment".into())))
-            .into_iter()
-            .flatten()
-        {
-            let value = unquote(value)?;
-            let (name, value) = value.split_once('=').context("invalid environment")?;
-            values.insert(name.into(), value.into());
+fn unit_environment(fields: &Fields) -> Result<BTreeMap<String, String>> {
+    let mut values = BTreeMap::new();
+    for value in fields
+        .get(&("Container".into(), "Environment".into()))
+        .into_iter()
+        .flatten()
+    {
+        if value == SYSTEMD_UNIT_ENV {
+            continue;
         }
-        Ok(values)
-    };
-    let old = environment(old)?;
-    let new = environment(Some(new))?;
+        let assignment = unquote(value)?;
+        let (name, value) = assignment
+            .split_once('=')
+            .context("invalid environment assignment")?;
+        ensure!(
+            values.insert(name.into(), value.into()).is_none(),
+            "duplicate environment variable"
+        );
+    }
+    Ok(values)
+}
+
+fn changed_environment(old: Option<&Fields>, new: &Fields) -> Result<BTreeSet<String>> {
+    let old = old.map(unit_environment).transpose()?.unwrap_or_default();
+    let new = unit_environment(new)?;
     Ok(old
         .keys()
         .chain(new.keys())
@@ -863,14 +1013,55 @@ fn changed_environment(old: Option<&Fields>, new: &Fields) -> Result<BTreeSet<St
         .cloned()
         .collect())
 }
-fn dropins(directory: &Path, name: &str) -> Result<Vec<PathBuf>> {
-    let mut directories = vec![directory.join("container.d")];
+
+fn validate_dropin_environment(value: &str, changed: &BTreeSet<String>) -> Result<()> {
+    ensure!(!value.is_empty(), "cannot reset the managed environment");
+    // Quadlet accepts several assignments on a line. Only their names are owned here.
+    let mut quote = None;
+    let mut escaped = false;
+    let words = value.split(|ch: char| {
+        if std::mem::take(&mut escaped) {
+            return false;
+        }
+        match ch {
+            '\\' => escaped = true,
+            _ if quote == Some(ch) => quote = None,
+            '\'' | '"' if quote.is_none() => quote = Some(ch),
+            _ => return quote.is_none() && ch.is_ascii_whitespace(),
+        }
+        false
+    });
+    for word in words.filter(|word| !word.is_empty()) {
+        let assignment = word.split_once('=');
+        let name = assignment
+            .map_or(word, |(name, _)| name)
+            .trim_matches(['\'', '"']);
+        ensure!(
+            valid_environment_name(name),
+            "expected a literal environment name"
+        );
+        ensure!(
+            name != PUBLISHED_PORTS_ENV
+                && (name != SYSTEMD_UNIT_ENV || assignment.is_none())
+                && !changed.contains(name),
+            "cannot override {name}"
+        );
+    }
+    ensure!(
+        quote.is_none() && !escaped,
+        "incomplete environment assignment"
+    );
+    Ok(())
+}
+
+fn dropins(directory: &Path, name: &str, extension: &str) -> Result<Vec<PathBuf>> {
+    let mut directories = vec![directory.join(format!("{extension}.d"))];
     for (index, character) in name.char_indices() {
         if character == '-' {
-            directories.push(directory.join(format!("{}.container.d", &name[..=index])));
+            directories.push(directory.join(format!("{}.{extension}.d", &name[..=index])));
         }
     }
-    directories.push(directory.join(format!("{name}.container.d")));
+    directories.push(directory.join(format!("{name}.{extension}.d")));
     let mut files = BTreeMap::new();
     for directory in directories {
         if !directory.try_exists()? {
@@ -929,23 +1120,6 @@ pub(crate) fn read_regular(path: &Path) -> Result<String> {
     ensure!(source.len() as u64 <= LIMIT, "file exceeds limit");
     Ok(source)
 }
-pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
-    ensure!(contents.len() as u64 <= LIMIT, "host file exceeds limit");
-    let parent = path.parent().context("file needs parent")?;
-    validate_real_directory(parent)?;
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => ensure!(metadata.is_file(), "refusing to replace a non-regular file"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-        Err(error) => return Err(error.into()),
-    }
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.write_all(contents)?;
-    temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,18 +1137,10 @@ mod tests {
 
     #[test]
     fn allocation_unlocks_before_an_unrelated_child_executes() {
-        let root = tempfile::tempdir().unwrap();
         let units = tempfile::tempdir().unwrap();
         let configuration = cluster(1);
-        let allocation = PortAllocation::reserve(
-            root.path(),
-            units.path(),
-            0,
-            &configuration,
-            &[],
-            43000..=43100,
-        )
-        .unwrap();
+        let allocation =
+            PortAllocation::reserve(units.path(), 0, &configuration, &[], 43000..=43100).unwrap();
         let owner_pid = allocation.owner_pid;
         let lock_fd = allocation._lock.as_raw_fd();
         let (mut parent, child) = UnixStream::pair().unwrap();
@@ -1012,24 +1178,10 @@ mod tests {
             command.status().unwrap()
         });
         parent.read_exact(&mut [0]).unwrap();
-        let parent_lock_intact = PortAllocation::reserve(
-            root.path(),
-            units.path(),
-            0,
-            &configuration,
-            &[],
-            43000..=43100,
-        )
-        .is_err();
+        let parent_lock_intact =
+            PortAllocation::reserve(units.path(), 0, &configuration, &[], 43000..=43100).is_err();
         drop(allocation);
-        let next = PortAllocation::reserve(
-            root.path(),
-            units.path(),
-            0,
-            &configuration,
-            &[],
-            43000..=43100,
-        );
+        let next = PortAllocation::reserve(units.path(), 0, &configuration, &[], 43000..=43100);
         parent.write_all(&[1]).unwrap();
         assert!(launched.join().unwrap().success());
         assert!(
@@ -1042,61 +1194,32 @@ mod tests {
     fn five_world_allocation_is_stable_and_excludes_other_rooms() {
         let root = tempfile::tempdir().unwrap();
         let units = tempfile::tempdir().unwrap();
-        let first = PortAllocation::reserve(
-            root.path(),
-            units.path(),
-            0,
-            &cluster(5),
-            &[],
-            42000..=42100,
-        )
-        .unwrap();
+        let first =
+            PortAllocation::reserve(units.path(), 0, &cluster(5), &[], 42000..=42100).unwrap();
         assert_eq!(first.mappings.len(), 10);
         let mappings = first.mappings.clone();
-        assert!(
-            PortAllocation::reserve(
-                root.path(),
-                units.path(),
-                1,
-                &cluster(1),
-                &[],
-                42000..=42100
-            )
-            .is_err()
-        );
-        ContainerUnit::for_cluster(
+        assert!(PortAllocation::reserve(units.path(), 1, &cluster(1), &[], 42000..=42100).is_err());
+        let mut requested = mappings.clone();
+        requested.reverse();
+        let unit = ContainerUnit::for_cluster(
             "dst-000",
             root.path(),
             &cluster(5),
             DeploymentOptions {
-                ports: mappings.clone(),
+                ports: requested,
                 ..Default::default()
             },
         )
-        .unwrap()
-        .save(units.path())
         .unwrap();
+        assert_eq!(unit.options.ports, mappings);
+        unit.save(units.path()).unwrap();
         drop(first);
-        let retry = PortAllocation::reserve(
-            root.path(),
-            units.path(),
-            0,
-            &cluster(5),
-            &[],
-            42000..=42100,
-        )
-        .unwrap();
+        let retry =
+            PortAllocation::reserve(units.path(), 0, &cluster(5), &[], 42000..=42100).unwrap();
         assert_eq!(retry.mappings, mappings);
         drop(retry);
-        let next = PortAllocation::reserve(
-            root.path(),
-            units.path(),
-            1,
-            &cluster(2),
-            &[],
-            42000..=42100,
-        )
-        .unwrap();
+        let next =
+            PortAllocation::reserve(units.path(), 1, &cluster(2), &[], 42000..=42100).unwrap();
         assert!(
             next.mappings
                 .iter()
@@ -1109,40 +1232,51 @@ mod tests {
         let units = tempfile::tempdir().unwrap();
         fs::write(
             root.path().join(".dst-ports.json"),
-            "legacy claims are superseded by Quadlets",
+            "unrelated historical port claims",
         )
         .unwrap();
         fs::write(
             units.path().join("other.container"),
-            "[Container]\nPublishPort=42100:12000/udp\n",
+            "[Container]\nImage=localhost/fixture\nExec=/bin/echo \\\n# continued argument\n    hello\nPublishPort=42100:12000/udp\n",
         )
         .unwrap();
         let dropin = units.path().join("other.container.d");
         fs::create_dir(&dropin).unwrap();
         fs::write(
             dropin.join("ports.conf"),
-            "[Container]\nPublishPort=\nPublishPort=\"42101-42102:12001-12002/udp\"\n",
+            "[Container]\nPublishPort=\nPublishPort=\"42101-42102:12001-12002/udp\"\nPublishPort=42000/udp\nPublishPort=127.0.0.1::42001-42002/udp\n",
+        )
+        .unwrap();
+        fs::write(
+            units.path().join("shared.pod"),
+            "[Pod]\nPublishPort=42103:12003/udp\n",
+        )
+        .unwrap();
+        let pod_dropin = units.path().join("shared.pod.d");
+        fs::create_dir(&pod_dropin).unwrap();
+        fs::write(
+            pod_dropin.join("ports.conf"),
+            "[Pod]\nPublishPort=421\\\n; continued port\n    04:12004/udp\n",
         )
         .unwrap();
         let config = cluster(1);
-        let first =
-            PortAllocation::reserve(root.path(), units.path(), 0, &config, &[], 42100..=42110)
-                .unwrap();
+        let first = PortAllocation::reserve(units.path(), 0, &config, &[], 42100..=42110).unwrap();
         assert_eq!(
             first
                 .mappings
                 .iter()
                 .map(|port| port.host)
                 .collect::<Vec<_>>(),
-            [42100, 42103]
+            [42100, 42105]
         );
         let mappings = first.mappings.clone();
         drop(first);
-        let retry =
-            PortAllocation::reserve(root.path(), units.path(), 1, &config, &[], 42100..=42110)
-                .unwrap();
+        let retry = PortAllocation::reserve(units.path(), 1, &config, &[], 42100..=42110).unwrap();
         assert_eq!(retry.mappings, mappings);
-        assert!(!root.path().join(".dst-ports.json").exists());
+        assert_eq!(
+            fs::read_to_string(root.path().join(".dst-ports.json")).unwrap(),
+            "unrelated historical port claims"
+        );
         ContainerUnit::for_cluster(
             "dst-001",
             root.path(),
@@ -1163,7 +1297,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            PortAllocation::reserve(root.path(), units.path(), 1, &config, &[], 42100..=42110)
+            PortAllocation::reserve(units.path(), 1, &config, &[], 42100..=42110)
                 .err()
                 .unwrap()
                 .to_string()
@@ -1172,13 +1306,185 @@ mod tests {
     }
 
     #[test]
+    fn partial_explicit_mappings_take_priority_before_allocating_or_reusing_ports() {
+        let root = tempfile::tempdir().unwrap();
+        let units = tempfile::tempdir().unwrap();
+        let mut config = cluster(1).as_value();
+        // Only the shard's effective master_port is occupied.
+        config["settings"]["master_port"] = json!(11000);
+        config["shards"]["Shard0"]["settings"]["master_port"] = json!(12010);
+        let config = ClusterConfig::from_value(config).unwrap();
+        let reserve = |host| {
+            PortAllocation::reserve(
+                units.path(),
+                1,
+                &config,
+                &[PortMapping {
+                    host,
+                    container: 11001,
+                }],
+                42220..=42221,
+            )
+            .unwrap()
+        };
+        let first = reserve(42220);
+        assert_eq!(
+            (first.mappings[0].host, first.mappings[1].host),
+            (42221, 42220)
+        );
+        ContainerUnit::for_cluster(
+            "dst-001",
+            root.path(),
+            &config,
+            DeploymentOptions {
+                ports: first.mappings.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .save(units.path())
+        .unwrap();
+        drop(first);
+        let edited = reserve(42221);
+        assert_eq!(
+            (edited.mappings[0].host, edited.mappings[1].host),
+            (42220, 42221)
+        );
+    }
+
+    #[test]
+    fn managed_units_require_their_service_name_and_shutdown_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let units = tempfile::tempdir().unwrap();
+        let unit = ContainerUnit::for_cluster(
+            "dst-001",
+            root.path(),
+            &cluster(1),
+            DeploymentOptions {
+                ports: vec![
+                    PortMapping {
+                        host: 43000,
+                        container: 11000,
+                    },
+                    PortMapping {
+                        host: 43001,
+                        container: 11001,
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let current = unit.render().unwrap();
+        let old = current
+            .replace("StopSignal=SIGTERM\n", "")
+            .replace("StopTimeout=540", "StopTimeout=360")
+            .replace("TimeoutStopSec=600", "TimeoutStopSec=420");
+        let path = units.path().join(unit.filename());
+        fs::write(&path, &current).unwrap();
+        assert_eq!(ContainerUnit::load(&path).unwrap(), unit);
+        for source in [
+            old.clone(),
+            old.replace("StopTimeout=360", "StopTimeout=540"),
+            current.replace("StopTimeout=540", "StopTimeout=360"),
+            current.replace("TimeoutStopSec=600", "TimeoutStopSec=420"),
+            current.replace("StopSignal=SIGTERM", "StopSignal=SIGINT"),
+            current.replace("StopSignal=SIGTERM\n", ""),
+            current.replace(
+                "StopSignal=SIGTERM",
+                "StopSignal=SIGTERM\nStopSignal=SIGTERM",
+            ),
+            current.replace("StopTimeout=540", "StopTimeout=540\nStopTimeout=540"),
+            current.replace("TimeoutStopSec=600", "TimeoutStopSec=601"),
+            current.replace("Environment=PODMAN_SYSTEMD_UNIT\n", ""),
+            current.replace("43000:11000/udp", "43000:11000/tcp"),
+        ] {
+            fs::write(&path, &source).unwrap();
+            assert!(ContainerUnit::load(&path).is_err());
+            assert!(unit.save(units.path()).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), source);
+        }
+        fs::remove_file(&path).unwrap();
+        for level in ["container.d", "dst-.container.d", "dst-001.container.d"] {
+            let dropin = units.path().join(level);
+            fs::create_dir(&dropin).unwrap();
+            for (section, key, value) in [
+                ("Container", "ServiceName", "renamed"),
+                ("Container", "ServiceName", ""),
+                ("Container", "ServiceName", "dst-001.service"),
+                ("Container", "PublishPort", ""),
+                ("Container", "PublishPort", "43002:11000/udp"),
+                ("Container", "Environment", ""),
+                (
+                    "Container",
+                    "Environment",
+                    "OTHER=up PODMAN_SYSTEMD_UNIT=wrong.service",
+                ),
+                (
+                    "Container",
+                    "Environment",
+                    "\"DST_SERVER_PUBLISHED_PORTS={}\"",
+                ),
+                ("Container", "StopSignal", "SIGINT"),
+                ("Container", "StopTimeout", "360"),
+                ("Service", "TimeoutStopSec", "420"),
+                ("Service", "TimeoutSec", "60"),
+                ("Service", "SuccessExitStatus", "8"),
+                ("Service", "RestartForceExitStatus", "8"),
+            ] {
+                let override_path = dropin.join("stop.conf");
+                fs::write(&override_path, format!("[{section}]\n{key}={value}\n")).unwrap();
+                assert!(
+                    unit.save(units.path())
+                        .unwrap_err()
+                        .to_string()
+                        .contains("drop-in overrides"),
+                    "{level} {key}"
+                );
+                assert!(!path.exists());
+                fs::write(&path, &current).unwrap();
+                assert!(ContainerUnit::load_for_room(&path, root.path()).is_err());
+                assert!(unit.save(units.path()).is_err());
+                fs::remove_file(&path).unwrap();
+                fs::remove_file(override_path).unwrap();
+            }
+            fs::write(dropin.join("memory.conf"), "[Service]\nMemoryMax=4G\n").unwrap();
+        }
+        fs::write(
+            units.path().join("container.d/10-stop.conf"),
+            "[Container]\nStopTimeout=60\n",
+        )
+        .unwrap();
+        fs::write(
+            units.path().join("dst-001.container.d/10-stop.conf"),
+            "[Container]\nStopTimeout=540\n",
+        )
+        .unwrap();
+        fs::write(
+            units.path().join("dst-.container.d/20-exit.conf"),
+            "[Container]\nServiceName=renamed\n[Service]\nSuccessExitStatus=8\n",
+        )
+        .unwrap();
+        fs::write(
+            units.path().join("dst-001.container.d/30-reset.conf"),
+            "[Container]\nServiceName=\"dst-001\"\nContainerName=custom\nEnvironment=OTEL_RESOURCE_ATTRIBUTES=dst.cluster.name=local \"LABEL=a PODMAN_SYSTEMD_UNIT=b\" PODMAN_SYSTEMD_UNIT\n[Service]\nSuccessExitStatus=\nTimeoutSec=45\nTimeoutStopSec=600\n",
+        )
+        .unwrap();
+        unit.save(units.path()).unwrap();
+        assert_eq!(
+            ContainerUnit::load_for_room(&path, root.path()).unwrap(),
+            unit
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), current);
+    }
+
+    #[test]
     fn native_quadlet_roundtrip_conflicts_and_literal_expansions() {
         let root = tempfile::tempdir().unwrap();
         let units = tempfile::tempdir().unwrap();
         let config = cluster(5);
         let allocation =
-            PortAllocation::reserve(root.path(), units.path(), 1, &config, &[], 42200..=42300)
-                .unwrap();
+            PortAllocation::reserve(units.path(), 1, &config, &[], 42200..=42300).unwrap();
         let mut options = DeploymentOptions {
             ports: allocation.mappings.clone(),
             ..Default::default()
@@ -1194,16 +1500,25 @@ mod tests {
         )
         .unwrap();
         let path = unit.save(units.path()).unwrap();
-        assert_eq!(ContainerUnit::load(path).unwrap(), unit);
+        assert_eq!(ContainerUnit::load(&path).unwrap(), unit);
         let rendered = unit.render().unwrap();
         assert!(rendered.contains("Restart=on-failure\n"));
         assert!(!rendered.contains("SuccessExitStatus="));
         assert!(!rendered.contains("RestartForceExitStatus="));
         let generator = Path::new("/usr/lib/systemd/system-generators/podman-system-generator");
         if generator.exists() {
-            for image in [DEFAULT_IMAGE, "quay.io/wh2099/dst-server:beta"] {
-                let mut channel = unit.clone();
-                channel.options.image = image.into();
+            for (name, image) in [("dst-001", DEFAULT_IMAGE), ("dst-002", BETA_IMAGE)] {
+                let units = tempfile::tempdir().unwrap();
+                let mut options = unit.options.clone();
+                options.image = image.into();
+                if image != DEFAULT_IMAGE {
+                    options.environment.insert(
+                        "OTEL_RESOURCE_ATTRIBUTES".into(),
+                        "dst.cluster.name=explicit-name".into(),
+                    );
+                }
+                let channel =
+                    ContainerUnit::for_cluster(name, &unit.cluster, &config, options).unwrap();
                 let path = channel.save(units.path()).unwrap();
                 assert_eq!(ContainerUnit::load(path).unwrap(), channel);
                 let output = std::process::Command::new(generator)
@@ -1224,16 +1539,28 @@ mod tests {
                     service.contains(&format!("-v \"{volume}:/cluster\"")),
                     "{service}"
                 );
-                assert!(service.contains("--stop-timeout 360"));
+                assert!(service.contains("--stop-timeout 540"));
+                assert!(service.contains("--stop-signal SIGTERM"));
                 assert!(service.contains("--init"));
                 assert!(service.contains("--tz local"));
-                assert!(service.contains("TimeoutStopSec=420"));
+                assert!(service.contains("--log-driver passthrough"));
+                assert!(service.contains("TimeoutStopSec=600"));
+                assert!(service.contains("rm -v -f -i"));
                 assert!(service.contains("Restart=on-failure"));
                 assert!(service.contains("--label io.containers.autoupdate=registry"));
                 assert!(service.contains("--pull never"));
                 assert!(service.contains(image));
+                assert!(service.contains(&format!("---{name}.service---")));
+                assert!(service.contains("Environment=PODMAN_SYSTEMD_UNIT=%n\n"));
+                assert!(service.contains("--env PODMAN_SYSTEMD_UNIT "));
+                if image != DEFAULT_IMAGE {
+                    assert!(
+                        service.contains(
+                            "--env OTEL_RESOURCE_ATTRIBUTES=dst.cluster.name=explicit-name"
+                        )
+                    );
+                }
             }
-            unit.save(units.path()).unwrap();
         }
         let dropin = units.path().join("dst-.container.d");
         fs::create_dir(&dropin).unwrap();

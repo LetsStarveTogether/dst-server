@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -12,30 +13,45 @@ use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
 use futures::AsyncReadExt;
 use serde_json::{Value, json};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{
+    Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot, watch,
+};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::model::{Envelope, Error, ErrorCode, Scope};
+pub use crate::room_capnp::StreamKind;
 use crate::room_capnp::{self, room, subscription};
 
 mod codec;
+use codec::read_outcome;
 
 const MAX_MESSAGE: usize = 1024 * 1024;
-const MAX_EVENT: usize = 64 * 1024;
-// Each shared stream retains at most 128 native messages of at most 64 KiB.
+const MAX_OUTCOME: usize = 8 * 1024 * 1024;
+const MAX_EVENT: usize = MAX_MESSAGE - 32;
 const STREAM_ITEMS: usize = 128;
+const STREAM_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SUBSCRIPTIONS: usize = 128;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
-const READER_OPTIONS: capnp::message::ReaderOptions = capnp::message::ReaderOptions {
-    traversal_limit_in_words: Some(4 * MAX_MESSAGE / 8),
-    // Dynamic objects use a list of entries plus a value pointer at each level.
-    nesting_limit: 256,
-};
+const fn reader_options(limit: usize) -> capnp::message::ReaderOptions {
+    capnp::message::ReaderOptions {
+        traversal_limit_in_words: Some(4 * limit / 8),
+        // Dynamic objects use a list of entries plus a value pointer at each level.
+        nesting_limit: 256,
+    }
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn transport(message: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Transport, message.to_string())
+}
+
+fn rpc_error(failure: capnp::Error) -> Error {
+    if failure.kind == capnp::ErrorKind::Overloaded {
+        Error::new(ErrorCode::Busy, failure.to_string())
+    } else {
+        transport(failure)
+    }
 }
 
 /// Receiving this message transfers request ownership to the Agent.
@@ -44,66 +60,231 @@ pub struct Incoming {
     pub reply: oneshot::Sender<Result<Value>>,
 }
 
-// Oversized records use an empty slot so every reader can account for the loss.
-type Event = Option<Arc<codec::ValueMessage>>;
-type Streams = BTreeMap<&'static str, broadcast::Sender<Event>>;
+impl StreamKind {
+    pub(crate) const ALL: [Self; 3] = [Self::Logs, Self::Lifecycle, Self::Events];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Logs => "logs",
+            Self::Lifecycle => "lifecycle",
+            Self::Events => "events",
+        }
+    }
+}
+
+impl std::str::FromStr for StreamKind {
+    type Err = Error;
+
+    fn from_str(name: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == name)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Invalid,
+                    "subscription kind must be logs, lifecycle or events",
+                )
+            })
+    }
+}
+
+// Rejected records use an empty slot so every reader can account for the loss.
+type Event = Option<Arc<StoredEvent>>;
+
+struct StoredEvent {
+    value: codec::EncodedValue,
+    storage: Arc<StreamStorage>,
+    _bytes: OwnedSemaphorePermit,
+}
+
+impl Drop for StoredEvent {
+    fn drop(&mut self) {
+        self.storage.records.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+struct StreamStorage {
+    bytes: Arc<Semaphore>,
+    records: AtomicUsize,
+}
+
+struct Stream {
+    sender: Option<broadcast::Sender<Event>>,
+    storage: Arc<StreamStorage>,
+    stats: StreamStats,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct StreamStats {
+    pub accepted: u64,
+    pub invalid: u64,
+    pub too_large: u64,
+    pub byte_full: u64,
+    pub pending_records: usize,
+    pub pending_bytes: usize,
+    pub closed: bool,
+}
 
 #[derive(Clone)]
-pub struct EventHub(Arc<Mutex<Streams>>);
+pub struct EventHub(Arc<[Mutex<Stream>; StreamKind::ALL.len()]>);
 
 impl Default for EventHub {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(
-            ["logs", "lifecycle", "events"]
-                .map(|kind| (kind, broadcast::channel(STREAM_ITEMS).0))
-                .into_iter()
-                .collect(),
-        )))
+        Self(Arc::new(StreamKind::ALL.map(|_| {
+            Mutex::new(Stream {
+                sender: Some(broadcast::channel(STREAM_ITEMS).0),
+                storage: Arc::new(StreamStorage {
+                    bytes: Arc::new(Semaphore::new(STREAM_BYTES)),
+                    records: AtomicUsize::new(0),
+                }),
+                stats: StreamStats::default(),
+            })
+        })))
     }
 }
 
 impl EventHub {
+    pub(crate) fn has_subscribers(&self, kind: StreamKind) -> bool {
+        self.0[kind as usize]
+            .lock()
+            .unwrap()
+            .sender
+            .as_ref()
+            .is_some_and(|sender| sender.receiver_count() > 0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn subscribe_for_test(&self, kind: StreamKind) -> TestEvents {
+        TestEvents(self.subscribe(kind).unwrap())
+    }
+
     /// Encode once and share the native message across subscribers.
-    /// A slow subscriber never blocks a game pipe or another subscriber.
-    pub fn publish(&self, kind: &str, record: &Value) {
-        if let Some(stream) = self.0.lock().unwrap().get(kind) {
-            if stream.receiver_count() == 0 {
-                return;
+    pub fn publish(&self, kind: StreamKind, record: &Value) {
+        self.publish_encoded(kind, || codec::encode_value(record, MAX_EVENT));
+    }
+
+    pub(crate) fn publish_record(&self, kind: StreamKind, record: &impl serde::Serialize) {
+        self.publish_encoded(kind, || {
+            let value = serde_json::to_value(record)
+                .map_err(|error| Error::new(ErrorCode::Invalid, error.to_string()))?;
+            codec::encode_value(&value, MAX_EVENT)
+        });
+    }
+
+    fn publish_encoded(
+        &self,
+        kind: StreamKind,
+        encode: impl FnOnce() -> Result<codec::EncodedValue>,
+    ) {
+        let mut guard = self.0[kind as usize].lock().unwrap();
+        let stream = &mut *guard;
+        let Some(sender) = &stream.sender else { return };
+        if sender.receiver_count() == 0 {
+            return;
+        }
+        let (event, counter) = match encode() {
+            Ok(value) => {
+                let bytes = value.expanded_bytes.max(value.native_bytes);
+                match stream
+                    .storage
+                    .bytes
+                    .clone()
+                    .try_acquire_many_owned(bytes as u32)
+                {
+                    Ok(permit) => {
+                        stream.storage.records.fetch_add(1, Ordering::Relaxed);
+                        (
+                            Some(Arc::new(StoredEvent {
+                                value,
+                                storage: stream.storage.clone(),
+                                _bytes: permit,
+                            })),
+                            &mut stream.stats.accepted,
+                        )
+                    }
+                    Err(_) => (None, &mut stream.stats.byte_full),
+                }
             }
-            let encoded = codec::encode_value(record, MAX_EVENT).ok().map(Arc::new);
-            let _ = stream.send(encoded);
+            Err(error) if error.code == ErrorCode::Overflow => (None, &mut stream.stats.too_large),
+            Err(_) => (None, &mut stream.stats.invalid),
+        };
+        if sender.send(event).is_ok() {
+            *counter += 1;
         }
     }
 
-    fn subscribe(&self, kind: &str) -> Result<broadcast::Receiver<Event>> {
-        if !matches!(kind, "logs" | "lifecycle" | "events") {
-            return Err(Error::new(
-                ErrorCode::Invalid,
-                "subscription kind must be logs, lifecycle or events",
-            ));
-        }
-        let streams = self.0.lock().unwrap();
-        let stream = streams
-            .get(kind)
+    fn subscribe(&self, kind: StreamKind) -> Result<broadcast::Receiver<Event>> {
+        // Acquire in schema order so concurrent registrations share one subscription limit.
+        let streams = self.0.each_ref().map(|stream| stream.lock().unwrap());
+        let sender = streams[kind as usize]
+            .sender
+            .as_ref()
             .ok_or_else(|| transport("event hub is closed"))?;
         if streams
-            .values()
+            .iter()
+            .filter_map(|stream| stream.sender.as_ref())
             .map(broadcast::Sender::receiver_count)
             .sum::<usize>()
             >= MAX_SUBSCRIPTIONS
         {
             return Err(Error::new(ErrorCode::Busy, "subscription limit reached"));
         }
-        Ok(stream.subscribe())
+        Ok(sender.subscribe())
     }
 
     pub fn close(&self) {
-        self.0.lock().unwrap().clear();
+        for mut stream in self.0.each_ref().map(|stream| stream.lock().unwrap()) {
+            stream.sender = None;
+        }
+    }
+
+    pub fn stats(&self) -> BTreeMap<&'static str, StreamStats> {
+        StreamKind::ALL
+            .into_iter()
+            .map(|kind| {
+                let stream = self.0[kind as usize].lock().unwrap();
+                let mut stats = stream.stats.clone();
+                stats.closed = stream.sender.is_none();
+                stats.pending_records = stream.storage.records.load(Ordering::Relaxed);
+                stats.pending_bytes = STREAM_BYTES - stream.storage.bytes.available_permits();
+                (kind.as_str(), stats)
+            })
+            .collect()
     }
 }
 
+#[cfg(test)]
+pub(crate) struct TestEvents(broadcast::Receiver<Event>);
+
+#[cfg(test)]
+impl TestEvents {
+    pub(crate) fn drain(&mut self) -> Vec<Value> {
+        let mut records = Vec::new();
+        loop {
+            match self.0.try_recv() {
+                Ok(Some(event)) => records.push(
+                    codec::read_value(event.value.message.get_root_as_reader().unwrap()).unwrap(),
+                ),
+                Err(
+                    broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
+                ) => return records,
+                _ => panic!("test observations exceeded their subscription budget"),
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_static_context(record: &Value) -> Result<()> {
+    codec::encode_value(record, 128 * 1024).map(|_| ())
+}
+
+struct SubscriptionState {
+    receiver: broadcast::Receiver<Event>,
+    carry: Option<Arc<StoredEvent>>,
+}
+
 struct SubscriptionServer {
-    receiver: AsyncMutex<broadcast::Receiver<Event>>,
+    state: AsyncMutex<Option<SubscriptionState>>,
     closed: watch::Sender<bool>,
     pending: Rc<PendingCalls>,
 }
@@ -121,51 +302,74 @@ impl subscription::Server for SubscriptionServer {
         if !(1..=512).contains(&count) {
             return Err(capnp::Error::failed("max_items must be in 1..=512".into()));
         }
-        let mut receiver = self
-            .receiver
-            .try_lock()
-            .map_err(|_| capnp::Error::failed("subscription already has a pending read".into()))?;
+        let mut active = self.state.try_lock().map_err(|_| {
+            capnp::Error::overloaded("subscription already has a pending read".into())
+        })?;
         let mut closing = self.closed.subscribe();
-        let mut closed = *closing.borrow_and_update();
-        // Leave space for the batch struct and list tag as well as the records.
-        let count = count.min((MAX_MESSAGE - 32) / MAX_EVENT);
+        let Some(state) = active.as_mut().filter(|_| !*closing.borrow_and_update()) else {
+            results.get().init_batch().set_closed(true);
+            return Ok(());
+        };
+        let mut closed = false;
         let mut records = Vec::with_capacity(count);
         let mut dropped = 0u64;
-        if !closed {
-            let mut item = tokio::select! {
+        let mut expanded_bytes = 8; // The decoded list tag.
+        let mut native_bytes = 32; // The batch struct and list tag.
+        let mut item = if let Some(record) = state.carry.take() {
+            Ok(Some(record))
+        } else {
+            tokio::select! {
                 biased;
                 _ = closing.changed() => Err(RecvError::Closed),
-                item = receiver.recv() => item,
-            };
-            for index in 0..count {
-                match item {
-                    Ok(Some(record)) => records.push(record),
-                    Ok(None) => dropped = dropped.saturating_add(1),
-                    Err(RecvError::Lagged(skipped)) => dropped = dropped.saturating_add(skipped),
-                    Err(RecvError::Closed) => {
-                        closed = true;
-                        break;
+                item = state.receiver.recv() => item,
+            }
+        };
+        // Empty slots and lag reports also consume a bounded scan step.
+        for scanned in 1..=512 {
+            match item {
+                Ok(Some(record)) => {
+                    if record.value.expanded_bytes > MAX_MESSAGE - expanded_bytes
+                        || record.value.native_bytes > MAX_MESSAGE - native_bytes
+                    {
+                        if records.is_empty() {
+                            dropped = dropped.saturating_add(1);
+                        } else {
+                            state.carry = Some(record);
+                            break;
+                        }
+                    } else {
+                        expanded_bytes += record.value.expanded_bytes;
+                        native_bytes += record.value.native_bytes;
+                        records.push(record);
                     }
                 }
-                if index + 1 == count {
+                Ok(None) => dropped = dropped.saturating_add(1),
+                Err(RecvError::Lagged(skipped)) => dropped = dropped.saturating_add(skipped),
+                Err(RecvError::Closed) => {
+                    closed = true;
                     break;
                 }
-                item = match receiver.try_recv() {
-                    Ok(record) => Ok(record),
-                    Err(TryRecvError::Lagged(skipped)) => Err(RecvError::Lagged(skipped)),
-                    Err(TryRecvError::Closed) => Err(RecvError::Closed),
-                    Err(TryRecvError::Empty) => break,
-                };
             }
-            closed |= receiver.is_closed() && receiver.is_empty();
+            if records.len() == count || scanned == 512 {
+                break;
+            }
+            item = match state.receiver.try_recv() {
+                Ok(record) => Ok(record),
+                Err(TryRecvError::Lagged(skipped)) => Err(RecvError::Lagged(skipped)),
+                Err(TryRecvError::Closed) => Err(RecvError::Closed),
+                Err(TryRecvError::Empty) => break,
+            };
         }
+        closed |= state.carry.is_none() && state.receiver.is_closed() && state.receiver.is_empty();
         let mut batch = results.get().init_batch();
         batch.set_dropped(dropped);
         batch.set_closed(closed);
-        let mut output = batch.init_records(records.len() as u32);
+        let mut output = batch.reborrow().init_records(records.len() as u32);
         for (index, record) in records.iter().enumerate() {
-            output.set_with_caveats(index as u32, record.get_root_as_reader()?)?;
+            output.set_with_caveats(index as u32, record.value.message.get_root_as_reader()?)?;
         }
+        codec::check_size(batch.into_reader().total_size()?, MAX_MESSAGE)
+            .map_err(|error| capnp::Error::failed(error.message))?;
         Ok(())
     }
 
@@ -176,7 +380,7 @@ impl subscription::Server for SubscriptionServer {
     ) -> capnp::Result<()> {
         self.closed.send_replace(true);
         // Drop the receiver after waking a pending read to release its subscription slot.
-        *self.receiver.lock().await = broadcast::channel(1).1;
+        self.state.lock().await.take();
         Ok(())
     }
 }
@@ -257,9 +461,9 @@ impl room::Server for RoomServer {
                     Err(mpsc::error::TrySendError::Closed(_)) => {
                         Err(transport("room dispatcher is closed"))
                     }
-                    Ok(()) => response
-                        .await
-                        .unwrap_or_else(|_| Err(transport("room dispatcher stopped"))),
+                    Ok(()) => response.await.map_err(|_| {
+                        capnp::Error::failed("room dispatcher stopped before replying".into())
+                    })?,
                 }
             }
         };
@@ -274,7 +478,6 @@ impl room::Server for RoomServer {
         set_outcome(
             results.get().init_result(),
             Ok(json!({
-                "protocol": 3,
                 "room": crate::model::describe(Scope::Room),
                 "shard": crate::model::describe(Scope::Shard),
             })),
@@ -289,18 +492,20 @@ impl room::Server for RoomServer {
         if self.pending.closing.get() {
             return Err(capnp::Error::disconnected("room server is closing".into()));
         }
-        let receiver = self
-            .events
-            .subscribe(match params.get()?.get_kind()? {
-                room_capnp::StreamKind::Logs => "logs",
-                room_capnp::StreamKind::Lifecycle => "lifecycle",
-                room_capnp::StreamKind::Events => "events",
-            })
-            .map_err(|e| capnp::Error::failed(e.message))?;
+        let receiver =
+            self.events
+                .subscribe(params.get()?.get_kind()?)
+                .map_err(|error| match error.code {
+                    ErrorCode::Busy => capnp::Error::overloaded(error.message),
+                    _ => capnp::Error::disconnected(error.message),
+                })?;
         results
             .get()
             .set_subscription(capnp_rpc::new_client(SubscriptionServer {
-                receiver: AsyncMutex::new(receiver),
+                state: AsyncMutex::new(Some(SubscriptionState {
+                    receiver,
+                    carry: None,
+                })),
                 closed: watch::channel(false).0,
                 pending: self.pending.clone(),
             }));
@@ -380,7 +585,7 @@ pub async fn serve(
                 // SAFETY: geteuid has no pointer arguments or side effects.
                 if (uid != 0 && uid != unsafe { libc::geteuid() }) || connections.len() >= 64 { continue; }
                 let (reader, writer) = stream.compat().split();
-                let network = twoparty::VatNetwork::new(reader, writer, rpc_twoparty_capnp::Side::Server, READER_OPTIONS);
+                let network = twoparty::VatNetwork::new(reader, writer, rpc_twoparty_capnp::Side::Server, reader_options(MAX_MESSAGE));
                 let rpc = RpcSystem::new(Box::new(network), Some(endpoint.clone().client));
                 let disconnected = rpc.get_disconnector();
                 let mut closing = disconnect.subscribe();
@@ -411,13 +616,12 @@ pub async fn serve(
     result
 }
 
+type CallReply = oneshot::Sender<Result<Result<Value>>>;
+
 enum ClientMessage {
-    Call(codec::EnvelopeMessage, oneshot::Sender<Result<Value>>),
-    Describe(oneshot::Sender<Result<Value>>),
-    Subscribe(
-        room_capnp::StreamKind,
-        oneshot::Sender<Result<Subscription>>,
-    ),
+    Call(codec::EnvelopeMessage, CallReply),
+    Describe(CallReply),
+    Subscribe(StreamKind, Client, oneshot::Sender<Result<Subscription>>),
     Close(oneshot::Sender<()>),
 }
 
@@ -484,45 +688,33 @@ impl Client {
         let result = match tokio::time::timeout(timeout, response).await {
             Ok(Ok(result)) => result,
             Ok(Err(failure)) => Err(transport(failure)),
-            Err(_) => Err(Error::new(
-                if mutation {
-                    ErrorCode::Unknown
-                } else {
-                    ErrorCode::Timeout
-                },
-                "wait timed out; query room status for the accepted operation",
+            Err(_) if mutation => Err(Error::new(
+                ErrorCode::Unknown,
+                "wait timed out before the mutation result was confirmed",
             )),
+            Err(_) => Err(Error::new(ErrorCode::Timeout, "query wait timed out")),
         };
         result.map_err(|mut failure| {
             if mutation && failure.code == ErrorCode::Transport {
                 failure.code = ErrorCode::Unknown;
-                failure.message =
-                    "connection ended before the mutation result was confirmed".into();
+                failure.message = format!(
+                    "mutation result could not be confirmed ({})",
+                    failure.message
+                );
             }
             failure
-        })
+        })?
     }
 
     pub async fn describe(&self) -> Result<Value> {
         let (reply, response) = oneshot::channel();
         self.send(ClientMessage::Describe(reply))?;
-        response.await.map_err(transport)?
+        response.await.map_err(transport)??
     }
 
-    pub async fn subscribe(&self, kind: &str) -> Result<Subscription> {
-        let kind = match kind {
-            "logs" => room_capnp::StreamKind::Logs,
-            "lifecycle" => room_capnp::StreamKind::Lifecycle,
-            "events" => room_capnp::StreamKind::Events,
-            _ => {
-                return Err(Error::new(
-                    ErrorCode::Invalid,
-                    "subscription kind must be logs, lifecycle or events",
-                ));
-            }
-        };
+    pub async fn subscribe(&self, kind: StreamKind) -> Result<Subscription> {
         let (reply, response) = oneshot::channel();
-        self.send(ClientMessage::Subscribe(kind, reply))?;
+        self.send(ClientMessage::Subscribe(kind, self.clone(), reply))?;
         response.await.map_err(transport)?
     }
 
@@ -551,18 +743,6 @@ impl Client {
     }
 }
 
-fn read_outcome(reader: room_capnp::outcome::Reader<'_>) -> Result<Value> {
-    codec::check_size(reader.total_size().map_err(transport)?, MAX_MESSAGE)?;
-    match reader.which().map_err(transport)? {
-        room_capnp::outcome::Value(value) => {
-            codec::read_value(value.map_err(transport)?).map_err(transport)
-        }
-        room_capnp::outcome::Error(error) => {
-            Err(codec::read_error(error.map_err(transport)?).map_err(transport)?)
-        }
-    }
-}
-
 async fn connect(path: PathBuf) -> Result<Client> {
     let stream = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -576,7 +756,7 @@ async fn connect(path: PathBuf) -> Result<Client> {
         reader,
         writer,
         rpc_twoparty_capnp::Side::Client,
-        READER_OPTIONS,
+        reader_options(MAX_OUTCOME),
     );
     let mut rpc = RpcSystem::new(Box::new(network), None);
     let endpoint: room::Client = rpc.bootstrap(rpc_twoparty_capnp::Side::Server);
@@ -599,37 +779,37 @@ async fn connect(path: PathBuf) -> Result<Client> {
                         Some(ClientMessage::Call(_, reply) | ClientMessage::Describe(reply)) if calls.len() >= 64 => {
                             let _ = reply.send(Err(Error::new(ErrorCode::Busy, "64 RPC requests are already pending")));
                         }
-                        Some(ClientMessage::Subscribe(_, reply)) if calls.len() >= 64 => {
+                        Some(ClientMessage::Subscribe(_, _, reply)) if calls.len() >= 64 => {
                             let _ = reply.send(Err(Error::new(ErrorCode::Busy, "64 RPC requests are already pending")));
                         }
                         Some(ClientMessage::Call(encoded, reply)) => {
                             let mut request = endpoint.call_request();
                             let prepared = encoded.get_root_as_reader().and_then(|value| request.get().set_request(value));
                             if let Err(error) = prepared {
-                                let _ = reply.send(Err(transport(error)));
+                                let _ = reply.send(Err(Error::new(ErrorCode::Internal, error.to_string())));
                                 continue;
                             }
                             let promise = request.send().promise;
                             calls.spawn_local(reply_or_cancel(reply, async move {
-                                    let response = promise.await.map_err(transport)?;
+                                    let response = promise.await.map_err(rpc_error)?;
                                     read_outcome(response.get().map_err(transport)?.get_result().map_err(transport)?)
                             }));
                         }
                         Some(ClientMessage::Describe(reply)) => {
                             let promise = endpoint.describe_request().send().promise;
                             calls.spawn_local(reply_or_cancel(reply, async move {
-                                    let response = promise.await.map_err(transport)?;
+                                    let response = promise.await.map_err(rpc_error)?;
                                     read_outcome(response.get().map_err(transport)?.get_result().map_err(transport)?)
                             }));
                         }
-                        Some(ClientMessage::Subscribe(kind, reply)) => {
+                        Some(ClientMessage::Subscribe(kind, connection, reply)) => {
                             let mut request = endpoint.subscribe_request();
                             request.get().set_kind(kind);
                             let promise = request.send().promise;
                             calls.spawn_local(reply_or_cancel(reply, async move {
-                                    let response = promise.await.map_err(transport)?;
+                                    let response = promise.await.map_err(rpc_error)?;
                                     let endpoint = response.get().map_err(transport)?.get_subscription().map_err(transport)?;
-                                    Ok(subscription_client(endpoint))
+                                    Ok(subscription_client(endpoint, connection))
                             }));
                         }
                     }
@@ -714,9 +894,11 @@ impl Subscription {
     }
 }
 
-fn subscription_client(endpoint: subscription::Client) -> Subscription {
+fn subscription_client(endpoint: subscription::Client, connection: Client) -> Subscription {
     let (requests, mut incoming) = mpsc::channel(1);
     tokio::task::spawn_local(async move {
+        // A returned capability keeps its connection until this subscription closes.
+        let _connection = connection;
         let mut reads = tokio::task::JoinSet::new();
         loop {
             let message = tokio::select! {
@@ -738,7 +920,7 @@ fn subscription_client(endpoint: subscription::Client) -> Subscription {
                     let mut request = endpoint.next_request();
                     request.get().set_max_items(count);
                     reads.spawn_local(reply_or_cancel(reply, async move {
-                        let response = request.send().promise.await.map_err(transport)?;
+                        let response = request.send().promise.await.map_err(rpc_error)?;
                         let batch = response
                             .get()
                             .map_err(transport)?
@@ -795,7 +977,7 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn previous_interface_cannot_dispatch_an_inverted_admin_flag() {
+    async fn another_capability_cannot_dispatch_a_room_call() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (dispatch, mut incoming) = mpsc::channel(1);
@@ -807,7 +989,7 @@ mod tests {
                 let request = endpoint
                     .client
                     .new_call::<room::call_params::Owned, room::call_results::Owned>(
-                        0xc19f_7fb2_d846_8969,
+                        <subscription::Client as capnp::traits::HasTypeId>::TYPE_ID,
                         0,
                         None,
                     );
@@ -816,7 +998,7 @@ mod tests {
                     .promise
                     .await
                     .err()
-                    .expect("old interface must be rejected");
+                    .expect("different capability must be rejected");
                 assert_eq!(error.kind, capnp::ErrorKind::Unimplemented);
                 assert!(incoming.try_recv().is_err());
             })
@@ -827,27 +1009,118 @@ mod tests {
     fn subscription_limit_is_shared_across_kinds_and_released_on_drop() {
         let hub = EventHub::default();
         assert_eq!(
-            hub.subscribe("unknown").unwrap_err().code,
+            "unknown".parse::<StreamKind>().unwrap_err().code,
             ErrorCode::Invalid
         );
         let mut subscribers: Vec<_> = (0..MAX_SUBSCRIPTIONS)
-            .map(|_| hub.subscribe("events").unwrap())
+            .map(|_| hub.subscribe(StreamKind::Events).unwrap())
             .collect();
-        assert_eq!(hub.subscribe("logs").unwrap_err().code, ErrorCode::Busy);
-        subscribers.pop();
-        let _logs = hub.subscribe("logs").unwrap();
         assert_eq!(
-            hub.subscribe("lifecycle").unwrap_err().code,
+            hub.subscribe(StreamKind::Logs).unwrap_err().code,
+            ErrorCode::Busy
+        );
+        subscribers.pop();
+        let _logs = hub.subscribe(StreamKind::Logs).unwrap();
+        assert_eq!(
+            hub.subscribe(StreamKind::Lifecycle).unwrap_err().code,
             ErrorCode::Busy
         );
     }
 
+    #[tokio::test]
+    async fn bounded_marker_scan_keeps_the_following_record() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for skipped in [0, 7] {
+                    let hub = EventHub::default();
+                    hub.0[StreamKind::Events as usize].lock().unwrap().sender =
+                        Some(broadcast::channel(1024).0);
+                    let receiver = hub.subscribe(StreamKind::Events).unwrap();
+                    {
+                        let stream = hub.0[StreamKind::Events as usize].lock().unwrap();
+                        let sender = stream.sender.as_ref().unwrap();
+                        let markers = if skipped == 0 { 512 } else { 1023 + skipped };
+                        for _ in 0..markers {
+                            assert!(sender.send(None).is_ok());
+                        }
+                    }
+                    hub.publish(StreamKind::Events, &json!({"after_markers":true}));
+                    let endpoint: subscription::Client =
+                        capnp_rpc::new_client(SubscriptionServer {
+                            state: AsyncMutex::new(Some(SubscriptionState {
+                                receiver,
+                                carry: None,
+                            })),
+                            closed: watch::channel(false).0,
+                            pending: Rc::new(PendingCalls::default()),
+                        });
+                    let mut dropped = 0;
+                    let mut received = Vec::new();
+                    for _ in 0..3 {
+                        let mut request = endpoint.next_request();
+                        request.get().set_max_items(512);
+                        let response = request.send().promise.await.unwrap();
+                        let batch = response.get().unwrap().get_batch().unwrap();
+                        dropped += batch.get_dropped();
+                        received.extend(codec::read_values(batch.get_records().unwrap()).unwrap());
+                        if !received.is_empty() {
+                            break;
+                        }
+                    }
+                    assert_eq!(dropped, if skipped == 0 { 512 } else { 1023 + skipped });
+                    assert_eq!(received, vec![json!({"after_markers":true})]);
+                }
+            })
+            .await;
+    }
+
+    #[test]
+    fn shared_byte_pressure_and_final_references_have_separate_stream_budgets() {
+        let hub = EventHub::default();
+        let slow = hub.subscribe(StreamKind::Events).unwrap();
+        let mut fast = hub.subscribe(StreamKind::Events).unwrap();
+        let mut logs = hub.subscribe(StreamKind::Logs).unwrap();
+        let value = json!("x".repeat(900_000));
+        hub.publish(StreamKind::Events, &value);
+        let held = fast.try_recv().unwrap().unwrap();
+        let bytes = held.value.expanded_bytes.max(held.value.native_bytes);
+        let mut accepted = 1;
+        for _ in 0..16 {
+            hub.publish(StreamKind::Events, &value);
+            if fast.try_recv().unwrap().is_some() {
+                accepted += 1;
+            }
+            assert!(hub.stats()["events"].pending_bytes <= STREAM_BYTES);
+        }
+        let stats = hub.stats();
+        assert_eq!(stats["events"].accepted, accepted);
+        assert_eq!(stats["events"].byte_full, 17 - accepted);
+        assert!(stats["events"].byte_full > 0);
+        hub.publish(StreamKind::Logs, &value);
+        assert!(logs.try_recv().unwrap().is_some());
+        assert_eq!(hub.stats()["logs"].pending_bytes, 0);
+        drop(slow);
+        assert_eq!(hub.stats()["events"].pending_bytes, bytes);
+        assert_eq!(hub.stats()["events"].pending_records, 1);
+        drop(held);
+        assert_eq!(hub.stats()["events"].pending_bytes, 0);
+        hub.publish(StreamKind::Events, &value);
+        assert!(fast.try_recv().unwrap().is_some());
+        assert_eq!(hub.stats()["events"].pending_bytes, 0);
+        drop(fast);
+        let before = hub.stats()["events"].clone();
+        hub.publish(StreamKind::Events, &json!("x".repeat(MAX_MESSAGE)));
+        assert_eq!(hub.stats()["events"].too_large, before.too_large);
+    }
+
     #[test]
     fn oversized_errors_obey_the_same_rpc_limit_as_values() {
-        let large = Error::new(ErrorCode::PartialFailure, "x".repeat(MAX_MESSAGE));
+        let large = Error::new(ErrorCode::PartialFailure, "x".repeat(MAX_OUTCOME));
         let mut encoded = capnp::message::Builder::new_default();
         set_outcome(encoded.init_root(), Err(large.clone())).unwrap();
-        let result = read_outcome(encoded.get_root_as_reader().unwrap()).unwrap_err();
+        let result = read_outcome(encoded.get_root_as_reader().unwrap())
+            .unwrap()
+            .unwrap_err();
         assert_eq!(result.code, ErrorCode::Overflow);
 
         let mut incoming = capnp::message::Builder::new_default();
@@ -918,7 +1191,7 @@ mod tests {
                     RpcSystem::new(Box::new(network), Some(endpoint.client)).await
                 });
                 let client = Client::connect(&path).await.unwrap();
-                let stream = client.subscribe("events").await.unwrap();
+                let stream = client.subscribe(StreamKind::Events).await.unwrap();
                 let reader = stream.clone();
                 let pending = tokio::spawn(async move { reader.next(1).await });
                 tokio::time::timeout(Duration::from_secs(1), started.notified())

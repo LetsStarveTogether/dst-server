@@ -301,6 +301,7 @@ impl Drop for Collector {
 
 fn event() -> LogEvent {
     LogEvent {
+        trace: None,
         event_name: "dst.tls.test".into(),
         body: json!({"verified":true, "private":"tls-payload-secret"}),
         observed_timestamp_ns: 1,
@@ -337,7 +338,14 @@ async fn environment_credentials_export_all_signals_over_tls_and_mutual_tls() ->
         config.schedule_delay = Duration::from_secs(60);
         let sdk = Observability::new(&TelemetryConfig {
             logs: None,
-            metrics: Some(config.clone()),
+            // The periodic reader has no record or byte queue.
+            metrics: Some(ExportConfig {
+                queue_capacity: 0,
+                queue_bytes: 0,
+                max_batch_records: 0,
+                max_batch_bytes: 0,
+                ..config.clone()
+            }),
             traces: Some(config),
             resource: Default::default(),
         })?;

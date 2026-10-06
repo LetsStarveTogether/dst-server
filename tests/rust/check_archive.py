@@ -5,7 +5,6 @@
 
 import asyncio
 import os
-import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,21 +19,18 @@ from dst_server.archive import (
     export_cluster,
     import_cluster,
 )
-from dst_server.host import Host
 from dst_server.settings import Room, RoomStore, build_template
+
+SHARD_INDEX = (
+    b'KLEI     1 return {session_id="0123456789ABCDEF",server={},world={options={'
+    b'id="SURVIVAL_TOGETHER",name="World",desc="",location="forest",overrides={task_set="default"}}}}'
+)
 
 
 async def check_export(directory: Path) -> None:
     root = directory / "rooms"
-    systemctl = directory / "systemctl"
-    systemctl.write_text(
-        f"#!{sys.executable}\n"
-        "print('Id=dst-003.service\\nLoadState=loaded\\nActiveState=inactive\\n'\n"
-        "      'SubState=dead\\nJob=0\\nResult=success')\n",
-        encoding="utf-8",
-    )
-    systemctl.chmod(0o755)
-    RoomStore(root).save(
+    rooms = RoomStore(root)
+    rooms.save(
         Room({
             "number": 3,
             "cluster": build_template(
@@ -43,58 +39,55 @@ async def check_export(directory: Path) -> None:
         })
     )
     token = (root / "003/cluster_token.txt").read_bytes()
-    async with Host(root, directory / "units", systemctl=systemctl) as host:
-        async with export_cluster(host, 3, room_id="shared") as archive:
-            assert archive.filename.startswith("DST-shared-")
-            assert archive.stream.seekable()
-            assert str(
-                await asyncio.to_thread(
-                    Path(f"/proc/self/fd/{archive.stream.fileno()}").readlink
-                )
-            ).startswith("/memfd:dst-archive")
-            contents = archive.stream.read()
-            assert contents.startswith(b"7z\xbc\xaf\x27\x1c")
-            output = directory / "saved.7z"
-            await archive.save(output)
-            assert output.read_bytes() == contents
-            await check_import(directory, archive, output, len(contents))
-            try:
-                await archive.save(output)
-            except FileExistsError:
-                pass
-            else:
-                message = "existing archive was overwritten"
-                raise AssertionError(message)
-        assert archive.stream.closed
-        async with export_cluster(host, 3, client_compatible=True) as archive:
-            assert archive.filename.startswith("DST-Cluster_3-")
-            assert archive.stream.read(6) == b"7z\xbc\xaf\x27\x1c"
-            assert str(
-                await asyncio.to_thread(
-                    Path(f"/proc/self/fd/{archive.stream.fileno()}").readlink
-                )
-            ).startswith("/memfd:dst-archive")
-        assert not (root / "003/Cluster_3").exists()
+    async with export_cluster(rooms, 3, room_id="shared") as archive:
+        assert archive.filename.startswith("DST-shared-")
+        assert archive.stream.seekable()
+        assert str(
+            await asyncio.to_thread(
+                Path(f"/proc/self/fd/{archive.stream.fileno()}").readlink
+            )
+        ).startswith("/memfd:dst-archive")
+        contents = archive.stream.read()
+        assert contents.startswith(b"7z\xbc\xaf\x27\x1c")
+        output = directory / "saved.7z"
+        await archive.save(output)
+        assert output.read_bytes() == contents
+        await check_import(directory, archive, output, len(contents))
         try:
-            async with export_cluster(
-                host, 3, client_compatible=True, room_id="custom"
-            ):
-                pass
-        except ValueError as error:
-            if "room_id cannot be overridden" not in str(error):
-                raise
+            await archive.save(output)
+        except FileExistsError:
+            pass
         else:
-            message = "client export accepted a custom root directory"
+            message = "existing archive was overwritten"
             raise AssertionError(message)
-        for number, level in ((True, 3), (3, True), (3, 0), (3, 10)):
-            try:
-                async with export_cluster(host, number, compression_level=level):
-                    pass
-            except ValueError:
+    assert archive.stream.closed
+    async with export_cluster(rooms, 3, client_compatible=True) as archive:
+        assert archive.filename.startswith("DST-Cluster_3-")
+        assert archive.stream.read(6) == b"7z\xbc\xaf\x27\x1c"
+        assert str(
+            await asyncio.to_thread(
+                Path(f"/proc/self/fd/{archive.stream.fileno()}").readlink
+            )
+        ).startswith("/memfd:dst-archive")
+    assert not (root / "003/Cluster_3").exists()
+    try:
+        async with export_cluster(rooms, 3, client_compatible=True, room_id="custom"):
+            pass
+    except ValueError as error:
+        if "room_id cannot be overridden" not in str(error):
+            raise
+    else:
+        message = "client export accepted a custom root directory"
+        raise AssertionError(message)
+    for number, level in ((True, 3), (3, True), (3, 0), (3, 10)):
+        try:
+            async with export_cluster(rooms, number, compression_level=level):
                 pass
-            else:
-                message = "invalid archive argument accepted"
-                raise AssertionError(message)
+        except ValueError:
+            pass
+        else:
+            message = "invalid archive argument accepted"
+            raise AssertionError(message)
     assert (root / "003/cluster_token.txt").read_bytes() == token
 
 
@@ -233,10 +226,10 @@ async def check_apply(imported: ImportedCluster, destination: Path) -> None:
     try:
         await partial.apply(destination)
     except ValueError as error:
-        if "missing shardindex" not in str(error):
+        if "no game saves" not in str(error):
             raise
     else:
-        message = "incomplete import replaced an existing world"
+        message = "standalone recipe progress replaced an existing world"
         raise AssertionError(message)
     assert world.read_bytes() == before
     await check_apply_acl(imported, destination.parent)
@@ -297,6 +290,8 @@ async def check_formats(directory: Path) -> None:
     entries = {
         "cluster.ini": b"[NETWORK]\ncluster_name = Format fixture\n",
         "Surface One/server.ini": b"[SHARD]\nis_master = true\n",
+        "Surface One/save/shardindex": SHARD_INDEX,
+        f"{session}/0000000001": b"world",
         f"{session}/世界.meta": b"metadata\x00\xff",
         f"{session}/A7K1NP32JUC8/0000000001": b"encoded player\x00\xff",
         f"{session}/KU_ABCDEFGH/0000000001": b"raw player\x00\xff",
@@ -367,6 +362,8 @@ async def check_archive_integrity_and_names() -> None:
     entries = {
         "cluster.ini": b"[NETWORK]\ncluster_name = Integrity fixture\n",
         "Master/server.ini": b"[SHARD]\nis_master = true\n",
+        "Master/save/shardindex": SHARD_INDEX,
+        f"{session}/0000000001": b"world",
         f"{session}/cafx.meta": b"snapshot\x00\xff",
     }
     stream = io.BytesIO()
@@ -420,6 +417,7 @@ async def check_compressed_tar_integrity() -> None:
         for path, data in {
             "cluster.ini": b"[NETWORK]\ncluster_name = Integrity\n",
             "Master/server.ini": b"[SHARD]\nis_master = true\n",
+            "Master/save/shardindex": SHARD_INDEX,
             name: world,
         }.items():
             info = tarfile.TarInfo(path)

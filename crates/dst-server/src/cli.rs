@@ -7,8 +7,8 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use dst_server::{driver::TelemetryProfile, rpc::StreamKind};
 use dst_server::{model, rpc, settings};
-use futures::{StreamExt, stream};
 use serde_json::{Value, json};
 
 #[path = "archive_cli.rs"]
@@ -41,8 +41,14 @@ enum Command {
         executable: PathBuf,
         #[arg(long)]
         socket: Option<PathBuf>,
-        #[arg(long, default_value = "history")]
-        profile: String,
+        /// Select which game events each shard records.
+        #[arg(
+            long,
+            env = "DST_SERVER_TELEMETRY_PROFILE",
+            value_enum,
+            default_value_t
+        )]
+        profile: TelemetryProfile,
         #[arg(long)]
         offline: bool,
     },
@@ -144,19 +150,13 @@ enum Command {
     },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum StreamKind {
-    Logs,
-    Lifecycle,
-    Events,
-}
-impl StreamKind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Logs => "logs",
-            Self::Lifecycle => "lifecycle",
-            Self::Events => "events",
-        }
+impl ValueEnum for StreamKind {
+    fn value_variants<'a>() -> &'a [Self] {
+        &Self::ALL
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(self.as_str().into())
     }
 }
 
@@ -229,7 +229,7 @@ fn read_json<T: serde::de::DeserializeOwned>(source: impl Read) -> Result<T> {
     model::parse_json(&data).context("invalid JSON input")
 }
 
-fn input(source: &str) -> Result<Value> {
+fn input<T: serde::de::DeserializeOwned>(source: &str) -> Result<T> {
     if source == "-" {
         read_json(std::io::stdin())
     } else if let Some(path) = source.strip_prefix('@') {
@@ -348,7 +348,7 @@ async fn run(arguments: Arguments) -> Result<u8> {
             timeout,
         } => {
             let request = serde_json::from_value::<model::Request>(
-                json!({"method":method,"arguments":input(&arguments)?}),
+                json!({"method":method,"arguments":input::<Value>(&arguments)?}),
             )?;
             let envelope = model::Envelope {
                 target: shard.map_or(model::Target::Room, model::Target::Shard),
@@ -360,15 +360,16 @@ async fn run(arguments: Arguments) -> Result<u8> {
                 socket.len() <= 1024,
                 "at most 1024 target sockets are allowed"
             );
-            let results: Vec<_> = stream::iter(socket.into_iter().map(|socket| {
-                let envelope = envelope.clone();
-                async move {
-                    let result = remote(&socket, envelope).await;
-                    (socket, result)
-                }
-            }))
-            .buffered(8)
-            .collect()
+            let results = crate::batch::collect(
+                socket.into_iter().map(|socket| {
+                    let envelope = envelope.clone();
+                    async move {
+                        let result = remote(&socket, envelope).await;
+                        (socket, result)
+                    }
+                }),
+                8,
+            )
             .await;
             let success = results.iter().all(|(_, result)| result.is_ok());
             let values: Vec<_> = results
@@ -394,28 +395,25 @@ async fn run(arguments: Arguments) -> Result<u8> {
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
             let mut terminate =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-            let client = rpc::Client::connect(socket).await?;
-            let subscription = client.subscribe(kind.name()).await?;
-            let result: Result<()> = async {
+            let run = async {
+                let client = rpc::Client::connect(socket).await?;
+                let subscription = client.subscribe(kind).await?;
                 loop {
-                    let batch = tokio::select! {
-                        batch = subscription.next(512) => batch?,
-                        _ = interrupt.recv() => break,
-                        _ = terminate.recv() => break,
-                    };
+                    let batch = subscription.next(512).await?;
                     emit(&batch, compact)?;
                     if batch.closed {
                         break;
                     }
                 }
-                Ok(())
+                subscription.close().await?;
+                client.close().await?;
+                anyhow::Ok(())
+            };
+            tokio::select! {
+                result = run => result?,
+                _ = interrupt.recv() => (),
+                _ = terminate.recv() => (),
             }
-            .await;
-            let subscription_closed = subscription.close().await;
-            let client_closed = client.close().await;
-            result?;
-            subscription_closed?;
-            client_closed?;
         }
         Command::Console {
             socket,
@@ -482,13 +480,11 @@ async fn run(arguments: Arguments) -> Result<u8> {
                     } else {
                         room.as_value()
                     }
+                } else if resolved {
+                    settings::resolved(&model, &value)?
                 } else {
                     settings::validate(&model, &value)?;
-                    if resolved {
-                        settings::resolved(&model, &value)?
-                    } else {
-                        value
-                    }
+                    value
                 };
                 emit(
                     &if secrets {
@@ -515,15 +511,13 @@ async fn run(arguments: Arguments) -> Result<u8> {
                 secrets,
             } => {
                 let token = std::fs::read_to_string(token_file)?;
-                let settings = settings
-                    .map(|source| input(&source).and_then(settings::ClusterSettings::from_value))
-                    .transpose()?;
+                let settings = settings.as_deref().map(input).transpose()?;
                 let configuration = dst_server::rooms::build_template(
                     &name,
                     number,
                     token.trim(),
                     cluster_key.as_deref(),
-                    settings.as_ref(),
+                    settings,
                 )?;
                 if secrets {
                     emit(&configuration.as_value(), compact)?;

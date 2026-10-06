@@ -12,8 +12,7 @@ lazy from ._native import ClusterArchive as _Archive
 lazy from ._native import ImportedCluster
 lazy from ._native import export_archive as _export_archive
 lazy from ._native import import_archive as _import_archive
-lazy from .host import Host
-lazy from .settings import Configuration
+lazy from .settings import Configuration, RoomStore
 
 
 class SecretValue(Protocol):
@@ -99,7 +98,7 @@ class ClusterArchive:
 
 @asynccontextmanager
 async def export_cluster(
-    host: Host,
+    rooms: RoomStore,
     number: int,
     *,
     configuration: Configuration | Mapping[str, Any] | None = None,
@@ -110,7 +109,7 @@ async def export_cluster(
     """Return an archive in RAM; optionally adapt two shards for a client save slot."""
     with ClusterArchive._from_native(
         await _export_archive(
-            host._host,
+            rooms,
             number,
             options={
                 "configuration": configuration,

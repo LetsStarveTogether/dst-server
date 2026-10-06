@@ -27,14 +27,6 @@ def revision(path: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def protocol(path: Path, expression: str) -> int:
-    match = re.search(expression, path.read_text(encoding="utf-8"))
-    if match is None:
-        message = f"missing protocol declaration in {path}"
-        raise ValueError(message)
-    return int(match[1])
-
-
 def check_wheel_notices(path: Path) -> None:
     with zipfile.ZipFile(path) as wheel:
         names = wheel.namelist()
@@ -77,6 +69,8 @@ def source_digest(root: Path) -> str:
         "pyproject.toml",
         "Containerfile",
         "README.md",
+        "README.zh-Hans.md",
+        "docs",
         "LICENSE",
         "licenses",
         "tools/build_manifest.py",
@@ -124,7 +118,6 @@ def main() -> None:
     if not files:
         parser.error(f"no Lua resources found in {lua}")
     cargo = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
-    package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     toolchain = tomllib.loads(
         (root / "rust-toolchain.toml").read_text(encoding="utf-8")
     )
@@ -147,7 +140,6 @@ def main() -> None:
         if args.python
         else None
     )
-    schema = root / "crates/dst-server/schema/room.capnp"
     artifacts = {}
     for path in args.artifact:
         if path.name in artifacts or path.resolve() == args.output.resolve():
@@ -156,10 +148,8 @@ def main() -> None:
             check_wheel_notices(path)
         artifacts[path.name] = {"sha256": sha256(path), "bytes": path.stat().st_size}
     manifest = {
-        "format": 1,
         "sdk": {
             "version": cargo["workspace"]["package"]["version"],
-            "python_version": package["project"].get("version"),
             "revision": args.revision or revision(root),
             "source_sha256": source_digest(root),
         },
@@ -172,16 +162,6 @@ def main() -> None:
                 json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest(),
             "files": files,
-        },
-        "protocol": {
-            "room_capnp_sha256": sha256(schema),
-            "lua_rpc": protocol(lua / "dst_server/rpc.lua", r"request\.v == ([0-9]+)"),
-            "lua_control": protocol(
-                lua / "dst_server/bootstrap.lua", r"record\.v = ([0-9]+)"
-            ),
-            "game_events": protocol(
-                lua / "dst_server/state.lua", r"protocol = ([0-9]+)"
-            ),
         },
         "native_game": {
             "steam_app_id": 343050,

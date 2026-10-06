@@ -14,6 +14,7 @@ clap_complete = ">=4"
 full_moon.workspace = true
 libc.workspace = true
 ulid = ">=3"
+fastrand = "2"
 opentelemetry-proto = { version = ">=0.33", default-features = false, features = ["gen-tonic", "logs"] }
 opentelemetry = { version = ">=0.33", default-features = false, features = ["trace", "metrics"] }
 opentelemetry_sdk = { version = ">=0.33", default-features = false, features = ["trace", "metrics"] }
@@ -32,7 +33,6 @@ futures = ">=0.3"
 tokio-util = { version = ">=0.7", features = ["compat"] }
 reqwest = { version = ">=0.13", default-features = false, features = ["rustls", "http2", "gzip", "json", "stream", "form"] }
 httpdate = ">=1"
-keyvalues-serde = ">=0.2"
 percent-encoding = ">=2"
 scraper = { version = ">=0.29", default-features = false }
 regex = ">=1"
@@ -42,6 +42,7 @@ sevenz-rust2 = { version = ">=0.24", default-features = false, features = ["comp
 object_store = { version = ">=0.14", default-features = false, features = ["aws"] }
 garde = { version = ">=0.23", features = ["derive", "regex"] }
 serde_path_to_error = ">=0.1"
+thiserror = "2"
 
 [build-dependencies]
 capnpc = ">=0.27"

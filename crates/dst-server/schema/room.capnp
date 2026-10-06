@@ -102,6 +102,7 @@ struct Request {
     getVote @53 :Void;
     startVote @54 :StartVoteArguments;
     cancelVote @55 :Void;
+    editConfiguration @56 :EditConfigurationArguments;
   }
 
   struct NoticeArguments {
@@ -117,6 +118,10 @@ struct Request {
   }
   struct SetPolicyArguments {
     policy @0 :Value;
+  }
+  struct EditConfigurationArguments {
+    changes @0 :Value;
+    unset @1 :List(Text);
   }
   struct SourceArguments {
     source @0 :Text;

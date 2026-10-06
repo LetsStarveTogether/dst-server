@@ -43,14 +43,14 @@ pub(crate) fn error(error: anyhow::Error) -> PyErr {
 }
 
 fn positive_count(value: &Bound<'_, PyAny>) -> PyResult<usize> {
-    from_python(value, 0, &mut 0)?
+    from_python(value)?
         .as_u64()
         .and_then(|value| usize::try_from(value).ok())
         .filter(|value| *value > 0)
         .ok_or_else(|| PyValueError::new_err("log reader limits must be positive integers"))
 }
 fn deadline(value: &Bound<'_, PyAny>) -> PyResult<Duration> {
-    let value = from_python(value, 0, &mut 0)?
+    let value = from_python(value)?
         .as_f64()
         .filter(|value| value.is_finite() && *value > 0.0)
         .ok_or_else(|| {
@@ -60,10 +60,7 @@ fn deadline(value: &Bound<'_, PyAny>) -> PyResult<Duration> {
         .map_err(|_| PyValueError::new_err("log completion timeout is too large"))
 }
 pub(crate) fn journal_query(value: &Bound<'_, PyAny>) -> PyResult<native::JournalQuery> {
-    let request: native::JournalQuery = serde_json::from_value(from_python(value, 0, &mut 0)?)
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    request.validate().map_err(error)?;
-    Ok(request)
+    native::JournalQuery::from_value(from_python(value)?).map_err(error)
 }
 fn journal_record(record: &native::JournalRecord) -> Value {
     json!({"fields":record.fields, "cursor":record.cursor(), "timestamp_us":record.timestamp_us(), "unit":record.unit(), "message":record.message()})
@@ -94,14 +91,17 @@ pub(crate) fn wrap_stream(
 #[pyclass(name = "JournalLogs", module = "dst_server._native")]
 struct JournalLogs {
     inner: Arc<native::JournalLogs>,
+    user: bool,
 }
 #[pymethods]
 impl JournalLogs {
     #[new]
+    #[pyo3(signature = (executable, max_record_bytes, max_output_bytes, user=false))]
     fn new(
         executable: PathBuf,
         max_record_bytes: &Bound<'_, PyAny>,
         max_output_bytes: &Bound<'_, PyAny>,
+        user: bool,
     ) -> PyResult<Self> {
         Ok(Self {
             inner: Arc::new(native::JournalLogs {
@@ -109,6 +109,7 @@ impl JournalLogs {
                 max_record_bytes: positive_count(max_record_bytes)?,
                 max_output_bytes: positive_count(max_output_bytes)?,
             }),
+            user,
         })
     }
 
@@ -123,9 +124,14 @@ impl JournalLogs {
         let request = journal_query(request)?;
         let completion_timeout = deadline(completion_timeout)?;
         let reader = self.inner.clone();
+        let user = self.user;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let result = reader
-                .query(units.as_deref(), &request, completion_timeout)
+                .query(
+                    Some(native::JournalUnits::for_manager(user, units.as_deref())),
+                    &request,
+                    completion_timeout,
+                )
                 .await
                 .map_err(error)?;
             Python::attach(|py| to_python(py, journal_result(&result)))
@@ -141,9 +147,13 @@ impl JournalLogs {
     ) -> PyResult<Bound<'py, PyAny>> {
         let request = journal_query(request)?;
         let reader = self.inner.clone();
+        let user = self.user;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = reader
-                .follow(units.as_deref(), &request)
+                .follow(
+                    Some(native::JournalUnits::for_manager(user, units.as_deref())),
+                    &request,
+                )
                 .await
                 .map_err(error)?;
             Python::attach(|py| wrap_stream(py, stream))
@@ -283,9 +293,8 @@ impl NetdataLogs {
         request: &Bound<'_, PyAny>,
         completion_timeout: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let request: native::NetdataLogQuery =
-            serde_json::from_value(from_python(request, 0, &mut 0)?)
-                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let request: native::NetdataLogQuery = serde_json::from_value(from_python(request)?)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         request.validate().map_err(error)?;
         let completion_timeout = deadline(completion_timeout)?;
         let reader = self.inner.clone();
@@ -302,7 +311,13 @@ impl NetdataLogs {
     }
 }
 
+#[pyfunction]
+fn event_userid_fields() -> Vec<&'static str> {
+    native::EVENT_USERID_FIELDS.to_vec()
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(event_userid_fields, module)?)?;
     module.add_class::<JournalLogs>()?;
     module.add_class::<JournalStream>()?;
     module.add_class::<NetdataLogs>()?;

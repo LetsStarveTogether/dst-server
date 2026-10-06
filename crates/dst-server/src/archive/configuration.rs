@@ -15,7 +15,7 @@ use crate::{
     },
 };
 
-pub(super) fn configuration(files: &NativeFiles) -> Result<(ClusterConfig, BTreeSet<String>)> {
+pub(super) fn configuration(files: &NativeFiles) -> Result<ClusterConfig> {
     let names: BTreeSet<_> = files
         .entries
         .keys()
@@ -109,8 +109,19 @@ pub(super) fn configuration(files: &NativeFiles) -> Result<(ClusterConfig, BTree
             eligible
                 .into_iter()
                 .filter(|name| {
-                    shards[name]["level"]["location"] == "forest"
-                        || shards[name]["world"]["overrides"]["kind"] == "forest"
+                    let shard = &shards[name];
+                    let world = &shard["world"];
+                    ["worldgen_preset", "settings_preset"]
+                        .into_iter()
+                        .find_map(|key| world[key].as_str().and_then(settings::preset_kind))
+                        .or_else(|| shard["level"]["location"].as_str())
+                        .or_else(|| indexes.get(name)?["world"]["options"]["location"].as_str())
+                        .or_else(|| {
+                            world["overrides"]["kind"]
+                                .as_str()
+                                .map(|kind| kind.trim_start_matches("loaded_"))
+                        })
+                        == Some("forest")
                 })
                 .collect()
         };
@@ -155,38 +166,30 @@ pub(super) fn configuration(files: &NativeFiles) -> Result<(ClusterConfig, BTree
                 .or_insert(json!(privacy == 2));
         }
     }
-    if names.len() > 1 {
-        settings.insert("shard_enabled".into(), json!(true));
-    }
     settings.entry("master_ip").or_insert(json!("127.0.0.1"));
     settings.remove("cluster_key");
+    let cluster_port = settings
+        .get("master_port")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| settings::types::ClusterSettings::default().master_port());
     let mut ports: BTreeSet<u64> = shards
         .values()
         .flat_map(|shard| {
+            let settings = &shard["settings"];
             [
-                shard["settings"]["server_port"].as_u64(),
-                shard["settings"]["master_server_port"].as_u64(),
+                settings["server_port"].as_u64(),
+                settings["master_server_port"].as_u64(),
+                Some(settings["master_port"].as_u64().unwrap_or(cluster_port)),
             ]
             .into_iter()
             .flatten()
         })
         .collect();
-    ports.insert(
-        settings
-            .get("master_port")
-            .and_then(Value::as_u64)
-            .unwrap_or(10888),
-    );
-    let explicit_ids = shards
-        .iter()
-        .filter(|(_, shard)| shard["settings"]["id"].as_u64().is_some())
-        .map(|(name, _)| (*name).to_owned())
-        .collect();
-    let mut ids: BTreeSet<u64> = shards
-        .values()
-        .filter_map(|shard| shard["settings"]["id"].as_u64())
-        .collect();
-    ids.insert(1);
+    let defaults = settings::types::ShardSettings::default();
+    let port_defaults = [
+        ("server_port", defaults.server_port()),
+        ("master_server_port", defaults.master_server_port()),
+    ];
     let mut order: Vec<_> = names.into_iter().collect();
     order.sort_by_key(|name| *name != master);
     for name in order {
@@ -194,18 +197,7 @@ pub(super) fn configuration(files: &NativeFiles) -> Result<(ClusterConfig, BTree
         let settings = shard["settings"].as_object_mut().unwrap();
         settings.insert("is_master".into(), json!(name == master));
         settings.entry("name").or_insert(json!(name));
-        if !settings.contains_key("id") || settings["id"].is_null() {
-            let id = if name == master {
-                1
-            } else {
-                (2..=u32::MAX as u64)
-                    .find(|id| !ids.contains(id))
-                    .context("no available shard ID")?
-            };
-            ids.insert(id);
-            settings.insert("id".into(), json!(id));
-        }
-        for (field, start) in [("server_port", 10999), ("master_server_port", 27016)] {
+        for (field, start) in port_defaults {
             if !settings.contains_key(field) {
                 let port = (start..=u16::MAX as u64)
                     .find(|port| !ports.contains(port))
@@ -255,5 +247,5 @@ pub(super) fn configuration(files: &NativeFiles) -> Result<(ClusterConfig, BTree
             };
         }
     }
-    Ok((ClusterConfig::from_value(cluster)?, explicit_ids))
+    ClusterConfig::from_value(cluster)
 }

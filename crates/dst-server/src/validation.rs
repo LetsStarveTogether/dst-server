@@ -1,25 +1,16 @@
 //! Typed input validation with bounded, value-free diagnostics.
 
-use std::fmt;
-
 use garde::Validate;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
-use serde_json::{Number, Value};
+use serde_json::Number;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("invalid value at {path}")]
 pub struct Invalid {
     pub path: String,
 }
 
-impl fmt::Display for Invalid {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "invalid value at {}", self.path)
-    }
-}
-
-impl std::error::Error for Invalid {}
-
-pub fn decode<T>(value: &Value) -> Result<T, Invalid>
+pub fn decode<'de, T>(value: impl Deserializer<'de>) -> Result<T, Invalid>
 where
     T: DeserializeOwned + Validate<Context = ()>,
 {

@@ -4,6 +4,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use dst_server::{
     files::RoomLock,
     model::Countdown,
+    mods::{UpdateTarget, UpdateTargets},
     policy::{
         Action, Inputs, ModPhase, Policy, PolicyState, Presence, StopReason, countdown, retention,
     },
@@ -46,6 +47,17 @@ fn running() -> Inputs {
         master_day: Some(1),
         ..Inputs::default()
     }
+}
+
+fn mod_targets(version: &str) -> UpdateTargets {
+    [(
+        2189004162,
+        UpdateTarget {
+            version: version.into(),
+            shards: ["Master".into(), "Caves".into()].into(),
+        },
+    )]
+    .into()
 }
 
 fn elapsed(input: &mut Inputs, seconds: f64) {
@@ -94,7 +106,7 @@ fn default_schedule_follows_system_timezone() {
             )
             .unwrap();
         assert!(
-            matches!(notice.action, Some(Action::Announce { message }) if message.contains("09:00"))
+            matches!(notice.action, Some(Action::Announce { message, .. }) if message.contains("09:00"))
         );
         return;
     }
@@ -181,6 +193,8 @@ fn schedule_opening_budget_survives_restart_and_clock_rewind() {
         policy.plan(&mut state, first, &input).unwrap().new_opening,
         None
     );
+    let step = Duration::from_secs(30);
+    input.previous_tick = Some((first, step));
     assert_eq!(
         policy
             .plan(&mut state, first - TimeDelta::days(1), &input)
@@ -188,14 +202,13 @@ fn schedule_opening_budget_survives_restart_and_clock_rewind() {
             .new_opening,
         None
     );
+    input.previous_tick = Some((first - TimeDelta::days(1), step));
     assert_eq!(
         policy.plan(&mut state, first, &input).unwrap().new_opening,
         None
     );
-    input.monotonic = Some(Duration::from_secs(0));
-    policy.plan(&mut state, first, &input).unwrap();
     state = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
-    input.monotonic = Some(Duration::from_secs(30));
+    input.previous_tick = Some((first, step));
     assert_eq!(
         policy
             .plan(&mut state, first + TimeDelta::days(1), &input)
@@ -203,7 +216,7 @@ fn schedule_opening_budget_survives_restart_and_clock_rewind() {
             .new_opening,
         None
     );
-    input.monotonic = Some(Duration::from_secs(60));
+    input.previous_tick = Some((first + TimeDelta::days(1), step));
     assert_eq!(
         policy
             .plan(
@@ -216,7 +229,10 @@ fn schedule_opening_budget_survives_restart_and_clock_rewind() {
         None
     );
     // A subsequent ordinary opening may receive a fresh recovery budget.
-    input.monotonic = None;
+    input.previous_tick = Some((
+        first + TimeDelta::days(1) + TimeDelta::seconds(30),
+        Duration::from_secs(86400 - 30),
+    ));
     assert!(
         policy
             .plan(&mut state, first + TimeDelta::days(2), &input)
@@ -232,7 +248,7 @@ fn mod_countdown_stops_then_retries_three_total_attempts() {
     let mut state = PolicyState::default();
     let now = at("2026-10-02T10:00:00Z");
     let mut input = running();
-    input.mods_outdated = true;
+    input.mod_targets = mod_targets("2");
     assert!(matches!(
         policy.plan(&mut state, now, &input).unwrap().action,
         Some(Action::Announce { .. })
@@ -290,7 +306,7 @@ fn mod_countdown_stops_then_retries_three_total_attempts() {
     let failure = policy.plan(&mut state, update_at, &input).unwrap();
     assert!(failure.fault.is_some());
     assert!(failure.action.is_none());
-    state.request_mod_update().unwrap();
+    state.queue_mod_update(true).unwrap();
     assert_eq!(
         policy.plan(&mut state, update_at, &input).unwrap().action,
         Some(Action::UpdateMods { attempt: 1 })
@@ -302,24 +318,21 @@ fn late_countdown_tick_remains_valid_until_its_deadline() {
     let policy = Policy::default();
     let mut state = PolicyState::default();
     let now = at("2026-10-02T10:00:00Z");
-    let input = Inputs {
-        mods_outdated: true,
+    let mut input = Inputs {
+        mod_targets: mod_targets("2"),
         ..running()
     };
     policy.plan(&mut state, now, &input).unwrap();
-    let plan = policy
-        .plan(
-            &mut state,
-            now + TimeDelta::microseconds(59_999_500),
-            &input,
-        )
-        .unwrap();
+    let reminder = now + TimeDelta::hours(1) + TimeDelta::microseconds(59_999_500);
+    input.previous_tick = Some((now, Duration::from_micros(59_999_500)));
+    let plan = policy.plan(&mut state, reminder, &input).unwrap();
     assert!(
-        matches!(plan.action, Some(Action::Announce { ref message }) if message.contains("1秒"))
+        matches!(plan.action, Some(Action::Announce { ref message, .. }) if message.contains("1秒"))
     );
+    input.previous_tick = Some((reminder, Duration::from_micros(500)));
     assert!(matches!(
         policy
-            .plan(&mut state, now + TimeDelta::seconds(60), &input)
+            .plan(&mut state, reminder + TimeDelta::microseconds(500), &input)
             .unwrap()
             .action,
         Some(Action::Stop {
@@ -334,11 +347,11 @@ fn closing_preempts_mod_notice_and_started_writes_finish_closed() {
     let policy = make_policy("UTC", &[("10:00", "12:00")]);
     let mut state = PolicyState::default();
     let mut input = running();
-    input.mods_outdated = true;
+    input.mod_targets = mod_targets("2");
     let now = at("2026-10-02T11:59:30Z");
     let warning = policy.plan(&mut state, now, &input).unwrap();
     assert!(
-        matches!(warning.action, Some(Action::Announce { ref message }) if message.contains("定时关闭"))
+        matches!(warning.action, Some(Action::Announce { ref message, .. }) if message.contains("定时关闭"))
     );
     assert_eq!(state.mods.phase, ModPhase::Pending);
     assert!(matches!(
@@ -388,8 +401,10 @@ fn closing_preempts_mod_notice_and_started_writes_finish_closed() {
             .plan(&mut state, at("2026-10-04T10:00:00Z"), &input)
             .unwrap()
             .action,
-        Some(Action::UpdateMods { attempt: 1 })
+        Some(Action::Start)
     );
+    assert_eq!(state.mods.phase, ModPhase::Verifying);
+    assert_eq!(state.mods.attempts, 1);
 }
 
 #[test]
@@ -416,25 +431,229 @@ fn manual_mod_maintenance_runs_while_closed_and_recovery_is_exhausted() {
 }
 
 #[test]
-fn failed_mod_budget_resets_only_on_a_later_opening() {
-    let policy = make_policy("UTC", &[("10:00", "12:00")]);
+fn manual_download_keeps_recovery_closed_until_a_valid_start_reset() {
+    let policy = Policy::default();
     let now = at("2026-10-02T10:00:00Z");
     let mut state = PolicyState::default();
-    policy.plan(&mut state, now, &Inputs::default()).unwrap();
-    state.mods.phase = ModPhase::Failed;
-    state.mods.attempts = 3;
-    assert!(
-        policy
-            .plan(&mut state, now, &Inputs::default())
-            .unwrap()
-            .fault
-            .is_some()
+    state.mods.targets = mod_targets("2");
+    state.queue_mod_update(true).unwrap();
+    let mut input = Inputs {
+        faulted: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        policy.plan(&mut state, now, &input).unwrap().action,
+        Some(Action::UpdateMods { attempt: 1 })
     );
-    let next = policy
-        .plan(&mut state, now + TimeDelta::days(1), &Inputs::default())
-        .unwrap();
-    assert!(next.fault.is_none());
-    assert_eq!(next.action, Some(Action::UpdateMods { attempt: 1 }));
+    state.finish_mod_update(now, Ok(())).unwrap();
+    let maintenance = state.mods.clone();
+    for _ in 0..3 {
+        assert!(
+            policy
+                .plan(&mut state, now, &input)
+                .unwrap()
+                .action
+                .is_none()
+        );
+        assert_eq!(state.mods, maintenance);
+    }
+    input.faulted = false;
+    assert_eq!(
+        policy.plan(&mut state, now, &input).unwrap().action,
+        Some(Action::Start)
+    );
+}
+
+#[test]
+fn successful_downloads_require_verification_and_keep_one_budget_across_openings() {
+    let policy = make_policy("UTC", &[("10:00", "12:00")]);
+    let mut state = PolicyState::default();
+    let directory = tempfile::tempdir().unwrap();
+    let mut room = RoomLock::try_acquire(directory.path()).unwrap();
+    let base = at("2026-10-02T10:00:00Z");
+    for attempt in 1..=3 {
+        let now = base + TimeDelta::days(i64::from(attempt - 1));
+        let input = Inputs {
+            mod_targets: mod_targets("2"),
+            ..Inputs::default()
+        };
+        assert_eq!(
+            policy.plan(&mut state, now, &input).unwrap().action,
+            Some(Action::UpdateMods { attempt })
+        );
+        state.finish_mod_update(now, Ok(())).unwrap();
+        assert_eq!(state.mods.phase, ModPhase::Verifying);
+        assert_eq!(state.mods.attempts, attempt);
+        assert_eq!(
+            policy
+                .plan(&mut state, now, &Inputs::default())
+                .unwrap()
+                .action,
+            Some(Action::Start)
+        );
+        state.save(&mut room).unwrap();
+        state = PolicyState::load(&room).unwrap();
+        state.resume_after_restart(now).unwrap();
+        for error in ["Steam unavailable", "RPC missing expected shard"] {
+            state.verify_mod_update(now, Err(error.into())).unwrap();
+            assert!(
+                policy
+                    .plan(&mut state, now, &running())
+                    .unwrap()
+                    .action
+                    .is_none()
+            );
+            assert_eq!(state.mods.phase, ModPhase::Verifying);
+            assert_eq!(state.mods.attempts, attempt);
+        }
+        // A new remote publication belongs to the unfinished event, with the same budget.
+        state
+            .verify_mod_update(now, Ok(mod_targets(&format!("target-{attempt}"))))
+            .unwrap();
+        assert_eq!(state.mods.attempts, attempt);
+        let closed = now + TimeDelta::hours(2);
+        assert!(
+            policy
+                .plan(&mut state, closed, &Inputs::default())
+                .unwrap()
+                .action
+                .is_none()
+        );
+        state.save(&mut room).unwrap();
+        state = PolicyState::load(&room).unwrap();
+        state.resume_after_restart(closed).unwrap();
+    }
+    for day in 3..=5 {
+        let next = policy
+            .plan(&mut state, base + TimeDelta::days(day), &Inputs::default())
+            .unwrap();
+        assert!(next.fault.is_some());
+        assert!(next.action.is_none());
+        assert_eq!(state.mods.phase, ModPhase::Failed);
+        assert_eq!(state.mods.attempts, 3);
+    }
+    let targets = state.mods.targets.clone();
+    state.queue_mod_update(false).unwrap();
+    assert_eq!(state.mods.targets, targets);
+    assert_eq!(state.mods.attempts, 0);
+    assert_eq!(
+        policy
+            .plan(&mut state, base + TimeDelta::days(6), &Inputs::default())
+            .unwrap()
+            .action,
+        Some(Action::UpdateMods { attempt: 1 })
+    );
+}
+
+#[test]
+fn verified_updates_release_the_budget_and_manual_downloads_preserve_target_semantics() {
+    for has_target in [false, true] {
+        for restart in [false, true] {
+            let policy = Policy::default();
+            let mut state = PolicyState::default();
+            let now = at("2026-10-02T10:00:00Z");
+            if has_target {
+                state.mods.targets = mod_targets("2");
+            }
+            state.queue_mod_update(restart).unwrap();
+            assert_eq!(state.mods.resume_game, restart);
+            assert_eq!(
+                policy
+                    .plan(&mut state, now, &Inputs::default())
+                    .unwrap()
+                    .action,
+                Some(Action::UpdateMods { attempt: 1 })
+            );
+            state.finish_mod_update(now, Ok(())).unwrap();
+            if has_target {
+                assert_eq!(state.mods.phase, ModPhase::Verifying);
+                assert_eq!(state.mods.attempts, 1);
+                state
+                    .verify_mod_update(now, Ok(UpdateTargets::new()))
+                    .unwrap();
+            }
+            assert_eq!(state.mods, Default::default());
+            let input = Inputs {
+                mod_targets: mod_targets("3"),
+                ..Inputs::default()
+            };
+            assert_eq!(
+                policy.plan(&mut state, now, &input).unwrap().action,
+                Some(Action::UpdateMods { attempt: 1 })
+            );
+            assert_eq!(state.mods.targets, mod_targets("3"));
+        }
+    }
+}
+
+#[test]
+fn disabling_automatic_updates_waits_for_download_writes_and_preserves_manual_work() {
+    let policy = Policy {
+        mod_auto_update: false,
+        ..Default::default()
+    };
+    let now = at("2026-10-02T10:00:00Z");
+    for manual in [false, true] {
+        let mut state = PolicyState::default();
+        if manual {
+            state.mods.targets = mod_targets("2");
+            state.queue_mod_update(true).unwrap();
+        }
+        Policy::default()
+            .plan(
+                &mut state,
+                now,
+                &Inputs {
+                    mod_targets: mod_targets("2"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        policy
+            .plan(
+                &mut state,
+                now,
+                &Inputs {
+                    writes_in_progress: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(state.mods.phase, ModPhase::Updating);
+        state.finish_mod_update(now, Ok(())).unwrap();
+        policy.plan(&mut state, now, &Inputs::default()).unwrap();
+        assert_eq!(
+            state.mods.phase,
+            if manual {
+                ModPhase::Verifying
+            } else {
+                ModPhase::Idle
+            }
+        );
+    }
+}
+
+#[test]
+fn a_missing_runtime_section_initializes_but_an_active_task_needs_its_origin() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut room = RoomLock::try_acquire(directory.path()).unwrap();
+    Policy::default().save(&mut room).unwrap();
+    let mut state = PolicyState::load(&room).unwrap();
+    assert_eq!(state, PolicyState::default());
+    state.queue_mod_update(true).unwrap();
+    state.save(&mut room).unwrap();
+    room.update_state(|document| {
+        document.get_mut("policy_state").unwrap()["mods"]
+            .as_object_mut()
+            .unwrap()
+            .remove("origin");
+        Ok(())
+    })
+    .unwrap();
+    let before = room.read_state().unwrap();
+    let error = PolicyState::load(&room).unwrap_err();
+    assert!(error.to_string().contains("policy_state.mods.origin"));
+    assert_eq!(room.read_state().unwrap(), before);
 }
 
 #[test]
@@ -497,6 +716,20 @@ fn idle_requires_continuous_observation_and_strict_threshold() {
         state.activity.as_ref().unwrap().last_active_at,
         now + TimeDelta::days(1)
     );
+    let disabled_at = now + TimeDelta::days(2);
+    Policy::default()
+        .plan(&mut state, disabled_at, &input)
+        .unwrap();
+    assert!(state.activity.is_none());
+    let enabled_at = disabled_at + TimeDelta::days(3);
+    assert!(
+        policy
+            .plan(&mut state, enabled_at, &input)
+            .unwrap()
+            .action
+            .is_none()
+    );
+    assert_eq!(state.activity.unwrap().last_active_at, enabled_at);
 }
 
 #[test]
@@ -539,12 +772,8 @@ fn clean_shutdown_preserves_idle_but_world_changes_and_clock_jumps_reset_it() {
             .action
             .is_none()
     );
-    input.monotonic = Some(Duration::from_secs(0));
-    policy
-        .plan(&mut state, now + TimeDelta::days(1), &input)
-        .unwrap();
     state = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
-    input.monotonic = Some(Duration::from_secs(30));
+    input.previous_tick = Some((now + TimeDelta::days(1), Duration::from_secs(30)));
     assert!(
         policy
             .plan(&mut state, now + TimeDelta::days(2), &input)
@@ -556,7 +785,7 @@ fn clean_shutdown_preserves_idle_but_world_changes_and_clock_jumps_reset_it() {
         state.activity.as_ref().unwrap().last_active_at,
         now + TimeDelta::days(2)
     );
-    input.monotonic = Some(Duration::from_secs(60));
+    input.previous_tick = Some((now + TimeDelta::days(2), Duration::from_secs(30)));
     policy
         .plan(
             &mut state,
@@ -575,7 +804,7 @@ fn saving_policy_preserves_recovery_and_other_control_keys() {
     let directory = tempfile::tempdir().unwrap();
     let mut room = RoomLock::try_acquire(directory.path()).unwrap();
     room.update_state(|control| {
-        control.insert("recovery".into(), json!({"remaining": 2}));
+        control.insert("recovery".into(), json!({"restarts_used": 2}));
         control.insert("future".into(), json!([1, 2, 3]));
         Ok(())
     })
@@ -586,7 +815,7 @@ fn saving_policy_preserves_recovery_and_other_control_keys() {
     assert_eq!(Policy::load(&room).unwrap(), expected);
     assert_eq!(PolicyState::load(&room).unwrap(), PolicyState::default());
     let control = room.read_state().unwrap();
-    assert_eq!(control["recovery"], json!({"remaining": 2}));
+    assert_eq!(control["recovery"], json!({"restarts_used": 2}));
     assert_eq!(control["future"], json!([1, 2, 3]));
 }
 

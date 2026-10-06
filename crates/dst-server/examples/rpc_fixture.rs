@@ -1,7 +1,7 @@
 //! Local transport fixture for Python cancellation and interpreter lifecycle checks.
 use dst_server::{
     model::Request,
-    rpc::{self, Incoming},
+    rpc::{self, EventHub, Incoming, StreamKind},
 };
 use serde_json::json;
 use std::{
@@ -23,11 +23,14 @@ async fn main() -> anyhow::Result<()> {
             let accepted = Arc::new(AtomicU64::new(0));
             let completed = Arc::new(AtomicU64::new(0));
             let release = Arc::new(Notify::new());
+            let hub = EventHub::default();
+            let events = hub.clone();
             tokio::spawn(async move {
                 while let Some(call) = incoming.recv().await {
                     let accepted = accepted.clone();
                     let completed = completed.clone();
                     let release = release.clone();
+                    let events = events.clone();
                     tokio::spawn(async move {
                         if matches!(call.request.request, Request::Save {}) {
                             accepted.fetch_add(1, Ordering::SeqCst);
@@ -37,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
                             // The test releases accepted saves after disconnecting their caller.
                             release.notify_one();
                         }
-                        let _ = call.reply.send(Ok(json!({
+                        let result = json!({
                             "accepted": accepted.load(Ordering::SeqCst),
                             "completed": completed.load(Ordering::SeqCst),
                             "exact": 9_007_199_254_740_993_u64,
@@ -45,7 +48,9 @@ async fn main() -> anyhow::Result<()> {
                             "huge": "1267650600228229401496703205376".parse::<serde_json::Number>().unwrap(),
                             "nested": [null, false, 0, "", {"float": 0.25}],
                             "request": call.request,
-                        })));
+                        });
+                        events.publish(StreamKind::Events, &result);
+                        let _ = call.reply.send(Ok(result));
                     });
                 }
             });
@@ -53,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
                 let _ = tokio::signal::ctrl_c().await;
                 let _ = shutdown.send(());
             });
-            rpc::serve(&socket, dispatch, rpc::EventHub::default(), stop).await
+            rpc::serve(&socket, dispatch, hub, stop).await
         })
         .await?;
     Ok(())

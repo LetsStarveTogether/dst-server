@@ -1,4 +1,5 @@
-use pyo3::prelude::*;
+use dst_server::events::coverage::CoverageBody;
+use pyo3::{exceptions::PyValueError, prelude::*};
 
 use crate::{from_python, py_error, to_python};
 
@@ -9,14 +10,24 @@ fn event_names() -> Vec<&'static str> {
 
 #[pyfunction]
 fn validate_event(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    let value = from_python(value, 0, &mut 0)?;
+    let value = from_python(value)?;
     py.detach(|| dst_server::events::validate(&value))
         .map_err(py_error)?;
     to_python(py, value)
 }
 
+#[pyfunction]
+fn validate_coverage(value: &Bound<'_, PyAny>) -> PyResult<()> {
+    if CoverageBody::valid(&from_python(value)?) {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err("invalid telemetry coverage body"))
+    }
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(event_names, module)?)?;
     module.add_function(wrap_pyfunction!(validate_event, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_coverage, module)?)?;
     Ok(())
 }

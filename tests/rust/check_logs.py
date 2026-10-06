@@ -108,6 +108,7 @@ async def check_journal(directory: Path) -> None:
     assert record.message == "hi�"
     assert record.timestamp == datetime(1970, 1, 1, 0, 0, 1, 1, UTC)
     arguments = json.loads(journal.with_suffix(".args").read_text())
+    assert "--system" in arguments
     assert "--since=2026-09-01 00:00:00.000000 UTC" in arguments
     assert "--grep=--help" in arguments
     resumed = await logs.query(
@@ -115,6 +116,13 @@ async def check_journal(directory: Path) -> None:
     )
     assert [record.cursor for record in resumed.records] == ["2", "3"]
     await reaped(int(journal.with_suffix(".pid").read_text()))
+    try:
+        await logs.query(None, JournalQuery(limit=0))
+    except ValueError as error:
+        assert str(error) == "journal query limit must be positive"
+    else:
+        msg = "a zero-sized journal page cannot advance its cursor"
+        raise AssertionError(msg)
     try:
         await logs.query(None, JournalQuery(grep="failure"))
     except LogProcessError as error:
@@ -129,9 +137,14 @@ async def check_journal(directory: Path) -> None:
 
 async def check_streams(directory: Path) -> None:
     journal = executable(directory, "follow", JOURNAL)
-    logs = JournalLogs(journal)
-    async with logs.follow(None) as stream:
+    logs = JournalLogs(journal, user=True)
+    async with logs.follow(None, JournalQuery(grep="players")) as stream:
         assert (await anext(stream)).cursor == "0"
+        args = json.loads(journal.with_suffix(".args").read_text())
+        assert "--user" in args
+        assert "--grep=players" in args
+        assert "--lines=0" in args
+        assert "--reverse" not in args
         pending = asyncio.create_task(anext(stream), eager_start=True)
         assert not pending.done()
         # A live snapshot must remain accessible while next() is pending.
@@ -164,6 +177,20 @@ async def check_streams(directory: Path) -> None:
     del stream
     gc.collect()
     await reaped(pid)
+
+    cancelled = executable(directory, "cancel-query", "time.sleep(60)\n")
+    query = asyncio.create_task(JournalLogs(cancelled).query(None))
+    pid_file = cancelled.with_suffix(".pid")
+    async with asyncio.timeout(5):
+        # The native reader reports its PID through a file in the temporary directory.
+        while not pid_file.exists():  # ruff: ignore[async-busy-wait]
+            await asyncio.sleep(0.01)
+    query.cancel()
+    assert isinstance(
+        (await asyncio.gather(query, return_exceptions=True))[0],
+        asyncio.CancelledError,
+    )
+    await reaped(int(pid_file.read_text()))
 
     hanging = executable(directory, "hanging", "time.sleep(60)\n")
     try:
@@ -198,7 +225,7 @@ async def check_netdata(directory: Path) -> None:
     assert result.records[0].values("tag") == ("a", "b")
     assert result.records[0].values("body") == ("玩家",)
     assert result.since == datetime(2026, 9, 1, tzinfo=UTC)
-    assert result.until == result.since + timedelta(minutes=1)
+    assert result.until == result.since + timedelta(minutes=1, seconds=1)
     assert result.matched == 5
     assert result.truncated
     arguments = json.loads(plugin.with_suffix(".args").read_text())
@@ -213,10 +240,24 @@ async def check_netdata(directory: Path) -> None:
         for value in arguments
         if value.startswith("--query=")
     )
-    assert re.fullmatch(query, "body.actor.userid=KU_player")
+    assert re.fullmatch(query, "body.giver.userid=KU_player")
     assert re.fullmatch(query, "body.target_userid=KU_player")
     assert not re.fullmatch(query, "body.message=KU_player")
     await reaped(int(plugin.with_suffix(".pid").read_text()))
+
+    short = await reader.query(
+        NetdataLogQuery(since=since, until=since + timedelta(microseconds=1))
+    )
+    assert short.since == result.since
+    assert short.until == result.since + timedelta(seconds=1)
+    for end in (since, since - timedelta(microseconds=1)):
+        try:
+            NetdataLogQuery(since=since, until=end).to_native()
+        except ValueError:
+            pass
+        else:
+            msg = "nonpositive subsecond window accepted"
+            raise AssertionError(msg)
 
 
 async def check_validation() -> None:

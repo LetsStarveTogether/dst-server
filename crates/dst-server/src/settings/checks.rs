@@ -13,9 +13,6 @@ pub trait Check {
 
 impl Check for ClusterSettings {
     fn check(&self) -> Result<()> {
-        if let Some(host) = self.master_ip() {
-            configuration::validate_host(&host)?;
-        }
         ensure!(
             !(self.steam_group_only() || self.steam_group_admins()) || self.steam_group_id() != 0,
             "Steam group restrictions require steam_group_id"
@@ -30,13 +27,14 @@ impl Check for ClusterSettings {
 
 impl Check for ShardSettings {
     fn check(&self) -> Result<()> {
-        if let Some(host) = self.master_ip() {
-            configuration::validate_host(&host)?;
-        }
+        ensure!(
+            self.is_master() || self.name().as_deref() != Some(""),
+            "secondary shards require SHARD.name"
+        );
         if let Some(id) = self.id() {
             ensure!(
                 (self.is_master() && id == 1) || (!self.is_master() && id >= 2),
-                "master shard id must be 1; secondary shard ids must be at least 2"
+                "master shard id must be 1; secondary shards require is_master = false and an id of at least 2"
             );
         }
         Ok(())
@@ -46,10 +44,16 @@ impl Check for ShardSettings {
 impl Check for ShardConfig {
     fn check(&self) -> Result<()> {
         self.settings.check()?;
-        self.mods().check()?;
         if let Some(world) = self.world.as_ref().and_then(Option::as_ref) {
             world.check()?;
         }
+        self.check_mods_and_level()
+    }
+}
+
+impl ShardConfig {
+    fn check_mods_and_level(&self) -> Result<()> {
+        self.mods().check()?;
         if let Some(level) = self.level.as_ref().and_then(Option::as_ref) {
             level.check()?;
         }
@@ -62,10 +66,37 @@ impl Check for ClusterConfig {
         let settings = self.settings();
         settings.check()?;
         self.mod_settings().check()?;
-        let multi = self.shards.len() > 1;
+        let event_game = super::event_game_mode(&settings.game_mode()).is_some();
+        for shard in self.shards.values() {
+            shard.check()?;
+            if event_game {
+                ensure!(
+                    shard.level.as_ref().is_some_and(Option::is_some),
+                    "event game modes require level data for every shard"
+                );
+            }
+        }
+        settings.check_topology(
+            self.shards
+                .iter()
+                .map(|(name, shard)| (name, &shard.settings)),
+            configuration::ClusterKey::GenerateOnSave,
+        )?;
+        Ok(())
+    }
+}
+
+impl ClusterSettings {
+    /// A missing shared key can be generated when an editable configuration is saved.
+    pub(crate) fn check_topology<'a>(
+        &self,
+        shards: impl ExactSizeIterator<Item = (&'a String, &'a ShardSettings)>,
+        key: configuration::ClusterKey,
+    ) -> Result<u16> {
+        let sharded = self.shard_enabled();
         ensure!(
-            !multi || settings.shard_enabled != Some(false),
-            "shard_enabled cannot be false for multiple shards"
+            shards.len() <= 1 || sharded,
+            "shard_enabled must be true for multiple shards"
         );
         let mut names = BTreeSet::new();
         let mut ids = BTreeSet::new();
@@ -73,55 +104,33 @@ impl Check for ClusterConfig {
         let mut master_ports = BTreeSet::new();
         let mut keys = BTreeSet::new();
         let mut masters = 0;
-        for (name, shard) in &self.shards {
-            configuration::validate_shard_name(name)?;
+        for (directory, shard) in shards {
+            configuration::validate_shard_name(directory)?;
             ensure!(
-                names.insert(name.to_lowercase()),
+                names.insert(directory.to_lowercase()),
                 "duplicate shard directory names"
             );
-            shard.check()?;
-            let shard_settings = &shard.settings;
-            let master = shard_settings.is_master();
-            masters += usize::from(master);
-            if !master {
+            if shard.is_master() {
+                masters += 1;
+            } else {
                 ensure!(
-                    shard_settings.name().is_some_and(|name| !name.is_empty()),
-                    "secondary shards require a name"
+                    shard.name().is_some(),
+                    "secondary shards require SHARD.name"
                 );
-            }
-            if let Some(id) = shard_settings.id() {
-                ensure!(ids.insert(id), "shard ids must be unique");
-            }
-            for port in [
-                shard_settings.server_port(),
-                shard_settings.master_server_port(),
-            ] {
-                ensure!(ports.insert(port), "UDP ports must be unique");
-            }
-            master_ports.insert(
-                shard_settings
-                    .master_port()
-                    .unwrap_or_else(|| settings.master_port()),
-            );
-            keys.insert(
-                shard_settings
-                    .cluster_key()
-                    .or_else(|| settings.cluster_key()),
-            );
-            if (multi || settings.shard_enabled()) && !master {
                 ensure!(
-                    shard_settings
-                        .master_ip()
-                        .or_else(|| settings.master_ip())
-                        .is_some(),
+                    shard.master_ip().or_else(|| self.master_ip()).is_some(),
                     "secondary shards require master_ip"
                 );
             }
-            if matches!(settings.game_mode().as_str(), "quagmire" | "lavaarena") {
-                ensure!(
-                    shard.level.as_ref().is_some_and(Option::is_some),
-                    "event game modes require level data for every shard"
-                );
+            if let Some(id) = shard.id() {
+                ensure!(ids.insert(id), "shard ids must be unique");
+            }
+            for port in [shard.server_port(), shard.master_server_port()] {
+                ensure!(ports.insert(port), "UDP port {port} is used more than once");
+            }
+            master_ports.insert(shard.master_port().unwrap_or_else(|| self.master_port()));
+            if sharded {
+                keys.insert(shard.cluster_key().or_else(|| self.cluster_key()));
             }
         }
         ensure!(masters == 1, "expected exactly one master shard");
@@ -129,25 +138,34 @@ impl Check for ClusterConfig {
             master_ports.len() == 1,
             "all shards must use the same master_port"
         );
+        let master_port = *master_ports.first().expect("a master port was validated");
         ensure!(
-            !ports.contains(master_ports.first().expect("one master port")),
+            !ports.contains(&master_port),
             "master_port conflicts with another UDP port"
         );
         ensure!(
-            keys.len() == 1 && !keys.contains(&Some(String::new())),
-            "all shards require the same non-empty cluster_key or must omit it"
+            keys.len() <= 1 && !keys.contains(&Some(String::new())),
+            "all enabled shards require the same non-empty cluster_key or must omit it"
         );
-        Ok(())
+        ensure!(
+            !sharded || key == configuration::ClusterKey::GenerateOnSave || !keys.contains(&None),
+            "enabled shards require a non-empty shared cluster_key"
+        );
+        Ok(master_port.try_into()?)
     }
 }
 
 impl Check for RoomPreset {
     fn check(&self) -> Result<()> {
-        self.settings().check()?;
-        self.mods().check()?;
+        if let Some(mods) = &self.mods {
+            mods.check()?;
+        }
         for (name, shard) in self.shards.iter().flatten() {
             configuration::validate_shard_name(name)?;
-            shard.check()?;
+            shard.check_mods_and_level()?;
+            if let Some(world) = shard.world.as_ref().and_then(Option::as_ref) {
+                validate_world_values(&world.overrides().values())?;
+            }
         }
         Ok(())
     }

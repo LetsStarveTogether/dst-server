@@ -14,12 +14,16 @@ use tokio::time::{Instant, timeout_at};
 use ulid::Ulid;
 
 use crate::configuration::{self, Cluster};
-use crate::process::{EventKind, GameProcess, ProcessSpec, StreamKind, native_message};
+use crate::process::{
+    EventKind, GameProcess, ProcessOutput, ProcessSpec, StreamKind, native_message,
+    sdk_frame_summary,
+};
 use crate::{driver::DriverOptions, files::RoomLock};
 
 struct Shard {
     name: String,
     process: GameProcess,
+    output: ProcessOutput,
     nonce: String,
     generation: Option<u64>,
     ready: bool,
@@ -30,7 +34,7 @@ struct Shard {
     native_done: bool,
     busy: bool,
     result: Option<Value>,
-    control_records: VecDeque<Value>,
+    recovery_record: Option<Value>,
     tail: VecDeque<String>,
 }
 
@@ -121,12 +125,13 @@ pub async fn recovery(
 ) -> Result<Value> {
     ensure!(timeout > 0, "timeout must be positive");
     let cluster = disposable(cluster)?;
-    let requests = recovery_requests(&cluster, targets)?;
+    let lock = RoomLock::try_acquire(&cluster.directory)?;
+    let requests = recovery_requests(&lock, &cluster, targets)?;
     let executable = executable
         .canonicalize()
         .context("resolve game executable")?;
     let mut room = Room {
-        lock: RoomLock::try_acquire(&cluster.directory)?,
+        lock,
         shards: Vec::new(),
         cursor: 0,
         recovering: true,
@@ -155,12 +160,10 @@ pub async fn recovery(
                 "{} recovery process did not exit cleanly: {exit:?}",
                 shard.name
             );
-            ensure!(
-                shard.control_records.len() == 1,
-                "{} recovery did not publish exactly one result",
-                shard.name
-            );
-            let record = &shard.control_records[0];
+            let record = shard
+                .recovery_record
+                .as_ref()
+                .with_context(|| format!("{} recovery did not publish a result", shard.name))?;
             let request = &requests[&shard.name];
             if targets.is_some() {
                 ensure!(
@@ -247,6 +250,7 @@ fn disposable(path: &Path) -> Result<Cluster> {
 }
 
 fn recovery_requests(
+    lock: &RoomLock,
     cluster: &Cluster,
     targets: Option<&BTreeMap<String, Value>>,
 ) -> Result<BTreeMap<String, Value>> {
@@ -276,20 +280,25 @@ fn recovery_requests(
                 object.get("mode").is_none_or(|value| value == "apply"),
                 "recovery target mode must be apply"
             );
-            for (key, limit) in [("session_id", 128), ("world_file", 4096)] {
-                ensure!(
-                    target[key].as_str().is_some_and(|value| !value.is_empty()
-                        && value.len() <= limit
-                        && !value.contains(['\0', '\r', '\n'])),
-                    "invalid recovery {key}"
-                );
-            }
+            let text = |key: &str, limit| {
+                target[key]
+                    .as_str()
+                    .filter(|value| {
+                        !value.is_empty()
+                            && value.len() <= limit
+                            && !value.contains(['\0', '\r', '\n'])
+                    })
+                    .with_context(|| format!("invalid recovery {key}"))
+            };
+            let session = text("session_id", 128)?;
+            let file = text("world_file", 4096)?;
             ensure!(
                 target["snapshot_id"]
                     .as_u64()
                     .is_some_and(|id| (1..=9_007_199_254_740_991).contains(&id)),
                 "recovery snapshot_id must be a positive Lua-safe integer"
             );
+            crate::recovery::require_target_file(lock, name, session, file)?;
             let mut target = target.clone();
             target["mode"] = json!("apply");
             requests.insert(name.clone(), target);
@@ -330,15 +339,14 @@ impl Room {
         executable: &Path,
         recovery: Option<&Value>,
     ) -> Result<()> {
-        let mut options = DriverOptions {
-            profile: "history".into(),
-            actions: vec!["ATTACK".into(), "MIGRATE".into()],
-            ..Default::default()
-        };
+        let mut options = DriverOptions::default();
         if let Some(request) = recovery {
             options.control["recovery"] = request.clone();
         }
-        let nonce = options.save(&mut self.lock)?;
+        let nonce = options.save(
+            &self.lock,
+            cluster.shards.iter().map(|shard| shard.name.as_str()),
+        )?;
         for shard in &cluster.shards {
             let args: Vec<OsString> = vec![
                 "-persistent_storage_root".into(),
@@ -357,7 +365,7 @@ impl Room {
                 "-offline".into(),
                 "-cloudserver".into(),
             ];
-            let process = GameProcess::spawn(ProcessSpec {
+            let (process, output) = GameProcess::spawn(ProcessSpec {
                 program: executable.to_owned(),
                 args,
                 cwd: executable.parent().unwrap().to_owned(),
@@ -366,6 +374,7 @@ impl Room {
             self.shards.push(Shard {
                 name: shard.name.clone(),
                 process,
+                output,
                 nonce: nonce.clone(),
                 generation: None,
                 ready: false,
@@ -376,7 +385,7 @@ impl Room {
                 native_done: false,
                 busy: false,
                 result: None,
-                control_records: VecDeque::new(),
+                recovery_record: None,
                 tail: VecDeque::new(),
             });
             eprintln!(
@@ -604,7 +613,7 @@ impl Room {
         let id = Ulid::generate().to_string();
         let frame = format!(
             "DST_RPC|{}\n",
-            json!({"v": 1, "nonce": shard.nonce,
+            json!({"nonce": shard.nonce,
             "id": id, "generation": shard.generation, "method": method, "arguments": arguments})
         )
         .into_bytes();
@@ -629,7 +638,7 @@ impl Room {
                 self.shards[index].pending = None;
                 ensure!(
                     result["ok"] == true,
-                    "{} {method} failed: {result}",
+                    "{} {method} failed",
                     self.shards[index].name
                 );
                 eprintln!("probe: {} {method} completed", self.shards[index].name);
@@ -646,7 +655,7 @@ impl Room {
                 if self.shards[index].ended {
                     continue;
                 }
-                let next = self.shards[index].process.next_event();
+                let next = self.shards[index].output.next_event();
                 tokio::pin!(next);
                 if let Poll::Ready(event) = next.poll(cx) {
                     return Poll::Ready((index, event));
@@ -668,21 +677,25 @@ impl Room {
         };
         let line = match event.kind {
             EventKind::Line(line) => line,
-            EventKind::Oversized => {
+            EventKind::Oversized { mandatory: true } => {
                 bail!("{} {:?} exceeded the line limit", shard.name, event.stream)
             }
+            EventKind::Oversized { mandatory: false } => return Ok(()),
             EventKind::ReadError(error) => bail!("{} {:?}: {error}", shard.name, event.stream),
         };
-        let text = String::from_utf8_lossy(&line);
         if shard.tail.len() == 16 {
             shard.tail.pop_front();
         }
-        shard.tail.push_back(format!(
-            "{:?}: {}",
-            event.stream,
-            text.chars().take(1024).collect::<String>()
-        ));
-        let text = std::str::from_utf8(native_message(&line));
+        let diagnostic = sdk_frame_summary(&line)
+            .unwrap_or_else(|| String::from_utf8_lossy(&line).chars().take(1024).collect());
+        shard
+            .tail
+            .push_back(format!("{:?}: {diagnostic}", event.stream));
+        let text = std::str::from_utf8(if event.stream == StreamKind::Reply {
+            &line
+        } else {
+            native_message(&line)
+        });
         let Ok(text) = text else {
             return Ok(());
         };
@@ -694,7 +707,7 @@ impl Room {
             {
                 shard.native_ready = true;
                 eprintln!("probe: {} native ready: {}", shard.name, text.trim_end());
-            } else if !text.starts_with("DST_Stats|") {
+            } else {
                 eprintln!(
                     "probe: {} native lifecycle: {}",
                     shard.name,
@@ -729,20 +742,15 @@ impl Room {
                 shard.name
             );
         }
-        let (kind, payload) = if matches!(event.stream, StreamKind::Reply) {
-            if let Some(payload) = text.strip_prefix("DST_RPC|") {
-                ("rpc", Some(payload))
-            } else {
-                ("control", text.strip_prefix("DST_CONTROL|"))
-            }
-        } else if matches!(event.stream, StreamKind::Stdout) {
-            if let Some(payload) = text.strip_prefix("DST_DRIVER|") {
-                ("driver", Some(payload))
-            } else {
-                ("control", text.strip_prefix("DST_CONTROL|"))
-            }
-        } else {
+        if event.stream != StreamKind::Reply {
             return Ok(());
+        }
+        let (kind, payload) = if let Some(payload) = text.strip_prefix("DST_DRIVER|") {
+            ("driver", Some(payload))
+        } else if let Some(payload) = text.strip_prefix("DST_RPC|") {
+            ("rpc", Some(payload))
+        } else {
+            ("control", text.strip_prefix("DST_CONTROL|"))
         };
         let Some(payload) = payload else {
             return Ok(());
@@ -757,7 +765,7 @@ impl Room {
         if kind == "driver" {
             ensure!(
                 record.get("error").is_none(),
-                "{} bootstrap failed: {record}",
+                "{} bootstrap failed",
                 shard.name
             );
             let generation = record.get("health").unwrap_or(&record)["generation"]
@@ -771,10 +779,15 @@ impl Room {
                 shard.name
             );
             shard.generation = Some(generation);
-            if record.get("health").is_some() {
+            if let Some(health) = record.get("health") {
                 ensure!(
                     !self.recovering,
                     "{} driver became ready during recovery",
+                    shard.name
+                );
+                ensure!(
+                    crate::driver::control_ready(health),
+                    "{} native control did not initialize",
                     shard.name
                 );
                 shard.ready = true;
@@ -793,15 +806,13 @@ impl Room {
                 shard.generation = record["generation"].as_u64();
             }
             ensure!(
-                record["v"] == 1
-                    && shard.generation.is_some()
-                    && record["generation"].as_u64() == shard.generation,
-                "{} mandatory frame protocol/generation mismatch",
+                shard.generation.is_some() && record["generation"].as_u64() == shard.generation,
+                "{} mandatory frame generation mismatch",
                 shard.name
             );
             if kind == "rpc" {
                 ensure!(
-                    record["id"].as_str() == shard.pending.as_deref(),
+                    shard.pending.is_some() && record["id"].as_str() == shard.pending.as_deref(),
                     "unexpected RPC response"
                 );
                 if let Some(result) = record.get("result") {
@@ -817,21 +828,23 @@ impl Room {
                             record["event"].as_str(),
                             Some("recovery_catalog" | "recovery_applied" | "recovery_failed")
                         ),
-                    "{} published unexpected control during recovery: {record}",
+                    "{} published unexpected control during recovery",
                     shard.name
                 );
                 ensure!(
                     !matches!(record["event"].as_str(), Some("recovery_failed")),
-                    "{} native recovery failed: {record}",
+                    "{} native recovery failed",
                     shard.name
                 );
-                ensure!(
-                    shard.control_records.len() < 128,
-                    "{} exceeded probe control evidence limit",
-                    shard.name
-                );
-                eprintln!("probe: {} control {}", shard.name, record);
-                shard.control_records.push_back(record);
+                eprintln!("probe: {} control frame ({} bytes)", shard.name, line.len());
+                if self.recovering {
+                    ensure!(
+                        shard.recovery_record.is_none(),
+                        "{} recovery published multiple results",
+                        shard.name
+                    );
+                    shard.recovery_record = Some(record);
+                }
             }
         }
         Ok(())
@@ -881,15 +894,34 @@ mod tests {
         ] {
             assert!(result.unwrap_err().to_string().contains("timeout"));
         }
+        let game = dir.path().join("probe-game");
+        fs::write(
+            &game,
+            "#!/bin/sh\nprintf '%s\\n' 'DST_RPC|{\"nonce\":\"private-marker\"}' >&4\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&game, fs::Permissions::from_mode(0o700)).unwrap();
+        let error = run(dir.path(), &game, 3, 1).await.unwrap_err();
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("SDK RPC frame ("));
+        assert!(diagnostic.contains("nonce mismatch"));
+        assert!(!diagnostic.contains("private-marker"));
         let mut targets = BTreeMap::from([(
             "Surface".to_owned(),
-            json!({"session_id": "session", "snapshot_id": 2, "world_file": "session/0000000002"}),
+            json!({"session_id":"SESSION", "snapshot_id":2, "world_file":"session/SESSION/0000000002"}),
         )]);
-        assert!(recovery_requests(&cluster, Some(&targets)).is_ok());
+        let lock = RoomLock::try_acquire(dir.path()).unwrap();
+        let world = dir.path().join("Surface/save/session/SESSION/0000000002");
+        fs::create_dir_all(world.parent().unwrap()).unwrap();
+        fs::write(&world, []).unwrap();
+        assert!(recovery_requests(&lock, &cluster, Some(&targets)).is_err());
+        fs::write(&world, b"world").unwrap();
+        assert!(recovery_requests(&lock, &cluster, Some(&targets)).is_ok());
         targets.get_mut("Surface").unwrap()["snapshot_id"] = json!(0);
-        assert!(recovery_requests(&cluster, Some(&targets)).is_err());
+        assert!(recovery_requests(&lock, &cluster, Some(&targets)).is_err());
         targets.get_mut("Surface").unwrap()["snapshot_id"] = json!(2);
         targets.insert("Unexpected".to_owned(), targets["Surface"].clone());
-        assert!(recovery_requests(&cluster, Some(&targets)).is_err());
+        assert!(recovery_requests(&lock, &cluster, Some(&targets)).is_err());
     }
 }

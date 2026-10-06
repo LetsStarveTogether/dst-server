@@ -209,7 +209,9 @@ jobs:
       - name: Record pinned native Lua revision
         if: ${{ matrix.build }}
         id: source
-        run: printf 'revision=%s\n' "$(git -C dst-scripts/scripts rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          test -z "$(git status --porcelain)"
+          printf 'revision=%s\ndirty=false\n' "$(git -C dst-scripts/scripts rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Setup uv and Python
         if: ${{ matrix.build }}
@@ -235,6 +237,7 @@ jobs:
             BETA=${{ matrix.beta }}
             GAME_VERSION=${{ matrix.version }}
             SOURCE_REVISION=${{ needs.sync-dst-scripts.outputs.revision }}
+            SOURCE_DIRTY=${{ steps.source.outputs.dirty }}
             NATIVE_SCRIPTS_REVISION=${{ steps.source.outputs.revision }}
           labels: |
             org.opencontainers.image.version=${{ matrix.version }}

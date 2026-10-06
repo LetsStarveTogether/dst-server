@@ -18,6 +18,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{Semaphore, oneshot};
 
 use crate::files::RoomReader;
+use crate::rooms::RoomStore;
 use crate::settings::ClusterConfig;
 mod configuration;
 mod importing;
@@ -139,8 +140,8 @@ impl ClusterArchive {
 }
 
 /// Read a room directly; exports do not need its Agent, service or ownership lock.
-pub async fn export_host(
-    host: &crate::host::Host,
+pub async fn export_room(
+    rooms: &RoomStore,
     number: u16,
     options: ExportOptions,
     level: u32,
@@ -149,7 +150,7 @@ pub async fn export_host(
         (1..=9).contains(&level),
         "LZMA2 compression level must be between 1 and 9"
     );
-    let directory = host.rooms.path(number)?;
+    let directory = rooms.path(number)?;
     compression_worker(move || {
         prepare(&RoomReader::open(directory)?, number, &options)?.compress_sync(level)
     })
@@ -366,22 +367,16 @@ pub fn prepare(room: &RoomReader, number: u16, options: &ExportOptions) -> Resul
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
         "archive room ID must contain 1-80 ASCII letters, digits, underscores or hyphens"
     );
-    let files = native::NativeFiles::read_directory(room)?;
+    let conversion = if options.client_compatible {
+        native::Conversion::ToClient
+    } else {
+        native::Conversion::None
+    };
+    let files = native::NativeFiles::read_directory(room, conversion)?;
     let configuration = files.configuration()?;
-    let files = files.normalize(
-        configuration,
-        options.configuration.as_ref(),
-        if options.client_compatible {
-            native::Conversion::ToClient
-        } else {
-            native::Conversion::None
-        },
-    )?;
+    let files = files.normalize(configuration, options.configuration.as_ref(), conversion)?;
     Ok(PreparedArchive {
-        filename: format!(
-            "DST-{room_id}-{}.7z",
-            chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
-        ),
+        filename: format!("DST-{room_id}-{}.7z", ulid::Ulid::generate()),
         room_id,
         entries: files.entries,
     })
@@ -405,8 +400,9 @@ impl PreparedArchive {
                 self.room_id,
                 path.to_str().context("archive path is not UTF-8")?
             );
+            let source = (!bytes.is_empty()).then(|| Cursor::new(bytes));
             writer
-                .push_archive_entry(ArchiveEntry::new_file(&name), Some(Cursor::new(bytes)))
+                .push_archive_entry(ArchiveEntry::new_file(&name), source)
                 .context("compress archive file")?;
         }
         let mut file = writer.finish().context("finish native archive")?;

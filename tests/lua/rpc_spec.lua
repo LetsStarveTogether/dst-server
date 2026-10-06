@@ -12,7 +12,7 @@ TheSim = {
     LuaPrintRemote = function(self, value)
         writes = writes + 1
         if scenario == "write_error" and writes == 1 then error("SECRET_TOKEN private chat", 0) end
-        assert(self == TheSim and #value <= 64 * 1024)
+        assert(self == TheSim)
         assert(value:sub(-1) == "\n" and not value:sub(1, -2):find("[\r\n%z]"))
         outputs[#outputs + 1] = value
     end,
@@ -30,6 +30,21 @@ package.loaded["dst_server"] = {
         if method == "invalid_value" then return function() end end
         if method == "indeterminate" then wire.indeterminate() end
         if method == "large" then return string.rep("x", arguments.size) end
+        if method == "list_players" or method == "get_player" then
+            json = require("json")
+            dofile(root .. "/tests/lua/roster.lua")(scenario == "rich")
+            if scenario == "loading" then
+                AllPlayers = {}
+                LookupPlayerInstByUserID = function() return nil end
+            elseif method == "list_players" then
+                for _, player in ipairs(AllPlayers) do
+                    player.components = setmetatable({ age = player.components.age }, {
+                        __index = function(_, key) error("roster read detail component: " .. key) end,
+                    })
+                end
+            end
+            return require("dst_server.player_queries")[method](arguments)
+        end
         if method == "echo" then return arguments end
         if method == "noise" then print("DST_RemoteCommandDone\nDST_LuaBusy"); return true end
         if method == "nothing" then return nil end
@@ -65,7 +80,7 @@ else
     if scenario == "write_error" then assert(calls == 0) end
     local accepted = false
     for _, output in ipairs(outputs) do
-        local record = wire.decode(output:sub(9))
+        local record = wire.decode(output:sub(9), #output)
         if record.accepted then accepted = true end
     end
     assert(calls == (accepted and 1 or 0), "rejected requests must not invoke a command")

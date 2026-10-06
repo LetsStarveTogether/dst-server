@@ -9,10 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use full_moon::{
-    ast::{Call, Expression, FunctionArgs, Prefix, Stmt, Suffix},
-    tokenizer::{StringLiteralQuoteType, TokenType},
-};
+use full_moon::ast::Stmt;
 use include_dir::{Dir, include_dir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -42,7 +39,6 @@ pub struct ScriptBundle {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
-    format: u8,
     sdk_version: String,
     source_digest: String,
     files: BTreeMap<String, String>,
@@ -157,28 +153,10 @@ fn check_startup(source: &[u8]) -> Result<()> {
     let source = std::str::from_utf8(source).context("native main.lua must be UTF-8")?;
     let ast = crate::lua::parse_script(source).context("invalid native main.lua")?;
     let found = ast.nodes().stmts().any(|statement| {
-        let Stmt::FunctionCall(call) = statement else { return false; };
-        let Prefix::Name(name) = call.prefix() else { return false; };
-        if !matches!(name.token_type(), TokenType::Identifier { identifier } if identifier.as_str() == "require") { return false; }
-        let mut suffixes = call.suffixes();
-        let Some(Suffix::Call(Call::AnonymousCall(arguments))) = suffixes.next() else { return false; };
-        if suffixes.next().is_some() { return false; }
-        let token = match arguments.as_ref() {
-            FunctionArgs::Parentheses { arguments, .. } if arguments.len() == 1 => {
-                let mut expression = arguments.iter().next().unwrap();
-                while let Expression::Parentheses { expression: inner, .. } = expression {
-                    expression = inner;
-                }
-                let Expression::String(token) = expression else { return false; };
-                token
-            },
-            FunctionArgs::String(token) => token,
-            _ => return false,
+        let Stmt::FunctionCall(call) = statement else {
+            return false;
         };
-        if let TokenType::StringLiteral { literal, quote_type: StringLiteralQuoteType::Brackets, .. } = token.token_type() {
-            return literal.as_str().strip_prefix('\n').unwrap_or(literal.as_str()) == "globalvariableoverrides";
-        }
-        crate::lua::parse_literal(&token.token().to_string()).is_ok_and(|value| value == "globalvariableoverrides")
+        matches!(crate::lua::string_call(call), Some(("require", name)) if name == "globalvariableoverrides")
     });
     ensure!(
         found,
@@ -223,13 +201,10 @@ fn inspect(
     );
     check_startup(&read_entry(archive, MAIN)?)?;
     let manifest = if seen.contains(MANIFEST) {
-        let manifest: Manifest = serde_json::from_slice(&read_entry(archive, MANIFEST)?)
-            .context("invalid script bundle manifest")?;
-        ensure!(
-            manifest.format == 1,
-            "unsupported script bundle manifest version"
-        );
-        Some(manifest)
+        Some(
+            serde_json::from_slice::<Manifest>(&read_entry(archive, MANIFEST)?)
+                .context("invalid script bundle manifest")?,
+        )
     } else {
         None
     };
@@ -345,7 +320,6 @@ fn build_with_payload(
             .map(|(name, bytes)| (name.clone(), digest(bytes))),
     );
     let manifest = Manifest {
-        format: 1,
         sdk_version: version.to_owned(),
         source_digest: source_digest(&inspected.native)?,
         files,

@@ -77,7 +77,8 @@ pub struct UgcHandle(#[serde(with = "decimal_u64")] pub u64);
 /// Steam's EResult value, including codes unknown to this client.
 ///
 /// <https://partner.steamgames.com/doc/api/steam_api#EResult>
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, thiserror::Error)]
+#[error("Steam result {0}")]
 #[serde(transparent)]
 pub struct ResultCode(pub i32);
 
@@ -86,14 +87,6 @@ impl ResultCode {
     pub const FILE_NOT_FOUND: Self = Self(9);
     pub const ACCESS_DENIED: Self = Self(15);
 }
-
-impl fmt::Display for ResultCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Steam result {}", self.0)
-    }
-}
-
-impl std::error::Error for ResultCode {}
 
 /// Workshop visibility, preserving future values without guessing their meaning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,103 +173,56 @@ pub struct PublishedFile {
 }
 
 /// A transport failure category, without URLs or underlying peer messages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TransportError {
     /// The HTTP client or request could not be constructed.
+    #[error("client or request configuration failed")]
     Configuration,
     /// A connection could not be established.
+    #[error("connection failed")]
     Connection,
     /// The request failed before a response was received.
+    #[error("request failed")]
     Request,
     /// Reading or decompressing the response body failed.
+    #[error("response body read failed")]
     ResponseBody,
 }
 
-impl fmt::Display for TransportError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Configuration => "client or request configuration failed",
-            Self::Connection => "connection failed",
-            Self::Request => "request failed",
-            Self::ResponseBody => "response body read failed",
-        })
-    }
-}
-
-impl std::error::Error for TransportError {}
-
 /// Request failures expose only typed values and fixed messages, never upstream error text.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("at least one published file ID is required")]
     EmptyBatch,
-    BatchTooLarge {
-        count: usize,
-    },
+    #[error("requested {count} files; the batch limit is {MAX_PUBLISHED_FILES}")]
+    BatchTooLarge { count: usize },
+    #[error("invalid published file ID: {0}")]
     InvalidPublishedFileId(PublishedFileId),
-    Transport(TransportError),
+    #[error("Steam HTTP {0}")]
+    Transport(#[source] TransportError),
+    #[error("Steam returned HTTP {status}")]
     Http {
         status: StatusCode,
         retry_after: Option<Duration>,
     },
+    #[error("Steam request timed out")]
     Timeout,
+    #[error("Steam response exceeds {MAX_RESPONSE_BYTES} bytes")]
     ResponseTooLarge,
-    Decode {
-        line: usize,
-        column: usize,
-    },
+    #[error("invalid Steam response at line {line}, column {column}")]
+    Decode { line: usize, column: usize },
+    #[error(
+        "Steam item count mismatch: requested {requested}, reported {reported}, received {received}"
+    )]
     ItemCountMismatch {
         requested: usize,
         reported: usize,
         received: usize,
     },
+    #[error("Steam response is missing requested item {0}")]
     MissingItem(PublishedFileId),
-    Api(ResultCode),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyBatch => f.write_str("at least one published file ID is required"),
-            Self::BatchTooLarge { count } => {
-                write!(
-                    f,
-                    "requested {count} files; the batch limit is {MAX_PUBLISHED_FILES}"
-                )
-            }
-            Self::InvalidPublishedFileId(id) => write!(f, "invalid published file ID: {id}"),
-            Self::Transport(error) => write!(f, "Steam HTTP {error}"),
-            Self::Http { status, .. } => write!(f, "Steam returned HTTP {status}"),
-            Self::Timeout => f.write_str("Steam request timed out"),
-            Self::ResponseTooLarge => {
-                write!(f, "Steam response exceeds {MAX_RESPONSE_BYTES} bytes")
-            }
-            Self::Decode { line, column } => {
-                write!(f, "invalid Steam response at line {line}, column {column}")
-            }
-            Self::ItemCountMismatch {
-                requested,
-                reported,
-                received,
-            } => {
-                write!(
-                    f,
-                    "Steam item count mismatch: requested {requested}, reported {reported}, received {received}"
-                )
-            }
-            Self::MissingItem(id) => write!(f, "Steam response is missing requested item {id}"),
-            Self::Api(code) => code.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Transport(error) => Some(error),
-            Self::Api(code) => Some(code),
-            _ => None,
-        }
-    }
+    #[error("{0}")]
+    Api(#[source] ResultCode),
 }
 
 impl Error {
@@ -322,7 +268,15 @@ impl Client {
 
     /// Use an explicit proxy when supplied; otherwise retain the HTTP client's defaults.
     pub fn with_proxy(proxy: Option<&str>) -> Result<Self, Error> {
-        let mut http = reqwest::Client::builder()
+        Self::build(reqwest::Client::builder(), proxy)
+    }
+
+    pub(crate) fn with_explicit_proxy(proxy: Option<&str>) -> Result<Self, Error> {
+        Self::build(reqwest::Client::builder().no_proxy(), proxy)
+    }
+
+    fn build(http: reqwest::ClientBuilder, proxy: Option<&str>) -> Result<Self, Error> {
+        let mut http = http
             .redirect(Policy::none())
             .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(3))

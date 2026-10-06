@@ -16,8 +16,8 @@ use pyo3::{
 
 use crate::{
     anyhow_error as error, from_python,
-    host::{Host, room_number},
-    settings::Configuration,
+    host::room_number,
+    settings::{Configuration, RoomStore},
     to_python,
 };
 
@@ -290,24 +290,24 @@ impl Upload {
 }
 
 #[pyfunction]
-#[pyo3(signature = (host, number, *, options=None, compression_level=9))]
+#[pyo3(signature = (rooms, number, *, options=None, compression_level=9))]
 fn export_archive<'py>(
     py: Python<'py>,
-    host: PyRef<'_, Host>,
+    rooms: PyRef<'_, RoomStore>,
     number: &Bound<'_, PyAny>,
     options: Option<&Bound<'_, PyAny>>,
     #[pyo3(from_py_with = level)] compression_level: u32,
 ) -> PyResult<Bound<'py, PyAny>> {
     let number = room_number(number)?;
     let options = options
-        .map(|value| from_python(value, 0, &mut 0))
+        .map(from_python)
         .transpose()?
         .unwrap_or_else(|| serde_json::json!({}));
     let options = serde_json::from_value::<native::ExportOptions>(options)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    let host = host.inner.clone();
+    let rooms = rooms.inner.clone();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let archive = native::export_host(&host, number, options, compression_level)
+        let archive = native::export_room(&rooms, number, options, compression_level)
             .await
             .map_err(error)?;
         Python::attach(|py| Py::new(py, ClusterArchive::from_native(py, archive)?))
@@ -315,7 +315,7 @@ fn export_archive<'py>(
 }
 
 fn level(value: &Bound<'_, PyAny>) -> PyResult<u32> {
-    from_python(value, 0, &mut 0)?
+    from_python(value)?
         .as_u64()
         .filter(|value| (1..=9).contains(value))
         .map(|value| value as u32)

@@ -13,7 +13,6 @@ use dst_server::{
         PreparedMods, UPDATE_COMPLETE, download_environment, prepare_shared, scan_setup,
         update_native,
     },
-    rpc::EventHub,
 };
 use serde_json::{Value, json};
 
@@ -50,12 +49,448 @@ fn output(lines: &[&str], status: i32) -> String {
     )
 }
 
+fn configured_maintenance() -> (tempfile::TempDir, RoomLock) {
+    use dst_server::{
+        mods::UpdateTarget,
+        policy::{ModPhase, PolicyState},
+        settings::ClusterConfig,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let mut lock = RoomLock::try_acquire(directory.path()).unwrap();
+    let config = ClusterConfig::from_value(json!({
+        "settings":{"cluster_key":"maintenance-fixture","master_ip":"127.0.0.1"}, "mod_settings":{},
+        "shards":{
+            "Master":{"settings":{"is_master":true,"id":1,"name":"Master","server_port":19000},"mods":{"entries":{"workshop-42":{"enabled":true}}}},
+            "Caves":{"settings":{"is_master":false,"id":2,"name":"Caves","server_port":19001,"master_server_port":19002},"mods":{"entries":{"workshop-42":{"enabled":true}}}}
+        }
+    })).unwrap();
+    config
+        .save(
+            &mut lock.while_stopped(),
+            dst_server::files::PermissionFiles::Preserve,
+        )
+        .unwrap();
+    let mut state = PolicyState::default();
+    state.queue_mod_update(true).unwrap();
+    state.mods.phase = ModPhase::Verifying;
+    state.mods.attempts = 1;
+    state.mods.targets = [(
+        42,
+        UpdateTarget {
+            version: "2".into(),
+            shards: ["Master".into(), "Caves".into()].into(),
+        },
+    )]
+    .into();
+    state.save(&mut lock).unwrap();
+    lock.update_state(|value| {
+        value.insert("other".into(), json!("preserved"));
+        Ok(())
+    })
+    .unwrap();
+    (directory, lock)
+}
+
+#[test]
+fn structured_and_raw_saves_reconcile_active_shards_and_shared_enablement() {
+    use dst_server::{files::PermissionFiles, policy::PolicyState, settings::ClusterConfig};
+    let (directory, mut lock) = configured_maintenance();
+    let before = PolicyState::load(&lock).unwrap().mods;
+    let mut configuration = ClusterConfig::load(&lock).unwrap().into_value();
+    configuration["shards"]["Caves"]["mods"] = json!({});
+    let changed = ClusterConfig::from_value(configuration)
+        .unwrap()
+        .save(&mut lock.while_stopped(), PermissionFiles::Preserve)
+        .unwrap();
+    assert!(changed.contains(&PathBuf::from("Caves/modoverrides.lua")));
+    assert!(!changed.contains(&PathBuf::from(dst_server::files::STATE_FILE)));
+    let mut expected = before.clone();
+    expected
+        .targets
+        .get_mut(&42)
+        .unwrap()
+        .shards
+        .remove("Caves");
+    assert_eq!(PolicyState::load(&lock).unwrap().mods, expected);
+
+    let server = lock.read_text("Caves/server.ini").unwrap();
+    lock.while_stopped()
+        .write_files(
+            [
+                (PathBuf::from("Island/server.ini"), server),
+                (
+                    PathBuf::from("Island/modoverrides.lua"),
+                    "return {['workshop-42']={enabled=true}}\n".into(),
+                ),
+                (
+                    PathBuf::from("mods/modsettings.lua"),
+                    "ForceEnableMod('workshop-42')\n".into(),
+                ),
+                (
+                    PathBuf::from("Master/modoverrides.lua"),
+                    "return {}\n".into(),
+                ),
+            ]
+            .into(),
+            vec![],
+            PermissionFiles::Preserve,
+        )
+        .unwrap();
+    assert_eq!(
+        PolicyState::load(&lock).unwrap().mods.targets[&42].shards,
+        ["Master".into(), "Caves".into(), "Island".into()].into()
+    );
+    fs::create_dir_all(directory.path().join("Island/save")).unwrap();
+    lock.while_stopped()
+        .write_files(
+            Default::default(),
+            vec!["Island/server.ini".into()],
+            PermissionFiles::Preserve,
+        )
+        .unwrap();
+    assert!(directory.path().join("Island/save").is_dir());
+    assert_eq!(
+        PolicyState::load(&lock).unwrap().mods.targets[&42].shards,
+        ["Master".into(), "Caves".into()].into()
+    );
+    lock.while_stopped()
+        .write_files(
+            [(PathBuf::from("mods/modsettings.lua"), String::new())].into(),
+            vec![],
+            PermissionFiles::Preserve,
+        )
+        .unwrap();
+    assert_eq!(PolicyState::load(&lock).unwrap().mods, Default::default());
+    assert_eq!(lock.read_state().unwrap()["other"], "preserved");
+
+    for was_active in [true, false] {
+        let (directory, mut lock) = configured_maintenance();
+        fs::remove_file(directory.path().join("Caves/modoverrides.lua")).unwrap();
+        if !was_active {
+            fs::remove_file(directory.path().join("Caves/server.ini")).unwrap();
+        }
+        lock.while_stopped()
+            .write_files(
+                Default::default(),
+                vec!["Caves/server.ini".into()],
+                PermissionFiles::Preserve,
+            )
+            .unwrap();
+        let required = PolicyState::load(&lock).unwrap().mods.targets[&42]
+            .shards
+            .clone();
+        assert_eq!(
+            required.contains("Caves"),
+            !was_active,
+            "only a newly removed active shard cancels its historical Mod target"
+        );
+        assert!(required.contains("Master"));
+    }
+}
+
+#[test]
+fn ambiguous_mod_names_preserve_maintenance_without_implying_downloads() {
+    use dst_server::{
+        files::PermissionFiles,
+        policy::PolicyState,
+        settings::{ClusterConfig, ModOverrides},
+    };
+    let canonical = "return {['workshop-42']={enabled=true}}\n";
+    let numeric = "return {['42']={enabled=true}}\n";
+    let conflicting = "return {['workshop-42']={enabled=true}, ['42']={enabled=false}}\n";
+    for structured in [false, true] {
+        for (old, new, retained, downloads) in [
+            (canonical, numeric, true, vec![]),
+            (canonical, conflicting, true, vec![42]),
+            (conflicting, "return {}\n", true, vec![]),
+            (numeric, "return {}\n", true, vec![]),
+            (
+                canonical,
+                "return {['042']={enabled=true}}\n",
+                false,
+                vec![],
+            ),
+        ] {
+            let (directory, mut lock) = configured_maintenance();
+            for shard in ["Master", "Caves"] {
+                fs::write(directory.path().join(shard).join("modoverrides.lua"), old).unwrap();
+            }
+            let before = PolicyState::load(&lock).unwrap().mods;
+            let mut value = ClusterConfig::load(&lock).unwrap().into_value();
+            value["downloads"] = json!({});
+            for shard in ["Master", "Caves"] {
+                value["shards"][shard]["mods"] = ModOverrides::parse(new).unwrap().into_value();
+            }
+            let configuration = ClusterConfig::from_value(value).unwrap();
+            assert_eq!(
+                configuration.resolved_downloads().unwrap().data().items(),
+                downloads
+            );
+            if structured {
+                configuration
+                    .save(&mut lock.while_stopped(), PermissionFiles::Preserve)
+                    .unwrap();
+            } else {
+                lock.while_stopped()
+                    .write_files(
+                        ["Master", "Caves"]
+                            .map(|shard| {
+                                (PathBuf::from(shard).join("modoverrides.lua"), new.into())
+                            })
+                            .into(),
+                        vec![],
+                        PermissionFiles::Preserve,
+                    )
+                    .unwrap();
+            }
+            ClusterConfig::load(&lock).unwrap();
+            assert_eq!(
+                PolicyState::load(&lock).unwrap().mods,
+                if retained { before } else { Default::default() },
+                "structured={structured}, {old} -> {new}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ambiguous_mod_names_allow_proven_shard_changes() {
+    use dst_server::{files::PermissionFiles, policy::PolicyState};
+    let (_directory, mut lock) = configured_maintenance();
+    let mut expected = PolicyState::load(&lock).unwrap().mods;
+    lock.while_stopped()
+        .write_files(
+            [
+                (
+                    "Master/modoverrides.lua".into(),
+                    "return {['42']={enabled=true}}\n".into(),
+                ),
+                ("Caves/modoverrides.lua".into(), "return {}\n".into()),
+                (
+                    "Island/server.ini".into(),
+                    "[SHARD]\nis_master=false\nid=3\nname=Island\n[NETWORK]\nserver_port=19003\n"
+                        .into(),
+                ),
+                (
+                    "Island/modoverrides.lua".into(),
+                    "return {['42']={enabled=true}}\n".into(),
+                ),
+            ]
+            .into(),
+            vec![],
+            PermissionFiles::Preserve,
+        )
+        .unwrap();
+    expected.targets.get_mut(&42).unwrap().shards = ["Master".into()].into();
+    assert_eq!(PolicyState::load(&lock).unwrap().mods, expected);
+
+    lock.while_stopped()
+        .write_files(
+            [(
+                "Island/modoverrides.lua".into(),
+                "return {['workshop-42']={enabled=true}}\n".into(),
+            )]
+            .into(),
+            vec!["Master/server.ini".into()],
+            PermissionFiles::Preserve,
+        )
+        .unwrap();
+    expected.targets.get_mut(&42).unwrap().shards = ["Island".into()].into();
+    assert_eq!(PolicyState::load(&lock).unwrap().mods, expected);
+}
+
+#[test]
+fn structured_save_repairs_legacy_lua_and_preserves_maintenance_targets() {
+    use dst_server::{files::PermissionFiles, policy::PolicyState, settings::ClusterConfig};
+    for path in ["Caves/modoverrides.lua", "mods/modsettings.lua"] {
+        let (directory, mut lock) = configured_maintenance();
+        let before = PolicyState::load(&lock).unwrap().mods;
+        let mut desired = ClusterConfig::load(&lock).unwrap().into_value();
+        desired["shards"]["Caves"]["mods"] = json!({});
+        let mut legacy = b"-- old comment \xe9\n".to_vec();
+        legacy.extend(fs::read(directory.path().join(path)).unwrap());
+        fs::write(directory.path().join(path), &legacy).unwrap();
+
+        if path == "mods/modsettings.lua" {
+            let mut omitted = desired.clone();
+            omitted.as_object_mut().unwrap().remove("mod_settings");
+            ClusterConfig::from_value(omitted)
+                .unwrap()
+                .save(&mut lock.while_stopped(), PermissionFiles::Preserve)
+                .unwrap();
+            assert_eq!(fs::read(directory.path().join(path)).unwrap(), legacy);
+        }
+        let desired = ClusterConfig::from_value(desired).unwrap();
+        let written = desired
+            .save(&mut lock.while_stopped(), PermissionFiles::Preserve)
+            .unwrap();
+        assert!(written.contains(&PathBuf::from(path)));
+        assert_eq!(
+            lock.read_text(path).unwrap(),
+            desired.files().unwrap()[Path::new(path)]
+        );
+        assert_eq!(PolicyState::load(&lock).unwrap().mods, before);
+    }
+}
+
+#[test]
+fn configuration_uncertainty_and_initialization_preserve_existing_targets() {
+    use dst_server::{
+        files::PermissionFiles,
+        policy::{ModPhase, PolicyState},
+    };
+    for scenario in [
+        "opaque",
+        "missing",
+        "initialization",
+        "updating",
+        "unrelated",
+    ] {
+        let (directory, mut lock) = configured_maintenance();
+        match scenario {
+            "opaque" => fs::write(
+                directory.path().join("Caves/modoverrides.lua"),
+                "return GetMods()\n",
+            )
+            .unwrap(),
+            "missing" => fs::write(
+                directory.path().join("Caves/modoverrides.lua"),
+                "return {}\n",
+            )
+            .unwrap(),
+            "initialization" => {
+                fs::remove_file(directory.path().join("mods/modsettings.lua")).unwrap()
+            }
+            "updating" => {
+                let mut state = PolicyState::load(&lock).unwrap();
+                state.mods.phase = ModPhase::Updating;
+                state.save(&mut lock).unwrap();
+            }
+            _ => {}
+        }
+        let before = PolicyState::load(&lock).unwrap().mods;
+        if scenario == "initialization" {
+            prepare_shared(&mut lock).unwrap();
+        } else {
+            let path = if scenario == "unrelated" {
+                "Caves/worldgenoverride.lua"
+            } else {
+                "Caves/modoverrides.lua"
+            };
+            lock.while_stopped()
+                .write_files(
+                    [(PathBuf::from(path), "return {}\n".into())].into(),
+                    vec![],
+                    PermissionFiles::Preserve,
+                )
+                .unwrap();
+        }
+        assert_eq!(PolicyState::load(&lock).unwrap().mods, before, "{scenario}");
+    }
+}
+
+#[test]
+fn partial_configuration_failures_reconcile_only_changes_that_reached_disk() {
+    use dst_server::{files::PermissionFiles, policy::PolicyState};
+    for blocked in ["Caves", "Master"] {
+        let (directory, mut lock) = configured_maintenance();
+        fs::create_dir(directory.path().join(blocked).join(".dst-config-write.tmp")).unwrap();
+        let error = lock
+            .while_stopped()
+            .write_files(
+                [
+                    (
+                        PathBuf::from("Caves/modoverrides.lua"),
+                        "return {}\n".into(),
+                    ),
+                    (
+                        PathBuf::from("Master/modoverrides.lua"),
+                        "return {}\n".into(),
+                    ),
+                ]
+                .into(),
+                vec![],
+                PermissionFiles::Preserve,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(&format!("{blocked}/modoverrides.lua")));
+        assert!(
+            error.root_cause().to_string().contains("regular"),
+            "{error:#}"
+        );
+        let expected = if blocked == "Caves" {
+            ["Caves", "Master"].as_slice()
+        } else {
+            ["Master"].as_slice()
+        };
+        assert_eq!(
+            PolicyState::load(&lock).unwrap().mods.targets[&42].shards,
+            expected.iter().map(|s| s.to_string()).collect()
+        );
+    }
+}
+
+#[test]
+fn state_write_failure_reports_applied_configuration_without_claiming_retry_repairs_it() {
+    use dst_server::{files::PermissionFiles, policy::PolicyState};
+    for config_failure in [false, true] {
+        let (directory, mut lock) = configured_maintenance();
+        let before = PolicyState::load(&lock).unwrap().mods;
+        let root_blocker = directory.path().join(".dst-config-write.tmp");
+        fs::create_dir(&root_blocker).unwrap();
+        let mut files = [(
+            PathBuf::from("Caves/modoverrides.lua"),
+            "return {}\n".into(),
+        )]
+        .into_iter()
+        .collect::<dst_server::files::FileChanges>();
+        if config_failure {
+            fs::create_dir(directory.path().join("Master/.dst-config-write.tmp")).unwrap();
+            files.insert("Master/modoverrides.lua".into(), "return {}\n".into());
+        }
+        let error = lock
+            .while_stopped()
+            .write_files(files.clone(), vec![], PermissionFiles::Preserve)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("maintenance"), "{error:#}");
+        if config_failure {
+            assert!(format!("{error:#}").contains("Master/modoverrides.lua"));
+        }
+        assert!(
+            error.root_cause().to_string().contains("regular"),
+            "{error:#}"
+        );
+        assert_eq!(
+            lock.read_text("Caves/modoverrides.lua").unwrap(),
+            "return {}\n"
+        );
+        assert_eq!(PolicyState::load(&lock).unwrap().mods, before);
+        fs::remove_dir(root_blocker).unwrap();
+        if config_failure {
+            fs::remove_dir(directory.path().join("Master/.dst-config-write.tmp")).unwrap();
+        }
+        lock.while_stopped()
+            .write_files(files, vec![], PermissionFiles::Preserve)
+            .unwrap();
+        let after = PolicyState::load(&lock).unwrap().mods;
+        assert!(
+            after.targets[&42].shards.contains("Caves"),
+            "the lost enabled delta is not recreated by an identical save"
+        );
+        assert_eq!(
+            after.targets[&42].shards.contains("Master"),
+            !config_failure
+        );
+    }
+}
+
 #[test]
 fn scan_keeps_dynamic_setup_and_reads_only_top_level_literal_declarations() {
     let setup = scan_setup(
         r#"
 -- ServerModSetup("100")
 ServerModSetup(""); ServerModSetup('42'); ServerModSetup([[7]])
+ServerModSetup(([[17]])); other.ServerModSetup("100"); ServerModSetup("101")()
 local id = "99"; ServerModSetup(id)
 if false then ServerModSetup("999") end
 ServerModSetup("4" .. "2"); OtherSetup("700"); ServerModSetup("42", "43")
@@ -64,7 +499,7 @@ return ServerModSetup("8"), ServerModCollectionSetup("99")
 "#,
     )
     .unwrap();
-    assert_eq!(setup.items, BTreeSet::from([7, 8, 42]));
+    assert_eq!(setup.items, BTreeSet::from([7, 8, 17, 42]));
     assert_eq!(setup.collections, BTreeSet::from([99]));
     assert!(setup.has_code);
     assert!(!scan_setup("-- ServerModSetup('42')\r\n").unwrap().has_code);
@@ -145,7 +580,7 @@ async fn prepared_dynamic_setup_uses_shared_mods_and_empty_setup_skips_download(
     let mut lock = RoomLock::try_acquire(&room).unwrap();
     let prepared = PreparedMods::prepare(&mut lock, &executable, None).unwrap();
     assert_eq!(
-        prepared.update(&EventHub::default()).await.unwrap()["updated"],
+        prepared.update(&|_| {}).await.unwrap()["download_completed"],
         false
     );
     assert!(!ugc.join("attempts").exists());
@@ -158,7 +593,7 @@ async fn prepared_dynamic_setup_uses_shared_mods_and_empty_setup_skips_download(
     symlink(room.join("mods"), directory.path().join("install/mods")).unwrap();
     let prepared = PreparedMods::prepare(&mut lock, &executable, None).unwrap();
     assert_eq!(
-        prepared.update(&EventHub::default()).await.unwrap()["updated"],
+        prepared.update(&|_| {}).await.unwrap()["download_completed"],
         true
     );
     assert_eq!(fs::read_to_string(ugc.join("attempts")).unwrap(), "1");
@@ -201,7 +636,7 @@ async fn updater_validates_completion_failure_precedence_and_retains_partial_dow
     ] {
         let directory = tempfile::tempdir().unwrap();
         let (executable, ugc) = fixture(directory.path(), &output(&lines, status));
-        let outcome = update_native(&executable, &ugc, None, &EventHub::default()).await;
+        let outcome = update_native(&executable, &ugc, None, &|_| {}).await;
         if let Some(error) = error {
             assert!(outcome.unwrap_err().message.contains(error));
         } else {
@@ -228,7 +663,7 @@ print({})
     );
     let (executable, ugc) = fixture(directory.path(), &source);
     for proxy in [None, Some("http://user:secret@127.0.0.1:1080")] {
-        update_native(&executable, &ugc, proxy, &EventHub::default())
+        update_native(&executable, &ugc, proxy, &|_| {})
             .await
             .unwrap();
         let environment: Value =
@@ -293,7 +728,7 @@ print({})
             0,
         ),
     );
-    let error = update_native(&executable, &ugc, Some(proxy), &EventHub::default())
+    let error = update_native(&executable, &ugc, Some(proxy), &|_| {})
         .await
         .unwrap_err();
     assert!(!error.message.contains("secret"));
@@ -338,9 +773,8 @@ print({}, flush=True)
         );
         let (executable, ugc) = fixture(directory.path(), &source);
         let task_ugc = ugc.clone();
-        let task = tokio::spawn(async move {
-            update_native(&executable, &task_ugc, None, &EventHub::default()).await
-        });
+        let task =
+            tokio::spawn(async move { update_native(&executable, &task_ugc, None, &|_| {}).await });
         wait_until(|| ugc.join("descendant").exists()).await;
         if cancel {
             task.abort();
@@ -385,7 +819,7 @@ async fn missing_output_never_counts_as_a_successful_download() {
         ),
     );
     assert_eq!(
-        update_native(&executable, &ugc, None, &EventHub::default())
+        update_native(&executable, &ugc, None, &|_| {})
             .await
             .unwrap_err()
             .code,
@@ -407,11 +841,7 @@ async fn explicit_interruption_returns_after_downloader_cleanup() {
     let mut lock = RoomLock::try_acquire(&room).unwrap();
     let prepared = PreparedMods::prepare(&mut lock, &executable, None).unwrap();
     let (cancel, cancelled) = tokio::sync::watch::channel(0);
-    let task = tokio::spawn(async move {
-        prepared
-            .update_cancellable(&EventHub::default(), cancelled)
-            .await
-    });
+    let task = tokio::spawn(async move { prepared.update_cancellable(&|_| {}, cancelled).await });
     wait_until(|| ugc.join("pid").exists()).await;
     let pid: u32 = fs::read_to_string(ugc.join("pid"))
         .unwrap()

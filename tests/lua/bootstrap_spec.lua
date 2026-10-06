@@ -1,218 +1,108 @@
-local root, scenario = assert(arg[1]), assert(arg[2])
-dofile(root .. "/tests/lua/setup.lua")(root, assert(arg[3]))
+local root, scripts, scenario = assert(arg[1]), assert(arg[2]), assert(arg[3])
+dofile(root .. "/tests/lua/setup.lua")(root, scripts)
 require("class")
 
-local outputs = {}
-nolineprint = function(value) outputs[#outputs + 1] = value end
-local encoded = io.read("*a")
-if encoded ~= "" then encoded = '{"driver":' .. encoded .. '}' end
-local configuration_callback
+local profile = scenario == "optional_failure" and "timeline" or "off"
+local nonce = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+local configuration = json.encode({driver = { nonce = nonce, profile = profile }})
+local configure, records, ready_writes = nil, {}, 0
 TheSim = {
-    LuaPrintRemote = function() error("bootstrap does not send RPC replies") end,
-    GetNumLaunches = function() return scenario == "invalid_generation" and 0.5 or 7 end,
-    GetPersistentString = function(self, path, callback)
+    GetNumLaunches = function() return 7 end,
+    GetPersistentString = function(_, path, callback)
         assert(path == "../dst_server_driver.json")
-        if scenario == "configuration_read_failure" then error("SECRET_TOKEN private chat", 0) end
-        if scenario == "delayed_configuration" then configuration_callback = callback
-        else callback(encoded ~= "", encoded) end
+        if scenario == "delayed_configuration" then configure = callback
+        else callback(true, configuration) end
     end,
 }
-ExecuteConsoleCommand = function() error("bootstrap does not execute console commands") end
-os.getenv = nil -- DST's native sandbox does not expose getenv.
-GetTick = function() return 10 end
+dofile(root .. "/tests/lua/capture_remote.lua")(function(line)
+    assert(line:sub(1, 11) == "DST_DRIVER|" and #line < 65536)
+    local record = require("dst_server.wire").decode(line:sub(12))
+    assert(record.nonce == nonce and record.v == nil)
+    if record.health then
+        ready_writes = ready_writes + 1
+        if scenario == "write_before" then error("private write failure") end
+        if scenario == "optional_failure" then io.write(line, "\n") end
+    end
+    records[#records + 1] = record
+    if record.health and scenario == "write_after" then error("private write failure") end
+end)
+GetTick = function() return 1 end
 GetTimeReal = function() return 20 end
-Networking_ModOutOfDateAnnouncement = function(...) return ... end
-Networking_Say = function(...) return ... end
-Networking_Announcement = function(...) return ... end
-Networking_SkinAnnouncement = function(...) return ... end
-Networking_SystemMessage = function(...) return ... end
-Networking_RollAnnouncement = function(...) return ... end
-OnSimPaused = function(...) return ... end
-OnSimUnpaused = function(...) return ... end
-MAX_VOTE_OPTIONS = 4
-local rescue = {serverfn = function() error("rescue must be replaced during network initialization") end}
-local rescues = 0
-GetCommonEmotes = function() return {} end
-EMOTE_ITEMS = {}
-UserToPlayer = function() return nil end
-package.loaded.usercommands = {
-    FinishVote = function() end,
-    GetCommandFromName = function(name) assert(name == "rescue"); return rescue end,
-}
-Shard_UpdateWorldState = function(...) return ... end
+ExecuteConsoleCommand = function() end
+OnSimPaused, OnSimUnpaused = function() end, function() end
+Networking_ModOutOfDateAnnouncement = function() end
+Networking_Say = function() end
+MAX_CHAT_INPUT_LENGTH = 150
+string.utf8len = function(value) return #value end
 AllPlayers, Ents = {}, {}
-local native_failure = {}
-local next_guid = 0
-
-local function entity(name)
-    next_guid = next_guid + 1
-    local inst = {
-        prefab = name, GUID = next_guid, components = {}, replica = {}, listeners = {},
-        state = { cycles = 1 },
-        Transform = { GetWorldPosition = function() return 1, 0, 2 end },
-        IsValid = function() return true end,
-        HasTag = function(self, tag) return tag == "player" and self.userid ~= nil end,
-        ListenForEvent = function(self, event, callback)
+local listeners, timers = {}, 0
+SpawnPrefabFromSim = function(name)
+    if name == "rock" then return 2, nil, name, nil end
+    assert(name == "world")
+    TheWorld = {
+        GUID = 1, prefab = name, ismastersim = true, ismastershard = true, state = { cycles = 1 },
+        components = {}, HasTag = function() return false end, IsValid = function() return true end,
+        ListenForEvent = function(_, event, callback)
             if scenario == "connections_install_failure" and event == "ms_clientauthenticationcomplete" then
-                error("SECRET_TOKEN private chat", 0)
+                error("private listener failure")
             end
-            self.listeners[event] = self.listeners[event] or {}
-            table.insert(self.listeners[event], callback)
+            listeners[event] = callback
         end,
-        PushEvent = function(self, event, data)
-            for _, callback in ipairs(self.listeners[event] or {}) do callback(self, data) end
+        WatchWorldState = function() error("optional world observer failed") end,
+        DoStaticPeriodicTask = function(_, period, _, delay)
+            assert(period == 60 and delay == 0)
+            timers = timers + 1
+            return { Cancel = function() timers = timers - 1 end }
         end,
-        WatchWorldState = function()
-            if scenario == "optional_failure" then error("SECRET_TOKEN private chat", 0) end
-        end,
-        DoStaticPeriodicTask = function(self, period, callback, delay)
-            if scenario == "connections_start_failure" then error("SECRET_TOKEN private chat", 0) end
-            assert(period == 60 and delay == 0 and self.meta ~= nil)
-            assert(self.presence_task == nil, "only one snapshot task per world")
-            self.presence_task = { callback = callback, Cancel = function(task) task.cancelled = true end }
-            return self.presence_task
-        end,
-        AddComponent = function(self, name)
-            assert(name == "dst_server_runtime" and self.meta == nil, "install before metadata is loaded")
-            if scenario ~= "delayed_configuration" then
-                local starting = json.decode(outputs[1]:sub(12))
-                assert(starting.generation == 7 and starting.health == nil, "starting must precede component installation")
-            end
-            if scenario == "component_failure" then error("SECRET_TOKEN private chat", 0) end
-            self.components[name] = require("components/" .. name)(self)
+        AddComponent = function(self, component)
+            self.components[component] = require("components/" .. component)(self)
         end,
     }
-    Ents[inst.GUID] = inst
-    return inst
+    Ents[1] = TheWorld
+    return TheWorld.GUID, nil, name, nil
 end
 
-SpawnPrefabFromSim = function(name)
-    if name == "native_error" then error(native_failure, 0) end
-    if name == "missing" then return -1 end
-    if name == "existing" then return TheWorld.GUID end
-    local inst = entity(name)
-    if name == "world" or name == "client" then
-        TheWorld = inst
-        inst.ismastersim = name == "world"
-        inst.ismastershard = inst.ismastersim
-    end
-    if TheWorld ~= nil then TheWorld:PushEvent("entity_spawned", inst) end
-    return inst.GUID
-end
-
-local original = SpawnPrefabFromSim
 local bootstrap = require("dst_server.bootstrap")
+local original = SpawnPrefabFromSim
 bootstrap.start()
-local wrapped = SpawnPrefabFromSim
+local spawn = SpawnPrefabFromSim
 bootstrap.start()
-assert(SpawnPrefabFromSim == wrapped, "duplicate bootstrap must not stack wrappers")
-
-local function controls()
-    local records = {}
-    for _, line in ipairs(outputs) do
-        assert(not line:find("SECRET_TOKEN", 1, true) and not line:find("private chat", 1, true))
-        assert(not line:find("[\r\n%z]") and #line <= 64 * 1024)
-        if line:sub(1, 11) == "DST_DRIVER|" then records[#records + 1] = json.decode(line:sub(12)) end
-    end
-    return records
+assert(SpawnPrefabFromSim == spawn)
+local expected = original
+if scenario == "delayed_configuration" then
+    expected = function(...) return spawn(...) end
+    SpawnPrefabFromSim = expected
 end
-
-if scenario == "configuration_failure" or scenario == "invalid_generation" or scenario == "configuration_read_failure" then
-    assert(wrapped ~= original and #outputs == 1)
-    local failed = controls()[1]
-    assert(failed.nonce == nil and failed.generation == nil and failed.error == "configuration_failed")
-elseif scenario == "native_results" then
-    assert(SpawnPrefabFromSim("missing") == -1)
-    assert(SpawnPrefabFromSim("tree") == 1)
-    assert(SpawnPrefabFromSim("client") == 2 and next(TheWorld.components) == nil)
-    local ok, failure = pcall(SpawnPrefabFromSim, "native_error")
-    assert(not ok and failure == native_failure and #outputs == 0)
+local function check_spawn(guid, prefab, ...)
+    local value, hole, name, trailing = ...
+    assert(select("#", ...) == 4 and value == guid and hole == nil and name == prefab and trailing == nil)
+end
+check_spawn(1, "world", SpawnPrefabFromSim("world"))
+assert(SpawnPrefabFromSim == expected)
+setmetatable(Ents, { __index = function() error("ordinary spawns must not inspect Ents") end })
+check_spawn(2, "rock", SpawnPrefabFromSim("rock"))
+local runtime = TheWorld.components.dst_server_runtime
+TheWorld.meta = {session_identifier = "SESSION"}
+TheWorld.net = {components = {worldvoter = {}}}
+runtime:OnPostInit()
+if configure then
+    assert(#records == 0 and runtime.installed == nil)
+    configure(true, configuration)
+    configure(false)
+end
+runtime:OnPostInit()
+assert(ready_writes == 1 and records[1].generation == 7)
+local result = records[#records]
+if scenario == "write_before" or scenario == "write_after" then
+    assert(result.error == "publication_failed")
 else
-    if scenario == "installation_failure" then Networking_ModOutOfDateAnnouncement = nil end
-    local guid = SpawnPrefabFromSim("world")
-    assert(guid == TheWorld.GUID)
-    assert(SpawnPrefabFromSim("existing") == guid)
-    local component = TheWorld.components.dst_server_runtime
-    if scenario == "component_failure" then
-        assert(component == nil)
-    else
-        assert(component ~= nil)
-        TheWorld.meta = { session_identifier = "SESSION" }
-        assert(TheWorld.listeners.master_worldvoterupdate == nil, "network not yet created")
-        TheWorld.net = { components = { worldvoter = { OnUpdate = function() end } } }
-        -- Reforged replaces /rescue while creating the world network.
-        rescue.serverfn = function() rescues = rescues + 1; return "rescued" end
-        if scenario == "commands_install_failure" then rescue.serverfn = nil end
-        if scenario == "commands_unsupported" then GetCommonEmotes = nil end
-        if scenario == "votes_install_failure" then package.loaded.usercommands.FinishVote = nil end
-        if scenario == "publication_failure" then
-            require("dst_server").health = function() return { oversized = string.rep("x", 64 * 1024) } end
-        end
-        component:OnPostInit()
-        component:OnPostInit()
-        if scenario == "delayed_configuration" then
-            assert(#outputs == 0 and component.installed == nil)
-            configuration_callback(true, encoded)
-            configuration_callback(false) -- Duplicate callback cannot undo readiness.
-        end
-    end
-    local records = controls()
-    assert(#records == 2 and records[1].generation == 7)
-    local result = records[2]
-    if scenario == "component_failure" or scenario == "installation_failure" then
-        assert(result.error == "installation_failed" and result.health == nil and result.generation == 7)
-    elseif scenario == "publication_failure" then
-        assert(result.error == "publication_failed" and result.health == nil and result.generation == 7)
-    else
-        assert(result.health.generation == 7 and result.error == nil)
-        local expected = scenario == "off" and "disabled" or scenario == "optional_failure" and "degraded" or "active"
-        if scenario == "connections_install_failure" or scenario == "connections_start_failure" then expected = "degraded" end
-        if scenario == "votes_install_failure" or scenario == "commands_install_failure" then expected = "degraded" end
-        assert(result.health.telemetry_status == expected)
-        if expected == "degraded" then
-            assert(component.installed and result.health.errors == 1)
-            assert(result.health.last_error.stage == (scenario == "connections_install_failure"
-                and "connections.install" or scenario == "optional_failure" and "world.install"
-                or scenario == "commands_install_failure" and "player_commands.install"
-                or scenario == "votes_install_failure" and "votes.install" or "connections.start"))
-        end
-        local command_status = scenario == "off" and "disabled"
-            or scenario == "commands_install_failure" and "failed"
-            or scenario == "commands_unsupported" and "unsupported" or "active"
-        assert(result.health.capabilities.player_commands == command_status)
-        if scenario ~= "commands_install_failure" then
-            local before = #outputs
-            assert(rescue.serverfn({}, {userid = "KU_RESCUE"}) == "rescued" and rescues == 1)
-            assert(#outputs == before + (command_status == "active" and 1 or 0), "capture the final command exactly once")
-            if command_status == "active" then
-                local event = json.decode(outputs[#outputs]:sub(10))
-                assert(event.event == "dst.player.rescue_requested" and event.data.userid == "KU_RESCUE")
-            end
-        end
-        local votes_installed = scenario ~= "off" and scenario ~= "votes_install_failure"
-        assert((TheWorld.listeners.master_worldvoterupdate ~= nil) == votes_installed)
-        if votes_installed then assert(#TheWorld.listeners.master_worldvoterupdate == 1) end
-        assert(require("dst_server").call("health").generation == 7)
-        if scenario == "connections_start_failure" then
-            assert(component.presence_task == nil)
-        else
-            assert(component.presence_task == TheWorld.presence_task)
-            component:OnRemoveFromEntity()
-            assert(component.presence_task.cancelled)
-        end
-        if scenario == "active" or scenario == "off" then
-            local player = entity("wilson")
-            player.userid = "KU_TEST"
-            AllPlayers = { player }
-            TheWorld:PushEvent("ms_playerjoined", player)
-            player:PushEvent("ms_skilltreeinitialized")
-            local loaded = json.decode(outputs[#outputs]:sub(10))
-            assert(loaded.event == "dst.player.loaded" and loaded.generation == 7)
-            assert(loaded.data.player.userid == player.userid)
-        end
-    end
+    local health = assert(result.health)
+    assert(health.generation == 7 and health.profile == profile and health.protocol == nil)
+    assert(health.control_ready == (scenario ~= "connections_install_failure"))
+    assert(health.telemetry_status == (profile == "off" and "disabled" or "degraded"))
+    assert(timers == (profile == "off" and 0 or 1))
+    if scenario == "off" then assert(listeners.master_worldvoterupdate, "vote control still observes native state") end
+    runtime:OnRemoveFromEntity()
+    assert(timers == 0)
 end
-
-controls()
-for _, line in ipairs(outputs) do io.write(line, "\n") end
 io.write("ok\n")

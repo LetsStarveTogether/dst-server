@@ -45,11 +45,11 @@ pub(crate) fn anyhow_error(error: anyhow::Error) -> PyErr {
     }
 }
 
-pub(crate) fn from_python(
-    value: &Bound<'_, PyAny>,
-    depth: usize,
-    count: &mut usize,
-) -> PyResult<Value> {
+pub(crate) fn from_python(value: &Bound<'_, PyAny>) -> PyResult<Value> {
+    read_json_value(value, 0, &mut 0)
+}
+
+fn read_json_value(value: &Bound<'_, PyAny>, depth: usize, count: &mut usize) -> PyResult<Value> {
     *count += 1;
     if depth > 64 || *count > 65_536 {
         return Err(PyValueError::new_err("value exceeds nesting or item limit"));
@@ -88,7 +88,7 @@ pub(crate) fn from_python(
                 .map_err(|_| PyTypeError::new_err("object keys must be strings"))?;
             result.insert(
                 key.to_str()?.to_owned(),
-                from_python(&object.get_item(key)?, depth + 1, count)?,
+                read_json_value(&object.get_item(key)?, depth + 1, count)?,
             );
         }
         return Ok(Value::Object(result));
@@ -96,14 +96,14 @@ pub(crate) fn from_python(
     if let Ok(values) = value.cast::<PyList>() {
         return values
             .iter()
-            .map(|value| from_python(&value, depth + 1, count))
+            .map(|value| read_json_value(&value, depth + 1, count))
             .collect::<PyResult<Vec<_>>>()
             .map(Value::Array);
     }
     if let Ok(values) = value.cast::<PyTuple>() {
         return values
             .iter()
-            .map(|value| from_python(&value, depth + 1, count))
+            .map(|value| read_json_value(&value, depth + 1, count))
             .collect::<PyResult<Vec<_>>>()
             .map(Value::Array);
     }
@@ -175,7 +175,7 @@ impl Client {
         timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let arguments = arguments
-            .map(|value| from_python(value, 0, &mut 0))
+            .map(from_python)
             .transpose()?
             .unwrap_or_else(|| json!({}));
         let request = serde_json::from_value::<model::Request>(
@@ -207,10 +207,11 @@ impl Client {
         })
     }
 
-    fn subscribe<'py>(&self, py: Python<'py>, kind: String) -> PyResult<Bound<'py, PyAny>> {
+    fn subscribe<'py>(&self, py: Python<'py>, kind: &str) -> PyResult<Bound<'py, PyAny>> {
+        let kind = kind.parse().map_err(py_error)?;
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let inner = client.subscribe(&kind).await.map_err(py_error)?;
+            let inner = client.subscribe(kind).await.map_err(py_error)?;
             Python::attach(|py| Py::new(py, Subscription { inner }))
         })
     }
@@ -235,9 +236,13 @@ impl Subscription {
         let subscription = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let batch = subscription.next(max_items).await.map_err(py_error)?;
-            let value =
-                serde_json::to_value(batch).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Python::attach(|py| to_python(py, value))
+            Python::attach(|py| {
+                let result = PyDict::new(py);
+                result.set_item("records", to_python(py, Value::Array(batch.records))?)?;
+                result.set_item("dropped", batch.dropped)?;
+                result.set_item("closed", batch.closed)?;
+                Ok(result.unbind())
+            })
         })
     }
 

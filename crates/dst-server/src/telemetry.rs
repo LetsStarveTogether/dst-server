@@ -1,10 +1,15 @@
 //! Typed OTLP logs. Empty protobuf values preserve JSON nulls.
 
+pub(crate) mod health;
+mod identity;
+pub(crate) mod local;
+pub(crate) mod management;
+
 use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    io::Read,
+    os::unix::fs::OpenOptionsExt,
+    path::Path,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -33,6 +38,7 @@ use tonic_types::StatusExt;
 // Each JSON object adds three protobuf message levels. Leave room for the
 // enclosing log/resource messages within prost's default recursion limit.
 const MAX_VALUE_DEPTH: usize = 24;
+pub(crate) const MAX_SPAN_QUEUE_SIZE: usize = 65_536;
 
 /// The event fields already recorded by the Python SDK.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,103 +49,130 @@ pub struct LogEvent {
     pub severity_text: String,
     #[serde(default)]
     pub attributes: Map<String, Value>,
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<LogTrace>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogTrace {
+    pub trace_id: String,
+    pub span_id: String,
+    pub trace_flags: u8,
+}
+
+#[derive(Serialize)]
+struct LocalRecord<'a> {
+    #[serde(flatten)]
+    log: &'a LogEvent,
+    resource: &'a Map<String, Value>,
 }
 
 impl LogEvent {
+    pub(crate) fn new(event_name: &str, body: Value, severity: &str) -> Self {
+        Self {
+            event_name: event_name.into(),
+            body,
+            severity_text: severity.into(),
+            observed_timestamp_ns: crate::operation::timestamp(),
+            attributes: Map::from_iter([(
+                "log.record.uid".into(),
+                json!(ulid::Ulid::generate().to_string()),
+            )]),
+            trace: None,
+        }
+    }
+
+    pub(crate) fn correlate(&mut self, context: &crate::operation::OperationContext) {
+        self.attributes
+            .insert("dst.operation.id".into(), json!(context.id));
+        if let Some(parent) = &context.parent_id {
+            self.attributes
+                .insert("dst.operation.parent_id".into(), json!(parent));
+        }
+        self.attributes
+            .insert("dst.operation.source".into(), json!(context.source));
+        self.attributes
+            .insert("dst.operation.layer".into(), json!(context.layer.as_str()));
+        self.trace = context
+            .span
+            .as_ref()
+            .filter(|span| span.is_valid())
+            .map(|span| LogTrace {
+                trace_id: span.trace_id().to_string(),
+                span_id: span.span_id().to_string(),
+                trace_flags: span.trace_flags().to_u8(),
+            });
+    }
     /// Convert once before delivering the observation to local and remote sinks.
-    pub fn from_driver(event: &crate::driver::DriverEvent, cluster: &str) -> Result<Self> {
+    pub fn from_driver(event: crate::driver::DriverEvent, cluster: &str) -> Result<Self> {
         use crate::driver::DriverEventKind;
         let mut attributes = Map::from_iter([
-            ("dst.cluster.name".into(), json!(cluster)),
-            ("dst.shard.name".into(), json!(event.shard)),
-            ("dst.game.attempt.id".into(), json!(event.nonce)),
+            ("log.record.uid".into(), event.id.into()),
+            ("dst.cluster.name".into(), cluster.into()),
+            ("dst.shard.name".into(), event.shard.into()),
         ]);
         if let Some(generation) = event.generation {
-            attributes.insert("dst.runtime.generation".into(), json!(generation));
+            attributes.insert("dst.runtime.generation".into(), generation.into());
         }
+        let operational = |prefix: &str, data: Value| -> Result<_> {
+            let name = data["event"]
+                .as_str()
+                .context("missing operational event name")?;
+            let severity = if name == "process_exited" {
+                let exit = &data["exit"];
+                if exit["returncode"] != 0
+                    || exit["output_drained"] != true
+                    || !exit["protocol_error"].is_null()
+                    || !data["control_error"].is_null()
+                {
+                    "ERROR"
+                } else if exit["forced"] == true {
+                    "WARN"
+                } else {
+                    "INFO"
+                }
+            } else {
+                "INFO"
+            };
+            Ok((format!("{prefix}.{name}"), data, severity))
+        };
         let (event_name, body, severity) = match event.kind {
-            DriverEventKind::Telemetry => {
-                let record = &event.data;
-                let generation = record["generation"]
-                    .as_u64()
-                    .context("missing telemetry generation")?;
-                let sequence = record["seq"]
-                    .as_u64()
-                    .filter(|value| *value > 0)
-                    .context("missing telemetry sequence")?;
+            DriverEventKind::Telemetry(game) => {
                 ensure!(
-                    record["nonce"] == event.nonce && event.generation == Some(generation),
+                    game.nonce == event.nonce && Some(game.generation.0) == event.generation,
                     "telemetry observation identity does not match its source"
                 );
-                let name = record["event"]
-                    .as_str()
-                    .filter(|name| name.starts_with("dst.") && name.len() <= 128)
-                    .context("invalid telemetry event name")?;
-                ensure!(
-                    record["data"].is_object(),
-                    "telemetry body must be an object"
-                );
-                attributes.insert("dst.event.sequence".into(), json!(sequence));
-                for (field, attribute) in
-                    [("tick", "dst.tick"), ("monotonic_ms", "dst.monotonic_ms")]
-                {
-                    let value = record[field]
-                        .as_u64()
-                        .context("missing telemetry source clock")?;
-                    attributes.insert(attribute.into(), json!(value));
+                attributes.insert("dst.event.sequence".into(), game.seq.0.into());
+                attributes.insert("dst.tick".into(), game.tick.0.into());
+                attributes.insert("dst.monotonic_ms".into(), game.monotonic_ms.0.into());
+                if let Some(session) = game.session_id {
+                    attributes.insert("dst.session.id".into(), session.0.into());
                 }
-                for (field, attribute) in [
-                    ("session_id", "dst.session.id"),
-                    ("cycle", "dst.world.cycle"),
-                ] {
-                    if let Some(value) = record.get(field).filter(|value| !value.is_null()) {
-                        attributes.insert(attribute.into(), value.clone());
-                    }
+                if let Some(cycle) = game.cycle {
+                    attributes.insert("dst.world.cycle".into(), cycle.0.into());
                 }
-                (
-                    name.to_owned(),
-                    record["data"].clone(),
-                    if name == "dst.telemetry.error" {
-                        "ERROR"
-                    } else {
-                        "INFO"
-                    },
-                )
+                (game.body.name().into(), game.body.into_data(), "INFO")
             }
-            kind => {
-                let (name, severity) = match kind {
-                    DriverEventKind::Lifecycle | DriverEventKind::Control => {
-                        let name = event.data["event"]
-                            .as_str()
-                            .context("missing operational event name")?;
-                        let prefix = if matches!(kind, DriverEventKind::Lifecycle) {
-                            "dst.server"
-                        } else {
-                            "dst.control"
-                        };
-                        (format!("{prefix}.{name}"), "INFO")
-                    }
-                    DriverEventKind::Diagnostic => ("dst.runtime.diagnostic".into(), "ERROR"),
-                    DriverEventKind::Log => (
-                        "dst.server.log".into(),
-                        if event.data["stream"] == "stderr" {
-                            "WARN"
-                        } else {
-                            "INFO"
-                        },
-                    ),
-                    DriverEventKind::Telemetry => unreachable!(),
+            DriverEventKind::Lifecycle(data) => operational("dst.server", data)?,
+            DriverEventKind::Control(data) => operational("dst.control", data)?,
+            DriverEventKind::Diagnostic(data) => ("dst.runtime.diagnostic".into(), data, "ERROR"),
+            DriverEventKind::Log(data) => {
+                let severity = if data["stream"] == "stderr" {
+                    "WARN"
+                } else {
+                    "INFO"
                 };
-                (name, event.data.clone(), severity)
+                ("dst.server.log".into(), data, severity)
             }
         };
-        attributes.insert("log.record.uid".into(), Value::String(event.id.clone()));
+        attributes.insert("dst.game.attempt.id".into(), event.nonce.into());
         Ok(Self {
             event_name,
             body,
             observed_timestamp_ns: event.observed_timestamp_ns,
             severity_text: severity.into(),
             attributes,
+            trace: None,
         })
     }
 
@@ -148,17 +181,94 @@ impl LogEvent {
         let severity_text = self.severity_text.to_ascii_uppercase();
         let severity = SeverityNumber::from_str_name(&format!("SEVERITY_NUMBER_{severity_text}"))
             .context("unknown OpenTelemetry severity")?;
+        let (trace_id, span_id, flags) = if let Some(trace) = &self.trace {
+            let trace_id = opentelemetry::trace::TraceId::from_hex(&trace.trace_id)?;
+            let span_id = opentelemetry::trace::SpanId::from_hex(&trace.span_id)?;
+            ensure!(
+                trace_id != opentelemetry::trace::TraceId::INVALID
+                    && span_id != opentelemetry::trace::SpanId::INVALID,
+                "invalid log trace identity"
+            );
+            (
+                trace_id.to_bytes().to_vec(),
+                span_id.to_bytes().to_vec(),
+                u32::from(trace.trace_flags),
+            )
+        } else {
+            (Vec::new(), Vec::new(), 0)
+        };
         Ok(LogRecord {
             event_name: self.event_name.clone(),
             body: Some(any_value(&self.body).context("invalid log body")?),
-            time_unix_nano: self.observed_timestamp_ns,
+            // Lua gameplay occurrence times are relative to the game process.
+            time_unix_nano: if self.attributes.contains_key("dst.event.sequence") {
+                0
+            } else {
+                self.observed_timestamp_ns
+            },
             observed_time_unix_nano: self.observed_timestamp_ns,
             severity_number: severity as i32,
             severity_text,
             attributes: attributes(&self.attributes, 0).context("invalid log attributes")?,
+            trace_id,
+            span_id,
+            flags,
             ..Default::default()
         })
     }
+}
+
+/// Reserve the complete static envelope before accepting a room configuration.
+pub(crate) fn validate_context<'a>(
+    resource: &Map<String, Value>,
+    cluster: &str,
+    shards: impl IntoIterator<Item = &'a str>,
+) -> crate::model::Result<()> {
+    let invalid = || {
+        crate::model::Error::new(
+            crate::model::ErrorCode::Overflow,
+            "telemetry resource or room context exceeds its size limit",
+        )
+    };
+    let template = export_request(resource, &[]).map_err(|_| invalid())?;
+    if template.encoded_len().saturating_add(16) > 64 * 1024 {
+        return Err(invalid());
+    }
+    for shard in shards {
+        let log = LogEvent {
+            trace: None,
+            event_name: "x".repeat(128),
+            body: Value::Null,
+            observed_timestamp_ns: u64::MAX,
+            severity_text: "ERROR".into(),
+            attributes: json!({
+                "dst.cluster.name":cluster,"dst.shard.name":shard,
+                "log.record.uid":"7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+                "dst.game.attempt.id":"7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+                "dst.room.attempt.id":"7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+                "dst.operation.id":"7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+                "dst.operation.parent_id":"7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+                "dst.operation.source":"agent_shutdown","dst.operation.layer":"request",
+                "dst.runtime.generation":u64::MAX,"dst.event.sequence":u64::MAX,
+                "dst.tick":u64::MAX,"dst.monotonic_ms":u64::MAX,
+                "dst.session.id":"🌲".repeat(128),"dst.world.cycle":u64::MAX,
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        };
+        let mut value = serde_json::to_value(LocalRecord {
+            log: &log,
+            resource,
+        })
+        .map_err(|_| invalid())?;
+        // Native trace fields are optional; reserve their longest serialized form too.
+        value["trace_id"] = json!("f".repeat(32));
+        value["span_id"] = json!("f".repeat(16));
+        value["trace_flags"] = json!(255);
+        crate::rpc::validate_static_context(&value).map_err(|_| invalid())?;
+    }
+    Ok(())
 }
 
 /// Build one batch for a single resource without changing event or value types.
@@ -240,47 +350,8 @@ fn attributes(values: &Map<String, Value>, depth: usize) -> Result<Vec<KeyValue>
         .collect()
 }
 
-/// One instance belongs to one source, subscription, or local log sink.
-/// Loss at these stages is independent of loss in the OTLP exporter.
-#[derive(Debug, Default)]
-pub struct StreamLossCounters {
-    source_gaps: AtomicU64,
-    subscription_dropped: AtomicU64,
-    log_dropped: AtomicU64,
-}
-
-#[derive(Debug, Default, Clone, Copy, Serialize)]
-pub struct StreamLossSnapshot {
-    pub source_gaps: u64,
-    pub subscription_dropped: u64,
-    pub log_dropped: u64,
-}
-
-impl StreamLossCounters {
-    pub fn record_source_gap(&self, count: u64) {
-        self.source_gaps.fetch_add(count, Ordering::Relaxed);
-    }
-
-    pub fn record_subscription_drop(&self, count: u64) {
-        self.subscription_dropped
-            .fetch_add(count, Ordering::Relaxed);
-    }
-
-    pub fn record_log_drop(&self, count: u64) {
-        self.log_dropped.fetch_add(count, Ordering::Relaxed);
-    }
-
-    pub fn snapshot(&self) -> StreamLossSnapshot {
-        StreamLossSnapshot {
-            source_gaps: self.source_gaps.load(Ordering::Relaxed),
-            subscription_dropped: self.subscription_dropped.load(Ordering::Relaxed),
-            log_dropped: self.log_dropped.load(Ordering::Relaxed),
-        }
-    }
-}
-
 /// Queue bounds include the active batch, measured in encoded log record bytes.
-/// Resource attributes are held once; each record is limited to 64 KiB.
+/// Resource attributes are held once; each record is limited to 1 MiB.
 #[derive(Clone)]
 pub struct ExportConfig {
     pub endpoint: String,
@@ -314,13 +385,73 @@ impl Default for ExportConfig {
     }
 }
 
-/// Resolved once per Agent, so every signal can share the same resource identity.
+impl ExportConfig {
+    pub(crate) fn validate_batch(&self, max_capacity: usize) -> Result<()> {
+        ensure!(
+            (1..=max_capacity).contains(&self.queue_capacity),
+            "OTLP queue capacity is outside the supported range"
+        );
+        ensure!(
+            (1..=self.queue_capacity).contains(&self.max_batch_records),
+            "OTLP batch size must be positive and bounded by its queue"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn channel(&self) -> Result<Channel> {
+        let mut endpoint = Endpoint::from_shared(self.endpoint.clone())?
+            .connect_timeout(self.export_timeout)
+            .timeout(self.export_timeout)
+            .buffer_size(1)
+            .concurrency_limit(1);
+        match endpoint.uri().scheme_str() {
+            Some("https") => {
+                endpoint = endpoint.tls_config(
+                    self.tls
+                        .clone()
+                        .unwrap_or_else(|| ClientTlsConfig::new().with_native_roots()),
+                )?;
+            }
+            Some("http") => ensure!(
+                self.tls.is_none(),
+                "TLS configuration requires an https endpoint"
+            ),
+            _ => bail!("OTLP endpoint must use http or https"),
+        }
+        Ok(endpoint.connect_lazy())
+    }
+}
+
+/// Export settings and static resource attributes for one telemetry configuration.
 /// Headers and TLS private keys deliberately have no Debug representation here.
+#[derive(Default)]
 pub struct TelemetryConfig {
     pub logs: Option<ExportConfig>,
     pub metrics: Option<ExportConfig>,
     pub traces: Option<ExportConfig>,
     pub resource: Map<String, Value>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ExportSetup {
+    Strict,
+    Room,
+}
+
+impl ExportSetup {
+    pub(crate) fn check<T>(self, name: &str, result: Result<Option<T>>) -> Result<Option<T>> {
+        match self {
+            Self::Strict => result,
+            Self::Room => Ok(room_export(name, result)),
+        }
+    }
+}
+
+pub(crate) fn room_export<T>(name: &str, result: Result<Option<T>>) -> Option<T> {
+    result.unwrap_or_else(|error| {
+        eprintln!("dst-server: OTLP {name} disabled: {error}");
+        None
+    })
 }
 
 impl TelemetryConfig {
@@ -330,29 +461,74 @@ impl TelemetryConfig {
 
     /// An explicit lookup keeps configuration tests independent of process env.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        Self::read(lookup, ExportSetup::Strict)
+    }
+
+    pub(crate) fn for_agent(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let mut config = Self::read(&lookup, ExportSetup::Room)?;
+        if config.configured_room_name().is_none()
+            && let Some(unit) = lookup(crate::deployment::SYSTEMD_UNIT_ENV)
+            && let Some(name) = unit
+                .strip_suffix(".service")
+                .filter(|name| !name.is_empty())
+        {
+            config
+                .resource
+                .insert("dst.cluster.name".into(), json!(name));
+        }
+        Ok(config)
+    }
+
+    fn read(lookup: impl Fn(&str) -> Option<String>, setup: ExportSetup) -> Result<Self> {
         let get = |name: &str| lookup(name).filter(|value| !value.is_empty());
-        let mut resource = Map::from_iter([
-            ("service.name".into(), json!("dst-server")),
-            ("service.version".into(), json!(env!("CARGO_PKG_VERSION"))),
-            (
-                "service.instance.id".into(),
-                json!(ulid::Ulid::generate().to_string()),
-            ),
-        ]);
-        if let Some(value) = get("OTEL_RESOURCE_ATTRIBUTES") {
-            for (key, value) in environment_pairs(&value)? {
+        let mut resource = Map::new();
+        let attributes = get("OTEL_RESOURCE_ATTRIBUTES")
+            .map(|v| environment_pairs(&v))
+            .transpose();
+        if let Some(pairs) = setup.check("resource attributes", attributes)? {
+            for (key, value) in pairs {
                 resource.insert(key, Value::String(value));
             }
         }
         if let Some(value) = get("OTEL_SERVICE_NAME") {
             resource.insert("service.name".into(), Value::String(value));
         }
+        resource.remove("service.instance.id");
+        identity::apply(&mut resource, None);
+        let signal = |name| setup.check(name, exporter_settings(&get, name));
         Ok(Self {
-            logs: exporter_settings(&get, "LOGS")?,
-            metrics: exporter_settings(&get, "METRICS")?,
-            traces: exporter_settings(&get, "TRACES")?,
+            logs: signal("LOGS")?,
+            metrics: signal("METRICS")?,
+            traces: signal("TRACES")?,
             resource,
         })
+    }
+
+    fn configured_room_name(&self) -> Option<&str> {
+        self.resource
+            .get("dst.cluster.name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+    }
+
+    pub(crate) fn bind_room(&mut self, executable: &Path, directory: &Path) -> String {
+        let room = self
+            .configured_room_name()
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                directory
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            });
+        identity::apply(&mut self.resource, Some(executable));
+        self.resource.insert(
+            "service.instance.id".into(),
+            json!(ulid::Ulid::generate().to_string()),
+        );
+        self.resource.insert("dst.cluster.name".into(), json!(room));
+        room
     }
 }
 
@@ -377,7 +553,7 @@ fn exporter_settings(
         setting("PROTOCOL").is_none_or(|value| value.eq_ignore_ascii_case("grpc")),
         "the {signal} exporter supports the grpc OTLP protocol"
     );
-    let mut logs = ExportConfig {
+    let mut config = ExportConfig {
         schedule_delay: Duration::from_secs(match signal {
             "TRACES" => 5,
             "METRICS" => 60,
@@ -404,7 +580,7 @@ fn exporter_settings(
                 && url.fragment().is_none(),
             "OTLP endpoint must be an HTTP URL without embedded credentials, query or fragment"
         );
-        logs.endpoint = endpoint;
+        config.endpoint = endpoint;
     }
     if let Some(value) = setting("HEADERS") {
         for (key, value) in environment_pairs(&value)? {
@@ -415,7 +591,7 @@ fn exporter_settings(
                 .parse()
                 .map_err(|_| anyhow::anyhow!("invalid OTLP metadata value"))?;
             value.set_sensitive(true);
-            logs.headers.insert(key, value);
+            config.headers.insert(key, value);
         }
     }
     if let Some(value) = setting("COMPRESSION") {
@@ -423,7 +599,7 @@ fn exporter_settings(
             value.eq_ignore_ascii_case("none") || value.eq_ignore_ascii_case("gzip"),
             "OTLP compression must be gzip or none"
         );
-        logs.gzip = value.eq_ignore_ascii_case("gzip");
+        config.gzip = value.eq_ignore_ascii_case("gzip");
     }
     let milliseconds = |value: Option<String>, name: &str, default: Duration| -> Result<Duration> {
         value.map_or(Ok(default), |value| {
@@ -434,7 +610,8 @@ fn exporter_settings(
             Ok(Duration::from_millis(value))
         })
     };
-    logs.export_timeout = milliseconds(setting("TIMEOUT"), "OTLP timeout", logs.export_timeout)?;
+    config.export_timeout =
+        milliseconds(setting("TIMEOUT"), "OTLP timeout", config.export_timeout)?;
     let prefix = if signal == "TRACES" { "BSP" } else { "BLRP" };
     let budget_name = if signal == "METRICS" {
         "OTEL_METRIC_EXPORT_TIMEOUT".into()
@@ -442,10 +619,10 @@ fn exporter_settings(
         format!("OTEL_{prefix}_EXPORT_TIMEOUT")
     };
     if let Some(value) = get(&budget_name) {
-        logs.export_timeout = logs.export_timeout.min(milliseconds(
+        config.export_timeout = config.export_timeout.min(milliseconds(
             Some(value),
             &budget_name,
-            logs.export_timeout,
+            config.export_timeout,
         )?);
     }
     let interval_name = if signal == "METRICS" {
@@ -453,16 +630,17 @@ fn exporter_settings(
     } else {
         format!("OTEL_{prefix}_SCHEDULE_DELAY")
     };
-    logs.schedule_delay = milliseconds(get(&interval_name), &interval_name, logs.schedule_delay)?;
+    config.schedule_delay =
+        milliseconds(get(&interval_name), &interval_name, config.schedule_delay)?;
     if signal != "METRICS" {
         for (name, target) in [
             (
                 format!("OTEL_{prefix}_MAX_QUEUE_SIZE"),
-                &mut logs.queue_capacity,
+                &mut config.queue_capacity,
             ),
             (
                 format!("OTEL_{prefix}_MAX_EXPORT_BATCH_SIZE"),
-                &mut logs.max_batch_records,
+                &mut config.max_batch_records,
             ),
         ] {
             if let Some(value) = get(&name) {
@@ -472,11 +650,12 @@ fn exporter_settings(
                 ensure!(*target > 0, "{name} must be positive");
             }
         }
+        config.validate_batch(if signal == "TRACES" {
+            MAX_SPAN_QUEUE_SIZE
+        } else {
+            tokio::sync::Semaphore::MAX_PERMITS
+        })?;
     }
-    ensure!(
-        logs.max_batch_records <= logs.queue_capacity,
-        "OTLP batch size must not exceed queue capacity"
-    );
     let certificate = setting("CERTIFICATE");
     let client_certificate = setting("CLIENT_CERTIFICATE");
     let client_key = setting("CLIENT_KEY");
@@ -484,7 +663,7 @@ fn exporter_settings(
         client_certificate.is_some() == client_key.is_some(),
         "OTLP client certificate and key must be configured together"
     );
-    if logs.endpoint.starts_with("https://") {
+    if config.endpoint.starts_with("https://") {
         let mut tls = ClientTlsConfig::new().with_native_roots();
         if let Some(path) = certificate {
             tls = tls.ca_certificate(Certificate::from_pem(read_tls_file(&path)?));
@@ -495,18 +674,30 @@ fn exporter_settings(
                 read_tls_file(&key)?,
             ));
         }
-        logs.tls = Some(tls);
+        config.tls = Some(tls);
     } else {
         ensure!(
             certificate.is_none() && client_certificate.is_none(),
             "OTLP certificate configuration requires an https endpoint"
         );
     }
-    Ok(Some(logs))
+    Ok(Some(config))
 }
 
 fn read_tls_file(path: &str) -> Result<Vec<u8>> {
-    std::fs::read(path).map_err(|_| anyhow::anyhow!("could not read an OTLP TLS credential file"))
+    let unreadable = || anyhow::anyhow!("could not read an OTLP TLS credential file");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| unreadable())?;
+    ensure!(
+        file.metadata().is_ok_and(|meta| meta.is_file()),
+        "OTLP TLS credentials must be regular files"
+    );
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|_| unreadable())?;
+    Ok(bytes)
 }
 
 fn environment_pairs(value: &str) -> Result<Vec<(String, String)>> {
@@ -578,11 +769,16 @@ struct ExportProgress {
 
 /// A nonblocking producer and an independently owned export task.
 /// Use `Arc<LogExporter>` to share a producer. Call `close` before stopping Tokio.
+struct ExportState {
+    stats: Mutex<ExportStats>,
+    health: health::ExporterHealth,
+}
+
 pub struct LogExporter {
     sender: Mutex<Option<mpsc::Sender<PendingLog>>>,
     control: watch::Sender<ExportControl>,
     progress: watch::Receiver<ExportProgress>,
-    stats: Arc<Mutex<ExportStats>>,
+    shared: Arc<ExportState>,
     config: ExportConfig,
     envelope_bytes: usize,
 }
@@ -591,17 +787,18 @@ impl LogExporter {
     /// Starts without contacting the collector; collector availability never
     /// prevents the game from starting. Configuration errors are returned here.
     pub fn new(config: ExportConfig, resource: &Map<String, Value>) -> Result<Self> {
-        ensure!(
-            (1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&config.queue_capacity),
-            "OTLP queue capacity is outside the supported range"
-        );
+        Self::with_local(config, resource, None)
+    }
+
+    pub(crate) fn with_local(
+        config: ExportConfig,
+        resource: &Map<String, Value>,
+        local: Option<local::LocalLog>,
+    ) -> Result<Self> {
+        config.validate_batch(tokio::sync::Semaphore::MAX_PERMITS)?;
         ensure!(
             config.queue_bytes > 0,
             "OTLP queue byte limit must be positive"
-        );
-        ensure!(
-            config.max_batch_records > 0,
-            "OTLP batch size must be positive"
         );
         for (name, duration) in [
             ("schedule delay", config.schedule_delay),
@@ -623,27 +820,7 @@ impl LogExporter {
         );
         let runtime =
             tokio::runtime::Handle::try_current().context("OTLP exporter needs a Tokio runtime")?;
-        let mut endpoint = Endpoint::from_shared(config.endpoint.clone())?
-            .connect_timeout(config.export_timeout)
-            .timeout(config.export_timeout)
-            .buffer_size(1)
-            .concurrency_limit(1);
-        match endpoint.uri().scheme_str() {
-            Some("https") => {
-                endpoint = endpoint.tls_config(
-                    config
-                        .tls
-                        .clone()
-                        .unwrap_or_else(|| ClientTlsConfig::new().with_native_roots()),
-                )?;
-            }
-            Some("http") => ensure!(
-                config.tls.is_none(),
-                "TLS configuration requires an https endpoint"
-            ),
-            _ => bail!("OTLP endpoint must use http or https"),
-        }
-        let mut client = LogsServiceClient::new(endpoint.connect_lazy())
+        let mut client = LogsServiceClient::new(config.channel()?)
             .max_encoding_message_size(config.max_batch_bytes)
             .max_decoding_message_size(4 * 1024 * 1024)
             .accept_compressed(CompressionEncoding::Gzip);
@@ -653,7 +830,10 @@ impl LogExporter {
         let (sender, receiver) = mpsc::channel(config.queue_capacity);
         let (control, control_rx) = watch::channel(ExportControl::default());
         let (progress_tx, progress) = watch::channel(ExportProgress::default());
-        let stats = Arc::new(Mutex::new(ExportStats::default()));
+        let shared = Arc::new(ExportState {
+            stats: Mutex::new(ExportStats::default()),
+            health: health::ExporterHealth::new(local),
+        });
         runtime.spawn(export_worker(
             client,
             template,
@@ -661,13 +841,13 @@ impl LogExporter {
             receiver,
             control_rx,
             progress_tx,
-            stats.clone(),
+            shared.clone(),
         ));
         Ok(Self {
             sender: Mutex::new(Some(sender)),
             control,
             progress,
-            stats,
+            shared,
             config,
             envelope_bytes,
         })
@@ -676,33 +856,58 @@ impl LogExporter {
     /// Never waits for queue space or network I/O. A full queue drops the new
     /// record; accepted records retain their order and delivery budget.
     pub fn submit(&self, event: &LogEvent) -> Result<Submission> {
-        let record = match event.to_otlp() {
+        let record = event.to_otlp();
+        // Publish local health transitions in admission order across producers.
+        let sender = self.sender.lock().unwrap();
+        let record = match record {
             Ok(record) => record,
             Err(error) => {
-                self.stats.lock().unwrap().invalid += 1;
+                self.shared.stats.lock().unwrap().invalid += 1;
+                self.shared
+                    .health
+                    .observe("logs", "admission", "invalid", None, true, 1);
                 return Err(error);
             }
         };
-        let bytes = record.encoded_len();
-        let sender = self.sender.lock().unwrap();
-        let mut stats = self.stats.lock().unwrap();
-        let Some(sender) = sender.as_ref() else {
-            stats.closed_dropped += 1;
-            return Ok(Submission::Closed);
+        let result = self.admit(sender.as_ref(), record);
+        let reason = match result {
+            Submission::Accepted => "accepted",
+            Submission::QueueFull => "queue_full",
+            Submission::ByteLimit => "byte_full",
+            Submission::TooLarge => "too_large",
+            Submission::Closed => "closed",
         };
-        if bytes > 64 * 1024
+        self.shared.health.observe(
+            "logs",
+            "admission",
+            reason,
+            None,
+            result != Submission::Accepted,
+            1,
+        );
+        Ok(result)
+    }
+
+    fn admit(&self, sender: Option<&mpsc::Sender<PendingLog>>, record: LogRecord) -> Submission {
+        let bytes = record.encoded_len();
+        let mut stats = self.shared.stats.lock().unwrap();
+        let Some(sender) = sender else {
+            stats.closed_dropped += 1;
+            return Submission::Closed;
+        };
+        if bytes > 1024 * 1024
             || bytes.saturating_add(self.envelope_bytes + 8) > self.config.max_batch_bytes
         {
             stats.too_large += 1;
-            return Ok(Submission::TooLarge);
+            return Submission::TooLarge;
         }
         if stats.pending_records >= self.config.queue_capacity {
             stats.queue_full += 1;
-            return Ok(Submission::QueueFull);
+            return Submission::QueueFull;
         }
         if bytes > self.config.queue_bytes.saturating_sub(stats.pending_bytes) {
             stats.queue_bytes_full += 1;
-            return Ok(Submission::ByteLimit);
+            return Submission::ByteLimit;
         }
         let pending = PendingLog {
             record,
@@ -714,21 +919,30 @@ impl LogExporter {
                 stats.accepted += 1;
                 stats.pending_records += 1;
                 stats.pending_bytes += bytes;
-                Ok(Submission::Accepted)
+                Submission::Accepted
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 stats.queue_full += 1;
-                Ok(Submission::QueueFull)
+                Submission::QueueFull
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 stats.closed_dropped += 1;
-                Ok(Submission::Closed)
+                Submission::Closed
             }
         }
     }
 
+    pub(crate) fn health_counters(
+        &self,
+    ) -> (
+        std::collections::BTreeMap<health::HealthKey, u64>,
+        std::collections::BTreeMap<health::HealthKey, u64>,
+    ) {
+        self.shared.health.counters()
+    }
+
     pub fn stats(&self) -> ExportStats {
-        self.stats.lock().unwrap().clone()
+        self.shared.stats.lock().unwrap().clone()
     }
 
     /// Settles every record accepted before this call. Check the returned loss
@@ -752,7 +966,7 @@ impl LogExporter {
 
     fn begin_close(&self) -> u64 {
         let mut sender = self.sender.lock().unwrap();
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.shared.stats.lock().unwrap();
         if sender.take().is_some() {
             stats.closed = true;
             self.control.send_modify(|control| {
@@ -799,7 +1013,7 @@ async fn export_worker(
     mut receiver: mpsc::Receiver<PendingLog>,
     mut control: watch::Receiver<ExportControl>,
     progress: watch::Sender<ExportProgress>,
-    stats: Arc<Mutex<ExportStats>>,
+    shared: Arc<ExportState>,
 ) {
     let mut interval = tokio::time::interval_at(
         Instant::now() + config.schedule_delay,
@@ -837,9 +1051,9 @@ async fn export_worker(
             let mut request = template.clone();
             request.resource_logs[0].scope_logs[0].log_records =
                 batch.drain(..).map(|item| item.record).collect();
-            let result = send_batch(&mut client, &request, &config, &mut control, &stats).await;
+            let result = send_batch(&mut client, &request, &config, &mut control, &shared).await;
             {
-                let mut stats = stats.lock().unwrap();
+                let mut stats = shared.stats.lock().unwrap();
                 stats.pending_records -= count as usize;
                 stats.pending_bytes -= bytes;
                 match result {
@@ -900,14 +1114,27 @@ async fn export_worker(
     drop(receiver);
     drop(batch);
     drop(next);
-    let completed = {
-        let mut stats = stats.lock().unwrap();
-        stats.shutdown_dropped += stats.pending_records as u64;
+    let (completed, unsettled) = {
+        let mut stats = shared.stats.lock().unwrap();
+        let unsettled = stats.pending_records as u64;
+        stats.shutdown_dropped += unsettled;
         stats.pending_records = 0;
         stats.pending_bytes = 0;
         stats.closed = true;
-        stats.accepted
+        (stats.accepted, unsettled)
     };
+    shared.health.observe(
+        "logs",
+        "shutdown",
+        if unsettled > 0 {
+            "unsettled"
+        } else {
+            "completed"
+        },
+        None,
+        unsettled > 0,
+        unsettled,
+    );
     progress.send_replace(ExportProgress {
         completed,
         stopped: true,
@@ -919,10 +1146,10 @@ async fn send_batch(
     request: &ExportLogsServiceRequest,
     config: &ExportConfig,
     control: &mut watch::Receiver<ExportControl>,
-    stats: &Mutex<ExportStats>,
+    shared: &ExportState,
 ) -> BatchResult {
     let deadline = Instant::now() + config.export_timeout;
-    let export = retry_batch(client, request, &config.headers, stats);
+    let export = retry_batch(client, request, &config.headers, shared);
     tokio::pin!(export);
     let mut control_open = true;
     loop {
@@ -932,7 +1159,10 @@ async fn send_batch(
             .map_or(deadline, |close| close.min(deadline));
         tokio::select! {
             biased;
-            _ = tokio::time::sleep_until(deadline) => return BatchResult::TimedOut,
+            _ = tokio::time::sleep_until(deadline) => {
+                shared.health.observe("logs", "export", "confirmation_timeout", None, true, request.resource_logs[0].scope_logs[0].log_records.len() as u64);
+                return BatchResult::TimedOut;
+            },
             result = &mut export => return result,
             changed = control.changed(), if control_open => control_open = changed.is_ok(),
         }
@@ -943,30 +1173,47 @@ async fn retry_batch(
     client: &mut LogsServiceClient<Channel>,
     batch: &ExportLogsServiceRequest,
     headers: &MetadataMap,
-    stats: &Mutex<ExportStats>,
+    shared: &ExportState,
 ) -> BatchResult {
     let mut backoff = Duration::from_millis(100);
     let mut retrying = false;
     loop {
         if retrying {
-            stats.lock().unwrap().retries += 1;
+            shared.stats.lock().unwrap().retries += 1;
         }
         let mut request = Request::new(batch.clone());
         *request.metadata_mut() = headers.clone();
         match client.export(request).await {
             Ok(response) => {
-                let Some(partial) = response.into_inner().partial_success else {
-                    return BatchResult::Delivered {
-                        rejected: 0,
-                        warning: None,
-                    };
-                };
+                let partial = response.into_inner().partial_success.unwrap_or_default();
                 let count = batch.resource_logs[0].scope_logs[0].log_records.len() as i64;
                 if !(0..=count).contains(&partial.rejected_log_records) {
+                    shared.health.observe(
+                        "logs",
+                        "export",
+                        "invalid_response",
+                        Some(0),
+                        true,
+                        count as u64,
+                    );
                     return BatchResult::Failed(
                         "collector returned an invalid rejected record count".into(),
                     );
                 }
+                shared.health.observe(
+                    "logs",
+                    "export",
+                    if partial.rejected_log_records > 0 {
+                        "partial_rejection"
+                    } else if !partial.error_message.is_empty() {
+                        "partial_warning"
+                    } else {
+                        "acknowledged"
+                    },
+                    Some(0),
+                    partial.rejected_log_records > 0 || !partial.error_message.is_empty(),
+                    partial.rejected_log_records as u64,
+                );
                 return BatchResult::Delivered {
                     rejected: partial.rejected_log_records as u64,
                     warning: (!partial.error_message.is_empty())
@@ -989,15 +1236,28 @@ async fn retry_batch(
                     .chars()
                     .take(1024)
                     .collect();
+                shared.health.observe(
+                    "logs",
+                    "export",
+                    if temporary {
+                        "retry"
+                    } else {
+                        "permanent_error"
+                    },
+                    Some(status.code() as i32),
+                    true,
+                    batch.resource_logs[0].scope_logs[0].log_records.len() as u64,
+                );
                 if !temporary {
                     return BatchResult::Failed(error);
                 }
-                stats.lock().unwrap().last_error = Some(error);
-                let delay = retry_info
+                shared.stats.lock().unwrap().last_error = Some(error);
+                let retry_after = retry_info
                     .and_then(|info| info.retry_delay)
-                    .unwrap_or_default()
-                    .max(backoff);
-                tokio::time::sleep(delay).await;
+                    .unwrap_or_default();
+                // Spread retries even when a collector gives several rooms the same minimum wait.
+                let jittered_backoff = backoff.mul_f64(0.5 + fastrand::f64() * 0.5);
+                tokio::time::sleep(retry_after.saturating_add(jittered_backoff)).await;
                 backoff = backoff.saturating_mul(2).min(Duration::from_secs(5));
                 retrying = true;
             }

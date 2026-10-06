@@ -3,7 +3,6 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use anyhow::{Result, ensure};
-use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -138,21 +137,6 @@ pub fn outcome(number: u16, result: Result<Value>) -> Value {
 }
 
 impl Host {
-    pub async fn edit_fields(
-        &self,
-        number: u16,
-        changes: &[(String, Value)],
-        unset: &[String],
-    ) -> Result<Room> {
-        let definition = self.load(number).await?;
-        let changes: Vec<_> = changes
-            .iter()
-            .map(|(pointer, value)| (pointer.as_str(), value.clone()))
-            .collect();
-        let unset: Vec<_> = unset.iter().map(String::as_str).collect();
-        self.edit(&definition.edit_many(&changes, &unset)?).await
-    }
-
     pub async fn operate(&self, number: u16, operation: &HostOperation) -> Result<Value> {
         operation.validate()?;
         self.rooms.path(number)?;
@@ -205,23 +189,41 @@ impl Host {
 
     pub async fn list(&self) -> Result<Vec<Value>> {
         self.batch(
-            &self.rooms.numbers()?,
+            &self.managed_numbers()?,
             &HostOperation::Status { game: false },
         )
         .await
     }
 
     pub async fn batch(&self, numbers: &[u16], operation: &HostOperation) -> Result<Vec<Value>> {
+        self.batch_matching(numbers, operation, None).await
+    }
+
+    pub(crate) async fn batch_matching(
+        &self,
+        numbers: &[u16],
+        operation: &HostOperation,
+        template: Option<&str>,
+    ) -> Result<Vec<Value>> {
         self.validate_batch(numbers)?;
         operation.validate()?;
-        Ok(stream::iter(
+        Ok(crate::batch::collect(
             numbers.iter().copied().map(|number| async move {
-                outcome(number, self.operate(number, operation).await)
+                if let Some(template) = template {
+                    match self.rooms.template(number) {
+                        Ok(saved) if saved.as_deref() != Some(template) => return None,
+                        Err(error) => return Some(outcome(number, Err(error))),
+                        Ok(_) => {}
+                    }
+                }
+                Some(outcome(number, self.operate(number, operation).await))
             }),
+            8,
         )
-        .buffered(8)
-        .collect()
-        .await)
+        .await
+        .into_iter()
+        .flatten()
+        .collect())
     }
 
     pub async fn provision(&self, definitions: &[Room]) -> Result<Vec<Value>> {
@@ -231,28 +233,193 @@ impl Host {
                 .map(|room| room.number)
                 .collect::<Vec<_>>(),
         )?;
-        for definition in definitions {
-            definition.validate()?;
-        }
-        Ok(
-            stream::iter(definitions.iter().cloned().map(|definition| async move {
+        let mut batch_ports = BTreeSet::new();
+        let validated: Vec<Result<&Room>> = definitions
+            .iter()
+            .map(|definition| {
+                definition.validate()?;
+                batch_ports.extend(definition.deployment.ports.iter().map(|port| port.host));
+                Ok(definition)
+            })
+            .collect();
+        let results = crate::batch::collect(
+            validated
+                .into_iter()
+                .map(|definition| async { self.create_files(definition?, &batch_ports).await }),
+            8,
+        )
+        .await;
+        let reload = if results.iter().any(Result::is_ok) {
+            self.systemd.reload().await
+        } else {
+            Ok(())
+        };
+        Ok(definitions
+            .iter()
+            .zip(results)
+            .map(|(definition, result)| {
                 outcome(
                     definition.number,
-                    self.create(&definition)
-                        .await
-                        .and_then(|room| Ok(serde_json::to_value(room)?)),
+                    result.and_then(|()| {
+                        if let Err(error) = &reload {
+                            return Err(crate::host::applied_error(
+                                definition.number,
+                                "daemon_reload",
+                                error,
+                            ));
+                        }
+                        let saved = self.rooms.load(definition.number).map_err(|e| {
+                            crate::host::applied_error(definition.number, "readback", e)
+                        })?;
+                        Ok(serde_json::to_value(saved)?)
+                    }),
                 )
-            }))
-            .buffered(8)
-            .collect()
-            .await,
-        )
+            })
+            .collect())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[tokio::test]
+    async fn provisioning_reloads_after_all_writes_and_preserves_per_room_failures() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path();
+        let mut host = Host::new(directory.join("rooms"), directory.join("units"));
+        host.systemd.executable = directory.join("systemctl");
+        fs::write(
+            &host.systemd.executable,
+            include_str!("../tests/fixtures/fleet_systemctl.py"),
+        )
+        .unwrap();
+        fs::set_permissions(&host.systemd.executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let counts_path = directory.join("systemd-counts.json");
+        let empty_counts = r#"{"active":0,"peak":0,"started":0,"finished":0}"#;
+        fs::write(&counts_path, empty_counts).unwrap();
+        let counts =
+            || -> Value { serde_json::from_slice(&fs::read(&counts_path).unwrap()).unwrap() };
+        let definition = |number| {
+            Room::new(
+                number,
+                crate::rooms::build_template("pure_survival", number, "fixture-token", None, None)
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        host.create(&definition(1)).await.unwrap();
+        assert_eq!(counts()["reloads"], 1);
+        fs::write(&counts_path, empty_counts).unwrap();
+
+        let mut second = definition(2);
+        let mut third = definition(3);
+        let preview = crate::deployment::PortAllocation::reserve(
+            &host.quadlet_dir,
+            2,
+            &second.cluster,
+            &[],
+            host.port_pool.clone(),
+        )
+        .unwrap();
+        // Each room needs the host port that the other would take automatically.
+        second.deployment.ports.push(preview.mappings[0].clone());
+        third.deployment.ports.push(preview.mappings[1].clone());
+        drop(preview);
+        let mut invalid = definition(4);
+        invalid.deployment.image.clear();
+        let results = host
+            .provision(&[second, definition(1), third, invalid])
+            .await
+            .unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|value| value["number"].clone())
+                .collect::<Vec<_>>(),
+            [json!(2), json!(1), json!(3), json!(4)]
+        );
+        assert_eq!(results[0]["result"]["ok"], true);
+        assert_eq!(
+            results[1]["result"]["error"]["message"],
+            "room already exists"
+        );
+        assert_eq!(results[2]["result"]["ok"], true);
+        assert_eq!(results[3]["result"]["ok"], false);
+        assert_eq!(counts()["reloads"], 1);
+        assert_eq!(counts()["last_reload_units"], 3);
+
+        assert!(host.provision(&[]).await.unwrap().is_empty());
+        assert!(
+            host.provision(&[definition(1), definition(2)])
+                .await
+                .unwrap()
+                .iter()
+                .all(|value| value["result"]["ok"] == false)
+        );
+        assert_eq!(counts()["reloads"], 1);
+
+        fs::write(directory.join("fail-reload"), "").unwrap();
+        let results = host
+            .provision(&[definition(4), definition(1)])
+            .await
+            .unwrap();
+        assert_eq!(results[0]["result"]["ok"], false);
+        let error = &results[0]["result"]["error"];
+        assert_eq!(error["code"], "partial_failure");
+        assert_eq!(
+            error["details"],
+            json!({"applied":true, "number":4, "stage":"daemon_reload"})
+        );
+        assert!(
+            results[0]["result"]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("fixture reload failure")
+        );
+        assert_eq!(
+            results[1]["result"]["error"]["message"],
+            "room already exists"
+        );
+        assert_eq!(host.rooms.load(4).unwrap().number, 4);
+        assert_eq!(counts()["reloads"], 2);
+        assert_eq!(counts()["last_reload_units"], 4);
+        assert_eq!(counts()["active"], 0);
+
+        let root = host.rooms.root();
+        std::os::unix::fs::symlink("001", root.join("latest")).unwrap();
+        fs::write(
+            root.join("001/.dst-server.json"),
+            r#"{"template":"chosen"}"#,
+        )
+        .unwrap();
+        fs::write(root.join("002/cluster.ini"), "broken INI").unwrap();
+        fs::write(root.join("003/.dst-server.json"), "invalid state").unwrap();
+        let results = host
+            .batch_matching(
+                &host.managed_numbers().unwrap(),
+                &HostOperation::Status { game: false },
+                Some("chosen"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            (
+                results[0]["number"].as_u64(),
+                results[0]["result"]["ok"].as_bool()
+            ),
+            (Some(1), Some(true))
+        );
+        assert_eq!(
+            (
+                results[1]["number"].as_u64(),
+                results[1]["result"]["ok"].as_bool()
+            ),
+            (Some(3), Some(false))
+        );
+    }
 
     #[tokio::test]
     async fn invalid_batches_do_not_contact_systemd_and_failures_are_per_room() {

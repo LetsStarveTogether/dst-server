@@ -1,15 +1,21 @@
 //! Read native INI topology without evaluating world or Mod configuration.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
-use std::io::Read;
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
-const MAX_INI_BYTES: u64 = 1024 * 1024;
+use crate::files::{self, RoomReader};
+use crate::settings::types::{ClusterSettings, ShardSettings};
+
+/// Native INI readers strip surrounding Unicode whitespace and cannot store line breaks or NUL.
+pub(crate) static INI_VALUE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"\A(?:[^\s\x00](?:[^\x00\r\n]*[^\s\x00])?)?\z")
+        .expect("valid INI value pattern")
+});
 
 /// A validated room topology. Credentials are deliberately not retained.
 #[derive(Clone, Debug, Serialize)]
@@ -39,6 +45,12 @@ pub struct Shard {
     pub bind_ip: Ipv4Addr,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClusterKey {
+    Required,
+    GenerateOnSave,
+}
+
 /// Discover every immediate shard directory containing `server.ini`.
 ///
 /// Discovery never loads tokens, saves, world overrides or Lua programs.
@@ -50,137 +62,68 @@ pub fn discover(directory: impl AsRef<Path>) -> Result<Cluster> {
     let directory = directory
         .canonicalize()
         .context("resolve cluster directory")?;
-    let cluster_ini = Ini::read(&directory.join("cluster.ini"), false)?;
-    let shard_enabled = cluster_ini.boolean("shard", "shard_enabled", false)?;
-    let cluster_port = cluster_ini.port("shard", "master_port", 10888)?;
-    let cluster_bind = cluster_ini.ipv4("bind_ip", Ipv4Addr::LOCALHOST)?;
-    if let Some(host) = cluster_ini.get("shard", "master_ip") {
-        validate_host(host).context("cluster.ini SHARD.master_ip")?;
-    }
+    let reader = RoomReader::open(&directory)?;
+    read_topology(&reader, ClusterKey::Required)
+}
 
-    let mut directories = Vec::new();
-    for entry in fs::read_dir(&directory).context("read cluster directory")? {
-        let entry = entry.context("read cluster directory entry")?;
-        let name = entry.file_name();
-        let name = name
-            .to_str()
-            .context("cluster entry name must be valid UTF-8")?;
-        if name == "mods" || name.starts_with('.') {
-            continue;
-        }
-        let kind = entry.file_type().context("read cluster entry type")?;
-        ensure!(!kind.is_symlink(), "cluster entries cannot be symlinks");
-        if kind.is_dir() && regular_file_exists(&entry.path().join("server.ini"))? {
-            validate_shard_name(name)?;
-            directories.push((name.to_owned(), entry.path()));
+pub(crate) fn read_topology(reader: &RoomReader, key: ClusterKey) -> Result<Cluster> {
+    let mut cluster_ini = reader.read_ini("cluster.ini")?;
+    cluster_ini.retain(|section, _| section == "shard");
+    let settings = ClusterSettings::from_ini(cluster_ini).context("cluster.ini")?;
+    let mut shard_settings = BTreeMap::new();
+    for name in reader.shard_directories()? {
+        let path = Path::new(&name).join("server.ini");
+        if let Some(source) = reader.read_optional_text(&path)? {
+            let mut ini = Ini::parse(&path, &source, Some(true))?.into_sections();
+            ini.remove("account");
+            let shard = ShardSettings::from_ini(ini).with_context(|| path.display().to_string())?;
+            shard_settings.insert(name, shard);
         }
     }
-    ensure!(!directories.is_empty(), "no DST shard directories found");
-    directories.sort_by_cached_key(|(name, _)| (name.to_lowercase(), name.clone()));
-    let multi = directories.len() > 1;
-    ensure!(
-        !multi || shard_enabled,
-        "shard_enabled must be true for multiple shards"
-    );
-
-    let mut names = BTreeSet::new();
-    let mut ids = BTreeSet::new();
-    let mut ports = BTreeSet::new();
-    let mut shards = Vec::with_capacity(directories.len());
-    let mut master_ports = BTreeSet::new();
-    let mut cluster_keys = BTreeSet::new();
-    for (name, path) in directories {
-        ensure!(
-            names.insert(name.to_lowercase()),
-            "duplicate shard directory names"
-        );
-        let ini = Ini::read(&path.join("server.ini"), true)?;
-        ensure!(
-            !(multi || shard_enabled) || ini.get("shard", "is_master").is_some(),
-            "is_master is required for each enabled shard"
-        );
-        let master = ini.boolean("shard", "is_master", true)?;
-        if !master {
-            ensure!(
-                ini.get("shard", "name")
-                    .is_some_and(|value| !value.is_empty()),
-                "every secondary shard requires SHARD.name"
-            );
-        }
-        let id = ini
-            .get("shard", "id")
-            .map(|value| unsigned(value, "SHARD.id"))
-            .transpose()?;
-        if let Some(id) = id {
-            ensure!(
-                (master && id == 1) || (!master && id >= 2),
-                "master shard id must be 1; secondary shard ids must be at least 2"
-            );
-            ensure!(ids.insert(id), "shard IDs must be unique");
-        }
-        master_ports.insert(ini.port("shard", "master_port", cluster_port)?);
-        cluster_keys.insert(
-            ini.get("shard", "cluster_key")
-                .or_else(|| cluster_ini.get("shard", "cluster_key"))
-                .map(str::to_owned),
-        );
-        let master_ip = ini
-            .get("shard", "master_ip")
-            .or_else(|| cluster_ini.get("shard", "master_ip"));
-        if let Some(host) = master_ip {
-            validate_host(host).context("server.ini SHARD.master_ip")?;
-        }
-        ensure!(
-            master || master_ip.is_some(),
-            "master_ip is required for every secondary shard"
-        );
-        let shard = Shard {
+    ensure!(!shard_settings.is_empty(), "no DST shard directories found");
+    let shard_enabled = settings.shard_enabled();
+    check_native_roles(
+        shard_enabled,
+        shard_settings.values().map(|shard| shard.is_master),
+    )?;
+    let master_port = settings.check_topology(shard_settings.iter(), key)?;
+    let mut shards = Vec::with_capacity(shard_settings.len());
+    for (name, shard) in shard_settings {
+        shards.push(Shard {
             name,
-            master,
-            id,
-            server_port: ini.port("network", "server_port", 10999)?,
-            master_server_port: ini.port("steam", "master_server_port", 27016)?,
-            master_ip: master_ip.map(str::to_owned),
-            bind_ip: ini.ipv4("bind_ip", cluster_bind)?,
-        };
-        for port in [shard.server_port, shard.master_server_port] {
-            ensure!(ports.insert(port), "UDP port {port} is used more than once");
-        }
-        shards.push(shard);
+            master: shard.is_master(),
+            id: shard.id().map(u32::try_from).transpose()?,
+            server_port: shard.server_port().try_into()?,
+            master_server_port: shard.master_server_port().try_into()?,
+            master_ip: shard.master_ip().or_else(|| settings.master_ip()),
+            bind_ip: shard
+                .bind_ip()
+                .unwrap_or_else(|| settings.bind_ip())
+                .parse()?,
+        });
     }
-
-    ensure!(
-        shards.iter().filter(|shard| shard.master).count() == 1,
-        "expected exactly one master shard"
-    );
-    ensure!(
-        master_ports.len() == 1,
-        "all shards must use the same master_port"
-    );
-    let master_port = *master_ports.first().expect("at least one shard");
-    ensure!(
-        !ports.contains(&master_port),
-        "master_port conflicts with another UDP port"
-    );
-    if multi || shard_enabled {
-        ensure!(
-            cluster_keys.len() == 1,
-            "all shards must use the same cluster_key"
-        );
-        ensure!(
-            !cluster_keys.contains(&Some(String::new()))
-                && (!multi || !cluster_keys.contains(&None)),
-            "multiple shards require a non-empty shared cluster_key"
-        );
-    }
-    // Stable sorting retains the deterministic name order among secondaries.
-    shards.sort_by_key(|shard| !shard.master);
+    shards.sort_by_cached_key(|shard| (!shard.master, shard.name.to_lowercase()));
     Ok(Cluster {
-        directory,
+        directory: reader.directory().to_owned(),
         shards,
         shard_enabled,
         master_port,
     })
+}
+
+pub(crate) fn check_native_roles(
+    shard_enabled: bool,
+    mut roles: impl ExactSizeIterator<Item = Option<bool>>,
+) -> Result<()> {
+    ensure!(
+        roles.len() <= 1 || shard_enabled,
+        "shard_enabled must be true for multiple shards"
+    );
+    ensure!(
+        !shard_enabled || roles.all(|role| role.is_some()),
+        "is_master is required for each enabled shard"
+    );
+    Ok(())
 }
 
 pub(crate) fn validate_shard_name(name: &str) -> Result<()> {
@@ -222,28 +165,6 @@ fn reject_symlink_components(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn regular_file_exists(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            ensure!(
-                !metadata.file_type().is_symlink(),
-                "configuration file cannot be a symlink: {}",
-                path.display()
-            );
-            ensure!(
-                metadata.is_file(),
-                "configuration must be a regular file: {}",
-                path.display()
-            );
-            Ok(true)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => {
-            Err(error).with_context(|| format!("inspect configuration file: {}", path.display()))
-        }
-    }
-}
-
 pub(crate) fn validate_host(host: &str) -> Result<()> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         ensure!(
@@ -273,53 +194,15 @@ pub(crate) fn validate_host(host: &str) -> Result<()> {
     Ok(())
 }
 
-fn unsigned(value: &str, field: &str) -> Result<u32> {
-    ensure!(
-        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
-        "{field} must be an unsigned integer"
-    );
-    value
-        .parse()
-        .with_context(|| format!("{field} exceeds its integer range"))
-}
-
 // Raw values may contain credentials; never derive Debug or Serialize.
 pub(crate) struct Ini {
-    path: PathBuf,
-    values: BTreeMap<String, BTreeMap<String, String>>,
+    values: files::IniDocument,
 }
 
 impl Ini {
-    fn read(path: &Path, shard: bool) -> Result<Self> {
-        ensure!(
-            regular_file_exists(path)?,
-            "missing configuration file: {}",
-            path.display()
-        );
-        let mut source = String::new();
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        }
-        let file = options
-            .open(path)
-            .with_context(|| format!("open INI configuration: {}", path.display()))?;
-        ensure!(
-            file.metadata()?.is_file(),
-            "INI configuration must be a regular file"
-        );
-        file.take(MAX_INI_BYTES + 1)
-            .read_to_string(&mut source)
-            .with_context(|| format!("read UTF-8 INI configuration: {}", path.display()))?;
-        Self::parse(path, &source, Some(shard))
-    }
-
     pub(crate) fn parse(path: &Path, source: &str, shard: Option<bool>) -> Result<Self> {
         ensure!(
-            source.len() as u64 <= MAX_INI_BYTES,
+            source.len() <= files::MAX_FILE_BYTES,
             "INI configuration exceeds size limit: {}",
             path.display()
         );
@@ -357,7 +240,9 @@ impl Ini {
                 );
                 if shard == Some(true) {
                     ensure!(
-                        ["shard", "network", "steam", "account"].contains(&section.as_str()),
+                        ShardSettings::SECTIONS
+                            .iter()
+                            .any(|(name, _)| name.eq_ignore_ascii_case(&section)),
                         "{} (unknown section)",
                         invalid()
                     );
@@ -378,83 +263,25 @@ impl Ini {
                 "{} (duplicate option)",
                 invalid()
             );
-            let allowed: Option<&[&str]> = match (shard, section.as_str()) {
-                (Some(false), "shard") => Some(&[
-                    "shard_enabled",
-                    "bind_ip",
-                    "master_ip",
-                    "master_port",
-                    "cluster_key",
-                ]),
-                (Some(true), "shard") => Some(&[
-                    "is_master",
-                    "name",
-                    "id",
-                    "bind_ip",
-                    "master_ip",
-                    "master_port",
-                    "cluster_key",
-                ]),
-                (Some(true), "network") => Some(&["server_port"]),
-                (Some(true), "steam") => Some(&["master_server_port", "authentication_port"]),
-                (Some(true), "account") => Some(&["encode_user_path"]),
-                _ => None,
+            let schema = match shard {
+                Some(true) => ShardSettings::SECTIONS,
+                Some(false) if section == "shard" => ClusterSettings::SECTIONS,
+                _ => continue,
             };
+            let allowed = schema
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&section));
             ensure!(
-                allowed.is_none_or(|allowed| allowed.contains(&key.as_str())),
+                allowed.is_some_and(|(_, fields)| fields.contains(&key.as_str())),
                 "{} (unknown topology option)",
                 invalid()
             );
         }
-        Ok(Self {
-            path: path.to_owned(),
-            values,
-        })
+        Ok(Self { values })
     }
 
-    pub(crate) fn into_sections(self) -> BTreeMap<String, BTreeMap<String, String>> {
+    pub(crate) fn into_sections(self) -> files::IniDocument {
         self.values
-    }
-
-    fn get(&self, section: &str, key: &str) -> Option<&str> {
-        self.values.get(section)?.get(key).map(String::as_str)
-    }
-
-    fn boolean(&self, section: &str, key: &str, default: bool) -> Result<bool> {
-        match self.get(section, key) {
-            None => Ok(default),
-            Some(value) if value.eq_ignore_ascii_case("true") => Ok(true),
-            Some(value) if value.eq_ignore_ascii_case("false") => Ok(false),
-            _ => bail!(
-                "{}: {section}.{key} must be true or false",
-                self.path.display()
-            ),
-        }
-    }
-
-    fn port(&self, section: &str, key: &str, default: u16) -> Result<u16> {
-        let Some(value) = self.get(section, key) else {
-            return Ok(default);
-        };
-        let port = unsigned(value, key)
-            .with_context(|| format!("{}: {section}.{key}", self.path.display()))?;
-        ensure!(
-            (1024..=65535).contains(&port),
-            "{}: {section}.{key} must be between 1024 and 65535",
-            self.path.display()
-        );
-        Ok(port as u16)
-    }
-
-    fn ipv4(&self, key: &str, default: Ipv4Addr) -> Result<Ipv4Addr> {
-        self.get("shard", key).map_or(Ok(default), |value| {
-            value.parse().with_context(|| {
-                format!(
-                    "{}: SHARD.{key} must be an IPv4 address",
-                    self.path.display()
-                )
-            })
-        })
     }
 }
 
@@ -473,7 +300,7 @@ mod tests {
                 format!("world-{index}")
             });
             fs::create_dir(&path).unwrap();
-            fs::write(path.join("server.ini"), format!("[SHARD]\nis_master = {}\nname = World {index}\nid = {}\n[NETWORK]\nserver_port = {}\n[STEAM]\nmaster_server_port = {}\nauthentication_port = ignored\n", index == 0, index + 1, 12000 + index, 27016 + index)).unwrap();
+            fs::write(path.join("server.ini"), format!("[SHARD]\nis_master = {}\nname = World {index}\nid = {}\n[NETWORK]\nserver_port = {}\n[STEAM]\nmaster_server_port = {}\n", index == 0, index + 1, 12000 + index, 27016 + index)).unwrap();
             fs::write(
                 path.join("modoverrides.lua"),
                 "return make_dynamic_mod_settings()",
@@ -584,7 +411,12 @@ mod tests {
             ),
             ("world-1/server.ini", "is_master = false\n", "", "is_master"),
             ("world-1/server.ini", "id = 2", "id = 1", "id"),
-            ("world-1/server.ini", "id = 2", "id = 4294967296", "range"),
+            (
+                "world-1/server.ini",
+                "id = 2",
+                "id = 4294967296",
+                "4294967295",
+            ),
             ("world-1/server.ini", "name = World 1", "name =", "name"),
             (
                 "world-1/server.ini",
@@ -626,6 +458,12 @@ mod tests {
                 "world-1/server.ini",
                 "id = 2",
                 "id = 2\nunknown = value",
+                "unknown topology option",
+            ),
+            (
+                "world-1/server.ini",
+                "master_server_port = 27017",
+                "master_server_port = 27017\nauthentication_port = 8766",
                 "unknown topology option",
             ),
             ("world-2/server.ini", "id = 3", "id = 2", "unique"),

@@ -2,12 +2,94 @@ use std::{collections::BTreeSet, os::fd::AsRawFd, sync::Arc, time::Duration};
 
 use dst_server::{
     model::{Envelope, Error, ErrorCode, Request, Scope, Target},
-    rpc::{self, Client, EventHub, Incoming},
+    rpc::{self, Client, EventHub, Incoming, StreamKind},
 };
 use serde_json::json;
 use tokio::sync::{Notify, mpsc, oneshot};
 
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[path = "fixtures/large_events.rs"]
+mod large_events;
+
+#[tokio::test]
+async fn legal_maximum_game_frames_survive_subscription_encoding() {
+    let _test = TEST_LOCK.lock().await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("large.sock");
+            let (dispatch, _incoming) = mpsc::channel(1);
+            let (shutdown, stop) = oneshot::channel();
+            let hub = EventHub::default();
+            let path = socket.clone();
+            let events = hub.clone();
+            let server =
+                tokio::task::spawn_local(
+                    async move { rpc::serve(&path, dispatch, events, stop).await },
+                );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !socket.exists() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let client = Client::connect(&socket).await.unwrap();
+            let stream = client.subscribe(StreamKind::Events).await.unwrap();
+            let (resource, cluster, shard) = large_events::dense_context().await;
+            let mut largest = 0;
+            for event in large_events::records() {
+                let mut expected = large_events::local_record(&event);
+                expected["resource"] = json!(resource);
+                expected["attributes"]["dst.cluster.name"] = json!(cluster);
+                expected["attributes"]["dst.shard.name"] = json!(shard);
+                hub.publish(StreamKind::Events, &expected);
+                largest = largest.max(hub.stats()["events"].pending_bytes);
+                let batch = stream.next(512).await.unwrap();
+                assert_eq!(batch.dropped, 0, "{}", event.event_name);
+                assert!(
+                    batch.records == vec![expected],
+                    "{} changed",
+                    event.event_name
+                );
+            }
+            eprintln!(
+                "schema_capacity resource_attributes={} maximum_encoded_bytes={largest}",
+                resource.len()
+            );
+            assert!(largest < 1024 * 1024 - 32);
+            let records = vec![
+                json!({"sequence":0,"value":"x".repeat(700_000)}),
+                json!({"sequence":1,"value":null}),
+                json!({"sequence":2,"value":vec![0; 32_000]}),
+                json!({"sequence":3,"value":"中文🌲"}),
+            ];
+            for record in &records {
+                hub.publish(StreamKind::Events, record);
+            }
+            let first = stream.next(512).await.unwrap();
+            assert_eq!((first.records.len(), first.dropped), (2, 0));
+            assert!(first.records == records[..2]);
+            assert_eq!(hub.stats()["events"].pending_records, 2);
+            let second = stream.next(512).await.unwrap();
+            assert!(second.records == records[2..]);
+            assert_eq!(second.dropped, 0);
+            assert_eq!(hub.stats()["events"].pending_bytes, 0);
+
+            for record in &records {
+                hub.publish(StreamKind::Events, record);
+            }
+            stream.next(512).await.unwrap();
+            assert_eq!(hub.stats()["events"].pending_records, 2);
+            stream.close().await.unwrap();
+            assert_eq!(hub.stats()["events"].pending_bytes, 0);
+            client.close().await.unwrap();
+            shutdown.send(()).unwrap();
+            server.await.unwrap().unwrap();
+        })
+        .await;
+}
 
 #[tokio::test]
 async fn native_commands_results_and_events_preserve_fields() {
@@ -23,12 +105,21 @@ async fn native_commands_results_and_events_preserve_fields() {
         let server = tokio::task::spawn_local(async move {
             rpc::serve(&path, dispatch, events, stop).await
         });
-        let failure = Error::new(ErrorCode::PartialFailure, "洞穴 unavailable").with_details(json!({"exact": u64::MAX, "nested": [null, {}, []]}));
-        let expected_failure = failure.clone();
+        let failure = Error::new(ErrorCode::PartialFailure, "洞穴 unavailable").with_details(json!({
+            "exact": u64::MAX,
+            "nested": [null, {}, []],
+            "shard_results": "x".repeat(5 * 1024 * 1024),
+        }));
+        let failures = [
+            failure,
+            Error::new(ErrorCode::Transport, "native preloader did not exit cleanly")
+                .with_details(json!({"returncode":7})),
+        ];
+        let mut replies = failures.clone().into_iter();
         let actor = tokio::spawn(async move {
             while let Some(call) = incoming.recv().await {
                 let result = if matches!(call.request.request, Request::Kill {}) {
-                    Err(failure.clone())
+                    Err(replies.next().unwrap())
                 } else {
                     Ok(serde_json::to_value(call.request).unwrap())
                 };
@@ -54,6 +145,7 @@ async fn native_commands_results_and_events_preserve_fields() {
             ("update_mods", json!({"restart":true,"notice":null})),
             ("read_configuration", json!({})),
             ("configure", json!({"configuration":dynamic,"replace_permissions":true})),
+            ("edit_configuration", json!({"changes":[["/cluster/settings/cluster_name","新名字"],["/cluster/settings/max_players",12]],"unset":["/policy/idle"]})),
             ("set_policy", json!({"policy":{"mod_auto_update":false}})),
             ("execute", json!({"source":"print('test')"})),
             ("execute_json", json!({"source":"return {test=1}"})),
@@ -112,11 +204,20 @@ async fn native_commands_results_and_events_preserve_fields() {
             methods.insert(method);
         }
         assert_eq!(methods, dst_server::model::METHODS.iter().map(|method| method.name).collect());
-        assert_eq!(client.call(Envelope::new(Target::Room, Request::Kill {}).unwrap()).await.unwrap_err(), expected_failure);
-        let stream = client.subscribe("events").await.unwrap();
-        hub.publish("events", &dynamic);
+        for failure in failures {
+            assert_eq!(client.call(Envelope::new(Target::Room, Request::Kill {}).unwrap()).await.unwrap_err(), failure);
+        }
+        let stream = client.subscribe(StreamKind::Events).await.unwrap();
+        hub.publish(StreamKind::Events, &dynamic);
         assert_eq!(stream.next(1).await.unwrap().records, vec![dynamic]);
+        let mut subscribers = Vec::new();
+        for _ in 1..128 {
+            subscribers.push(client.subscribe(StreamKind::Logs).await.unwrap());
+        }
+        assert_eq!(client.subscribe(StreamKind::Lifecycle).await.err().unwrap().code, ErrorCode::Busy);
         stream.close().await.unwrap();
+        client.subscribe(StreamKind::Lifecycle).await.unwrap().close().await.unwrap();
+        drop(subscribers);
         client.close().await.unwrap();
         shutdown.send(()).unwrap();
         server.await.unwrap().unwrap();
@@ -146,7 +247,7 @@ async fn final_response_is_delivered_before_server_shutdown() {
                 .await
                 .unwrap();
                 let client = Client::connect(&socket).await.unwrap();
-                let stream = client.subscribe("lifecycle").await.unwrap();
+                let stream = client.subscribe(StreamKind::Lifecycle).await.unwrap();
                 let clone = client.clone();
                 let request = tokio::spawn(async move {
                     clone
@@ -220,7 +321,11 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
             .await
             .unwrap();
             let client = Client::connect(&path).await.unwrap();
-            assert_eq!(client.describe().await.unwrap()["protocol"], 3);
+            let methods = client.describe().await.unwrap();
+            for (scope, name) in [("room", "save"), ("shard", "runtime")] {
+                let available = methods[scope].as_array().unwrap();
+                assert!(available.iter().any(|method| method["name"] == name));
+            }
             let clone = client.clone();
             let call = tokio::spawn(async move {
                 clone
@@ -239,25 +344,25 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
                 .unwrap();
 
             let client = Client::connect(&path).await.unwrap();
-            let stream = client.subscribe("events").await.unwrap();
-            let fast = client.subscribe("events").await.unwrap();
+            let stream = client.subscribe(StreamKind::Events).await.unwrap();
+            let fast = client.subscribe(StreamKind::Events).await.unwrap();
             for sequence in 0..1100 {
-                hub.publish("events", &json!({"sequence":sequence}));
+                hub.publish(StreamKind::Events, &json!({"sequence":sequence}));
                 let batch = fast.next(1).await.unwrap();
                 assert_eq!(batch.records, vec![json!({"sequence": sequence})]);
                 assert_eq!(batch.dropped, 0);
             }
             fast.close().await.unwrap();
             let batch = stream.next(512).await.unwrap();
-            assert!(!batch.records.is_empty() && batch.records.len() <= 16);
+            assert_eq!(batch.records.len(), 128);
             assert_eq!(batch.dropped, 1100 - 128);
             assert_eq!(batch.records[0]["sequence"], 1100 - 128);
             assert!(!batch.closed);
             stream.close().await.unwrap();
 
-            let stream = client.subscribe("events").await.unwrap();
+            let stream = client.subscribe(StreamKind::Events).await.unwrap();
             for sequence in 0..1024 {
-                hub.publish("events", &json!({"sequence": sequence}));
+                hub.publish(StreamKind::Events, &json!({"sequence": sequence}));
                 let batch = stream.next(1).await.unwrap();
                 assert_eq!(batch.records, vec![json!({"sequence": sequence})]);
             }
@@ -266,24 +371,42 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
             assert_eq!(next.unwrap_err().code, ErrorCode::Transport);
             assert_eq!(stream.next(1).await.unwrap_err().code, ErrorCode::Transport);
 
-            let stream = client.subscribe("logs").await.unwrap();
-            let record = json!({"line":"x".repeat(64 * 1024 - 128)});
-            for _ in 0..200 {
-                hub.publish("logs", &record);
+            let stream = client.subscribe(StreamKind::Logs).await.unwrap();
+            for sequence in 0..200 {
+                hub.publish(
+                    StreamKind::Logs,
+                    &json!({"sequence":sequence,"line":"x".repeat(64 * 1024 - 128)}),
+                );
             }
-            let batch = stream.next(512).await.unwrap();
+            let mut batch = stream.next(512).await.unwrap();
             assert!(batch.dropped > 0 && batch.dropped < 200);
-            assert!(batch.records.len() <= 16);
-            let batch = stream.next(512).await.unwrap();
-            assert_eq!(batch.records.len(), 15); // Native records plus the batch header fit 1 MiB.
-            assert!(batch.records.iter().all(|value| *value == record));
-            assert_eq!(batch.dropped, 0);
+            hub.publish(StreamKind::Logs, &json!({"sequence":200,"sentinel":true}));
+            let mut received = Vec::new();
+            let mut dropped = 0;
+            loop {
+                dropped += batch.dropped;
+                received.extend(
+                    batch
+                        .records
+                        .iter()
+                        .map(|record| record["sequence"].as_u64().unwrap()),
+                );
+                if received.last() == Some(&200) {
+                    break;
+                }
+                batch = tokio::time::timeout(Duration::from_secs(1), stream.next(512))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            assert!(received.windows(2).all(|pair| pair[0] < pair[1]));
+            assert_eq!(received.len() as u64 + dropped, 201);
             stream.close().await.unwrap();
 
-            let oversized = client.subscribe("events").await.unwrap();
+            let oversized = client.subscribe(StreamKind::Events).await.unwrap();
             let mut waiting = Box::pin(oversized.next(1));
             assert!(futures::poll!(&mut waiting).is_pending());
-            hub.publish("events", &json!("x".repeat(64 * 1024 + 1)));
+            hub.publish(StreamKind::Events, &json!("x".repeat(1024 * 1024)));
             let batch = tokio::time::timeout(Duration::from_secs(1), waiting)
                 .await
                 .unwrap()
@@ -293,7 +416,7 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
             assert!(!batch.closed);
             oversized.close().await.unwrap();
 
-            let pending = client.subscribe("lifecycle").await.unwrap();
+            let pending = client.subscribe(StreamKind::Lifecycle).await.unwrap();
             let mut reading = Box::pin(pending.next(1));
             assert!(futures::poll!(&mut reading).is_pending());
             drop(reading);
@@ -301,7 +424,7 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
                 .await
                 .unwrap()
                 .unwrap();
-            let active = client.subscribe("events").await.unwrap();
+            let active = client.subscribe(StreamKind::Events).await.unwrap();
             let mut waiting = Box::pin(active.next(1));
             assert!(futures::poll!(&mut waiting).is_pending());
             active.close().await.unwrap();
@@ -312,15 +435,15 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
                     .unwrap()
                     .closed
             );
-            let draining = client.subscribe("lifecycle").await.unwrap();
+            let draining = client.subscribe(StreamKind::Lifecycle).await.unwrap();
             for sequence in 0..20 {
-                hub.publish("lifecycle", &json!({"sequence": sequence}));
+                hub.publish(StreamKind::Lifecycle, &json!({"sequence": sequence}));
             }
             hub.close();
-            let first = draining.next(512).await.unwrap();
+            let first = draining.next(15).await.unwrap();
             assert_eq!(first.records.len(), 15);
             assert!(!first.closed);
-            let last = draining.next(512).await.unwrap();
+            let last = draining.next(5).await.unwrap();
             assert_eq!(last.records.len(), 5);
             assert!(last.closed);
             assert_eq!(first.dropped + last.dropped, 0);
@@ -331,7 +454,7 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
                 .map(|record| record["sequence"].as_u64().unwrap())
                 .collect();
             assert_eq!(sequences, (0..20).collect::<Vec<_>>());
-            assert!(client.subscribe("lifecycle").await.is_err());
+            assert!(client.subscribe(StreamKind::Lifecycle).await.is_err());
             draining.close().await.unwrap();
             client.close().await.unwrap();
             shutdown.send(()).unwrap();
@@ -381,7 +504,7 @@ async fn cancelled_waits_release_slots_and_disconnected_mutations_stay_unknown()
                 );
                 waiting.abort();
                 let _ = waiting.await;
-                assert_eq!(client.describe().await.unwrap()["protocol"], 3);
+                client.describe().await.unwrap();
             }
             assert_eq!(owned_operations.len(), 80);
             let clone = client.clone();

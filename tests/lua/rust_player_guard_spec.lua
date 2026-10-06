@@ -1,9 +1,6 @@
 local root, native = assert(arg[1]), assert(arg[2])
 package.path = root .. "/resources/lua/?.lua;" .. native .. "/?.lua;" .. package.path
 json = require("json")
-package.preload["dst_server.player_values"] = function()
-    return { player = function(client, player) return { userid = client.userid, loaded = player ~= nil } end }
-end
 local state = require("dst_server.state")
 state.installed = true
 state.generation = 7
@@ -11,10 +8,12 @@ TheWorld = { ismastershard = true, meta = { session_identifier = "SESSION" } }
 local teleports = 0
 local player = {
     userid = "KU_TEST", GUID = 17, prefab = "wilson",
+    components = {}, HasTag = function() return false end,
     IsValid = function() return true end,
-    GetDisplayName = function() return "Test" end,
+    Transform = { GetWorldPosition = function() return 1, 0, 2 end },
     Physics = { Teleport = function() teleports = teleports + 1 end },
 }
+AllPlayers = {player}
 LookupPlayerInstByUserID = function(userid) return userid == "KU_TEST" and player or nil end
 GetPlayerClientTable = function() return { { userid = "KU_TEST" }, { userid = "KU_LOADING" } } end
 local driver = require("dst_server")
@@ -26,6 +25,23 @@ local function teleport(session, guid, generation)
     end))
 end
 assert(teleport("SESSION", 17).ok and teleports == 1)
+POSTACTIVATEHANDSHAKE = { STC_SENDINGSTATE = 2, READY = 3 }
+player._PostActivateHandshakeState_Server = POSTACTIVATEHANDSHAKE.STC_SENDINGSTATE
+local pending = driver.call("locate_player", { userid = "KU_TEST", include_details = true })
+assert(pending.loaded == false and pending.guid == 17 and pending.player.prefab == "wilson")
+assert(pending.player.vitals == json.null and pending.player.state == json.null)
+local summary = driver.call("list_players")[1]
+assert(summary.position == json.null and summary.age == json.null and summary.is_ghost == json.null)
+assert(teleport("SESSION", 17).error == "stale_reference" and teleports == 1)
+player._PostActivateHandshakeState_Server = POSTACTIVATEHANDSHAKE.READY
+local ready = driver.call("locate_player", { userid = "KU_TEST", include_details = true })
+assert(ready.loaded and ready.player.position.x == 1 and ready.player.vitals ~= json.null)
+local clients = GetPlayerClientTable
+GetPlayerClientTable = function() error("active routing read the roster") end
+player.components.skilltreeupdater = {GetSkillXP = function() error("active routing read character details") end}
+local route = driver.call("locate_player", { userid = "KU_TEST" })
+assert(route.present and route.loaded and route.guid == player.GUID and route.player == nil)
+GetPlayerClientTable, player.components.skilltreeupdater = clients, nil
 assert(teleport("OLD", 17).error == "stale_reference" and teleports == 1)
 assert(teleport("SESSION", 18).error == "stale_reference" and teleports == 1)
 assert(teleport("SESSION", 17, 6).error == "stale_reference" and teleports == 1)
@@ -34,13 +50,13 @@ assert(teleport("SESSION", 17).error == "stale_reference" and teleports == 1)
 local departing = driver.call("locate_player", { userid = "KU_TEST" })
 assert(departing.departing and departing.guid == 17 and departing.session_id == "SESSION")
 local loading = driver.call("locate_player", { userid = "KU_LOADING" })
-assert(loading.guid == json.null and loading.player.loaded == false)
+assert(loading.present and loading.guid == json.null and loading.player == nil)
 local kicked = {}
 TheNet = { Kick = function(_, userid) kicked[#kicked + 1] = userid end }
 assert(driver.call("kick", { userid = "KU_LOADING" }), "character selection has no entity")
 assert(driver.call("kick", { userid = "KU_TEST" }), "migration must not require an active entity")
 assert(not driver.call("kick", { userid = "KU_GONE" }) and #kicked == 2)
-assert(driver.call("locate_player", { userid = "KU_GONE" }).player == json.null)
+assert(not driver.call("locate_player", { userid = "KU_GONE" }).present)
 player._despawning = false
 player = nil
 assert(driver.call("kick", { userid = "KU_TEST" }), "loading must not require a GUID")

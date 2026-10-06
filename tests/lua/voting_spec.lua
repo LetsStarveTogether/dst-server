@@ -2,6 +2,8 @@ local root, scripts = assert(arg[1]), assert(arg[2])
 dofile(root .. "/tests/lua/setup.lua")(root, scripts)
 require("class")
 package.loaded["screens/redux/popupdialog"] = {}
+package.loaded["map/customize"] = {}
+require("shardnetworking")
 package.loaded.stats = { PushMetricsEvent = function() end }
 MAX_VOTE_OPTIONS = 6
 COMMAND_PERMISSION = { USER = 1, MODERATOR = 2, ADMIN = 3 }
@@ -133,6 +135,9 @@ assert(start("kick", "KU_A", "KU_B").error.message == "MINSTARTAGE")
 clients[2].playerage = 20
 local vote = start("kick", "KU_A", "KU_B")
 assert(vote.current.command == "kick" and vote.current.starter_userid == "KU_A")
+TheWorld:PushEvent("master_worldvoterupdate", {})
+TheWorld:PushEvent("worldvotertick")
+assert(driver.call("get_vote").current.countdown == vote.current.countdown)
 assert(not native:IsVoteActive(), "native dialog visibility lags the start event")
 assert(start("rollback", "KU_A").error.code == "busy")
 assert(vote.current.voters[1].selection == json.null and vote.current.voters[1].can_vote)
@@ -154,6 +159,33 @@ end
 native:OnUpdate(0.1)
 native:OnUpdate(2)
 assert(executed == 1 and driver.call("get_vote").current == json.null)
+
+-- The cave checks command access with the character. The master receives Klei's shard vote callback.
+local master, masterplayers = TheWorld, AllPlayers
+local caveplayer = table.remove(masterplayers, 2)
+assert(caveplayer.userid == "KU_B" and not LookupPlayerInstByUserID(caveplayer.userid))
+assert(start("kick", "KU_B", "KU_C").error.code == "invalid")
+TheWorld, AllPlayers = entity(3), {caveplayer}
+TheWorld.ismastersim, TheWorld.ismastershard, TheWorld.net = true, false, entity(4)
+TheWorld.net.components.worldvoter = require("components/worldvoter")(TheWorld.net)
+TheWorld:PushEvent("secondary_worldvoterenabled", true)
+local kick = commands.GetCommandFromName("kick")
+kick.hasaccessfn = function(_, caller) return caller == caveplayer and caller.can_start end
+local args = {command = "kick", starter_userid = "KU_B", userid = "KU_B", target_userid = "KU_C"}
+assert(driver.call("check_vote_access", args).error.code == "invalid")
+caveplayer.can_start = true
+kick.votecanstartfn = function(_, caller) return caller ~= caveplayer, "PLAYER_CHECK" end
+assert(driver.call("check_vote_access", args).error.message == "PLAYER_CHECK")
+kick.votecanstartfn = nil
+args._checked_command_hash = driver.call("check_vote_access", args)
+assert(args._checked_command_hash == kick.hash)
+TheWorld, AllPlayers = master, masterplayers
+local remote_vote = driver.call("start_vote", args)
+assert(remote_vote.current.command == "kick" and remote_vote.current.starter_userid == "KU_B"
+    and remote_vote.current.target_userid == "KU_C")
+assert(driver.call("get_vote").current.starter_userid == "KU_B" and driver.call("cancel_vote"))
+kick.hasaccessfn = nil
+
 TheWorld.net.components.worldvoter = { IsEnabled = function() return false end, IsVoteActive = function() return false end }
 assert(start("rollback", "KU_B").error.code == "unsupported")
 TheWorld.net.components.worldvoter = nil

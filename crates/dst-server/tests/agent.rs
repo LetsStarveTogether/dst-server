@@ -12,7 +12,7 @@ use dst_server::{
     files::RoomLock,
     model::{Envelope, ErrorCode, Request, Target},
     recovery::{ClosedReason, RecoveryState},
-    rpc::Client,
+    rpc::{Client, StreamKind},
 };
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
@@ -103,7 +103,9 @@ if not prepared.exists():
             .arg(root)
             .arg("--executable")
             .arg(directory.join("install/bin64/game.py"))
-            .env("DST_SERVER_CLUSTER_NAME", "dst-fixture")
+            .env("PODMAN_SYSTEMD_UNIT", "dst-fixture.service")
+            .env_remove("DST_SERVER_TELEMETRY_PROFILE")
+            .env_remove("OTEL_RESOURCE_ATTRIBUTES")
             .env("OTEL_LOGS_EXPORTER", "none")
             .env("OTEL_METRICS_EXPORTER", "none")
             .env("OTEL_TRACES_EXPORTER", "none")
@@ -150,6 +152,14 @@ if not prepared.exists():
         fs::read_to_string(self.directory.path().join("agent.log")).unwrap()
     }
 
+    fn records(&self) -> Vec<Value> {
+        self.log()
+            .lines()
+            .filter_map(|line| line.strip_prefix("DST_RECORD|"))
+            .map(|record| serde_json::from_str(record).unwrap())
+            .collect()
+    }
+
     fn control(&self) -> Value {
         serde_json::from_slice(&fs::read(self.root.join(".dst-server.json")).unwrap()).unwrap()
     }
@@ -165,13 +175,18 @@ if not prepared.exists():
     }
 
     fn assert_no_games(&self) {
-        assert!(self.control().get("driver").is_none());
         for name in ["Master", "Caves"] {
-            assert!(!self.root.join(name).join("native-lifecycle").exists());
+            let shard = self.root.join(name);
+            assert!(!shard.join("dst_server_driver.json").exists());
+            assert!(!shard.join("native-lifecycle").exists());
         }
     }
     async fn wait(&mut self, code: i32) {
-        let status = timeout(Duration::from_secs(8), async {
+        self.wait_for(code, Duration::from_secs(8)).await;
+    }
+
+    async fn wait_for(&mut self, code: i32, duration: Duration) {
+        let status = timeout(duration, async {
             loop {
                 if let Some(status) = self.child.try_wait().unwrap() {
                     return status;
@@ -197,6 +212,343 @@ async fn call(client: &Client, request: Request) -> Value {
         .call(Envelope::new(Target::Room, request).unwrap())
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn expired_and_disconnected_queries_do_not_reach_a_busy_shard() {
+    let mut agent = Agent::spawn(false, false);
+    let client = agent.client().await;
+    let master = agent.root.join("Master");
+    let shard = |request| Envelope::new(Target::Shard("Master".into()), request).unwrap();
+    fs::write(master.join("hold-world"), "").unwrap();
+    fs::write(master.join("hold-list_players"), "").unwrap();
+    fs::write(agent.root.join("vote-response.json"), "true").unwrap();
+    let mut active = Box::pin(client.call(shard(Request::World {})));
+    assert!(futures::poll!(&mut active).is_pending());
+    timeout(Duration::from_secs(3), async {
+        while !master.join("world-waiting").exists() {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let remote = agent.client().await;
+    let mut abandoned =
+        Box::pin(remote.call(Envelope::new(Target::Room, Request::GetVote {}).unwrap()));
+    assert!(futures::poll!(&mut abandoned).is_pending());
+    call(&remote, Request::Status {}).await;
+    remote.close().await.unwrap();
+    assert_eq!(abandoned.await.unwrap_err().code, ErrorCode::Transport);
+
+    let mut list = shard(Request::ListPlayers {});
+    list.timeout = Some(0.1);
+    assert_eq!(
+        client.call(list).await.unwrap_err().code,
+        ErrorCode::Timeout
+    );
+    fs::remove_file(master.join("hold-world")).unwrap();
+    active.await.unwrap();
+    let runtime = timeout(
+        Duration::from_secs(3),
+        client.call(shard(Request::Runtime {})),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(runtime["session_id"], "S_Master");
+    assert!(!master.join("list_players-waiting").exists());
+    assert!(!agent.root.join("Master.vote-call").exists());
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+}
+
+#[tokio::test]
+async fn cli_reports_failing_shards_and_lua_errors_with_their_output() {
+    let mut agent = Agent::spawn(false, false);
+    let client = agent.client().await;
+    let run = |args: &[&str], code| {
+        let output = Command::new(env!("CARGO_BIN_EXE_dst-server"))
+            .args(args)
+            .args(["--json", "--socket"])
+            .arg(agent.root.join(".dst-agent.sock"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let all = run(&["call", "list_players"], 0);
+    assert_eq!(all[0]["result"]["ok"], true);
+    fs::write(
+        agent.root.join("Caves/list_players-response.json"),
+        r#"{"ok":false,"error":"lua_error"}"#,
+    )
+    .unwrap();
+    let all = run(&["call", "list_players"], 1);
+    let error = &all[0]["result"]["error"];
+    assert_eq!(error["code"], "partial_failure");
+    let shards = error["details"]["shards"].as_array().unwrap();
+    assert_eq!(shards.len(), 2);
+    assert!(
+        shards
+            .iter()
+            .any(|row| row["shard"] == "Caves" && row["result"]["status"] == "failure")
+    );
+    assert!(
+        shards
+            .iter()
+            .any(|row| row["shard"] == "Master" && row["result"]["status"] == "success")
+    );
+
+    let source = "print('before'); error('example')";
+    let file = agent.directory.path().join("script.lua");
+    fs::write(&file, "return +").unwrap();
+    for (flag, argument, kind, printed) in [
+        ("--source", source, "runtime", "before"),
+        ("--file", file.to_str().unwrap(), "compile", ""),
+    ] {
+        let evaluated = json!({"output":printed,"error":{"kind":kind,"message":"example"},"values":[],"truncated":false});
+        fs::write(
+            agent.root.join("Caves/evaluate-response.json"),
+            json!({"ok":true,"data":evaluated}).to_string(),
+        )
+        .unwrap();
+        let response = run(&["console", "--shard", "Caves", flag, argument], 1);
+        assert_eq!(response["error"]["code"], "lua");
+        assert_eq!(response["error"]["details"], evaluated);
+    }
+    let result = run(&["call", "execute_all", r#"{"source":"1"}"#], 1);
+    let error = &result[0]["result"]["error"];
+    assert_eq!(error["code"], "partial_failure");
+    let shards = error["details"]["shards"].as_array().unwrap();
+    assert!(
+        shards
+            .iter()
+            .any(|row| row["shard"] == "Caves" && row["result"]["error"]["code"] == "lua")
+    );
+    assert!(
+        shards
+            .iter()
+            .any(|row| row["shard"] == "Master" && row["result"]["value"] == "captured")
+    );
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+}
+
+async fn online_host() -> (Agent, Client, dst_server::host::Host) {
+    use dst_server::{
+        deployment::{ContainerUnit, DeploymentOptions, PortMapping},
+        host::Host,
+        settings::ClusterConfig,
+    };
+    let mut agent = Agent::spawn(true, false);
+    let client = agent.client_in_phase("stopped").await;
+    let configuration = call(&client, Request::ReadConfiguration {}).await;
+    let units = agent.directory.path().join("units");
+    fs::create_dir(&units).unwrap();
+    let options = DeploymentOptions {
+        ports: [19100, 19101, 19200, 19201]
+            .into_iter()
+            .map(|port| PortMapping {
+                host: port,
+                container: port,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    ContainerUnit::for_cluster(
+        "dst-001",
+        &agent.root,
+        &ClusterConfig::from_value(configuration["cluster"].clone()).unwrap(),
+        options,
+    )
+    .unwrap()
+    .save(&units)
+    .unwrap();
+    fs::write(agent.directory.path().join("service-state"), "active").unwrap();
+    let mut host = Host::new(agent.directory.path(), &units);
+    let systemctl = agent.directory.path().join("systemctl");
+    fs::write(&systemctl, include_str!("fixtures/edit_systemctl.py")).unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+    host.systemd.executable = systemctl;
+    (agent, client, host)
+}
+
+#[tokio::test]
+async fn online_host_field_edits_preserve_concurrent_changes() {
+    let (mut agent, client, host) = online_host().await;
+    let first = [("/cluster/settings/cluster_name".into(), json!("renamed"))];
+    let second = [("/cluster/settings/max_players".into(), json!(12))];
+    let results = tokio::join!(
+        host.edit_fields(1, &first, &[]),
+        host.edit_fields(1, &second, &[])
+    );
+    for (result, changes) in [(results.0, first), (results.1, second)] {
+        if let Err(error) = result {
+            assert_eq!(
+                error
+                    .downcast_ref::<dst_server::model::Error>()
+                    .unwrap()
+                    .code,
+                ErrorCode::Busy
+            );
+            host.edit_fields(1, &changes, &[]).await.unwrap();
+        }
+    }
+    let saved = host.load(1).await.unwrap();
+    assert_eq!(
+        saved.get("/cluster/settings/cluster_name").unwrap(),
+        "renamed"
+    );
+    assert_eq!(saved.get("/cluster/settings/max_players").unwrap(), 12);
+    agent.assert_no_games();
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn online_edit_distinguishes_preflight_from_failed_readback() {
+    let (mut agent, client, host) = online_host().await;
+    let observed = host.wait_ready(1, Duration::from_secs(2)).await.unwrap();
+    assert_eq!(observed["game"]["phase"], "stopped");
+    assert_eq!(observed["desired"], false);
+    let original = call(&client, Request::ReadConfiguration {}).await;
+    let window = original["policy"]["schedule"][0].clone();
+    let append = [("/policy/schedule/-".into(), window)];
+    let unit = host.quadlet_dir.join("dst-001.container");
+    let contents = fs::read(&unit).unwrap();
+    fs::remove_file(&unit).unwrap();
+    assert!(host.edit_fields(1, &append, &[]).await.is_err());
+    assert_eq!(call(&client, Request::ReadConfiguration {}).await, original);
+    fs::write(&unit, contents).unwrap();
+
+    // The Agent can still edit policy when the native configuration is unreadable.
+    let ini = agent.root.join("cluster.ini");
+    let contents = fs::read(&ini).unwrap();
+    fs::write(&ini, "[invalid-section]\nsecret=private\n").unwrap();
+    let error = host.edit_fields(1, &append, &[]).await.unwrap_err();
+    let error = error.downcast_ref::<dst_server::model::Error>().unwrap();
+    assert_eq!(error.code, ErrorCode::PartialFailure);
+    assert_eq!(
+        error.details,
+        json!({"applied":true,"number":1,"stage":"readback"})
+    );
+    assert!(!error.message.contains("private"));
+    fs::write(ini, contents).unwrap();
+    assert_eq!(host.load(1).await.unwrap().policy.schedule.len(), 2);
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn large_command_replies_stay_out_of_status_and_lifecycle_records() {
+    let mut agent = Agent::spawn(false, false);
+    let client = agent.client().await;
+    let stream = client.subscribe(StreamKind::Lifecycle).await.unwrap();
+    let payload = "x".repeat(256 * 1024);
+    fs::write(
+        agent.root.join("Master/execute_json-response.json"),
+        json!({"ok":true, "data":payload}).to_string(),
+    )
+    .unwrap();
+    let request = Envelope::new(
+        Target::Shard("Master".into()),
+        Request::ExecuteJson {
+            source: "return 'x'".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(client.call(request).await.unwrap(), payload);
+    let status = call(&client, Request::Status {}).await;
+    let last = &status["operations"]["last"];
+    assert_eq!(last["method"], "execute_json");
+    assert!(last["completed_at_ns"].is_u64());
+    assert!(last["error"].is_null());
+    assert!(serde_json::to_vec(&status).unwrap().len() < 16 * 1024);
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let batch = stream.next(128).await.unwrap();
+            assert_eq!(batch.dropped, 0);
+            if batch.records.iter().any(|record| {
+                let last = &record["status"]["operations"]["last"];
+                last["method"] == "execute_json" && last["completed_at_ns"].is_u64()
+            }) {
+                assert!(
+                    batch
+                        .records
+                        .iter()
+                        .all(|record| serde_json::to_vec(record).unwrap().len() < 16 * 1024)
+                );
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn closed_agent_rejects_version_fifos_without_blocking_startup() {
+    for linked in [false, true] {
+        let mut agent = Agent::spawn(true, false);
+        let client = agent.client_in_phase("stopped").await;
+        agent.assert_no_games();
+        call(&client, Request::Stop { notice: None }).await;
+        agent.wait(0).await;
+        client.close().await.unwrap();
+
+        let version = agent.directory.path().join("install/version.txt");
+        let fifo = if linked {
+            version.with_file_name("version-source")
+        } else {
+            version.clone()
+        };
+        let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+        if linked {
+            std::os::unix::fs::symlink(&fifo, &version).unwrap();
+        }
+        fs::write(agent.directory.path().join("agent.log"), "").unwrap();
+        agent.child = Agent::launch(
+            agent.directory.path(),
+            &agent.root,
+            &[("OTEL_SDK_DISABLED", "true")],
+        );
+        let client = match timeout(Duration::from_secs(5), agent.client_in_phase("stopped")).await {
+            Ok(client) => client,
+            Err(_) => {
+                let pid = agent.child.id() as i32;
+                drop(agent);
+                let probe = unsafe { libc::kill(pid, 0) };
+                let error = std::io::Error::last_os_error();
+                assert_eq!((probe, error.raw_os_error()), (-1, Some(libc::ESRCH)));
+                panic!(
+                    "Agent startup blocked by a writerless version FIFO (linked={linked}); child {pid} was killed and reaped"
+                );
+            }
+        };
+        let status = call(&client, Request::Status {}).await;
+        assert_eq!(status["agent"]["ready"], true);
+        assert_eq!(status["phase"], "stopped");
+        agent.assert_no_games();
+        call(&client, Request::Stop { notice: None }).await;
+        agent.wait(0).await;
+        client.close().await.unwrap();
+        agent.assert_no_games();
+        let mut operations = agent.records();
+        operations.retain(|record| record["event_name"] == "dst.server.operation");
+        assert!(!operations.is_empty());
+        assert!(
+            operations
+                .iter()
+                .all(|record| record["resource"]["dst.game.version"] == "unknown")
+        );
+    }
 }
 
 #[tokio::test]
@@ -249,6 +601,39 @@ async fn initial_mod_download_finishes_before_automatic_game_start() {
 }
 
 #[tokio::test]
+async fn closed_room_with_pending_automatic_mods_accepts_stop_and_manual_update() {
+    let mut agent = Agent::spawn(true, true);
+    let client = agent.client_in_phase("stopped").await;
+    let automatic = agent.control()["policy_state"]["mods"].clone();
+    assert_eq!(automatic["phase"]["state"], "pending");
+    assert_eq!(automatic["origin"]["source"], "mod_auto");
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    client.close().await.unwrap();
+    assert_eq!(agent.control()["policy_state"]["mods"], automatic);
+    assert!(!agent.root.join("mods/prepared").exists());
+
+    agent.relaunch();
+    let client = agent.client_in_phase("stopped").await;
+    let queued = call(
+        &client,
+        Request::UpdateMods {
+            restart: false,
+            notice: None,
+        },
+    )
+    .await;
+    assert_eq!(queued, json!({"queued":true,"restart":false}));
+    agent.wait(0).await;
+    client.close().await.unwrap();
+    assert_eq!(
+        fs::read_to_string(agent.root.join("mods/prepared")).unwrap(),
+        "download\n"
+    );
+    agent.assert_no_games();
+}
+
+#[tokio::test]
 async fn closed_start_keeps_the_agent_and_defers_recovery_without_starting_games() {
     let mut agent = Agent::spawn(true, false);
     let client = agent.client_in_phase("stopped").await;
@@ -260,7 +645,7 @@ async fn closed_start_keeps_the_agent_and_defers_recovery_without_starting_games
     client.close().await.unwrap();
 
     let mut control = agent.control();
-    control["agent_run"] = json!({"active":true,"failure":{"kind":"retryable"}});
+    control["agent_run"] = json!({"active":true,"attempt_id":"interrupted","failure":null});
     fs::write(
         agent.root.join(".dst-server.json"),
         serde_json::to_vec(&control).unwrap(),
@@ -368,10 +753,81 @@ async fn wall_clock_opens_and_closes_games_without_an_external_trigger() {
     })
     .await
     .expect("the resident Agent must cross both daily boundaries");
+    let status = call(&client, Request::Status {}).await;
+    for shard in status["shards"].as_array().unwrap() {
+        assert_eq!(shard["readiness"]["world_loaded"], false);
+    }
     assert!(agent.child.try_wait().unwrap().is_none());
     agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
     call(&client, Request::Stop { notice: None }).await;
     agent.wait(0).await;
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn closed_agent_reports_invalid_mod_setup_and_accepts_its_repair() {
+    let mut agent = Agent::spawn(true, false);
+    let client = agent.client_in_phase("stopped").await;
+    let mut configuration = call(&client, Request::ReadConfiguration {}).await["cluster"].take();
+    configuration["downloads"] = json!({});
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    client.close().await.unwrap();
+
+    let mut control = agent.control();
+    control["policy"]["mod_auto_update"] = true.into();
+    fs::write(
+        agent.root.join(".dst-server.json"),
+        serde_json::to_vec(&control).unwrap(),
+    )
+    .unwrap();
+    fs::create_dir_all(agent.root.join("mods")).unwrap();
+    fs::write(
+        agent.root.join("mods/dedicated_server_mods_setup.lua"),
+        "ServerModSetup(",
+    )
+    .unwrap();
+    agent.child = Agent::launch(
+        agent.directory.path(),
+        &agent.root,
+        &[(
+            "DST_SERVER_PUBLISHED_PORTS",
+            r#"{"Master":19100,"Caves":19200}"#,
+        )],
+    );
+    let client = agent.client_in_phase("stopped").await;
+    let maintenance = &call(&client, Request::Status {}).await["agent"]["maintenance"];
+    assert_eq!(maintenance["phase"]["state"], "pending");
+    assert_eq!(maintenance["attempts"], 0);
+    assert!(
+        maintenance["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty())
+    );
+    agent.assert_no_games();
+
+    call(
+        &client,
+        Request::Configure {
+            configuration,
+            replace_permissions: false,
+        },
+    )
+    .await;
+    let repaired = &call(&client, Request::Status {}).await["agent"]["maintenance"];
+    assert_eq!(repaired["phase"]["state"], "idle");
+    assert!(repaired["error"].is_null());
+    call(
+        &client,
+        Request::SetPolicy {
+            policy: json!({"timezone":"UTC","mod_auto_update":true}),
+        },
+    )
+    .await;
+    let running = agent.client().await;
+    call(&running, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    running.close().await.unwrap();
     client.close().await.unwrap();
 }
 
@@ -438,7 +894,8 @@ async fn accepted_work_survives_disconnect_and_stop_replies_before_exit() {
         loop {
             let status = call(&client, Request::Status {}).await;
             if status["operations"]["current"].is_null() {
-                assert_eq!(status["operations"]["last"]["result"]["status"], "success");
+                assert!(status["operations"]["last"]["completed_at_ns"].is_u64());
+                assert!(status["operations"]["last"]["error"].is_null());
                 break;
             }
             sleep(Duration::from_millis(10)).await;
@@ -468,7 +925,8 @@ async fn accepted_work_survives_disconnect_and_stop_replies_before_exit() {
         loop {
             let status = call(&client, Request::Status {}).await;
             if status["operations"]["current"].is_null() {
-                assert_eq!(status["operations"]["last"]["result"]["status"], "success");
+                assert!(status["operations"]["last"]["completed_at_ns"].is_u64());
+                assert!(status["operations"]["last"]["error"].is_null());
                 break;
             }
             sleep(Duration::from_millis(10)).await;
@@ -498,15 +956,11 @@ async fn accepted_work_survives_disconnect_and_stop_replies_before_exit() {
     client.close().await.unwrap();
     agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
     assert!(!agent.root.join(".dst-agent.sock").exists());
-    let records: Vec<Value> = agent
-        .log()
-        .lines()
-        .filter_map(|line| line.strip_prefix("DST_RECORD|"))
-        .map(|record| serde_json::from_str(record).unwrap())
-        .collect();
+    let records = agent.records();
     assert!(!records.is_empty());
     for record in records {
         assert_eq!(record["attributes"]["dst.cluster.name"], "dst-fixture");
+        assert_eq!(record["resource"]["dst.cluster.name"], "dst-fixture");
     }
 }
 
@@ -579,8 +1033,40 @@ async fn kill_interrupts_a_restart_countdown_and_requests_failure_recovery() {
 }
 
 #[tokio::test]
+async fn agent_opens_and_records_locally_with_a_missing_exporter_certificate() {
+    let mut agent = Agent::with_environment(
+        json!({"policy":{"mod_auto_update":false}}),
+        &[
+            ("OTEL_LOGS_EXPORTER", "otlp"),
+            ("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "https://localhost:4317"),
+            (
+                "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE",
+                "/fixture-private/missing.pem",
+            ),
+            ("OTEL_RESOURCE_ATTRIBUTES", "dst.cluster.name=local-room"),
+        ],
+    );
+    let client = agent.client().await;
+    call(&client, Request::Save {}).await;
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    let log = agent.log();
+    assert_eq!(log.matches("OTLP LOGS disabled").count(), 1);
+    assert!(!log.contains("fixture-private"));
+    assert!(
+        agent
+            .records()
+            .iter()
+            .any(|r| r["resource"]["dst.cluster.name"] == "local-room")
+    );
+}
+
+#[tokio::test]
 async fn restart_replaces_games_in_the_same_agent() {
-    let mut agent = Agent::spawn(false, false);
+    let mut agent = Agent::with_environment(
+        json!({"policy":{"mod_auto_update":false,"timezone":"UTC"}}),
+        &[("DST_SERVER_TELEMETRY_PROFILE", "off")],
+    );
     let client = agent.client().await;
     let restarted = call(&client, Request::Restart { notice: None }).await;
     assert_eq!(restarted["restart"], true);
@@ -593,11 +1079,109 @@ async fn restart_replaces_games_in_the_same_agent() {
     agent.assert_native_lifecycle(
         "start\nshutdown\nshutdown_save\nstart\nshutdown\nshutdown_save\n",
     );
+    let records = agent.records();
+    for shard in ["Master", "Caves"] {
+        let coverage: Vec<_> = records
+            .iter()
+            .filter(|record| {
+                record["event_name"] == "dst.telemetry.coverage"
+                    && record["attributes"]["dst.shard.name"] == shard
+            })
+            .collect();
+        assert_eq!(coverage.len(), 2, "{shard} records coverage for each start");
+        for record in &coverage {
+            assert_eq!(record["attributes"]["dst.runtime.generation"], 1);
+            assert_eq!(record["body"]["profile"], "off");
+            assert_eq!(record["body"]["requested_profile"], "off");
+            assert_eq!(record["body"]["telemetry_status"], "disabled");
+        }
+        let attempt = "dst.game.attempt.id";
+        assert_ne!(
+            coverage[0]["attributes"][attempt],
+            coverage[1]["attributes"][attempt],
+        );
+    }
     client.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn termination_uses_native_shutdown_and_preserves_abnormal_exit_as_failure() {
+async fn termination_announces_for_sixty_seconds_before_native_shutdown() {
+    let now = Utc::now();
+    let minute = now.hour() * 60 + now.minute();
+    let start = (minute + 1439) % 1440;
+    let end = (minute + 480) % 1440;
+    let mut agent = Agent::with_control(
+        json!({"policy":{"mod_auto_update":false,"timezone":"UTC","schedule":[{"start":format!("{:02}:{:02}",start/60,start%60),"end":format!("{:02}:{:02}",end/60,end%60)}]}}),
+    );
+    let client = agent.client().await;
+    assert_eq!(
+        unsafe { libc::kill(agent.child.id() as i32, libc::SIGTERM) },
+        0
+    );
+    timeout(Duration::from_secs(4), async {
+        while !agent.root.join("announcements").exists() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        client
+            .call(Envelope::new(Target::Room, Request::Start {}).unwrap())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::NotReady
+    );
+    agent.wait_for(0, Duration::from_secs(75)).await;
+    let notices: Vec<Value> = fs::read_to_string(agent.root.join("announcements"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(notices.len(), 3);
+    let first = notices[0]["time"].as_f64().unwrap();
+    for name in ["Master", "Caves"] {
+        let events: Vec<Value> =
+            fs::read_to_string(agent.root.join(name).join("native-times.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+        let shutdown = events
+            .iter()
+            .find(|event| event["event"] == "shutdown")
+            .unwrap()["time"]
+            .as_f64()
+            .unwrap();
+        assert!(
+            (60.0..70.0).contains(&(shutdown - first)),
+            "{name}: {}",
+            shutdown - first
+        );
+    }
+    agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
+    assert_eq!(agent.control()["agent_run"]["active"], false);
+    let records = agent.records();
+    assert!(
+        records
+            .iter()
+            .any(|record| record["body"]["method"] == "agent_shutdown"
+                && record["body"]["phase"] == "finished"
+                && record["body"]["error_code"].is_null()
+                && record["attributes"]["dst.operation.source"] == "signal")
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| record["body"]["stage"] == "failure_finalized"
+                && record["severity_text"] == "ERROR")
+    );
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn later_signals_end_the_notice_and_preserve_abnormal_exit_as_failure() {
     for abnormal in [false, true] {
         let mut agent = Agent::spawn(false, false);
         let client = agent.client().await;
@@ -605,9 +1189,20 @@ async fn termination_uses_native_shutdown_and_preserves_abnormal_exit_as_failure
             fs::write(agent.root.join("Caves/shutdown-mode"), "signal").unwrap();
         }
         assert_eq!(
-            unsafe { libc::kill(agent.child.id() as i32, libc::SIGTERM) },
+            unsafe { libc::kill(agent.child.id() as i32, libc::SIGINT) },
             0
         );
+        timeout(Duration::from_secs(4), async {
+            while !agent.root.join("announcements").exists() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGTERM] {
+            assert_eq!(unsafe { libc::kill(agent.child.id() as i32, signal) }, 0);
+            sleep(Duration::from_millis(10)).await;
+        }
         agent.wait(if abnormal { 1 } else { 0 }).await;
         agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
         assert_eq!(agent.control()["agent_run"]["active"], false);
@@ -616,14 +1211,37 @@ async fn termination_uses_native_shutdown_and_preserves_abnormal_exit_as_failure
             abnormal
         );
         assert!(!agent.root.join(".dst-agent.sock").exists());
+        assert_eq!(
+            fs::read_to_string(agent.root.join("announcements"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        let records = agent.records();
+        let final_event = records
+            .iter()
+            .find(|record| {
+                record["body"]["method"] == "agent_shutdown"
+                    && record["body"]["phase"] == "finished"
+            })
+            .unwrap();
+        assert_eq!(final_event["body"]["error_code"].is_null(), !abnormal);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["body"]["reason"] == "subsequent_signal")
+                .count(),
+            1
+        );
         client.close().await.unwrap();
     }
 }
 
 #[tokio::test]
 async fn manual_mod_updates_reuse_the_agent_and_honor_reopening() {
-    for restart in [false, true] {
-        let mut agent = Agent::spawn(false, true);
+    for (restart, mods) in [(false, true), (true, true), (false, false)] {
+        let mut agent = Agent::spawn(false, mods);
         let client = agent.client().await;
         let result = call(
             &client,
@@ -641,10 +1259,30 @@ async fn manual_mod_updates_reuse_the_agent_and_honor_reopening() {
             client.close().await.unwrap();
         }
         agent.wait(0).await;
-        assert_eq!(
-            fs::read_to_string(agent.root.join("mods/prepared")).unwrap(),
-            "download\ndownload\n"
-        );
+        let prepared = agent.root.join("mods/prepared");
+        let (outcome, reason) = if mods {
+            assert_eq!(
+                fs::read_to_string(prepared).unwrap(),
+                "download\ndownload\n"
+            );
+            ("download_completed", "completed")
+        } else {
+            assert!(!prepared.exists());
+            ("download_skipped", "skipped")
+        };
+        let mut records = agent.records();
+        records.retain(|record| record["attributes"]["dst.operation.source"] == "rpc");
+        for layer in ["room", "policy"] {
+            assert!(records.iter().any(|record| {
+                record["event_name"] == "dst.server.operation"
+                    && record["attributes"]["dst.operation.layer"] == layer
+                    && record["body"]["method"] == "update_mods"
+                    && record["body"]["outcome"] == outcome
+            }));
+        }
+        assert!(records.iter().any(|record| {
+            record["event_name"] == "dst.mod.maintenance" && record["body"]["reason"] == reason
+        }));
         agent.assert_native_lifecycle(if restart {
             "start\nshutdown\nshutdown_save\nstart\nshutdown\nshutdown_save\n"
         } else {

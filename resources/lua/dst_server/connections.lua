@@ -17,6 +17,16 @@ local function activity()
 end
 local connections = {}
 
+function connections.loaded(player)
+    local handshake = rawget(_G, "POSTACTIVATEHANDSHAKE")
+    local ready = type(handshake) == "table" and handshake.READY
+    local step = player and player._PostActivateHandshakeState_Server
+    if type(step) == "number" and type(ready) == "number" and step >= 0 and step <= ready then
+        return step == ready
+    end
+    return json.null
+end
+
 local function client_record(userid)
     return {
         userid = userid or json.null, steam_id = json.null, name = json.null,
@@ -30,51 +40,42 @@ local function is_steam_id(value)
         and value >= "76561197960265729" and value <= "76561202255233023"
 end
 
-function connections.steam_id(userid, netid)
-    if type(userid) ~= "string" or userid == "" then return json.null end
-    local client = identities[userid] or client_record(userid)
-    identities[userid] = client
-    if is_steam_id(netid) then
-        client.steam_id = netid
-    elseif client.steam_id == json.null then
-        local ok, value = pcall(function() return TheNet:GetNetIdForUser(userid) end)
-        if ok and is_steam_id(value) then client.steam_id = value end
-    end
-    return client.steam_id
-end
-
 function connections.client(userid, native)
     if type(userid) ~= "string" or userid == "" then return client_record(nil) end
-    local client = identities[userid] or client_record(userid)
-    identities[userid] = client
-    if native == nil then
-        local ok, value = pcall(function() return TheNet:GetClientTableForUser(userid) end)
-        if ok and type(value) == "table" then native = value end
+    local client = identities[userid]
+    if client == nil then
+        client = client_record(userid)
+        identities[userid] = client
     end
     if native ~= nil then
+        if is_steam_id(native.netid) then client.steam_id = native.netid end
         if type(native.name) == "string" then client.name = values.text(native.name, 256) end
         if type(native.admin) == "boolean" then client.admin = native.admin end
         if type(native.moderator) == "boolean" then client.moderator = native.moderator end
     end
-    connections.steam_id(userid, native ~= nil and native.netid or nil)
     return client
 end
 
 function connections.install(inst)
+    local capture = state.telemetry_active
     for name, paused in pairs({ OnSimPaused = true, OnSimUnpaused = false }) do
         local original = _G[name]
         assert(type(original) == "function", name .. " is unavailable")
-        local emit_pause = telemetry.guard("world." .. string.lower(name), function()
+        local emit_pause = capture and telemetry.guard("world." .. string.lower(name), function()
             telemetry.emit("dst.server.pause_changed", { domain = "simulation", paused = paused })
         end)
+        local function after_pause(...)
+            emit_pause()
+            return ...
+        end
         _G[name] = function(...)
             state.sim_paused = paused
-            local results = telemetry.pack(original(...))
-            emit_pause()
-            return telemetry.unpack(results)
+            if emit_pause then return after_pause(original(...)) end
+            return original(...)
         end
     end
     activity()
+    assert(last_active ~= nil, "real time is unavailable")
     observed_since = last_active
     reliable = true
     for _, name in ipairs({ "ms_playerjoined", "ms_playerleft" }) do
@@ -87,23 +88,26 @@ function connections.install(inst)
         local event_name = event
         inst:ListenForEvent(native, telemetry.guard(event_name, function(_, data)
             activity()
-            if data == nil then return end
-            assert(type(data) == "table", "invalid client event")
-            local userid = data.userid
-            if userid == nil or userid == "" then return end
-            assert(type(userid) == "string", "invalid client identity type")
-            local client
-            if event_name == "dst.client.authenticated" then
-                identities[userid] = nil
-                client = connections.client(userid)
-            else
-                client = identities[userid] or client_record(userid)
-                identities[userid] = nil
-            end
-            telemetry.emit(event_name, client)
+            local userid = type(data) == "table" and values.userid(data.userid)
+            if not userid then return end
+            identities[userid] = nil
+            if capture then telemetry.emit(event_name, { userid = userid }) end
         end, true))
     end
     installed = true
+end
+
+local function optional_flag(value)
+    if type(value) == "boolean" then return value end
+    return json.null
+end
+
+local function rift_flag(spawner, method)
+    if spawner ~= nil and type(spawner[method]) == "function" then
+        local ok, value = pcall(spawner[method], spawner)
+        if ok then return optional_flag(value) end
+    end
+    return json.null
 end
 
 local function snapshot()
@@ -113,26 +117,25 @@ local function snapshot()
         local userid = client.userid
         if type(userid) == "string" and userid ~= "" and not seen[userid] then
             seen[userid] = true
-            clients[#clients + 1] = connections.client(userid, client)
+            clients[#clients + 1] = userid
         end
     end
     for userid in pairs(identities) do
         if not seen[userid] then identities[userid] = nil end
     end
-    table.sort(clients, function(a, b) return a.userid < b.userid end)
     local players = {}
     for _, player in ipairs(AllPlayers) do
-        if player:IsValid() and type(player.userid) == "string" and player.userid ~= "" then
+        local userid = player:IsValid() and values.entity_userid(player)
+        if userid and type(player.prefab) == "string" and player.prefab ~= "" then
             players[#players + 1] = {
-                userid = player.userid, guid = player.GUID, prefab = player.prefab,
+                userid = userid, prefab = player.prefab, loaded = connections.loaded(player),
                 is_ghost = player:HasTag("playerghost"),
             }
         end
     end
-    table.sort(players, function(a, b) return a.guid < b.guid end)
-    if #native_clients > 0 or #players > 0 then activity() end
     local world = TheWorld.state
     local cave = TheWorld:HasTag("cave")
+    local rifts = TheWorld.components and TheWorld.components.riftspawner
     return {
         clients = clients,
         players = players,
@@ -141,29 +144,37 @@ local function snapshot()
             phase = values.text(world[cave and "cavephase" or "phase"], 128),
             moonphase = values.text(world[cave and "cavemoonphase" or "moonphase"], 128),
             nightmarephase = values.text(world.nightmarephase, 128),
-            israining = world.israining == nil and json.null or world.israining,
-            issnowing = world.issnowing == nil and json.null or world.issnowing,
-            isacidraining = world.isacidraining == nil and json.null or world.isacidraining,
-            islunarhailing = world.islunarhailing == nil and json.null or world.islunarhailing,
+            israining = optional_flag(world.israining),
+            issnowing = optional_flag(world.issnowing),
+            isacidraining = optional_flag(world.isacidraining),
+            islunarhailing = optional_flag(world.islunarhailing),
+            lunar_rifts_enabled = rift_flag(rifts, "GetLunarRiftsEnabled"),
+            shadow_rifts_enabled = rift_flag(rifts, "GetShadowRiftsEnabled"),
         },
-        max_players = TheNet:GetServerMaxPlayers(),
-        health = require("dst_server").health(),
-    }, #native_clients
+    }
 end
 
 function connections.presence()
-    local data, count = snapshot()
+    local client_count = #GetPlayerClientTable()
+    local player_count = 0
+    for _, player in ipairs(AllPlayers) do
+        if player:IsValid() and values.entity_userid(player) then player_count = player_count + 1 end
+    end
     local now = GetTimeReal() / 1000
     if not reliable then
         observation_epoch = observation_epoch + 1
         observed_since, last_active, reliable = now, now, true
+    elseif client_count > 0 or player_count > 0 then
+        last_active = now
     end
+    local cycles = TheWorld.state and TheWorld.state.cycles
     return {
+        day = type(cycles) == "number" and cycles + 1 or json.null,
         observation_epoch = observation_epoch,
         session_id = TheWorld.meta.session_identifier,
-        client_count = count,
-        player_count = #data.players,
-        max_players = data.max_players,
+        client_count = client_count,
+        player_count = player_count,
+        max_players = TheNet:GetServerMaxPlayers(),
         reliable = installed and reliable and observed_since ~= nil,
         idle_seconds = math.max(0, now - (last_active or now)),
         observed_seconds = math.max(0, now - (observed_since or now)),
@@ -172,6 +183,7 @@ function connections.presence()
 end
 
 function connections.start(inst)
+    if not state.telemetry_active then return nil end
     local reason = "startup"
     -- Static tasks keep observing lobby connections while the simulation is paused.
     -- The first task runs after PostInit and temporary snapshot-player restoration.
@@ -180,7 +192,7 @@ function connections.start(inst)
         data.reason = reason
         telemetry.emit("dst.server.presence", data)
         reason = "periodic"
-    end, true), 0)
+    end), 0)
 end
 
 return connections

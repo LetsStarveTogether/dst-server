@@ -23,17 +23,21 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt},
     net::unix::pipe,
     process::{Child, Command},
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch},
+    sync::{Mutex, mpsc, watch},
     task::JoinHandle,
     time::{Instant, sleep, sleep_until, timeout_at},
 };
 
+use crate::bounded;
+
 pub const MAX_REQUEST_BYTES: usize = 4096;
 pub const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
+pub const MAX_RPC_REPLY_BYTES: usize = 1024 * 1024;
 pub const MAX_LOG_LINE_BYTES: usize = 1024 * 1024;
 const LOG_QUEUE_LINES: usize = 1024;
 const LOG_QUEUE_BYTES: usize = 8 * 1024 * 1024;
 const PROTOCOL_QUEUE_LINES: usize = 128;
+const PROTOCOL_QUEUE_BYTES: usize = PROTOCOL_QUEUE_LINES * MAX_PROTOCOL_LINE_BYTES;
 const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -43,7 +47,8 @@ pub struct ProcessSpec {
     pub cwd: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StreamKind {
     Reply,
     Lifecycle,
@@ -52,8 +57,12 @@ pub enum StreamKind {
 }
 
 impl StreamKind {
-    fn protocol(self) -> bool {
-        matches!(self, Self::Reply | Self::Lifecycle)
+    fn line_limit(self, line: &[u8]) -> usize {
+        match self {
+            Self::Reply if line.starts_with(b"DST_RPC|") => MAX_RPC_REPLY_BYTES,
+            Self::Reply | Self::Lifecycle => MAX_PROTOCOL_LINE_BYTES,
+            Self::Stdout | Self::Stderr => MAX_LOG_LINE_BYTES,
+        }
     }
 
     fn index(self) -> usize {
@@ -63,10 +72,12 @@ impl StreamKind {
 
 #[derive(Debug)]
 pub enum EventKind {
-    /// Original bytes, including the newline when present.
+    /// Native or SDK line, with misplaced SDK frames reduced to a diagnostic.
     Line(Vec<u8>),
     /// The whole line was discarded; reading resumes at the next newline.
-    Oversized,
+    Oversized {
+        mandatory: bool,
+    },
     ReadError(String),
 }
 
@@ -77,11 +88,102 @@ pub struct ProcessEvent {
 }
 
 /// Counter arrays are ordered Reply, Lifecycle, Stdout, Stderr.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OutputStats {
     pub dropped: [u64; 4],
     pub oversized: [u64; 4],
     pub read_errors: [u64; 4],
+}
+
+/// Present only after the child was reaped and every output reader finished.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExitSummary {
+    pub returncode: Option<i32>,
+    pub forced: bool,
+    pub output_drained: bool,
+    pub protocol_error: Option<String>,
+    pub stats: OutputStats,
+}
+
+impl From<&ExitReport> for ExitSummary {
+    fn from(report: &ExitReport) -> Self {
+        Self {
+            returncode: report.returncode(),
+            forced: report.forced,
+            output_drained: report.output_drained,
+            protocol_error: report.protocol_error.clone(),
+            stats: report.stats.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeDiagnosticKind {
+    LoginTransport,
+    LuaError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeDiagnostic {
+    pub kind: NativeDiagnosticKind,
+    pub observed_at_ms: u64,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeDiagnostics {
+    pub login_transport: Option<NativeDiagnostic>,
+    pub lua_error: Option<NativeDiagnostic>,
+}
+
+#[derive(Default)]
+struct NativeCapture {
+    diagnostics: NativeDiagnostics,
+    login_pending: Option<Instant>,
+}
+
+impl NativeCapture {
+    fn observe(
+        &mut self,
+        line: &[u8],
+        now: impl FnOnce() -> Instant,
+        wall_ms: impl FnOnce() -> u64,
+    ) {
+        let pending = self.login_pending.take();
+        let Some(line) = line.strip_suffix(b"\n") else {
+            return;
+        };
+        let message = line.strip_suffix(b"\r").unwrap_or(line);
+        // shortcut: only the verified native DNS pair is supported; extend with new native evidence.
+        let kind = if message == b"CURL ERROR: (login.kleientertainment.com) [6]Could not resolve host: login.kleientertainment.com" {
+            self.login_pending = Some(now());
+            return;
+        } else if message == b"[0] Account Failed (6): \"\""
+            && pending.is_some_and(|at| now().saturating_duration_since(at) <= Duration::from_secs(5))
+        {
+            NativeDiagnosticKind::LoginTransport
+        } else if message == b"LUA ERROR stack traceback:" {
+            NativeDiagnosticKind::LuaError
+        } else {
+            return;
+        };
+        let slot = match kind {
+            NativeDiagnosticKind::LoginTransport => &mut self.diagnostics.login_transport,
+            NativeDiagnosticKind::LuaError => &mut self.diagnostics.lua_error,
+        };
+        let observed_at_ms = wall_ms();
+        let diagnostic = slot.get_or_insert(NativeDiagnostic {
+            kind,
+            observed_at_ms,
+            count: 0,
+        });
+        diagnostic.observed_at_ms = observed_at_ms;
+        diagnostic.count = diagnostic.count.saturating_add(1);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +210,7 @@ struct Counters {
     dropped: [AtomicU64; 4],
     oversized: [AtomicU64; 4],
     read_errors: [AtomicU64; 4],
+    native: std::sync::Mutex<NativeCapture>,
 }
 
 impl Counters {
@@ -118,11 +221,6 @@ impl Counters {
             read_errors: std::array::from_fn(|i| self.read_errors[i].load(Ordering::Relaxed)),
         }
     }
-}
-
-struct QueuedEvent {
-    event: ProcessEvent,
-    _bytes: Option<OwnedSemaphorePermit>,
 }
 
 #[derive(Clone, Copy)]
@@ -138,14 +236,31 @@ type Completion = Option<Result<ExitReport, String>>;
 pub struct GameProcess {
     pid: u32,
     input: Mutex<pipe::Sender>,
-    events: Mutex<(mpsc::Receiver<QueuedEvent>, mpsc::Receiver<QueuedEvent>)>,
     stop: watch::Sender<Stop>,
     completion: watch::Receiver<Completion>,
     counters: Arc<Counters>,
 }
 
+/// The sole reader for a process's filtered output.
+pub struct ProcessOutput {
+    protocol: mpsc::Receiver<bounded::Item<ProcessEvent>>,
+    logs: mpsc::Receiver<bounded::Item<ProcessEvent>>,
+}
+
+impl ProcessOutput {
+    /// Control output has a separate queue and takes priority over game logs.
+    pub async fn next_event(&mut self) -> Option<ProcessEvent> {
+        tokio::select! {
+            biased;
+            Some(item) = self.protocol.recv() => Some(item.into_inner()),
+            Some(item) = self.logs.recv() => Some(item.into_inner()),
+            else => None,
+        }
+    }
+}
+
 impl GameProcess {
-    pub fn spawn(spec: ProcessSpec) -> io::Result<Self> {
+    pub fn spawn(spec: ProcessSpec) -> io::Result<(Self, ProcessOutput)> {
         Self::spawn_inner(spec, None)
     }
 
@@ -154,14 +269,14 @@ impl GameProcess {
     pub fn spawn_with_environment(
         spec: ProcessSpec,
         environment: Vec<(OsString, OsString)>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, ProcessOutput)> {
         Self::spawn_inner(spec, Some(environment))
     }
 
     fn spawn_inner(
         spec: ProcessSpec,
         environment: Option<Vec<(OsString, OsString)>>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, ProcessOutput)> {
         // Keep child source descriptors above 5 before dup2. A source must not be
         // overwritten while installing a different protocol descriptor.
         let (request_read, request_write) = open_pipe()?;
@@ -208,48 +323,22 @@ impl GameProcess {
         let pid = child.id().expect("spawned child has a PID");
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
-        let (protocol_tx, protocol) = mpsc::channel(PROTOCOL_QUEUE_LINES);
-        let (logs_tx, logs) = mpsc::channel(LOG_QUEUE_LINES);
+        let (protocol_tx, protocol) = bounded::channel(PROTOCOL_QUEUE_LINES, PROTOCOL_QUEUE_BYTES);
+        let (logs_tx, logs) = bounded::channel(LOG_QUEUE_LINES, LOG_QUEUE_BYTES);
         let (fatal_tx, fatal) = watch::channel(None);
         let counters = Arc::new(Counters::default());
-        let log_bytes = Arc::new(Semaphore::new(LOG_QUEUE_BYTES));
+        let output = |stream| Output {
+            stream,
+            logs: logs_tx.clone(),
+            protocol: protocol_tx.clone(),
+            fatal: fatal_tx.clone(),
+            counters: counters.clone(),
+        };
         let outputs = [
-            spawn_reader(
-                reply,
-                StreamKind::Reply,
-                protocol_tx.clone(),
-                protocol_tx.clone(),
-                None,
-                fatal_tx.clone(),
-                counters.clone(),
-            ),
-            spawn_reader(
-                lifecycle,
-                StreamKind::Lifecycle,
-                protocol_tx.clone(),
-                protocol_tx.clone(),
-                None,
-                fatal_tx.clone(),
-                counters.clone(),
-            ),
-            spawn_reader(
-                stdout,
-                StreamKind::Stdout,
-                logs_tx.clone(),
-                protocol_tx.clone(),
-                Some(log_bytes.clone()),
-                fatal_tx.clone(),
-                counters.clone(),
-            ),
-            spawn_reader(
-                stderr,
-                StreamKind::Stderr,
-                logs_tx,
-                protocol_tx,
-                Some(log_bytes),
-                fatal_tx,
-                counters.clone(),
-            ),
+            tokio::spawn(read_output(reply, output(StreamKind::Reply))),
+            tokio::spawn(read_output(lifecycle, output(StreamKind::Lifecycle))),
+            tokio::spawn(read_output(stdout, output(StreamKind::Stdout))),
+            tokio::spawn(read_output(stderr, output(StreamKind::Stderr))),
         ];
         let (stop, stop_rx) = watch::channel(Stop::Running);
         let (complete_tx, completion) = watch::channel(None);
@@ -261,14 +350,16 @@ impl GameProcess {
             counters.clone(),
             complete_tx,
         ));
-        Ok(Self {
-            pid,
-            input: Mutex::new(input),
-            events: Mutex::new((protocol, logs)),
-            stop,
-            completion,
-            counters,
-        })
+        Ok((
+            Self {
+                pid,
+                input: Mutex::new(input),
+                stop,
+                completion,
+                counters,
+            },
+            ProcessOutput { protocol, logs },
+        ))
     }
 
     pub fn pid(&self) -> u32 {
@@ -277,6 +368,15 @@ impl GameProcess {
 
     pub fn stats(&self) -> OutputStats {
         self.counters.snapshot()
+    }
+
+    pub fn native_diagnostics(&self) -> NativeDiagnostics {
+        self.counters
+            .native
+            .lock()
+            .expect("native diagnostic lock")
+            .diagnostics
+            .clone()
     }
 
     /// Write one native read chunk atomically. The caller owns request framing.
@@ -289,6 +389,14 @@ impl GameProcess {
                 "request must contain 1..=4096 bytes",
             ));
         }
+        self.with_writable_input(|input| write_request(input, bytes))
+            .await
+    }
+
+    pub(crate) async fn with_writable_input<T>(
+        &self,
+        mut write: impl FnMut(&pipe::Sender) -> io::Result<T>,
+    ) -> io::Result<T> {
         let input = self.input.lock().await;
         loop {
             if self.completion.borrow().is_some() {
@@ -309,9 +417,7 @@ impl GameProcess {
                 continue;
             }
             input.writable().await?;
-            match input.try_write(bytes) {
-                Ok(written) if written == bytes.len() => return Ok(()),
-                Ok(_) => return Err(io::Error::other("atomic pipe write was incomplete")),
+            match write(&input) {
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -320,25 +426,7 @@ impl GameProcess {
                 {
                     continue;
                 }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    /// Control output has a separate queue and takes priority over game logs.
-    pub async fn next_event(&self) -> Option<ProcessEvent> {
-        let mut events = self.events.lock().await;
-        let (protocol, logs) = &mut *events;
-        loop {
-            tokio::select! {
-                biased;
-                item = protocol.recv(), if !protocol.is_closed() || !protocol.is_empty() => {
-                    if let Some(item) = item { return Some(item.event); }
-                }
-                item = logs.recv(), if !logs.is_closed() || !logs.is_empty() => {
-                    if let Some(item) = item { return Some(item.event); }
-                }
-                else => return None,
+                result => return result,
             }
         }
     }
@@ -364,6 +452,15 @@ impl GameProcess {
                 "shutdown grace period is too large",
             )
         })?;
+        self.request_shutdown(deadline);
+        self.wait().await
+    }
+
+    pub(crate) fn request_shutdown(&self, deadline: Instant) {
+        if deadline <= Instant::now() {
+            self.request_kill();
+            return;
+        }
         self.stop.send_if_modified(|stop| match stop {
             Stop::Running => {
                 *stop = Stop::Terminate(deadline);
@@ -375,7 +472,6 @@ impl GameProcess {
             }
             _ => false,
         });
-        self.wait().await
     }
 
     pub async fn kill(&self) -> io::Result<ExitReport> {
@@ -386,6 +482,14 @@ impl GameProcess {
     /// Request termination synchronously; `wait` confirms exit and reaping.
     pub fn request_kill(&self) {
         self.stop.send_replace(Stop::Kill);
+    }
+}
+
+pub(crate) fn write_request(input: &pipe::Sender, bytes: &[u8]) -> io::Result<()> {
+    if input.try_write(bytes)? == bytes.len() {
+        Ok(())
+    } else {
+        Err(io::Error::other("atomic pipe write was incomplete"))
     }
 }
 
@@ -435,20 +539,67 @@ fn fail_protocol(fatal: &watch::Sender<Option<String>>, message: String) {
 
 struct Output {
     stream: StreamKind,
-    events: mpsc::Sender<QueuedEvent>,
-    protocol_events: mpsc::Sender<QueuedEvent>,
-    bytes: Option<Arc<Semaphore>>,
+    logs: bounded::Sender<ProcessEvent>,
+    protocol: bounded::Sender<ProcessEvent>,
     fatal: watch::Sender<Option<String>>,
     counters: Arc<Counters>,
 }
 
 impl Output {
+    fn observe(&self, line: &[u8]) {
+        if self.stream == StreamKind::Stdout {
+            self.counters
+                .native
+                .lock()
+                .expect("native diagnostic lock")
+                .observe(line, Instant::now, || {
+                    crate::operation::timestamp() / 1_000_000
+                });
+        }
+    }
+
+    fn clear_native_pending(&self) {
+        if self.stream == StreamKind::Stdout {
+            self.counters
+                .native
+                .lock()
+                .expect("native diagnostic lock")
+                .login_pending = None;
+        }
+    }
+
     fn mandatory(&self, line: &[u8]) -> bool {
-        self.stream.protocol()
-            || (self.stream == StreamKind::Stdout
-                && [b"DST_DRIVER|".as_slice(), b"DST_CONTROL|".as_slice()]
-                    .iter()
-                    .any(|prefix| native_message(line).starts_with(prefix)))
+        self.stream == StreamKind::Lifecycle
+            || (self.stream == StreamKind::Reply && !line.starts_with(b"DST_OTEL|"))
+    }
+
+    fn line(&self, mut line: Vec<u8>) {
+        let mandatory = self.mandatory(&line);
+        if mandatory && !line.ends_with(b"\n") {
+            fail_protocol(
+                &self.fatal,
+                format!("{:?} ended with an incomplete line", self.stream),
+            );
+            return;
+        }
+        match self.stream {
+            StreamKind::Stdout | StreamKind::Stderr => {
+                let message = native_message(&line);
+                self.observe(message);
+                if sdk_frame_name(message).is_some() {
+                    return;
+                }
+            }
+            StreamKind::Lifecycle if native_message(&line).starts_with(b"DST_Stats|") => return,
+            // Only raw FD4 frames reach the SDK decoder. Keep misplaced bodies out of logs.
+            StreamKind::Reply if !line.starts_with(b"[") => (),
+            StreamKind::Reply | StreamKind::Lifecycle => {
+                if let Some(summary) = sdk_frame_summary(&line) {
+                    line = summary.into_bytes();
+                }
+            }
+        }
+        self.emit(EventKind::Line(line), mandatory);
     }
 
     fn emit(&self, kind: EventKind, mandatory: bool) {
@@ -456,29 +607,16 @@ impl Output {
             EventKind::Line(bytes) => bytes.len(),
             _ => 1,
         };
-        let permit = match self.bytes.as_ref().filter(|_| !mandatory) {
-            Some(budget) => match budget.clone().try_acquire_many_owned(size.max(1) as u32) {
-                Ok(permit) => Some(permit),
-                Err(_) => {
-                    self.dropped(mandatory);
-                    return;
-                }
-            },
-            None => None,
+        let event = ProcessEvent {
+            stream: self.stream,
+            kind,
         };
-        let event = QueuedEvent {
-            event: ProcessEvent {
-                stream: self.stream,
-                kind,
-            },
-            _bytes: permit,
-        };
-        let events = if mandatory {
-            &self.protocol_events
+        let queue = if mandatory {
+            &self.protocol
         } else {
-            &self.events
+            &self.logs
         };
-        if events.try_send(event).is_err() {
+        if queue.try_send(event, size).is_err() {
             self.dropped(mandatory);
         }
     }
@@ -496,66 +634,35 @@ impl Output {
         }
     }
 
-    fn oversized(&self, mandatory: bool) {
+    fn oversized(&self, mandatory: bool, limit: usize) {
+        self.clear_native_pending();
         self.counters.oversized[self.stream.index()].fetch_add(1, Ordering::Relaxed);
         if mandatory {
             fail_protocol(
                 &self.fatal,
-                format!(
-                    "{:?} line exceeds {MAX_PROTOCOL_LINE_BYTES} bytes",
-                    self.stream
-                ),
+                format!("{:?} line exceeds {limit} bytes", self.stream),
             );
         }
-        self.emit(EventKind::Oversized, mandatory);
+        self.emit(EventKind::Oversized { mandatory }, mandatory);
     }
-}
-
-fn spawn_reader<R: AsyncRead + Unpin + Send + 'static>(
-    reader: R,
-    stream: StreamKind,
-    events: mpsc::Sender<QueuedEvent>,
-    protocol_events: mpsc::Sender<QueuedEvent>,
-    bytes: Option<Arc<Semaphore>>,
-    fatal: watch::Sender<Option<String>>,
-    counters: Arc<Counters>,
-) -> JoinHandle<()> {
-    tokio::spawn(read_output(
-        reader,
-        Output {
-            stream,
-            events,
-            protocol_events,
-            bytes,
-            fatal,
-            counters,
-        },
-    ))
 }
 
 async fn read_output<R: AsyncRead + Unpin>(mut reader: R, output: Output) {
     let mut chunk = [0_u8; 8192];
     let mut line = Vec::new();
     let mut oversized = false;
-    let mut mandatory = output.stream.protocol();
     loop {
         let count = match reader.read(&mut chunk).await {
             Ok(0) => {
                 if !oversized && !line.is_empty() {
-                    if mandatory {
-                        fail_protocol(
-                            &output.fatal,
-                            format!("{:?} ended with an incomplete line", output.stream),
-                        );
-                    } else {
-                        output.emit(EventKind::Line(line), false);
-                    }
+                    output.line(line);
                 }
                 return;
             }
             Ok(count) => count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => {
+                output.clear_native_pending();
                 output.counters.read_errors[output.stream.index()].fetch_add(1, Ordering::Relaxed);
                 if output.stream != StreamKind::Stderr {
                     fail_protocol(&output.fatal, format!("{:?}: {error}", output.stream));
@@ -570,34 +677,38 @@ async fn read_output<R: AsyncRead + Unpin>(mut reader: R, output: Output) {
         for part in chunk[..count].split_inclusive(|byte| *byte == b'\n') {
             let ends_line = part.last() == Some(&b'\n');
             if !oversized {
-                let limit = if mandatory {
-                    MAX_PROTOCOL_LINE_BYTES
-                } else {
-                    MAX_LOG_LINE_BYTES
-                };
+                // Each read is smaller than the shortest limit, so the prefix is
+                // complete in `line` before any frame can cross its limit.
+                let limit = output.stream.line_limit(&line);
                 if line.len() + part.len() > limit {
-                    line.clear();
+                    output.oversized(output.mandatory(&line), limit);
+                    line = Vec::new();
                     oversized = true;
-                    output.oversized(mandatory);
                 } else {
                     line.extend_from_slice(part);
-                    mandatory = output.mandatory(&line);
-                    if mandatory && line.len() > MAX_PROTOCOL_LINE_BYTES {
-                        line.clear();
-                        oversized = true;
-                        output.oversized(true);
-                    }
                 }
             }
             if ends_line {
                 if !oversized {
-                    output.emit(EventKind::Line(std::mem::take(&mut line)), mandatory);
+                    output.line(std::mem::take(&mut line));
                 }
                 oversized = false;
-                mandatory = output.stream.protocol();
             }
         }
     }
+}
+
+fn sdk_frame_name(message: &[u8]) -> Option<&'static str> {
+    let message = message.strip_prefix(b"DST_")?;
+    ["DRIVER|", "RPC|", "CONTROL|", "OTEL|"]
+        .into_iter()
+        .find(|name| message.starts_with(name.as_bytes()))
+}
+
+/// A diagnostic may retain the frame kind and physical length, including the newline.
+pub(crate) fn sdk_frame_summary(line: &[u8]) -> Option<String> {
+    let name = sdk_frame_name(native_message(line))?.trim_end_matches('|');
+    Some(format!("SDK {name} frame ({} bytes)\n", line.len()))
 }
 
 /// Remove only an anchored native `[hours:mm:ss]: ` timestamp, if present.
@@ -714,4 +825,172 @@ async fn supervise(
             })
             .map_err(|error| error.to_string()),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DNS: &[u8] = b"CURL ERROR: (login.kleientertainment.com) [6]Could not resolve host: login.kleientertainment.com\n";
+    const ACCOUNT: &[u8] = b"[0] Account Failed (6): \"\"\n";
+
+    #[test]
+    fn native_pair_requires_exact_adjacent_complete_lines_within_five_seconds() {
+        let now = Instant::now();
+        let cases = [
+            (DNS.to_vec(), ACCOUNT.to_vec(), Duration::ZERO, true),
+            (DNS.to_vec(), ACCOUNT.to_vec(), Duration::from_secs(5), true),
+            (
+                DNS.to_vec(),
+                ACCOUNT.to_vec(),
+                Duration::from_secs(5) + Duration::from_nanos(1),
+                false,
+            ),
+            (
+                [b"[125:01:02]: ".as_slice(), DNS].concat(),
+                [b"[125:01:02]: ".as_slice(), ACCOUNT].concat(),
+                Duration::ZERO,
+                true,
+            ),
+            (
+                [b"[125:01:02]: [125:01:02]: ".as_slice(), DNS].concat(),
+                ACCOUNT.to_vec(),
+                Duration::ZERO,
+                false,
+            ),
+            (
+                String::from_utf8_lossy(DNS)
+                    .replace("login.kleientertainment.com", "dst.metrics.klei.com")
+                    .into_bytes(),
+                ACCOUNT.to_vec(),
+                Duration::ZERO,
+                false,
+            ),
+            (
+                String::from_utf8_lossy(DNS)
+                    .replace("login.kleientertainment.com", "items.kleientertainment.com")
+                    .into_bytes(),
+                ACCOUNT.to_vec(),
+                Duration::ZERO,
+                false,
+            ),
+            (
+                String::from_utf8_lossy(DNS)
+                    .replace("[6]", "[28]")
+                    .into_bytes(),
+                ACCOUNT.to_vec(),
+                Duration::ZERO,
+                false,
+            ),
+            (
+                DNS.to_vec(),
+                b"[0] Account Failed (6): \"private player text\"\n".to_vec(),
+                Duration::ZERO,
+                false,
+            ),
+            (
+                DNS.to_vec(),
+                b"[0] Account Failed (7): \"\"\n".to_vec(),
+                Duration::ZERO,
+                false,
+            ),
+            (
+                [b"player: ".as_slice(), DNS].concat(),
+                ACCOUNT.to_vec(),
+                Duration::ZERO,
+                false,
+            ),
+            (
+                DNS.to_vec(),
+                [b"player: ".as_slice(), ACCOUNT].concat(),
+                Duration::ZERO,
+                false,
+            ),
+            (
+                DNS.to_vec(),
+                ACCOUNT[..ACCOUNT.len() - 1].to_vec(),
+                Duration::ZERO,
+                false,
+            ),
+            (
+                DNS[..DNS.len() - 1].to_vec(),
+                ACCOUNT.to_vec(),
+                Duration::ZERO,
+                false,
+            ),
+        ];
+        for (first, second, delay, expected) in cases {
+            let mut capture = NativeCapture::default();
+            capture.observe(native_message(&first), || now, || 1);
+            capture.observe(native_message(&second), || now + delay, || 2);
+            assert_eq!(
+                capture.diagnostics.login_transport.is_some(),
+                expected,
+                "{first:?} {second:?} {delay:?}"
+            );
+            assert!(capture.login_pending.is_none());
+        }
+        for separator in [b"other\n".as_slice(), b"", b"partial"] {
+            let mut capture = NativeCapture::default();
+            capture.observe(DNS, || now, || 1);
+            capture.observe(separator, || unreachable!(), || unreachable!());
+            capture.observe(ACCOUNT, || now, || 3);
+            assert!(capture.diagnostics.login_transport.is_none());
+        }
+        let mut first_process = NativeCapture::default();
+        let mut second_process = NativeCapture::default();
+        first_process.observe(DNS, || now, || 1);
+        second_process.observe(ACCOUNT, || now, || 2);
+        assert!(first_process.diagnostics.login_transport.is_none());
+        assert!(second_process.diagnostics.login_transport.is_none());
+        for _ in 0..2 {
+            first_process.observe(DNS, || now, || 3);
+            first_process.observe(ACCOUNT, || now, || 4);
+        }
+        assert_eq!(
+            first_process
+                .diagnostics
+                .login_transport
+                .as_ref()
+                .unwrap()
+                .count,
+            2
+        );
+        first_process
+            .diagnostics
+            .login_transport
+            .as_mut()
+            .unwrap()
+            .count = u64::MAX;
+        first_process.observe(DNS, || now, || 5);
+        first_process.observe(ACCOUNT, || now, || 6);
+        assert_eq!(
+            first_process
+                .diagnostics
+                .login_transport
+                .as_ref()
+                .unwrap()
+                .count,
+            u64::MAX
+        );
+        for text in [
+            b"LUA ERROR stack traceback:".as_slice(),
+            b"player: LUA ERROR stack traceback:\n",
+            b"LUA ERROR stack traceback: private\n",
+        ] {
+            first_process.observe(text, || now, || 7);
+        }
+        assert!(first_process.diagnostics.lua_error.is_none());
+        first_process.observe(
+            native_message(b"[0:00:01]: LUA ERROR stack traceback:\r\n"),
+            || now,
+            || 8,
+        );
+        assert_eq!(
+            first_process.diagnostics.lua_error.as_ref().unwrap().count,
+            1
+        );
+        let encoded = serde_json::to_string(&first_process.diagnostics).unwrap();
+        assert!(!encoded.contains("private") && encoded.len() < 256);
+    }
 }
