@@ -98,7 +98,8 @@ journalctl -u dst-299.service -n 100 -f
 Use `host --root PATH --quadlet-dir PATH` for alternate directories, and `host --user` for the user systemd manager.
 Room numbers range from `000` to `299` independently of gameplay templates.
 The packaged fleet contains 121 rooms: `000–100` and `200–219`.
-Room `100`, `LST-100-测试尝鲜`, uses the official Beta game build with the pure endless configuration.
+Generated room names use the prefix `LST-朗诵团`, followed by the room number and gameplay label.
+Room `100`, `LST-朗诵团-100-测试尝鲜`, uses the official Beta game build with the pure endless configuration.
 Its forest uses the native `ENDLESS` preset, and its cave uses the matching overrides from the pure endless template.
 
 ```sh

@@ -444,7 +444,7 @@ pub fn build_template(
     let mut cluster = template["cluster"].clone();
     cluster["token"] = Value::String(token.into());
     cluster["settings"]["cluster_name"] = Value::String(format!(
-        "LST-{number:03}-{}",
+        "LST-朗诵团-{number:03}-{}",
         template["label"].as_str().expect("template label")
     ));
     if let Some(settings) = settings {
@@ -640,7 +640,7 @@ mod tests {
             let cluster =
                 build_template(template, 299, "test-token", Some("shared-key"), None).unwrap();
             let files = cluster.files().unwrap();
-            assert!(files[Path::new("cluster.ini")].contains("LST-299-"));
+            assert!(files[Path::new("cluster.ini")].contains("LST-朗诵团-299-"));
             assert_eq!(files[Path::new("cluster_token.txt")], "test-token\n");
             assert_eq!(cluster.resolved()["settings"]["cluster_key"], "shared-key");
             let expected = match template {
