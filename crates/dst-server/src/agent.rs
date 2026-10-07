@@ -59,6 +59,7 @@ struct Controller {
     stable: Mutex<Option<Instant>>,
     unhealthy: Mutex<Option<Instant>>,
     error: Mutex<Option<String>>,
+    mod_check: Mutex<crate::mods::monitor::Check>,
 }
 
 impl Controller {
@@ -191,6 +192,7 @@ impl Controller {
             "error":self.error.lock().unwrap().clone(),
             "requires_container_restart":self.room.requires_container_restart(),
             "telemetry":self.room.telemetry_stats(),
+            "mod_check":self.mod_check.lock().unwrap().clone(),
         });
         if value["phase"] == "stopped"
             && (recovery.closed.is_some() || matches!(state.mods.phase, ModPhase::Failed))
@@ -521,6 +523,7 @@ impl Controller {
     ) -> model::Result<policy::Inputs> {
         let mut inputs = self.base_inputs(status, busy)?;
         if inputs.all_ready {
+            inputs.mods_outdated = !self.mod_check.lock().unwrap().outdated.is_empty();
             for shard in &status.shards {
                 let request = Envelope {
                     target: Target::Shard(shard.name.clone()),
@@ -565,6 +568,44 @@ impl Controller {
             }
         }
         Ok(inputs)
+    }
+
+    async fn check_mods(
+        &self,
+        client: &std::result::Result<crate::steam::Client, crate::steam::Error>,
+    ) {
+        let before = self.room.status();
+        let history = self.operations.lock().unwrap().clone();
+        if !self.policy().is_ok_and(|policy| policy.mod_auto_update)
+            || before.phase != Phase::Running
+            || history.current.is_some()
+            || before.operations.current.is_some()
+            || !self
+                .policy_state()
+                .is_ok_and(|state| state.mods.phase == ModPhase::Idle)
+        {
+            return;
+        }
+        let result = match client {
+            Ok(client) => crate::mods::monitor::check(&self.room, client).await,
+            Err(error) => Err(anyhow::anyhow!(error.to_string())),
+        };
+        if before != self.room.status()
+            || history != *self.operations.lock().unwrap()
+            || !self.policy().is_ok_and(|policy| policy.mod_auto_update)
+            || !self
+                .policy_state()
+                .is_ok_and(|state| state.mods.phase == ModPhase::Idle)
+        {
+            return;
+        }
+        *self.mod_check.lock().unwrap() =
+            result.unwrap_or_else(|error| crate::mods::monitor::Check {
+                checked_at: Some(Utc::now()),
+                error: Some(error.to_string()),
+                ..Default::default()
+            });
+        self.changed.notify_one();
     }
 
     async fn tick(self: &Arc<Self>) -> model::Result<()> {
@@ -724,6 +765,7 @@ impl Controller {
                     },
                 )?;
                 let result = self.room.invoke_until_complete(request).await;
+                *self.mod_check.lock().unwrap() = Default::default();
                 let resume_game = self.room.with_lock(|lock| {
                     let mut state = PolicyState::load(lock)?;
                     let resume_game = state.mods.resume_game;
@@ -877,8 +919,19 @@ pub async fn run(options: Options) -> Result<u8> {
         stable: Mutex::new(None),
         unhealthy: Mutex::new(None),
         error: Mutex::new(None),
+        mod_check: Mutex::new(Default::default()),
     });
     controller.initialize()?;
+    let monitor_controller = controller.clone();
+    let mut monitor_task = tokio::spawn(async move {
+        let client = crate::steam::Client::new();
+        let mut interval = tokio::time::interval(crate::mods::monitor::INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            monitor_controller.check_mods(&client).await;
+        }
+    });
     let (dispatch, mut requests) = mpsc::channel::<rpc::Incoming>(64);
     let (shutdown, receive_shutdown) = oneshot::channel();
     let server_socket = socket.clone();
@@ -912,6 +965,14 @@ pub async fn run(options: Options) -> Result<u8> {
             }
             _ = interrupt.recv() => break,
             _ = termination.recv() => break,
+            result = &mut monitor_task => {
+                terminal_error = Some(match result {
+                    Err(error) => error.into(),
+                    Ok(()) => anyhow::anyhow!("Workshop monitor stopped unexpectedly"),
+                });
+                exit = 1;
+                break;
+            }
             result = async { policy_task.as_mut().unwrap().await }, if policy_task.is_some() => {
                 policy_task = None;
                 match result {
@@ -941,6 +1002,10 @@ pub async fn run(options: Options) -> Result<u8> {
         }
     }
     controller.closing.store(true, Ordering::Release);
+    if !monitor_task.is_finished() {
+        monitor_task.abort();
+        let _ = monitor_task.await;
+    }
     if let Some(task) = policy_task {
         task.abort();
         let _ = task.await;
@@ -1026,9 +1091,127 @@ mod tests {
             stable: Mutex::new(None),
             unhealthy: Mutex::new(None),
             error: Mutex::new(None),
+            mod_check: Mutex::new(Default::default()),
         });
         controller.start().await.unwrap();
         (directory, cluster, controller)
+    }
+
+    fn installed_mod_fixture(cluster: &std::path::Path) -> Vec<u8> {
+        fs::create_dir_all(cluster.join("mods/ugc")).unwrap();
+        fs::write(
+            cluster.join("mods/ugc/appworkshop_322330.acf"),
+            r#""AppWorkshop" {
+            "appid" "322330" "WorkshopItemsInstalled" {
+                "2189004162" { "manifest" "3558921307329919114" "timeupdated" "1793675412" }
+            }
+        }"#,
+        )
+        .unwrap();
+        for name in ["Master", "Caves"] {
+            fs::write(
+                cluster.join(name).join("enabled-mods.json"),
+                r#"[{"id":"workshop-2189004162"},{"id":"local-mod"}]"#,
+            )
+            .unwrap();
+        }
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/steam/published_file_details.json"
+        ))
+        .unwrap();
+        let mut item = fixture["response"]["publishedfiledetails"][0].clone();
+        item["hcontent_file"] = json!("1");
+        serde_json::to_vec(
+            &json!({"response":{"result":1,"resultcount":1,"publishedfiledetails":[item]}}),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn workshop_checks_feed_maintenance_and_report_network_failures_without_stopping_games() {
+        use crate::steam::tests::{Server, response};
+        let (_directory, cluster, controller) = running_controller().await;
+        let body = installed_mod_fixture(&cluster);
+        let server = Server::start(vec![response(200, "", &body)]).await;
+        controller.check_mods(&Ok(server.client())).await;
+        assert_eq!(
+            server.count(),
+            1,
+            "the same Mod on two shards is queried once"
+        );
+        assert_eq!(
+            controller.mod_check.lock().unwrap().outdated,
+            BTreeSet::from([2189004162])
+        );
+        let inputs = controller
+            .inputs(&controller.room.status(), false)
+            .await
+            .unwrap();
+        let mut state = controller.policy_state().unwrap();
+        let plan = controller
+            .policy()
+            .unwrap()
+            .plan(&mut state, Utc::now(), &inputs)
+            .unwrap();
+        assert!(matches!(plan.action, Some(policy::Action::Announce { .. })));
+        let failed = Server::start(vec![response(403, "", b"private upstream text")]).await;
+        controller.check_mods(&Ok(failed.client())).await;
+        assert!(controller.mod_check.lock().unwrap().outdated.is_empty());
+        assert!(
+            controller.status().unwrap()["agent"]["mod_check"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("403")
+        );
+        assert_eq!(controller.room.status().phase, Phase::Running);
+        assert_eq!(*controller.exit.borrow(), None);
+        controller.room.shutdown_priority().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn workshop_network_waits_do_not_hold_room_mutation_ownership() {
+        let (_directory, cluster, controller) = running_controller().await;
+        installed_mod_fixture(&cluster);
+        let server = crate::steam::tests::Server::start(vec![Vec::new()]).await;
+        let checking = controller.clone();
+        let client = Ok(server.client());
+        let task = tokio::spawn(async move { checking.check_mods(&client).await });
+        wait_for(|| server.count() == 1).await;
+        tokio::time::timeout(Duration::from_secs(5), controller.stop(None))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(controller.room.status().phase, Phase::Stopped);
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn disabling_automatic_maintenance_discards_a_pending_workshop_observation() {
+        use crate::steam::tests::{Server, response};
+        let (_directory, cluster, controller) = running_controller().await;
+        let body = installed_mod_fixture(&cluster);
+        let hold = cluster.join("Master/hold-mods");
+        fs::write(&hold, "").unwrap();
+        let server = Server::start(vec![response(200, "", &body)]).await;
+        let checking = controller.clone();
+        let client = Ok(server.client());
+        let task = tokio::spawn(async move { checking.check_mods(&client).await });
+        wait_for(|| cluster.join("Master/mods-waiting").exists()).await;
+        controller
+            .room
+            .with_lock(|lock| {
+                Policy {
+                    mod_auto_update: false,
+                    ..Default::default()
+                }
+                .save(lock)
+            })
+            .unwrap();
+        fs::remove_file(hold).unwrap();
+        task.await.unwrap();
+        assert!(controller.mod_check.lock().unwrap().checked_at.is_none());
+        controller.room.shutdown_priority().await.unwrap();
     }
 
     async fn enable_idle_regeneration(controller: &Controller) {

@@ -25,6 +25,9 @@ use crate::{
     rpc::EventHub,
 };
 
+mod manifest;
+pub(crate) mod monitor;
+
 pub const EXECUTABLE: &str = "bin64/dontstarve_dedicated_server_nullrenderer_x64";
 pub const UPDATE_PROCESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const UPDATE_COMPLETE: &str =

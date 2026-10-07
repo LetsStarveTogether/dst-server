@@ -160,6 +160,9 @@ while True:
         while (root / name / ("hold-" + method)).exists():
             time.sleep(0.005)
     data = True
+    if method == "mods":
+        source = root / name / "enabled-mods.json"
+        data = json.loads(source.read_text()) if source.exists() else []
     if method == "runtime":
         data = {
             "session_id": session,
