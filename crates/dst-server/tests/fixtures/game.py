@@ -249,7 +249,9 @@ while True:
         loading = moving is not None and name == moving["destination"]
         data = {
             "player": {"userid": params["userid"]} if active or loading else None,
-            "guid": PLAYER_GUID if active else None,
+            "guid": PLAYER_GUID
+            if active and not (root / "player-loading").exists()
+            else None,
             "departing": moving is not None and name == moving["source"],
             "session_id": session,
         }
@@ -273,14 +275,32 @@ while True:
             )
             (root / "migration.new").replace(root / "migration.json")
             pending_migration = (destination, time.monotonic() + 0.12)
-    if method == "kick":
-        data = (
-            params.get("_expected_guid") == PLAYER_GUID
-            and params.get("_expected_session_id") == session
-            and params.get("_expected_generation") == generation
+    if method in {"kick", "is_connected"}:
+        location = (
+            (root / "player-location").read_text()
+            if (root / "player-location").exists()
+            else "Master"
         )
-        if data:
-            (root / "kicked").write_text("disconnected")
+        moving = migration()
+        connected = not (root / "kicked").exists() and (
+            name == location or (moving is not None and name == moving["destination"])
+        )
+        if method == "kick":
+            if "_expected_guid" in params:
+                message = "kick must target a connection without requiring an entity"
+                raise AssertionError(message)
+            with (root / "kick-requests").open("a") as log:
+                log.write(name + "\n")
+            data = connected
+            if connected:
+                (root / "kicked").write_text("disconnected")
+        else:
+            data = connected
+    if method == "kick" and (root / ("invalid-kick-" + name)).exists():
+        data = "malformed result"
+    if method in {"get_vote", "list_vote_commands", "start_vote", "cancel_vote"}:
+        (root / (name + ".vote-call")).write_text(json.dumps(request))
+        data = json.loads((root / "vote-response.json").read_text())
     if method == "ban":
         data = "seconds" not in params or isinstance(params["seconds"], int)
         if data:
@@ -301,6 +321,8 @@ while True:
         ).read_text() == name + ":" + params["userid"]
         if data:
             (root / "banned").unlink()
+    if method in {"ban", "unban"}:
+        data = None
     if method == "reload_permissions":
         (root / (name + ".permissions")).write_bytes(
             (root / "adminlist.txt").read_bytes()

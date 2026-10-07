@@ -1,4 +1,4 @@
-@0xc835c081a4d6e52b;
+@0x92b0cf161f9dcbde;
 
 # Dynamic game and MOD data stays structured on the wire.
 struct Value {
@@ -98,6 +98,10 @@ struct Request {
     isWhitelisted @49 :PlayerArguments;
     whitelist @50 :PlayerArguments;
     unwhitelist @51 :PlayerArguments;
+    voteCommands @52 :Void;
+    getVote @53 :Void;
+    startVote @54 :StartVoteArguments;
+    cancelVote @55 :Void;
   }
 
   struct NoticeArguments {
@@ -155,7 +159,12 @@ struct Request {
   }
   struct SetAdminArguments {
     userid @0 :Text;
-    remove @1 :Bool;
+    enabled @1 :Bool;
+  }
+  struct StartVoteArguments {
+    command @0 :Text;
+    starterUserid @1 :Text;
+    targetUserid @2 :Text;
   }
   struct SetVitalsArguments {
     userid @0 :Text;

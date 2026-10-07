@@ -367,15 +367,15 @@ requests! {
     ListPlayers {} => ("list_players", false, BOTH, COMMAND_TIMEOUT),
     GetPlayer { userid: String } => ("get_player", false, BOTH, COMMAND_TIMEOUT),
     Inventory { userid: String } => ("inventory", false, BOTH, COMMAND_TIMEOUT),
-    Kick { userid: String } => ("kick", true, BOTH, COMMAND_TIMEOUT),
+    Kick { userid: String } => ("kick", true, ROOM, COMMAND_TIMEOUT),
     Ban { userid: String, #[serde(default)] seconds: Option<u64> }
-        => ("ban", true, BOTH, COMMAND_TIMEOUT),
-    Blocklist {} => ("blocklist", false, BOTH, COMMAND_TIMEOUT),
-    IsBlocked { userid: String } => ("is_blocked", false, BOTH, COMMAND_TIMEOUT),
-    Unban { userid: String } => ("unban", true, BOTH, COMMAND_TIMEOUT),
-    IsAdmin { userid: String } => ("is_admin", false, BOTH, COMMAND_TIMEOUT),
+        => ("ban", true, ROOM, COMMAND_TIMEOUT),
+    Blocklist {} => ("blocklist", false, ROOM, COMMAND_TIMEOUT),
+    IsBlocked { userid: String } => ("is_blocked", false, ROOM, COMMAND_TIMEOUT),
+    Unban { userid: String } => ("unban", true, ROOM, COMMAND_TIMEOUT),
+    IsAdmin { userid: String } => ("is_admin", false, ROOM, COMMAND_TIMEOUT),
     ReadPermissions {} => ("read_permissions", false, ROOM, COMMAND_TIMEOUT),
-    SetAdmin { userid: String, #[serde(default)] remove: bool }
+    SetAdmin { userid: String, enabled: bool }
         => ("set_admin", true, ROOM, COMMAND_TIMEOUT),
     SetVitals {
         userid: String,
@@ -399,6 +399,14 @@ requests! {
     IsWhitelisted { userid: String } => ("is_whitelisted", false, ROOM, COMMAND_TIMEOUT),
     Whitelist { userid: String } => ("whitelist", true, ROOM, COMMAND_TIMEOUT),
     Unwhitelist { userid: String } => ("unwhitelist", true, ROOM, COMMAND_TIMEOUT),
+    VoteCommands {} => ("list_vote_commands", false, ROOM, COMMAND_TIMEOUT),
+    GetVote {} => ("get_vote", false, ROOM, COMMAND_TIMEOUT),
+    StartVote {
+        command: String,
+        starter_userid: String,
+        #[serde(default)] target_userid: Option<String>,
+    } => ("start_vote", true, ROOM, COMMAND_TIMEOUT),
+    CancelVote {} => ("cancel_vote", true, ROOM, COMMAND_TIMEOUT),
 }
 
 impl Request {
@@ -463,6 +471,17 @@ impl Request {
             identifier("userid", userid)?;
         }
         match self {
+            Self::StartVote {
+                command,
+                starter_userid,
+                target_userid,
+            } => {
+                identifier("command", command)?;
+                identifier("starter_userid", starter_userid)?;
+                if let Some(userid) = target_userid {
+                    identifier("target_userid", userid)?;
+                }
+            }
             Self::Configure { configuration, .. } => {
                 if !configuration.is_object() {
                     return Err(Error::invalid(
@@ -629,7 +648,17 @@ fn argument_schema(method: &str, name: &str, kind: &str) -> Value {
     } else if kind == "Value" {
         json!({"type": "object"})
     } else if kind.contains("String") {
-        let max = if ["userid", "shard_id", "session_id", "expected_session_id"].contains(&name) {
+        let max = if [
+            "userid",
+            "shard_id",
+            "session_id",
+            "expected_session_id",
+            "command",
+            "starter_userid",
+            "target_userid",
+        ]
+        .contains(&name)
+        {
             128
         } else {
             MAX_SOURCE_BYTES
@@ -901,7 +930,7 @@ fn text(field: &str, value: &str, maximum_bytes: usize) -> Result<()> {
     Ok(())
 }
 
-fn identifier(field: &str, value: &str) -> Result<()> {
+pub(crate) fn identifier(field: &str, value: &str) -> Result<()> {
     if value.is_empty() || value.chars().count() > 128 || value.chars().any(char::is_control) {
         return Err(Error::invalid(
             field,

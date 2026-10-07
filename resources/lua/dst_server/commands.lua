@@ -110,19 +110,55 @@ function commands.rollback_to_snapshot(args)
     return true
 end
 
+function commands.is_connected(args)
+    local userid = values.required_string(args, "userid")
+    for _, client in ipairs(GetPlayerClientTable()) do
+        if client.userid == userid then
+            return true
+        end
+    end
+    return false
+end
+
 function commands.kick(args)
-    TheNet:Kick(values.required_string(args, "userid"))
+    if not commands.is_connected(args) then return false end
+    TheNet:Kick(args.userid)
     return true
+end
+
+local function without_user(blacklist, userid)
+    local result, changed = {}, false
+    for _, entry in ipairs(blacklist) do
+        if type(entry) == "table" and (entry.userid == userid or entry.netid == userid) then
+            changed = true
+        else
+            result[#result + 1] = entry
+        end
+    end
+    return result, changed
 end
 
 function commands.ban(args)
     local userid = values.required_string(args, "userid")
-    if args.seconds == nil then
-        TheNet:Ban(userid)
-    else
-        TheNet:BanForTime(userid, values.required_integer(args, "seconds", 1))
+    local seconds = args.seconds ~= nil and values.required_integer(args, "seconds", 1) or nil
+    local previous = TheNet:GetBlacklist() or {}
+    local updated, changed = without_user(previous, userid)
+    local replace = seconds ~= nil and changed
+    local ok = pcall(function()
+        -- Timed bans live outside the persistent blacklist.
+        if replace then TheNet:SetBlacklist(updated) end
+        if seconds == nil then
+            if changed then commands.kick(args) else TheNet:Ban(userid) end
+            if not commands.is_blocked(args) then wire.indeterminate() end
+        else
+            TheNet:BanForTime(userid, seconds)
+        end
+    end)
+    if not ok then
+        if replace then pcall(TheNet.SetBlacklist, TheNet, previous) end
+        wire.indeterminate()
     end
-    return true
+    return json.null
 end
 
 function commands.blocklist()
@@ -154,20 +190,11 @@ end
 
 function commands.unban(args)
     local userid = values.required_string(args, "userid")
-    local blacklist = TheNet:GetBlacklist() or {}
-    local changed = false
-    for index = #blacklist, 1, -1 do
-        local entry = blacklist[index]
-        if type(entry) == "table"
-            and (entry.userid == userid or entry.netid == userid) then
-            table.remove(blacklist, index)
-            changed = true
-        end
-    end
+    local blacklist, changed = without_user(TheNet:GetBlacklist() or {}, userid)
     if changed then
         TheNet:SetBlacklist(blacklist)
     end
-    return changed
+    return json.null
 end
 
 function commands.is_whitelisted(args)
@@ -177,13 +204,15 @@ end
 function commands.whitelist(args)
     local userid = values.required_string(args, "userid")
     TheNet:AddToWhiteList(userid)
-    return TheNet:IsWhiteListed(userid) == true
+    if TheNet:IsWhiteListed(userid) ~= true then wire.indeterminate() end
+    return json.null
 end
 
 function commands.unwhitelist(args)
     local userid = values.required_string(args, "userid")
     TheNet:RemoveFromWhiteList(userid)
-    return TheNet:IsWhiteListed(userid) ~= true
+    if TheNet:IsWhiteListed(userid) == true then wire.indeterminate() end
+    return json.null
 end
 
 function commands.reload_permissions()

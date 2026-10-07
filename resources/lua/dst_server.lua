@@ -7,6 +7,7 @@ for _, source in ipairs({
     require("dst_server.console"),
     require("dst_server.player_queries"),
     require("dst_server.world_queries"),
+    require("dst_server.voting").methods,
 }) do
     for name, callback in pairs(source) do
         methods[name] = callback

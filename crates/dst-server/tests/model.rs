@@ -15,6 +15,43 @@ fn call(target: Target, method: &str, arguments: Value) -> dst_server::model::Re
 }
 
 #[test]
+fn account_and_vote_requests_validate_before_transport() {
+    for method in ["kick", "ban", "unban", "is_blocked", "is_admin"] {
+        assert!(
+            call(
+                Target::Shard("Master".into()),
+                method,
+                json!({"userid":"KU_A"})
+            )
+            .is_err()
+        );
+    }
+    for arguments in [
+        json!({"userid":"KU_A"}),
+        json!({"userid":"KU_A","remove":false}),
+        json!({"userid":"KU_A","enabled":1}),
+    ] {
+        assert!(call(Target::Room, "set_admin", arguments).is_err());
+    }
+    for field in ["command", "starter_userid", "target_userid"] {
+        for invalid in [json!(""), json!("x\n"), json!("x".repeat(129)), json!(1)] {
+            let mut arguments =
+                json!({"command":"kick","starter_userid":"KU_A","target_userid":"KU_B"});
+            arguments[field] = invalid;
+            assert!(call(Target::Room, "start_vote", arguments).is_err());
+        }
+    }
+    assert!(
+        call(
+            Target::Room,
+            "start_vote",
+            json!({"command":"rollback","starter_userid":"KU_A","target_userid":null})
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn completion_wait_includes_requested_announcements_and_countdown() {
     let repeated = call(
         Target::Room,
@@ -251,11 +288,12 @@ fn registry_is_the_discovery_contract_for_every_method() {
             arguments.insert(
                 name.into(),
                 match name {
-                    "userid" => json!("player"),
+                    "userid" | "starter_userid" => json!("player"),
+                    "command" => json!("rollback"),
                     "source" => json!("return 1"),
                     "message" => json!("hello"),
                     "configuration" | "policy" => json!({}),
-                    "paused" => json!(true),
+                    "paused" | "enabled" => json!(true),
                     "session_id" | "shard_id" => json!("1"),
                     "item" => json!("twigs"),
                     "x" | "y" | "z" => json!(1.0),

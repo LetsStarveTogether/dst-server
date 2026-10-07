@@ -76,7 +76,7 @@ async fn native_commands_results_and_events_preserve_fields() {
             ("blocklist", json!({})), ("is_blocked", json!({"userid":"KU_5"})),
             ("unban", json!({"userid":"KU_6"})), ("is_admin", json!({"userid":"KU_7"})),
             ("read_permissions", json!({})),
-            ("set_admin", json!({"userid":"KU_8","remove":true})),
+            ("set_admin", json!({"userid":"KU_8","enabled":false})),
             ("set_vitals", json!({"userid":"KU_9","health":0,"hunger":0.25,"sanity":0.5,"temperature":-15.25,"moisture":1})),
             ("kill_player", json!({"userid":"KU_10"})),
             ("revive", json!({"userid":"KU_11"})), ("despawn", json!({"userid":"KU_12"})),
@@ -87,6 +87,9 @@ async fn native_commands_results_and_events_preserve_fields() {
             ("is_whitelisted", json!({"userid":"KU_17"})),
             ("whitelist", json!({"userid":"KU_18"})),
             ("unwhitelist", json!({"userid":"KU_19"})),
+            ("list_vote_commands", json!({})), ("get_vote", json!({})), ("cancel_vote", json!({})),
+            ("start_vote", json!({"command":"kick","starter_userid":"KU_A","target_userid":"KU_B"})),
+            ("start_vote", json!({"command":"rollback","starter_userid":"KU_A"})),
             // Exercise absent pointers separately from explicit false and zero.
             ("regenerate", json!({})), ("list_snapshots", json!({})),
             ("ban", json!({"userid":"KU_20"})),
@@ -217,7 +220,7 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
             .await
             .unwrap();
             let client = Client::connect(&path).await.unwrap();
-            assert_eq!(client.describe().await.unwrap()["protocol"], 2);
+            assert_eq!(client.describe().await.unwrap()["protocol"], 3);
             let clone = client.clone();
             let call = tokio::spawn(async move {
                 clone
@@ -378,7 +381,7 @@ async fn cancelled_waits_release_slots_and_disconnected_mutations_stay_unknown()
                 );
                 waiting.abort();
                 let _ = waiting.await;
-                assert_eq!(client.describe().await.unwrap()["protocol"], 2);
+                assert_eq!(client.describe().await.unwrap()["protocol"], 3);
             }
             assert_eq!(owned_operations.len(), 80);
             let clone = client.clone();

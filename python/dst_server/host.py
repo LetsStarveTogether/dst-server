@@ -5,10 +5,11 @@ import builtins
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from os import PathLike
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from ._native import Host as _Host
 from .logs import JournalQuery, JournalResult, JournalStream, _journal_record
+from .management import Permissions, VoteCommand, VoteStatus
 from .settings import Room, RoomStore
 
 if TYPE_CHECKING:
@@ -152,24 +153,6 @@ class Host:  # ruff: ignore[too-many-public-methods]
     async def set_policy(self, number: int, policy: dict[str, Any]) -> None:
         await self._host.operate(number, {"operation": "set_policy", "policy": policy})
 
-    async def permission(
-        self,
-        number: int,
-        kind: Literal["admin", "whitelist", "ban"],
-        userid: str | None = None,
-        *,
-        remove: bool = False,
-    ) -> Any:
-        return await self._host.operate(
-            number,
-            {
-                "operation": "permission",
-                "kind": kind,
-                "userid": userid,
-                "remove": remove,
-            },
-        )
-
     async def call(
         self, number: int, method: str, arguments: dict[str, Any] | None = None
     ) -> Any:
@@ -180,6 +163,76 @@ class Host:  # ruff: ignore[too-many-public-methods]
                 "request": {"method": method, "arguments": arguments or {}},
             },
         )
+
+    async def kick(self, number: int, userid: str) -> bool:
+        """Disconnect a client, including character selection and loading."""
+        return await self.call(number, "kick", {"userid": userid})
+
+    async def ban(
+        self, number: int, userid: str, *, seconds: int | None = None
+    ) -> None:
+        """Set a ban; seconds=None replaces any timed ban with a permanent ban."""
+        await self.call(number, "ban", {"userid": userid, "seconds": seconds})
+
+    async def unban(self, number: int, userid: str) -> None:
+        """Remove a permanent ban; native temporary bans expire on their own."""
+        await self.call(number, "unban", {"userid": userid})
+
+    async def whitelist(self, number: int, userid: str) -> None:
+        await self.call(number, "whitelist", {"userid": userid})
+
+    async def unwhitelist(self, number: int, userid: str) -> None:
+        await self.call(number, "unwhitelist", {"userid": userid})
+
+    async def set_admin(self, number: int, userid: str, *, enabled: bool) -> None:
+        await self.call(number, "set_admin", {"userid": userid, "enabled": enabled})
+
+    async def is_blocked(self, number: int, userid: str) -> bool:
+        """Read permanent blacklist membership; native temporary bans are excluded."""
+        return await self.call(number, "is_blocked", {"userid": userid})
+
+    async def is_admin(self, number: int, userid: str) -> bool:
+        return await self.call(number, "is_admin", {"userid": userid})
+
+    async def is_whitelisted(self, number: int, userid: str) -> bool:
+        return await self.call(number, "is_whitelisted", {"userid": userid})
+
+    async def blocklist(self, number: int) -> builtins.list[str]:
+        """Read permanent blacklist membership; native temporary bans are excluded."""
+        return await self.call(number, "blocklist")
+
+    async def read_permissions(self, number: int) -> Permissions:
+        """Read stored permission IDs; temporary bans are not in these files."""
+        return await self.call(number, "read_permissions")
+
+    async def list_vote_commands(self, number: int) -> builtins.list[VoteCommand]:
+        return await self.call(number, "list_vote_commands")
+
+    async def get_vote(self, number: int) -> VoteStatus:
+        return await self.call(number, "get_vote")
+
+    async def start_vote(
+        self,
+        number: int,
+        command: str,
+        *,
+        starter_userid: str,
+        target_userid: str | None = None,
+    ) -> VoteStatus:
+        """Start a vote using native access, player count and cooldown rules."""
+        return await self.call(
+            number,
+            "start_vote",
+            {
+                "command": command,
+                "starter_userid": starter_userid,
+                "target_userid": target_userid,
+            },
+        )
+
+    async def cancel_vote(self, number: int) -> bool:
+        """Cancel the current vote; return False when no vote is active."""
+        return await self.call(number, "cancel_vote")
 
     @asynccontextmanager
     async def connect(self, number: int) -> AsyncGenerator[Client]:

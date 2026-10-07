@@ -202,30 +202,6 @@ fn validate_service(unit: &str) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionKind {
-    Admin,
-    Whitelist,
-    Ban,
-}
-impl PermissionKind {
-    fn file(self) -> &'static str {
-        match self {
-            Self::Admin => "adminlist.txt",
-            Self::Whitelist => "whitelist.txt",
-            Self::Ban => "blocklist.txt",
-        }
-    }
-    fn field(self) -> &'static str {
-        match self {
-            Self::Admin => "adminlist",
-            Self::Whitelist => "whitelist",
-            Self::Ban => "blocklist",
-        }
-    }
-}
-
 pub struct Host {
     pub rooms: RoomStore,
     pub quadlet_dir: PathBuf,
@@ -255,6 +231,14 @@ impl Host {
         Ok(Client::connect(self.rooms.path(number)?.join(AGENT_SOCKET)).await?)
     }
     pub async fn call(&self, number: u16, request: Request) -> Result<Value> {
+        request.validate()?;
+        if crate::permissions::supports_offline(&request)
+            && !self.systemd.status(&Self::unit(number)).await?.running()
+        {
+            let mut lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
+            self.require_inactive(number).await?;
+            return crate::permissions::apply(&mut lock.while_stopped(), &request);
+        }
         if matches!(
             request,
             Request::Restart { .. } | Request::UpdateMods { .. }
@@ -747,61 +731,6 @@ impl Host {
         }
         Ok(())
     }
-    pub async fn permission(
-        &self,
-        number: u16,
-        kind: PermissionKind,
-        userid: Option<&str>,
-        remove: bool,
-    ) -> Result<Value> {
-        if let Some(userid) = userid {
-            Request::IsAdmin {
-                userid: userid.to_owned(),
-            }
-            .validate()?;
-        }
-        if self.systemd.status(&Self::unit(number)).await?.running() {
-            if let Some(userid) = userid {
-                let userid = userid.to_owned();
-                let request = match (kind, remove) {
-                    (PermissionKind::Ban, false) => Request::Ban {
-                        userid: userid.clone(),
-                        seconds: None,
-                    },
-                    (PermissionKind::Ban, true) => Request::Unban {
-                        userid: userid.clone(),
-                    },
-                    (PermissionKind::Whitelist, false) => Request::Whitelist {
-                        userid: userid.clone(),
-                    },
-                    (PermissionKind::Whitelist, true) => Request::Unwhitelist {
-                        userid: userid.clone(),
-                    },
-                    (PermissionKind::Admin, _) => Request::SetAdmin { userid, remove },
-                };
-                self.call(number, request).await?;
-            }
-            if kind == PermissionKind::Ban {
-                return self.call(number, Request::Blocklist {}).await;
-            }
-            let permissions = self.call(number, Request::ReadPermissions {}).await?;
-            return Ok(permissions[kind.field()].clone());
-        }
-        let mut lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
-        self.require_inactive(number).await?;
-        let mut stopped = lock.while_stopped();
-        let source = stopped
-            .read_optional_bytes(kind.file())?
-            .unwrap_or_default();
-        if let Some(userid) = userid {
-            let updated = files::edit_permission(&source, userid, remove);
-            if updated != source {
-                stopped.replace_permission(kind.file(), &updated)?;
-            }
-            return Ok(json!(files::permission_users(&updated)));
-        }
-        Ok(json!(files::permission_users(&source)))
-    }
 }
 
 fn require_no_failure(status: &Value) -> Result<()> {
@@ -1118,33 +1047,54 @@ mod tests {
         host.edit(&changed).await.unwrap();
         assert_eq!(std::fs::read(room.join("blocklist.txt")).unwrap(), native);
         assert_eq!(
-            host.permission(1, PermissionKind::Ban, None, false)
-                .await
-                .unwrap(),
+            host.call(1, Request::Blocklist {}).await.unwrap(),
             json!(["KU_first", "KU_second"])
         );
-        host.permission(1, PermissionKind::Ban, Some("KU_first"), false)
-            .await
-            .unwrap();
+        host.call(
+            1,
+            Request::Ban {
+                userid: "KU_first".into(),
+                seconds: None,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(std::fs::read(room.join("blocklist.txt")).unwrap(), native);
-        host.permission(1, PermissionKind::Ban, Some("KU_new"), false)
-            .await
-            .unwrap();
+        host.call(
+            1,
+            Request::Ban {
+                userid: "KU_new".into(),
+                seconds: None,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::fs::read(room.join("blocklist.txt")).unwrap(),
             [&native[..], b"KU_new\n"].concat()
         );
-        host.permission(1, PermissionKind::Ban, Some("KU_first"), true)
-            .await
-            .unwrap();
+        host.call(
+            1,
+            Request::Unban {
+                userid: "KU_first".into(),
+            },
+        )
+        .await
+        .unwrap();
         let remaining = [&second[..], b"KU_new\n"].concat();
         assert_eq!(
             std::fs::read(room.join("blocklist.txt")).unwrap(),
             remaining
         );
-        host.permission(1, PermissionKind::Admin, Some("KU_newadmin"), false)
-            .await
-            .unwrap();
+        host.call(
+            1,
+            Request::SetAdmin {
+                userid: "KU_newadmin".into(),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::fs::read(room.join("adminlist.txt")).unwrap(),
             b"KU_admin\r\nKU_newadmin\n"

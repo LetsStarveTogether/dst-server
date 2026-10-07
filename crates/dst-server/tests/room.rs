@@ -402,23 +402,97 @@ async fn migration_returns_native_acceptance_before_destination_entry() {
 }
 
 #[tokio::test]
+async fn stopped_permission_edits_preserve_native_records_without_starting_games() {
+    let (temp, room) = room();
+    let root = temp.path().join("cluster");
+    let existing = b"KU_existing\xba\xba1790989763\xba\xbaRoom \xff\xba\n";
+    fs::write(root.join("blocklist.txt"), existing).unwrap();
+    assert_eq!(
+        invoke(
+            &room,
+            Request::Ban {
+                userid: "KU_new".into(),
+                seconds: None
+            }
+        )
+        .await
+        .unwrap(),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        fs::read(root.join("blocklist.txt")).unwrap(),
+        [existing.as_slice(), b"KU_new\n"].concat()
+    );
+    assert_eq!(
+        invoke(&room, Request::Blocklist {}).await.unwrap(),
+        json!(["KU_existing", "KU_new"])
+    );
+    for expected in [serde_json::Value::Null, serde_json::Value::Null] {
+        assert_eq!(
+            invoke(
+                &room,
+                Request::Unban {
+                    userid: "KU_new".into()
+                }
+            )
+            .await
+            .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(fs::read(root.join("blocklist.txt")).unwrap(), existing);
+    let timed = invoke(
+        &room,
+        Request::Ban {
+            userid: "KU_timed".into(),
+            seconds: Some(60),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(timed.code, ErrorCode::NotReady);
+    assert_eq!(fs::read(root.join("blocklist.txt")).unwrap(), existing);
+    for request in [
+        Request::Whitelist {
+            userid: "KU_guest".into(),
+        },
+        Request::Unwhitelist {
+            userid: "KU_guest".into(),
+        },
+    ] {
+        assert_eq!(
+            invoke(&room, request).await.unwrap(),
+            serde_json::Value::Null
+        );
+    }
+    assert!(fs::read(root.join("whitelist.txt")).unwrap().is_empty());
+    assert_eq!(room.status().phase, Phase::Stopped);
+}
+
+#[tokio::test]
 async fn native_optionals_and_permissions_use_the_master_authority() {
     let (temp, room) = room();
     invoke(&room, Request::Start {}).await.unwrap();
-    let banned = room
-        .invoke(
-            Envelope::new(
-                Target::Shard("Caves".into()),
-                Request::Ban {
-                    userid: "KU_ABC".into(),
-                    seconds: None,
-                },
-            )
-            .unwrap(),
+    assert!(
+        Envelope::new(
+            Target::Shard("Caves".into()),
+            Request::Ban {
+                userid: "KU_ABC".into(),
+                seconds: None
+            }
         )
-        .await
-        .unwrap();
-    assert_eq!(banned, true);
+        .is_err()
+    );
+    let banned = invoke(
+        &room,
+        Request::Ban {
+            userid: "KU_ABC".into(),
+            seconds: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(banned, serde_json::Value::Null);
     assert_eq!(
         fs::read_to_string(temp.path().join("cluster/banned")).unwrap(),
         "Master:KU_ABC"
@@ -436,7 +510,7 @@ async fn native_optionals_and_permissions_use_the_master_authority() {
         )
         .await
         .unwrap(),
-        true
+        serde_json::Value::Null
     );
     let changed = invoke(
         &room,
@@ -457,6 +531,116 @@ async fn native_optionals_and_permissions_use_the_master_authority() {
             .unwrap();
     assert_eq!(vitals["health"], 0.5);
     assert!(!vitals.as_object().unwrap().contains_key("hunger"));
+    room.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn kick_handles_loading_and_migrating_connections_and_reports_partial_failures() {
+    for scenario in ["loading", "migrating", "partial"] {
+        let (temp, room) = room();
+        let root = temp.path().join("cluster");
+        invoke(&room, Request::Start {}).await.unwrap();
+        if scenario == "loading" {
+            fs::write(root.join("player-loading"), "").unwrap();
+            assert_eq!(
+                invoke(
+                    &room,
+                    Request::GetPlayer {
+                        userid: "KU_ABC".into()
+                    }
+                )
+                .await
+                .unwrap()["state"],
+                "loading"
+            );
+        } else if scenario == "migrating" {
+            fs::write(root.join("hold-migration"), "").unwrap();
+            invoke(
+                &room,
+                Request::Migrate {
+                    userid: "KU_ABC".into(),
+                    shard_id: "2".into(),
+                    portal_id: 1,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                invoke(
+                    &room,
+                    Request::GetPlayer {
+                        userid: "KU_ABC".into()
+                    }
+                )
+                .await
+                .unwrap()["state"],
+                "migrating"
+            );
+        } else {
+            fs::write(root.join("invalid-kick-Caves"), "").unwrap();
+        }
+        let result = invoke(
+            &room,
+            Request::Kick {
+                userid: "KU_ABC".into(),
+            },
+        )
+        .await;
+        if scenario == "partial" {
+            assert_eq!(result.unwrap_err().code, ErrorCode::PartialFailure);
+        } else {
+            assert_eq!(result.unwrap(), true);
+            assert_eq!(
+                invoke(
+                    &room,
+                    Request::Kick {
+                        userid: "KU_ABC".into()
+                    }
+                )
+                .await
+                .unwrap(),
+                false
+            );
+        }
+        let requests = fs::read_to_string(root.join("kick-requests")).unwrap();
+        assert!(requests.contains("Master") && requests.contains("Caves"));
+        room.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn vote_control_routes_to_master_and_preserves_native_rejections() {
+    let (temp, room) = room();
+    let root = temp.path().join("cluster");
+    invoke(&room, Request::Start {}).await.unwrap();
+    let response = json!({"enabled": true, "current": null});
+    fs::write(root.join("vote-response.json"), response.to_string()).unwrap();
+    assert_eq!(invoke(&room, Request::GetVote {}).await.unwrap(), response);
+    assert!(root.join("Master.vote-call").exists() && !root.join("Caves.vote-call").exists());
+    fs::write(
+        root.join("vote-response.json"),
+        r#"{"error":{"code":"busy","message":"active vote"}}"#,
+    )
+    .unwrap();
+    let error = invoke(
+        &room,
+        Request::StartVote {
+            command: "kick".into(),
+            starter_userid: "KU_A".into(),
+            target_userid: Some("KU_B".into()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Busy);
+    let forwarded: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("Master.vote-call")).unwrap()).unwrap();
+    assert_eq!(
+        forwarded["arguments"],
+        json!({"command":"kick", "starter_userid":"KU_A", "target_userid":"KU_B"})
+    );
+    fs::write(root.join("vote-response.json"), "true").unwrap();
+    assert_eq!(invoke(&room, Request::CancelVote {}).await.unwrap(), true);
     room.shutdown().await.unwrap();
 }
 
@@ -496,12 +680,12 @@ async fn admin_changes_preserve_native_lists_and_reload_every_shard() {
             &room,
             Request::SetAdmin {
                 userid: "KU_first".into(),
-                remove: false
+                enabled: true
             }
         )
         .await
         .unwrap(),
-        json!(["KU_first"])
+        serde_json::Value::Null
     );
     assert!(!root.join("Master.permissions").exists());
     invoke(&room, Request::Start {}).await.unwrap();
@@ -516,12 +700,12 @@ async fn admin_changes_preserve_native_lists_and_reload_every_shard() {
             &room,
             Request::SetAdmin {
                 userid: "KU_second".into(),
-                remove: false
+                enabled: true
             }
         )
         .await
         .unwrap(),
-        json!(["KU_first", "KU_second"])
+        serde_json::Value::Null
     );
     for shard in ["Master", "Caves"] {
         assert_eq!(
@@ -549,7 +733,7 @@ async fn admin_changes_preserve_native_lists_and_reload_every_shard() {
         &room,
         Request::SetAdmin {
             userid: "KU_second".into(),
-            remove: true,
+            enabled: false,
         },
     )
     .await

@@ -274,7 +274,7 @@ impl room::Server for RoomServer {
         set_outcome(
             results.get().init_result(),
             Ok(json!({
-                "protocol": 2,
+                "protocol": 3,
                 "room": crate::model::describe(Scope::Room),
                 "shard": crate::model::describe(Scope::Shard),
             })),
@@ -793,6 +793,35 @@ async fn close_subscription(endpoint: &subscription::Client) -> Result<()> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn previous_interface_cannot_dispatch_an_inverted_admin_flag() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (dispatch, mut incoming) = mpsc::channel(1);
+                let endpoint: room::Client = capnp_rpc::new_client(RoomServer {
+                    dispatch,
+                    events: EventHub::default(),
+                    pending: Rc::new(PendingCalls::default()),
+                });
+                let request = endpoint
+                    .client
+                    .new_call::<room::call_params::Owned, room::call_results::Owned>(
+                        0xc19f_7fb2_d846_8969,
+                        0,
+                        None,
+                    );
+                let error = request
+                    .send()
+                    .promise
+                    .await
+                    .err()
+                    .expect("old interface must be rejected");
+                assert_eq!(error.kind, capnp::ErrorKind::Unimplemented);
+                assert!(incoming.try_recv().is_err());
+            })
+            .await;
+    }
 
     #[test]
     fn subscription_limit_is_shared_across_kinds_and_released_on_drop() {

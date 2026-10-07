@@ -21,6 +21,7 @@ from .logs import (
     NetdataLogResult,
     NetdataLogs,
 )
+from .management import Permissions, VoteCommand, VoteStatus
 
 __all__ = [
     "Client",
@@ -38,13 +39,16 @@ __all__ = [
     "NetdataLogRecord",
     "NetdataLogResult",
     "NetdataLogs",
+    "Permissions",
     "Subscription",
+    "VoteCommand",
+    "VoteStatus",
     "describe",
     "inspect",
 ]
 
 
-class Client:
+class Client:  # ruff: ignore[too-many-public-methods]
     """A connection to one Agent; accepted operations survive cancelled waits."""
 
     __slots__ = ("_client",)
@@ -65,6 +69,68 @@ class Client:
         timeout: float | None = None,
     ) -> Any:
         return await self._client.call(method, arguments, shard=shard, timeout=timeout)
+
+    async def kick(self, userid: str) -> bool:
+        """Disconnect a client, including character selection and loading."""
+        return await self.call("kick", {"userid": userid})
+
+    async def ban(self, userid: str, *, seconds: int | None = None) -> None:
+        """Set a ban; seconds=None replaces any timed ban with a permanent ban."""
+        await self.call("ban", {"userid": userid, "seconds": seconds})
+
+    async def unban(self, userid: str) -> None:
+        """Remove a permanent ban; native temporary bans expire on their own."""
+        await self.call("unban", {"userid": userid})
+
+    async def whitelist(self, userid: str) -> None:
+        await self.call("whitelist", {"userid": userid})
+
+    async def unwhitelist(self, userid: str) -> None:
+        await self.call("unwhitelist", {"userid": userid})
+
+    async def set_admin(self, userid: str, *, enabled: bool) -> None:
+        await self.call("set_admin", {"userid": userid, "enabled": enabled})
+
+    async def is_blocked(self, userid: str) -> bool:
+        """Read permanent blacklist membership; native temporary bans are excluded."""
+        return await self.call("is_blocked", {"userid": userid})
+
+    async def is_admin(self, userid: str) -> bool:
+        return await self.call("is_admin", {"userid": userid})
+
+    async def is_whitelisted(self, userid: str) -> bool:
+        return await self.call("is_whitelisted", {"userid": userid})
+
+    async def blocklist(self) -> list[str]:
+        """Read permanent blacklist membership; native temporary bans are excluded."""
+        return await self.call("blocklist")
+
+    async def read_permissions(self) -> Permissions:
+        """Read stored permission IDs; temporary bans are not in these files."""
+        return await self.call("read_permissions")
+
+    async def list_vote_commands(self) -> list[VoteCommand]:
+        return await self.call("list_vote_commands")
+
+    async def get_vote(self) -> VoteStatus:
+        return await self.call("get_vote")
+
+    async def start_vote(
+        self, command: str, *, starter_userid: str, target_userid: str | None = None
+    ) -> VoteStatus:
+        """Start a vote using native access, player count and cooldown rules."""
+        return await self.call(
+            "start_vote",
+            {
+                "command": command,
+                "starter_userid": starter_userid,
+                "target_userid": target_userid,
+            },
+        )
+
+    async def cancel_vote(self) -> bool:
+        """Cancel the current vote; return False when no vote is active."""
+        return await self.call("cancel_vote")
 
     async def describe(self) -> dict[str, Any]:
         return await self._client.describe()

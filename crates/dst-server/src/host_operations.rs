@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    host::{Host, PermissionKind},
+    host::Host,
     model::{Countdown, Request},
     policy::Policy,
     rooms::Room,
@@ -70,13 +70,6 @@ pub enum HostOperation {
         #[serde(default)]
         notice: Option<Countdown>,
     },
-    Permission {
-        kind: PermissionKind,
-        #[serde(default)]
-        userid: Option<String>,
-        #[serde(default)]
-        remove: bool,
-    },
     SetPolicy {
         policy: Policy,
     },
@@ -117,13 +110,6 @@ impl HostOperation {
             Self::UpdateMods { restart, notice } => Request::UpdateMods {
                 restart: *restart,
                 notice: notice.clone(),
-            }
-            .validate()?,
-            Self::Permission {
-                userid: Some(userid),
-                ..
-            } => Request::IsAdmin {
-                userid: userid.clone(),
             }
             .validate()?,
             Self::SetPolicy { policy } => policy.validate()?,
@@ -195,14 +181,6 @@ impl Host {
             }
             HostOperation::UpdateMods { restart, notice } => {
                 self.update_mods(number, *restart, notice.clone()).await
-            }
-            HostOperation::Permission {
-                kind,
-                userid,
-                remove,
-            } => {
-                self.permission(number, *kind, userid.as_deref(), *remove)
-                    .await
             }
             HostOperation::SetPolicy { policy } => {
                 self.set_policy(number, policy).await?;

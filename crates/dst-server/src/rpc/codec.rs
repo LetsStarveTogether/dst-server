@@ -522,10 +522,10 @@ fn write_request(mut builder: wire::request::Builder<'_>, request: &Request) -> 
             args.set_userid(userid.as_str());
         }
         Request::ReadPermissions {} => builder.set_read_permissions(()),
-        Request::SetAdmin { userid, remove } => {
+        Request::SetAdmin { userid, enabled } => {
             let mut args = builder.init_set_admin();
             args.set_userid(userid.as_str());
-            args.set_remove(*remove);
+            args.set_enabled(*enabled);
         }
         Request::SetVitals {
             userid,
@@ -613,6 +613,21 @@ fn write_request(mut builder: wire::request::Builder<'_>, request: &Request) -> 
         Request::Unwhitelist { userid } => {
             let mut args = builder.init_unwhitelist();
             args.set_userid(userid.as_str());
+        }
+        Request::VoteCommands {} => builder.set_vote_commands(()),
+        Request::GetVote {} => builder.set_get_vote(()),
+        Request::CancelVote {} => builder.set_cancel_vote(()),
+        Request::StartVote {
+            command,
+            starter_userid,
+            target_userid,
+        } => {
+            let mut args = builder.init_start_vote();
+            args.set_command(command.as_str());
+            args.set_starter_userid(starter_userid.as_str());
+            if let Some(userid) = target_userid {
+                args.set_target_userid(userid.as_str());
+            }
         }
     }
     Ok(())
@@ -821,7 +836,7 @@ fn read_request(reader: wire::request::Reader<'_>) -> Result<Request> {
             let args = args.map_err(invalid)?;
             Request::SetAdmin {
                 userid: text(args.get_userid())?,
-                remove: args.get_remove(),
+                enabled: args.get_enabled(),
             }
         }
         Which::SetVitals(args) => {
@@ -922,6 +937,21 @@ fn read_request(reader: wire::request::Reader<'_>) -> Result<Request> {
             let args = args.map_err(invalid)?;
             Request::Unwhitelist {
                 userid: text(args.get_userid())?,
+            }
+        }
+        Which::VoteCommands(()) => Request::VoteCommands {},
+        Which::GetVote(()) => Request::GetVote {},
+        Which::CancelVote(()) => Request::CancelVote {},
+        Which::StartVote(args) => {
+            let args = args.map_err(invalid)?;
+            Request::StartVote {
+                command: text(args.get_command())?,
+                starter_userid: text(args.get_starter_userid())?,
+                target_userid: if args.has_target_userid() {
+                    Some(text(args.get_target_userid())?)
+                } else {
+                    None
+                },
             }
         }
     })

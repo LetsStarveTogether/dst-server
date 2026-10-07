@@ -35,9 +35,15 @@ local departing = driver.call("locate_player", { userid = "KU_TEST" })
 assert(departing.departing and departing.guid == 17 and departing.session_id == "SESSION")
 local loading = driver.call("locate_player", { userid = "KU_LOADING" })
 assert(loading.guid == json.null and loading.player.loaded == false)
+local kicked = {}
+TheNet = { Kick = function(_, userid) kicked[#kicked + 1] = userid end }
+assert(driver.call("kick", { userid = "KU_LOADING" }), "character selection has no entity")
+assert(driver.call("kick", { userid = "KU_TEST" }), "migration must not require an active entity")
+assert(not driver.call("kick", { userid = "KU_GONE" }) and #kicked == 2)
 assert(driver.call("locate_player", { userid = "KU_GONE" }).player == json.null)
 player._despawning = false
 player = nil
+assert(driver.call("kick", { userid = "KU_TEST" }), "loading must not require a GUID")
 assert(teleport("SESSION", 17).error == "stale_reference" and teleports == 1)
 
 local largest = 0

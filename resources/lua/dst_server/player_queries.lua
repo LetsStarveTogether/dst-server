@@ -27,10 +27,7 @@ function queries.get_player(args)
     end
     client = client or {
         userid = player.userid,
-        name = player:GetDisplayName() or "",
         prefab = player.prefab,
-        admin = false,
-        moderator = false,
     }
     return player_values.player(client, player)
 end

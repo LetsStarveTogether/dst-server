@@ -18,6 +18,9 @@ function Runtime:Initialize()
     if self.installed and self.post_initialized and not self.reported then
         self.reported = true
         -- Network initialization creates voters and lets modes replace player commands.
+        if not pcall(function() require("dst_server.voting").install() end) then
+            telemetry.report("voting.install", "installation_failed")
+        end
         if require("dst_server.state").requested_profile ~= "off" then
             telemetry.install("player_commands", function()
                 return require("dst_server.input_events").install_commands()

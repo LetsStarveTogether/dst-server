@@ -1572,15 +1572,12 @@ impl Room {
             }
         }
         let result = self.native(name, request.method(), args).await?;
-        if matches!(request, Request::Kick { .. } | Request::Despawn { .. }) && result == true {
+        if matches!(request, Request::Despawn { .. }) && result == true {
             let deadline = Instant::now() + COMMAND;
             loop {
                 let (observed, observed_guid) = self.locate(userid, None).await?;
-                let completed = if matches!(request, Request::Kick { .. }) {
-                    observed.state == PlayerState::Disconnected
-                } else {
-                    observed_guid != guid || observed.identity.as_ref() != Some(current)
-                };
+                let completed =
+                    observed_guid != guid || observed.identity.as_ref() != Some(current);
                 if completed {
                     return Ok(result);
                 }
@@ -1597,7 +1594,63 @@ impl Room {
         Ok(result)
     }
 
+    async fn kick(&self, userid: &str) -> Result<Value> {
+        let deadline = Instant::now() + COMMAND;
+        let mut kicked = false;
+        loop {
+            // Retry on every shard while migration can move the connection.
+            let outcomes = self.all("kick", json!({"userid": userid})).await?;
+            if outcomes.as_array().is_some_and(|outcomes| {
+                outcomes.iter().any(|entry| {
+                    entry["result"]["status"] != "success" || !entry["result"]["value"].is_boolean()
+                })
+            }) {
+                return Err(Error::new(
+                    ErrorCode::PartialFailure,
+                    "some shards could not disconnect the client",
+                )
+                .with_details(outcomes));
+            }
+            kicked |= outcomes.as_array().is_some_and(|outcomes| {
+                outcomes
+                    .iter()
+                    .any(|entry| entry["result"]["value"] == true)
+            });
+            let clients = self.all("is_connected", json!({"userid": userid})).await?;
+            if clients.as_array().is_some_and(|outcomes| {
+                outcomes.iter().any(|entry| {
+                    entry["result"]["status"] != "success" || !entry["result"]["value"].is_boolean()
+                })
+            }) {
+                return Err(Error::new(
+                    ErrorCode::Unknown,
+                    "could not confirm client disconnection",
+                )
+                .with_details(clients));
+            }
+            let connected = clients.as_array().is_some_and(|outcomes| {
+                outcomes
+                    .iter()
+                    .any(|entry| entry["result"]["value"] == true)
+            });
+            if !connected {
+                return Ok(json!(kicked));
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::new(
+                    ErrorCode::Unknown,
+                    "client disconnection did not finish",
+                ));
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn dispatch(self: &Arc<Self>, target: &Target, request: &Request) -> Result<Value> {
+        if crate::permissions::supports_offline(request) && self.require_stopped().is_ok() {
+            return self
+                .with_lock(|lock| crate::permissions::apply(&mut lock.while_stopped(), request));
+        }
         if request.mutating()
             && !matches!(
                 request,
@@ -1655,12 +1708,12 @@ impl Room {
                 let source=lock.read_optional_bytes("adminlist.txt")?.unwrap_or_default();
                 Ok(json!(crate::files::permission_users(&source).iter().any(|entry|entry==userid)))
             }),
-            Request::SetAdmin { userid,remove } => {
+            Request::SetAdmin { userid,enabled } => {
                 let running=self.require_stopped().is_err();
                 if running { self.require_ready()?; }
                 let users=self.with_lock(|lock| {
                     let source=lock.read_optional_bytes("adminlist.txt")?.unwrap_or_default();
-                    let updated=crate::files::edit_permission(&source,userid,*remove);
+                    let updated=crate::files::edit_permission(&source,userid,!*enabled);
                     if updated!=source { lock.replace_adminlist(&updated)?; }
                     Ok(crate::files::permission_users(&updated))
                 })?;
@@ -1670,7 +1723,7 @@ impl Room {
                         return Err(Error::new(ErrorCode::PartialFailure,"admin list was updated but some shards did not reload permissions").with_details(json!({"adminlist":users,"shards":shards})));
                     }
                 }
-                Ok(json!(users))
+                Ok(Value::Null)
             }
             Request::Configure { configuration,replace_permissions } => {
                 self.require_stopped()?;
@@ -1719,7 +1772,6 @@ impl Room {
                     .await
             }
             Request::GetPlayer { .. }
-            | Request::Kick { .. }
             | Request::Inventory { .. }
             | Request::SetVitals { .. }
             | Request::KillPlayer { .. }
@@ -1729,6 +1781,15 @@ impl Room {
             | Request::Teleport { .. }
             | Request::Give { .. }
             | Request::Remove { .. } => self.player_request(target, request).await,
+            Request::Kick { userid } => self.kick(userid).await,
+            Request::VoteCommands {} | Request::GetVote {} | Request::StartVote { .. } | Request::CancelVote {} => {
+                let result = self.native(&self.master(), request.method(), request.arguments()?).await?;
+                if let Some(error) = result.get("error") {
+                    let error: Error = serde_json::from_value(error.clone()).map_err(internal)?;
+                    return Err(error);
+                }
+                Ok(result)
+            }
             Request::Announce { message,count,interval } => self.announce(message,*count,*interval).await,
             Request::Ban { .. }
             | Request::Unban { .. }

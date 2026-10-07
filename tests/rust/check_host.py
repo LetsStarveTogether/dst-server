@@ -92,20 +92,24 @@ async def check(directory: Path) -> tuple[Path, Path, Path]:  # ruff: ignore[too
             raise AssertionError(message)
         assert (root / "001/cluster.ini").read_bytes() == before
 
-        assert await host.permission(1, "admin", "KU_test_user") == ["KU_test_user"]
+        assert await host.set_admin(1, "KU_test_user", enabled=True) is None
         blocklist = root / "001/blocklist.txt"
         native_ban = b"KU_banned\xba\xba1790989763\xba\xbaRoom \xff\xba\n"
         blocklist.write_bytes(native_ban)
         await host.edit_fields(1, [("/cluster/settings/cluster_name", "Updated name")])
         assert blocklist.read_bytes() == native_ban
-        assert await host.permission(1, "ban") == ["KU_banned"]
-        assert await host.permission(1, "ban", "KU_second") == [
-            "KU_banned",
-            "KU_second",
-        ]
+        assert await host.blocklist(1) == ["KU_banned"]
+        assert await host.ban(1, "KU_second") is None
+        assert await host.blocklist(1) == ["KU_banned", "KU_second"]
         assert blocklist.read_bytes() == native_ban + b"KU_second\n"
-        assert await host.permission(1, "admin") == ["KU_test_user"]
-        assert await host.permission(1, "admin", "KU_test_user", remove=True) == []
+        assert await host.ban(1, "KU_banned") is None
+        assert blocklist.read_bytes() == native_ban + b"KU_second\n"
+        assert (await host.read_permissions(1))["adminlist"] == ["KU_test_user"]
+        assert await host.is_admin(1, "KU_test_user")
+        assert await host.set_admin(1, "KU_test_user", enabled=False) is None
+        assert not await host.is_admin(1, "KU_test_user")
+        assert await host.unban(1, "KU_banned") is None
+        assert await host.unban(1, "KU_banned") is None
 
         outcomes = await host.provision([definition(1), definition(2)])
         assert [entry["number"] for entry in outcomes] == [1, 2]

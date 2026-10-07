@@ -356,12 +356,34 @@ assert(#observed.blacklist == 2 and observed.blacklist[1].netid == "Steam_ONLY"
 assert(observed.set_blacklist_calls == 1)
 assert(whitelist.KU_FRIEND == true and whitelist.KU_TEST == nil)
 assert(driver.call("is_blocked", { userid = "KU_BLOCKED" }) == false)
-assert(driver.call("unban", { userid = "KU_MISSING" }) == false)
+assert(driver.call("unban", { userid = "KU_MISSING" }) == json.null)
 assert(observed.set_blacklist_calls == 1)
 local remaining = driver.call("blocklist", {})
 assert(#remaining == 2 and remaining[1] == "KU_KEEP"
     and remaining[2] == "Steam_ONLY")
 assert(driver.call("is_whitelisted", { userid = "KU_TEST" }) == false)
+local keep = { userid = "KU_KEEP", timestamp = 123, name = "unchanged" }
+local temporary = { KU_TIMED = 60 }
+blacklist = { keep }
+TheNet.Ban = function(_, userid)
+    for _, entry in ipairs(blacklist) do if entry.userid == userid then return end end
+    blacklist[#blacklist + 1] = { userid = userid, timestamp = 1000 }
+end
+assert(driver.call("ban", { userid = "KU_TIMED" }) == json.null)
+local permanent = blacklist[2]
+assert(#blacklist == 2 and blacklist[1] == keep and permanent.userid == "KU_TIMED")
+assert(driver.call("ban", { userid = "KU_TIMED" }) == json.null and blacklist[2] == permanent)
+TheNet.BanForTime = function(_, userid, seconds) temporary[userid] = seconds end
+assert(driver.call("ban", { userid = "KU_TIMED", seconds = 90 }) == json.null)
+assert(#blacklist == 1 and blacklist[1] == keep and temporary.KU_TIMED == 90)
+assert(driver.call("ban", { userid = "KU_TIMED" }) == json.null)
+local previous = blacklist
+TheNet.BanForTime = function() error("native write failed") end
+local failed = json.decode(require("dst_server.wire").response(function()
+    return driver.call("ban", { userid = "KU_TIMED", seconds = 30 })
+end))
+assert(not failed.ok and failed.error == "indeterminate" and blacklist == previous)
+assert(driver.call("unban", { userid = "KU_TIMED" }) == json.null and #blacklist == 1 and blacklist[1] == keep)
 assert(observed.health == 0.5)
 assert(observed.killed == true)
 assert(observed.player_event == "respawnfromghost")

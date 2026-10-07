@@ -26,7 +26,7 @@ def test_driver(
 
 @pytest.mark.parametrize(
     "fixture",
-    ["rust_recovery", "rust_load", "rust_player_guard"],
+    ["rust_recovery", "rust_load", "rust_player_guard", "voting"],
 )
 def test_native_lifecycle(
     lua: Callable[..., bytes], root: Path, scripts: Path, fixture: str

@@ -17,6 +17,7 @@ pub mod lua;
 pub mod model;
 pub mod mods;
 pub mod observability;
+mod permissions;
 pub mod policy;
 pub mod preloader;
 pub mod probe;
