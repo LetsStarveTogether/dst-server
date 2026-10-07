@@ -88,7 +88,7 @@ fn collect_call(call: &FunctionCall, setup: &mut Setup) -> Result<()> {
     if suffixes.next().is_some() {
         return Ok(());
     }
-    let string = match arguments {
+    let string = match arguments.as_ref() {
         FunctionArgs::Parentheses { arguments, .. } if arguments.len() == 1 => {
             match arguments.iter().next() {
                 Some(Expression::String(string)) => string,

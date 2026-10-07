@@ -34,23 +34,23 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
           submodules: true
 
       - name: Setup uv and Python
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@v10.3.3
         with:
-          python-version: '3.14'
+          python-version: '3'
 
       - name: Install native build and Lua dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends capnproto lua5.1 luajit
+          sudo apt-get install --yes --no-install-recommends capnproto pkg-config libarchive-dev lua5.1 luajit
           rustup show
-          printf 'PYO3_PYTHON=%s\n' "$(uv python find 3.14)" >> "$GITHUB_ENV"
+          printf 'PYO3_PYTHON=%s\n' "$(uv python find 3)" >> "$GITHUB_ENV"
 
       - name: Check Rust formatting and lints
         run: |
@@ -58,7 +58,9 @@ jobs:
           cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
 
       - name: Test native SDK
         run: |
@@ -76,13 +78,13 @@ jobs:
         run: uv run --locked --no-sync pytest tests/lua
 
       - name: Build wheel from source distribution
-        run: uv build --python 3.14 --clear --out-dir dist --no-sources -C 'maturin.build-args=--compatibility pypi'
+        run: uv build --python 3 --clear --out-dir dist --no-sources -C 'maturin.build-args=--compatibility pypi'
 
       - name: Check isolated wheel and native process ownership
         shell: bash
         run: |
           set -euo pipefail
-          uv venv .wheel-check --python 3.14
+          uv venv .wheel-check --python 3
           uv pip install --python .wheel-check/bin/python --no-deps dist/*.whl
           .wheel-check/bin/python -I tests/rust/check_binding.py "$PWD/target/debug/examples/rpc_fixture" "$PWD/target/debug/dst-server"
           for check in tests/rust/check_*.py; do
@@ -97,9 +99,9 @@ jobs:
 
       - name: Verify release manifest generation
         run: |
-          uv run --no-project --python 3.14 -- python tools/build_manifest.py \
+          uv run --no-project --python 3 -- python tools/build_manifest.py \
             --output "$RUNNER_TEMP/build-manifest.json" \
-            --python "$(uv python find 3.14)" \
+            --python "$(uv python find 3)" \
             --artifact target/debug/dst-server --artifact dist/*.whl --artifact dist/*.tar.gz
 
   native-game:
@@ -114,16 +116,16 @@ jobs:
       DST_SERVER_IMAGE: localhost/dst-native-acceptance
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
           submodules: true
 
       - name: Setup uv and Python
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@v10.3.3
         with:
-          python-version: '3.14'
+          python-version: '3'
 
       - name: Resolve current native game version
         id: game
@@ -152,7 +154,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends lua5.1 luajit
+          sudo apt-get install --yes --no-install-recommends libarchive13t64 lua5.1 luajit
           native_directory="$RUNNER_TEMP/native-image"
           mkdir "$native_directory"
           native_container=$(sudo podman create "$DST_SERVER_IMAGE")
@@ -174,7 +176,7 @@ jobs:
 
       - name: Upload native acceptance reports
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           name: native-acceptance-${{ github.run_attempt }}
           path: |

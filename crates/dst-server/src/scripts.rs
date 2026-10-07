@@ -56,7 +56,10 @@ struct Inspected {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn source_digest(files: &BTreeMap<String, String>) -> Result<String> {
@@ -160,7 +163,7 @@ fn check_startup(source: &[u8]) -> Result<()> {
         let mut suffixes = call.suffixes();
         let Some(Suffix::Call(Call::AnonymousCall(arguments))) = suffixes.next() else { return false; };
         if suffixes.next().is_some() { return false; }
-        let token = match arguments {
+        let token = match arguments.as_ref() {
             FunctionArgs::Parentheses { arguments, .. } if arguments.len() == 1 => {
                 let mut expression = arguments.iter().next().unwrap();
                 while let Expression::Parentheses { expression: inner, .. } = expression {
@@ -193,7 +196,7 @@ fn inspect(
     let mut total = 0_u64;
     for index in 0..archive.len() {
         let file = archive.by_index(index)?;
-        let name = file.name().to_owned();
+        let name = file.name()?.into_owned();
         ensure!(
             valid_name(&name)
                 && seen.insert(name.clone())
@@ -444,7 +447,7 @@ mod tests {
             let mut remaining: BTreeMap<_, _> = changes.iter().copied().collect();
             for index in 0..original.len() {
                 let file = original.by_index(index).unwrap();
-                let name = file.name().to_owned();
+                let name = file.name().unwrap().into_owned();
                 if let Some(bytes) = remaining.remove(name.as_str()) {
                     let options = file
                         .options()
@@ -493,6 +496,10 @@ mod tests {
 
     #[test]
     fn native_bytes_metadata_provenance_and_repeatability_survive() {
+        assert_eq!(
+            digest(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         let directory = tempfile::tempdir().unwrap();
         let source = native(directory.path());
         let original = fs::read(&source).unwrap();
@@ -510,7 +517,7 @@ mod tests {
         assert_eq!(result.native_files, native.len());
         for index in 0..native.len() {
             let old = native.by_index(index).unwrap();
-            let name = old.name().to_owned();
+            let name = old.name().unwrap().into_owned();
             let new = bundled.by_name(&name).unwrap();
             assert_eq!(
                 (old.last_modified(), old.comment(), old.unix_mode()),

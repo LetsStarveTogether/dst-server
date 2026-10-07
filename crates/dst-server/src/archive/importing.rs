@@ -275,7 +275,7 @@ fn read_archive(mut file: File, client: bool) -> Result<NativeFiles> {
             .map(|index| {
                 let entry = reader.by_index(index)?;
                 Entry::new(
-                    entry.name(),
+                    &entry.name()?,
                     entry.is_dir(),
                     entry.size(),
                     entry.unix_mode(),

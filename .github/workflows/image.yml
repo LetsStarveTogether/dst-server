@@ -53,7 +53,7 @@ jobs:
       revision: ${{ steps.update-dst-scripts-reference.outputs.revision }}
     steps:
       - name: Checkout main
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           ref: main
           submodules: true
@@ -94,7 +94,7 @@ jobs:
     steps:
       - name: Resolve image versions
         id: detect
-        uses: actions/github-script@v9.0.0
+        uses: actions/github-script@v9
         env:
           BUILD_TARGET: ${{ inputs.build_target || 'both' }}
           FORCE_BUILD: ${{ inputs.force_build }}
@@ -191,7 +191,7 @@ jobs:
     steps:
       - name: Checkout
         if: ${{ matrix.build }}
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.sync-dst-scripts.outputs.revision }}
           persist-credentials: false
@@ -213,14 +213,14 @@ jobs:
 
       - name: Setup uv and Python
         if: ${{ matrix.build }}
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@v10.3.3
         with:
-          python-version: '3.14'
+          python-version: '3'
 
       - name: Build image
         if: ${{ matrix.build }}
         id: build
-        uses: redhat-actions/buildah-build@v3.1.0
+        uses: redhat-actions/buildah-build@v3
         with:
           image: ${{ env.IMAGE_NAME }}
           tags: ${{ matrix.version_tag }} ${{ matrix.image_tag }}
@@ -256,7 +256,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends lua5.1 luajit
+          sudo apt-get install --yes --no-install-recommends libarchive13t64 lua5.1 luajit
           native_dir=$(mktemp -d)
           printf 'directory=%s\n' "$native_dir" >> "$GITHUB_OUTPUT"
           native_container=$(podman create "$DST_SERVER_IMAGE")
@@ -286,7 +286,7 @@ jobs:
 
       - name: Upload native image verification reports
         if: ${{ always() && matrix.build }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           name: native-image-${{ matrix.image_tag }}-${{ matrix.version }}-${{ github.run_attempt }}
           path: |
@@ -297,7 +297,7 @@ jobs:
 
       - name: Push to registry
         if: ${{ matrix.build }}
-        uses: redhat-actions/push-to-registry@v3.0.0
+        uses: redhat-actions/push-to-registry@v3
         with:
           image: ${{ steps.build.outputs.image }}
           tags: ${{ steps.build.outputs.tags }}

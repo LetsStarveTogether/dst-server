@@ -13,16 +13,16 @@ dst-server = "dst_server.__main__:main"
 
 [dependency-groups]
 dev = [
-    "prek>=0.5.3",
-    "ruff>=0.16.7",
-    "rumdl>=0.2.73",
-    "ty>=0.0.81",
-    "maturin>=1.9,<2",
-    "pytest>=9.1.1",
+    "prek>=0.5",
+    "ruff>=0.17",
+    "rumdl>=0.3",
+    "ty>=0.0.95",
+    "maturin[patchelf]>=1.16",
+    "pytest>=9.2",
 ]
 
 [build-system]
-requires = ["maturin>=1.9,<2"]
+requires = ["maturin[patchelf]>=1.16"]
 build-backend = "maturin"
 
 [tool.maturin]
@@ -40,7 +40,7 @@ include = [
 
 [tool.ruff]
 preview = true
-required-version = '>=0.16.7'
+required-version = '>=0.17'
 
 [tool.ruff.lint]
 select = ['ALL']
@@ -91,5 +91,6 @@ addopts = ["--strict-config", "--strict-markers", "-ra"]
 
 [tool.rumdl]
 enable = ['ALL']
+disable = ['MD093'] # Source reference headings contain code identifiers.
 line-length = 120
 exclude = ['.git', '.github', 'LICENSE']

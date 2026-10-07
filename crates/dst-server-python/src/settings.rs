@@ -78,12 +78,7 @@ fn checked(model: &str, value: Value) -> PyResult<Configuration> {
 }
 
 #[derive(Clone)]
-#[pyclass(
-    name = "Configuration",
-    module = "dst_server._native",
-    frozen,
-    skip_from_py_object
-)]
+#[pyclass(name = "Configuration", module = "dst_server._native", frozen)]
 pub(crate) struct Configuration {
     pub(crate) model: String,
     pub(crate) value: Value,
@@ -352,12 +347,7 @@ impl Configuration {
 }
 
 #[derive(Clone)]
-#[pyclass(
-    name = "Room",
-    module = "dst_server._native",
-    frozen,
-    skip_from_py_object
-)]
+#[pyclass(name = "Room", module = "dst_server._native", frozen)]
 pub(crate) struct Room {
     pub(crate) inner: rooms::Room,
 }
@@ -458,12 +448,7 @@ impl Room {
 }
 
 #[derive(Clone)]
-#[pyclass(
-    name = "RoomStore",
-    module = "dst_server._native",
-    frozen,
-    skip_from_py_object
-)]
+#[pyclass(name = "RoomStore", module = "dst_server._native", frozen)]
 pub(crate) struct RoomStore {
     pub(crate) inner: rooms::RoomStore,
 }

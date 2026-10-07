@@ -3,14 +3,14 @@ ARG BETA=""
 ARG SOURCE_REVISION=""
 ARG NATIVE_SCRIPTS_REVISION=""
 
-FROM docker.io/library/rust:1.99.0-trixie AS rust-toolchain
+FROM docker.io/library/rust:latest AS rust-toolchain
 FROM ghcr.io/astral-sh/uv:latest AS uv
 
 FROM docker.io/cm2network/steamcmd:latest AS game-base
 LABEL maintainer="wh2099@pm.me"
 USER root
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates libcurl3t64-gnutls procps && \
+    apt-get install -y --no-install-recommends ca-certificates libcurl3t64-gnutls libarchive13t64 procps && \
     rm -rf /var/lib/apt/lists/* && \
     install -d -o steam -g steam /install
 
@@ -18,7 +18,7 @@ RUN apt-get update && \
 FROM game-base AS sdk-build
 USER root
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential capnproto git python3 && \
+    apt-get install -y --no-install-recommends build-essential capnproto git python3 pkg-config libarchive-dev && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
@@ -44,14 +44,14 @@ RUN install -D target/release/dst-server /out/native/dst-server-linux-x86_64 && 
 FROM sdk-build AS distributions
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_LINK_MODE=copy
-RUN uv python install 3.14 && \
-    uv build --python 3.14 --out-dir /out/python --no-sources \
+RUN uv python install 3 && \
+    uv build --python 3 --out-dir /out/python --no-sources \
         -C 'maturin.build-args=--compatibility pypi' && \
     python3 tools/build_manifest.py --output /out/build-manifest.json \
         --revision="${SOURCE_REVISION}" \
         --native-scripts-revision="${NATIVE_SCRIPTS_REVISION}" \
         --game-version="${GAME_VERSION}" ${BETA:+--beta} \
-        --python "$(uv python find 3.14)" \
+        --python "$(uv python find 3)" \
         --artifact /out/native/dst-server-linux-x86_64 \
         --artifact /out/python/*.whl --artifact /out/python/*.tar.gz
 

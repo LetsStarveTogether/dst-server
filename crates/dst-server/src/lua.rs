@@ -116,7 +116,7 @@ fn literal_call(call: &FunctionCall) -> Result<(String, Vec<Value>)> {
     let [Suffix::Call(Call::AnonymousCall(arguments))] = suffixes.as_slice() else {
         bail!("expected one direct function call");
     };
-    let arguments = match arguments {
+    let arguments = match arguments.as_ref() {
         FunctionArgs::Parentheses { arguments, .. } => arguments
             .iter()
             .map(|argument| value(argument, 0))
@@ -268,19 +268,19 @@ fn value(expression: &Expression, depth: usize) -> Result<Value> {
                         let TokenType::Identifier { identifier } = key.token_type() else {
                             bail!("expected a literal table key");
                         };
-                        (Value::String(identifier.to_string()), value)
+                        (Value::String(identifier.to_string()), value.as_ref())
                     }
                     Field::ExpressionKey {
                         key,
                         value: expression,
                         ..
                     } => {
-                        let key = match key {
+                        let key = match key.as_ref() {
                             Expression::String(token) => Value::String(string(token)?),
                             Expression::Number(token) => number(token, false)?,
                             _ => bail!("table keys must be literal strings or positive integers"),
                         };
-                        (key, expression)
+                        (key, expression.as_ref())
                     }
                     Field::NoKey(expression) => {
                         implicit += 1;

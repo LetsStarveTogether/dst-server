@@ -23,13 +23,13 @@ jobs:
       version: ${{ steps.verify.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Setup Python and uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@v10.3.3
 
       - id: verify
         name: Verify tag matches Cargo.toml and main
@@ -61,7 +61,7 @@ jobs:
     uses: ./.github/workflows/test.yml
 
   build:
-    name: Build Linux x86_64 binary, CPython 3.14 wheel and source distribution
+    name: Build Linux x86_64 binary, CPython wheel and source distribution
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     needs: test
@@ -69,15 +69,15 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           submodules: true
 
       - name: Setup Python and uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@v10.3.3
         with:
-          python-version: '3.14'
+          python-version: '3'
 
       - name: Build distributions against the game image libc
         shell: bash
@@ -97,9 +97,9 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends capnproto lua5.1 luajit
+          sudo apt-get install --yes --no-install-recommends capnproto pkg-config libarchive-dev lua5.1 luajit
           cargo build --locked -p dst-server --example rpc_fixture
-          uv venv .wheel-check --python 3.14
+          uv venv .wheel-check --python 3
           uv pip install --python .wheel-check/bin/python --no-deps dist/python/*.whl
           .wheel-check/bin/python -I tests/rust/check_binding.py "$PWD/target/debug/examples/rpc_fixture" "$PWD/dist/native/dst-server-linux-x86_64"
           for check in tests/rust/check_*.py; do
@@ -114,7 +114,7 @@ jobs:
           dist/native/dst-server-linux-x86_64 describe > /dev/null
 
       - name: Upload release distributions and manifest
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           name: release-distributions
           path: dist/
@@ -131,13 +131,13 @@ jobs:
       contents: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8
         with:
           name: release-distributions
           path: dist
 
       - name: Create or update GitHub draft release
-        uses: ncipollo/release-action@v1.21.0
+        uses: ncipollo/release-action@v1
         with:
           tag: ${{ needs.verify-tag.outputs.tag }}
           name: ${{ needs.verify-tag.outputs.tag }}
@@ -165,13 +165,13 @@ jobs:
       id-token: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8
         with:
           name: release-distributions
           path: dist
 
       - name: Publish package distributions to TestPyPI
-        uses: pypa/gh-action-pypi-publish@v1.14.2
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist/python
@@ -193,18 +193,18 @@ jobs:
       id-token: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8
         with:
           name: release-distributions
           path: dist
 
       - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@v1.14.2
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/python
 
       - name: Publish GitHub draft release
-        uses: ncipollo/release-action@v1.21.0
+        uses: ncipollo/release-action@v1
         with:
           tag: ${{ needs.verify-tag.outputs.tag }}
           allowUpdates: true
