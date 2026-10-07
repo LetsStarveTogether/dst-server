@@ -226,7 +226,6 @@ jobs:
           tags: ${{ matrix.version_tag }} ${{ matrix.image_tag }}
           containerfiles: Containerfile
           layers: true
-          # ponytail: final-image cache aliases persist; strict expiry needs separate publication.
           extra-args: |
             --pull=always
             --network=host
@@ -246,6 +245,25 @@ jobs:
             org.opencontainers.image.created=${{ matrix.created }}
             org.opencontainers.image.licenses=MIT
             io.github.letsstarvetogether.dst.channel=${{ matrix.channel }}
+
+      - name: Remove cache expiration from published images
+        if: ${{ matrix.build }}
+        shell: bash
+        env:
+          BUILT_IMAGE: ${{ steps.build.outputs.image-with-tag }}
+          IMAGE_TAGS: ${{ steps.build.outputs.tags }}
+        run: |
+          set -euo pipefail
+          publish_container=$(buildah from --pull=never "$BUILT_IMAGE")
+          trap 'buildah rm "$publish_container"' EXIT
+          buildah config --unsetlabel quay.expires-after "$publish_container"
+          publish_image=$(buildah commit "$publish_container")
+          buildah inspect --type image "$publish_image" | python3 -c \
+            'import json, sys; assert "quay.expires-after" not in json.load(sys.stdin)["OCIv1"]["config"].get("Labels", {})'
+          read -r -a tags <<< "$IMAGE_TAGS"
+          for tag in "${tags[@]}"; do
+            buildah tag "$publish_image" "$IMAGE_NAME:$tag"
+          done
 
       - name: Test native contracts from built image
         if: ${{ matrix.build }}
