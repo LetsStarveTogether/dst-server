@@ -257,7 +257,7 @@ impl ContainerUnit {
                 quote(&format!("{name}={value}"))
             ));
         }
-        source.push_str(&format!("\n[Service]\nRestart=on-failure\nRestartSec=5\nSuccessExitStatus={0}\nRestartForceExitStatus={0}\nTimeoutStartSec=900\nTimeoutStopSec=420\n", crate::agent::RESTART_EXIT));
+        source.push_str("\n[Service]\nRestart=on-failure\nRestartSec=5\nTimeoutStartSec=900\nTimeoutStopSec=420\n");
         if self.options.start_on_boot {
             source.push_str("\n[Install]\nWantedBy=default.target\n");
         }
@@ -294,7 +294,6 @@ impl ContainerUnit {
             ensure!(values.len() == 1, "duplicate {section}.{key}");
             Ok(values[0].clone())
         };
-        let restart_exit = crate::agent::RESTART_EXIT.to_string();
         for (section, key, value) in [
             ("Container", "Pull", "never"),
             ("Container", "RunInit", "true"),
@@ -307,8 +306,6 @@ impl ContainerUnit {
             ("Container", "StopTimeout", "360"),
             ("Service", "Restart", "on-failure"),
             ("Service", "RestartSec", "5"),
-            ("Service", "SuccessExitStatus", restart_exit.as_str()),
-            ("Service", "RestartForceExitStatus", restart_exit.as_str()),
             ("Service", "TimeoutStartSec", "900"),
             ("Service", "TimeoutStopSec", "420"),
         ] {
@@ -1199,14 +1196,9 @@ mod tests {
         let path = unit.save(units.path()).unwrap();
         assert_eq!(ContainerUnit::load(path).unwrap(), unit);
         let rendered = unit.render().unwrap();
-        assert!(rendered.contains(&format!(
-            "SuccessExitStatus={}\n",
-            crate::agent::RESTART_EXIT
-        )));
-        assert!(rendered.contains(&format!(
-            "RestartForceExitStatus={}\n",
-            crate::agent::RESTART_EXIT
-        )));
+        assert!(rendered.contains("Restart=on-failure\n"));
+        assert!(!rendered.contains("SuccessExitStatus="));
+        assert!(!rendered.contains("RestartForceExitStatus="));
         let generator = Path::new("/usr/lib/systemd/system-generators/podman-system-generator");
         if generator.exists() {
             for image in [DEFAULT_IMAGE, "quay.io/wh2099/dst-server:beta"] {
@@ -1236,13 +1228,7 @@ mod tests {
                 assert!(service.contains("--init"));
                 assert!(service.contains("--tz local"));
                 assert!(service.contains("TimeoutStopSec=420"));
-                assert!(
-                    service.contains(&format!("SuccessExitStatus={}", crate::agent::RESTART_EXIT))
-                );
-                assert!(service.contains(&format!(
-                    "RestartForceExitStatus={}",
-                    crate::agent::RESTART_EXIT
-                )));
+                assert!(service.contains("Restart=on-failure"));
                 assert!(service.contains("--label io.containers.autoupdate=registry"));
                 assert!(service.contains("--pull never"));
                 assert!(service.contains(image));

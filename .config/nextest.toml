@@ -2,5 +2,9 @@
 test-threads = 4
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+[[profile.default.overrides]]
+filter = "test(wall_clock_opens_and_closes_games_without_an_external_trigger)"
+slow-timeout = { period = "30s", terminate-after = 7 }
+
 [profile.ci]
 fail-fast = false

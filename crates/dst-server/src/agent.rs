@@ -15,7 +15,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
-    sync::{Semaphore, mpsc, oneshot, watch},
+    sync::{Notify, Semaphore, mpsc, oneshot, watch},
     task::JoinSet,
     time::Instant,
 };
@@ -31,9 +31,6 @@ use crate::{
     room::Room,
     rpc::{self, EventHub},
 };
-
-/// A clean stop requesting a fresh container from the service manager.
-pub const RESTART_EXIT: u8 = 8;
 
 pub struct Options {
     pub cluster: PathBuf,
@@ -52,9 +49,9 @@ struct RunState {
 struct Controller {
     room: Arc<Room>,
     started: Instant,
-    initialized: AtomicBool,
     closing: AtomicBool,
     exit: watch::Sender<Option<u8>>,
+    changed: Notify,
     mutation: Arc<Semaphore>,
     interrupted: watch::Sender<u64>,
     closing_game: AtomicBool,
@@ -113,31 +110,11 @@ impl Controller {
         });
     }
 
-    async fn initialize(&self) -> model::Result<()> {
+    fn initialize(&self) -> model::Result<()> {
         let policy = self.policy()?;
-        let schedule = policy.schedule_at(Utc::now()).map_err(internal)?;
-        let maintenance = self.policy_state()?.mods;
-        let manual =
-            maintenance.manual && !matches!(maintenance.phase, ModPhase::Idle | ModPhase::Failed);
-        if !schedule.open && !manual {
-            self.request_exit(0);
-            return Ok(());
-        }
         self.room.with_lock(|lock| {
-            if let Some(opening) = schedule.opening_id {
-                recovery::reset_for_open_window(lock, opening.timestamp_millis().try_into()?)?;
-            }
             let mut state = PolicyState::load(lock)?;
             state.resume_after_restart(Utc::now())?;
-            policy.plan(
-                &mut state,
-                Utc::now(),
-                &policy::Inputs {
-                    busy: true,
-                    monotonic: Some(self.started.elapsed()),
-                    ..Default::default()
-                },
-            )?;
             if policy.mod_auto_update
                 && recovery::load(lock)?.closed.is_none()
                 && state.mods.phase == ModPhase::Idle
@@ -146,54 +123,10 @@ impl Controller {
                 state.mods.phase = ModPhase::Pending;
             }
             state.save(lock)
-        })?;
-        if self.recovery()?.closed.is_some() && !manual {
-            self.request_exit(0);
-            return Ok(());
-        }
-        let resume_game = self.policy_state()?.mods.resume_game;
-        loop {
-            let maintenance = self.policy_state()?.mods;
-            if maintenance.phase == ModPhase::Idle {
-                break;
-            }
-            if maintenance.phase == ModPhase::Failed {
-                self.request_exit(0);
-                return Ok(());
-            }
-            if self.closing.load(Ordering::Acquire)
-                || !maintenance.manual
-                    && !self
-                        .policy()?
-                        .schedule_at(Utc::now())
-                        .map_err(internal)?
-                        .open
-            {
-                self.request_exit(0);
-                return Ok(());
-            }
-            let action = self.room.with_lock(|lock| {
-                let mut state = PolicyState::load(lock)?;
-                let action = state.mods.action(Utc::now(), &policy::Inputs::default())?;
-                state.save(lock)?;
-                Ok(action)
-            })?;
-            if let Some(action) = action {
-                self.action(action).await?;
-            } else {
-                tokio::time::sleep(policy::CHECK_INTERVAL).await;
-            }
-        }
-        if !resume_game
-            || !self
-                .policy()?
-                .schedule_at(Utc::now())
-                .map_err(internal)?
-                .open
-        {
-            self.request_exit(0);
-            return Ok(());
-        }
+        })
+    }
+
+    async fn recover(&self) -> model::Result<()> {
         let previous = self.run_state()?;
         let state = self.recovery()?;
         let pending = state.retry.is_some()
@@ -235,12 +168,6 @@ impl Controller {
             }
             self.save_run(RunState::default())?;
         }
-        if self.recovery()?.closed.is_some() {
-            self.request_exit(0);
-            return Ok(());
-        }
-        self.start().await?;
-        self.initialized.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -258,7 +185,7 @@ impl Controller {
         let policy = self.policy()?;
         let state = self.policy_state()?;
         value["agent"] = json!({
-            "ready":self.initialized.load(Ordering::Acquire),
+            "ready":!self.closing.load(Ordering::Acquire),
             "schedule":policy.schedule_at(Utc::now()).map_err(internal)?,
             "policy":policy, "maintenance":state.mods, "recovery":recovery,
             "error":self.error.lock().unwrap().clone(),
@@ -281,11 +208,8 @@ impl Controller {
         if !envelope.request.mutating() {
             return self.room.invoke_until_complete(envelope).await;
         }
-        if self.closing.load(Ordering::Acquire) || !self.initialized.load(Ordering::Acquire) {
-            return Err(Error::new(
-                ErrorCode::NotReady,
-                "Agent is preparing or closing the room",
-            ));
+        if self.closing.load(Ordering::Acquire) {
+            return Err(Error::new(ErrorCode::NotReady, "Agent is closing the room"));
         }
         let killing = matches!(envelope.request, Request::Kill {});
         if !killing && self.closing_game.load(Ordering::Acquire) {
@@ -300,7 +224,10 @@ impl Controller {
         }
         let maintenance = self.policy_state()?.mods;
         if !killing
-            && !matches!(envelope.request, Request::UpdateMods { .. })
+            && !matches!(
+                envelope.request,
+                Request::Start {} | Request::UpdateMods { .. }
+            )
             && !matches!(maintenance.phase, ModPhase::Idle | ModPhase::Failed)
         {
             return Err(Error::new(
@@ -350,6 +277,7 @@ impl Controller {
             history.last = Some(completed);
             drop(history);
             drop(_permit);
+            controller.changed.notify_one();
             let _ = reply.send(result);
         });
         tokio::time::timeout(wait, response)
@@ -373,26 +301,20 @@ impl Controller {
         envelope.timeout = None;
         match &envelope.request {
             Request::Start {} => {
-                if self.room.status().phase == Phase::Running {
-                    self.status()
-                } else {
-                    Err(Error::new(
-                        ErrorCode::NotReady,
-                        "start a fresh room container",
-                    ))
-                }
+                self.room.with_lock(|lock| {
+                    let always_open = Policy::load(lock)?
+                        .schedule_at(Utc::now())?
+                        .next_change
+                        .is_none();
+                    recovery::explicit_start(lock, always_open)?;
+                    Ok(())
+                })?;
+                *self.error.lock().unwrap() = None;
+                self.status()
             }
             Request::Restart { notice } => {
-                let result = self
-                    .room
-                    .invoke_until_complete(Envelope::new(
-                        Target::Room,
-                        Request::Stop {
-                            notice: notice.clone(),
-                        },
-                    )?)
-                    .await?;
-                self.request_exit(RESTART_EXIT);
+                let result = self.stop(notice.clone()).await?;
+                self.start().await?;
                 Ok(json!({"stopped": result, "restart": true}))
             }
             Request::Kill {} => {
@@ -407,8 +329,8 @@ impl Controller {
                 }
                 result
             }
-            Request::Stop { .. } => {
-                let result = self.room.invoke_until_complete(envelope).await;
+            Request::Stop { notice } => {
+                let result = self.stop(notice.clone()).await;
                 if result.is_ok() {
                     self.request_exit(0);
                 }
@@ -449,6 +371,15 @@ impl Controller {
         if self.room.status().phase == Phase::Running {
             return self.status();
         }
+        if !self
+            .policy()?
+            .schedule_at(Utc::now())
+            .map_err(internal)?
+            .open
+        {
+            return self.status();
+        }
+        self.recover().await?;
         let state = self.recovery()?;
         if let Some(reason) = state.closed {
             return Err(
@@ -524,6 +455,15 @@ impl Controller {
             Err(_) => {}
         }
         result
+    }
+
+    async fn stop(&self, notice: Option<model::Countdown>) -> model::Result<Value> {
+        let result = self
+            .room
+            .invoke_until_complete(Envelope::new(Target::Room, Request::Stop { notice })?)
+            .await?;
+        self.record_stop()?;
+        Ok(result)
     }
 
     fn record_stop(&self) -> model::Result<()> {
@@ -628,7 +568,7 @@ impl Controller {
     }
 
     async fn tick(self: &Arc<Self>) -> model::Result<()> {
-        if !self.initialized.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
+        if self.closing.load(Ordering::Acquire) {
             return Ok(());
         }
         if self.room.requires_container_restart() {
@@ -710,6 +650,7 @@ impl Controller {
             let plan = policy.plan(&mut state, Utc::now(), &inputs)?;
             if let Some(opening) = plan.new_opening {
                 recovery::reset_for_open_window(lock, opening.timestamp_millis().try_into()?)?;
+                self.changed.notify_one();
             }
             state.save(lock)?;
             Ok(plan)
@@ -753,6 +694,8 @@ impl Controller {
                 if let Err(error) = result {
                     *controller.error.lock().unwrap() = Some(error.to_string());
                 }
+                drop(_permit);
+                controller.changed.notify_one();
             });
         }
         Ok(())
@@ -760,16 +703,14 @@ impl Controller {
 
     async fn action(&self, action: policy::Action) -> model::Result<()> {
         match action {
-            policy::Action::Start => self.request_exit(RESTART_EXIT),
-            policy::Action::Stop { reason, message } => {
+            policy::Action::Start => {
+                self.start().await?;
+            }
+            policy::Action::Stop { message, .. } => {
                 if let Some(message) = message {
                     self.announce(message).await?;
                 }
-                self.request_exit(if reason == policy::StopReason::ModUpdate {
-                    RESTART_EXIT
-                } else {
-                    0
-                });
+                self.stop(None).await?;
             }
             policy::Action::Announce { message } => {
                 self.announce(message).await?;
@@ -783,16 +724,20 @@ impl Controller {
                     },
                 )?;
                 let result = self.room.invoke_until_complete(request).await;
-                self.room.with_lock(|lock| {
+                let resume_game = self.room.with_lock(|lock| {
                     let mut state = PolicyState::load(lock)?;
+                    let resume_game = state.mods.resume_game;
                     state.finish_mod_update(
                         Utc::now(),
                         result.as_ref().map(|_| ()).map_err(ToString::to_string),
                     )?;
-                    state.save(lock)
+                    state.save(lock)?;
+                    Ok(resume_game)
                 })?;
                 if let Err(error) = result {
                     *self.error.lock().unwrap() = Some(error.to_string());
+                } else if !resume_game {
+                    self.request_exit(0);
                 }
             }
             policy::Action::Regenerate { expected_sessions } => {
@@ -859,10 +804,7 @@ impl Controller {
             state.queue_mod_update(restart)?;
             state.save(lock)
         })?;
-        self.room
-            .invoke_until_complete(Envelope::new(Target::Room, Request::Stop { notice })?)
-            .await?;
-        self.request_exit(RESTART_EXIT);
+        self.stop(notice).await?;
         Ok(json!({"queued": true, "restart": restart}))
     }
 
@@ -925,9 +867,9 @@ pub async fn run(options: Options) -> Result<u8> {
     let controller = Arc::new(Controller {
         room: room.clone(),
         started: Instant::now(),
-        initialized: AtomicBool::new(false),
         closing: AtomicBool::new(false),
         exit: watch::channel(None).0,
+        changed: Notify::new(),
         mutation: Arc::new(Semaphore::new(1)),
         interrupted: watch::channel(0).0,
         closing_game: AtomicBool::new(false),
@@ -936,6 +878,7 @@ pub async fn run(options: Options) -> Result<u8> {
         unhealthy: Mutex::new(None),
         error: Mutex::new(None),
     });
+    controller.initialize()?;
     let (dispatch, mut requests) = mpsc::channel::<rpc::Incoming>(64);
     let (shutdown, receive_shutdown) = oneshot::channel();
     let server_socket = socket.clone();
@@ -944,16 +887,19 @@ pub async fn run(options: Options) -> Result<u8> {
     });
     let mut room_changes = room.watch();
     let mut requested_exit = controller.exit.subscribe();
-    let boot = controller.clone();
-    let mut boot = tokio::spawn(async move { boot.initialize().await });
-    let mut boot_complete = false;
     let mut workers = JoinSet::new();
     let mut tick = tokio::time::interval(policy::CHECK_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut policy_task = None;
+    let mut policy_pending = true;
     let mut exit = 0;
     let mut terminal_error = None;
     loop {
+        if policy_pending && policy_task.is_none() {
+            let controller = controller.clone();
+            policy_task = Some(tokio::spawn(async move { controller.tick().await }));
+            policy_pending = false;
+        }
         tokio::select! {
             _ = requested_exit.changed() => {
                 exit = requested_exit.borrow().unwrap_or(0);
@@ -966,19 +912,17 @@ pub async fn run(options: Options) -> Result<u8> {
             }
             _ = interrupt.recv() => break,
             _ = termination.recv() => break,
-            result = &mut boot, if !boot_complete => {
-                boot_complete = true;
+            result = async { policy_task.as_mut().unwrap().await }, if policy_task.is_some() => {
+                policy_task = None;
                 match result {
                     Ok(Err(error)) => {
-                        eprintln!("room preparation failed: {error}");
                         *controller.error.lock().unwrap() = Some(error.to_string());
-                        controller.request_exit(if room.requires_container_restart() { 1 } else { 0 });
                     }
                     Ok(Ok(())) => {},
                     Err(error) => { terminal_error = Some(error.into()); exit = 1; break; }
                 }
-                tick.reset_immediately();
             }
+            _ = controller.changed.notified() => policy_pending = true,
             _ = room_changes.changed() => {
                 if room.requires_container_restart() { exit = 1; break; }
             }
@@ -992,20 +936,11 @@ pub async fn run(options: Options) -> Result<u8> {
                     exit = 1;
                     break;
                 }
-                if policy_task.as_ref().is_none_or(tokio::task::JoinHandle::is_finished) {
-                    let controller = controller.clone();
-                    policy_task = Some(tokio::spawn(async move {
-                        if let Err(error) = controller.tick().await { *controller.error.lock().unwrap() = Some(error.to_string()); }
-                    }));
-                }
+                policy_pending = true;
             }
         }
     }
     controller.closing.store(true, Ordering::Release);
-    if !boot.is_finished() {
-        boot.abort();
-        let _ = boot.await;
-    }
     if let Some(task) = policy_task {
         task.abort();
         let _ = task.await;
@@ -1081,9 +1016,9 @@ mod tests {
         let controller = Arc::new(Controller {
             room: room.clone(),
             started: Instant::now(),
-            initialized: AtomicBool::new(true),
             closing: AtomicBool::new(false),
             exit: watch::channel(None).0,
+            changed: Notify::new(),
             mutation: Arc::new(Semaphore::new(1)),
             interrupted: watch::channel(0).0,
             closing_game: AtomicBool::new(false),
@@ -1285,9 +1220,11 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(rejected.code, ErrorCode::Busy);
-        wait_for(|| *controller.exit.borrow() == Some(0)).await;
-        room.shutdown_priority().await.unwrap();
-        controller.record_stop().unwrap();
+        wait_for(|| {
+            room.status().phase == Phase::Stopped && controller.mutation.available_permits() == 1
+        })
+        .await;
+        assert_eq!(*controller.exit.borrow(), None);
         let stopped: Vec<_> = room.driver_states().into_values().collect();
         assert_eq!(
             stopped

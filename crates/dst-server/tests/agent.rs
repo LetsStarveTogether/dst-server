@@ -9,7 +9,6 @@ use std::{
 
 use chrono::{Timelike, Utc};
 use dst_server::{
-    agent::RESTART_EXIT,
     files::RoomLock,
     model::{Envelope, ErrorCode, Request, Target},
     recovery::{ClosedReason, RecoveryState},
@@ -44,7 +43,7 @@ impl Agent {
     fn with_environment(control: Value, environment: &[(&str, &str)]) -> Self {
         let mods = control["policy"]["mod_auto_update"] == true;
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("cluster");
+        let root = directory.path().join("001");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("cluster.ini"), "[SHARD]\nshard_enabled=true\ncluster_key=agent-fixture\nmaster_port=19000\nmaster_ip=127.0.0.1\n").unwrap();
         for (name, id, port) in [("Master", 1, 19100), ("Caves", 2, 19200)] {
@@ -122,6 +121,10 @@ if not prepared.exists():
     }
 
     async fn client(&mut self) -> Client {
+        self.client_in_phase("running").await
+    }
+
+    async fn client_in_phase(&mut self, phase: &str) -> Client {
         timeout(Duration::from_secs(40), async {
             loop {
                 assert!(
@@ -131,7 +134,7 @@ if not prepared.exists():
                 );
                 if let Ok(client) = Client::connect(self.root.join(".dst-agent.sock")).await {
                     let status = call(&client, Request::Status {}).await;
-                    if status["agent"]["ready"] == true && status["phase"] == "running" {
+                    if status["agent"]["ready"] == true && status["phase"] == phase {
                         return client;
                     }
                     client.close().await.unwrap();
@@ -200,10 +203,7 @@ async fn call(client: &Client, request: Request) -> Value {
 async fn failed_telemetry_drain_preserves_requested_exit() {
     let collector = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", collector.local_addr().unwrap());
-    for (request, code) in [
-        (Request::Stop { notice: None }, 0),
-        (Request::Restart { notice: None }, i32::from(RESTART_EXIT)),
-    ] {
+    for (request, code) in [(Request::Stop { notice: None }, 0), (Request::Kill {}, 1)] {
         let mut agent = Agent::with_environment(
             json!({"policy":{"mod_auto_update":false}}),
             &[
@@ -215,12 +215,21 @@ async fn failed_telemetry_drain_preserves_requested_exit() {
             ],
         );
         let client = agent.client().await;
-        call(&client, request).await;
+        let result = client
+            .call(Envelope::new(Target::Room, request).unwrap())
+            .await;
+        if code == 0 {
+            result.unwrap();
+        }
         agent.wait(code).await;
         client.close().await.unwrap();
-        agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
+        agent.assert_native_lifecycle(if code == 0 {
+            "start\nshutdown\nshutdown_save\n"
+        } else {
+            "start\n"
+        });
         assert_eq!(agent.control()["agent_run"]["active"], false);
-        assert!(agent.control()["agent_run"]["failure"].is_null());
+        assert_eq!(agent.control()["agent_run"]["failure"].is_null(), code == 0);
         let log = agent.log();
         assert!(log.contains("telemetry shutdown did not complete"), "{log}");
         assert!(log.contains("\"observability_error\":\""), "{log}");
@@ -240,12 +249,15 @@ async fn initial_mod_download_finishes_before_automatic_game_start() {
 }
 
 #[tokio::test]
-async fn closed_start_exits_and_releases_the_room_without_starting_games() {
+async fn closed_start_keeps_the_agent_and_defers_recovery_without_starting_games() {
     let mut agent = Agent::spawn(true, false);
-    agent.wait(0).await;
+    let client = agent.client_in_phase("stopped").await;
     agent.assert_no_games();
-    assert!(!agent.root.join(".dst-agent.sock").exists());
-    RoomLock::try_acquire(&agent.root).unwrap();
+    assert!(agent.root.join(".dst-agent.sock").exists());
+    assert!(RoomLock::try_acquire(&agent.root).is_err());
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    client.close().await.unwrap();
 
     let mut control = agent.control();
     control["agent_run"] = json!({"active":true,"failure":{"kind":"retryable"}});
@@ -255,13 +267,116 @@ async fn closed_start_exits_and_releases_the_room_without_starting_games() {
     )
     .unwrap();
     agent.relaunch();
-    agent.wait(0).await;
+    let client = agent.client_in_phase("stopped").await;
     agent.assert_no_games();
     assert_eq!(agent.control()["agent_run"], control["agent_run"]);
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn exhausted_recovery_exits_and_preserves_the_offline_reason() {
+async fn policy_changes_open_and_close_games_repeatedly_in_the_same_agent() {
+    let mut agent = Agent::spawn(true, false);
+    let client = agent.client_in_phase("stopped").await;
+    let mut host =
+        dst_server::host::Host::new(agent.directory.path(), agent.directory.path().join("units"));
+    host.systemd.executable = agent.directory.path().join("systemctl");
+    fs::write(&host.systemd.executable, "#!/bin/sh\nprintf 'Id=dst-001.service\\nLoadState=loaded\\nActiveState=active\\nSubState=running\\nJob=0\\nResult=success\\n'\n").unwrap();
+    fs::set_permissions(&host.systemd.executable, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        host.wait_ready(1, Duration::from_secs(2)).await.unwrap()["desired"],
+        false
+    );
+    assert_eq!(
+        host.call(
+            1,
+            Request::Ban {
+                userid: "KU_offline".into(),
+                seconds: None
+            }
+        )
+        .await
+        .unwrap(),
+        serde_json::Value::Null
+    );
+    let closed = agent.control()["policy"].clone();
+    let open = json!({"timezone":"UTC", "mod_auto_update":false});
+    for _ in 0..2 {
+        call(
+            &client,
+            Request::SetPolicy {
+                policy: open.clone(),
+            },
+        )
+        .await;
+        let running = agent.client().await;
+        assert_eq!(
+            host.wait_ready(1, Duration::from_secs(2)).await.unwrap()["desired"],
+            true
+        );
+        let pids: Vec<_> = call(&running, Request::Status {}).await["shards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|shard| shard["pid"].as_i64().unwrap())
+            .collect();
+        running.close().await.unwrap();
+        call(
+            &client,
+            Request::SetPolicy {
+                policy: closed.clone(),
+            },
+        )
+        .await;
+        let stopped = agent.client_in_phase("stopped").await;
+        stopped.close().await.unwrap();
+        assert!(agent.child.try_wait().unwrap().is_none());
+        assert_eq!(agent.control()["agent_run"]["active"], false);
+        assert!(RoomLock::try_acquire(&agent.root).is_err());
+        for pid in pids {
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+        }
+    }
+    agent.assert_native_lifecycle(
+        "start\nshutdown\nshutdown_save\nstart\nshutdown\nshutdown_save\n",
+    );
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn wall_clock_opens_and_closes_games_without_an_external_trigger() {
+    let now = Utc::now();
+    let minute = now.hour() * 60 + now.minute();
+    let start = (minute + if now.second() < 55 { 1 } else { 2 }) % 1440;
+    let end = (start + 1) % 1440;
+    let mut agent = Agent::with_control(json!({
+        "policy": {"timezone":"UTC", "mod_auto_update":false,
+            "schedule":[{"start":format!("{:02}:{:02}",start/60,start%60), "end":format!("{:02}:{:02}",end/60,end%60)}]}
+    }));
+    let client = agent.client_in_phase("stopped").await;
+    agent.assert_no_games();
+    timeout(Duration::from_secs(180), async {
+        for phase in ["running", "stopped"] {
+            while call(&client, Request::Status {}).await["phase"] != phase {
+                assert!(agent.child.try_wait().unwrap().is_none(), "{}", agent.log());
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    })
+    .await
+    .expect("the resident Agent must cross both daily boundaries");
+    assert!(agent.child.try_wait().unwrap().is_none());
+    agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn exhausted_recovery_stays_available_and_explicit_start_resets_the_budget() {
     let recovery = RecoveryState {
         closed: Some(ClosedReason::CurrentRetriesExhausted),
         restarts_used: 2,
@@ -271,10 +386,18 @@ async fn exhausted_recovery_exits_and_preserves_the_offline_reason() {
         "policy":{"mod_auto_update":false},
         "recovery":recovery,
     }));
-    agent.wait(0).await;
+    let client = agent.client_in_phase("failed").await;
     agent.assert_no_games();
     assert_eq!(agent.control()["recovery"], json!(recovery));
-    assert!(!agent.root.join(".dst-agent.sock").exists());
+    assert!(agent.root.join(".dst-agent.sock").exists());
+    call(&client, Request::Start {}).await;
+    client.close().await.unwrap();
+    let client = agent.client().await;
+    assert!(agent.control()["recovery"]["closed"].is_null());
+    assert_eq!(agent.control()["recovery"]["restarts_used"], 0);
+    call(&client, Request::Stop { notice: None }).await;
+    agent.wait(0).await;
+    client.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -456,19 +579,15 @@ async fn kill_interrupts_a_restart_countdown_and_requests_failure_recovery() {
 }
 
 #[tokio::test]
-async fn restart_replies_then_exits_without_spawning_replacement_games() {
+async fn restart_replaces_games_in_the_same_agent() {
     let mut agent = Agent::spawn(false, false);
     let client = agent.client().await;
     let restarted = call(&client, Request::Restart { notice: None }).await;
     assert_eq!(restarted["restart"], true);
-    agent.wait(8).await;
-    agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
-    assert_eq!(agent.control()["agent_run"]["active"], false);
+    assert!(agent.child.try_wait().unwrap().is_none());
+    agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\nstart\n");
+    assert_eq!(agent.control()["agent_run"]["active"], true);
     assert!(agent.control()["agent_run"]["failure"].is_null());
-    client.close().await.unwrap();
-
-    agent.relaunch();
-    let client = agent.client().await;
     call(&client, Request::Stop { notice: None }).await;
     agent.wait(0).await;
     agent.assert_native_lifecycle(
@@ -502,7 +621,7 @@ async fn termination_uses_native_shutdown_and_preserves_abnormal_exit_as_failure
 }
 
 #[tokio::test]
-async fn manual_mod_updates_run_in_a_new_process_and_honor_reopening() {
+async fn manual_mod_updates_reuse_the_agent_and_honor_reopening() {
     for restart in [false, true] {
         let mut agent = Agent::spawn(false, true);
         let client = agent.client().await;
@@ -515,15 +634,7 @@ async fn manual_mod_updates_run_in_a_new_process_and_honor_reopening() {
         )
         .await;
         assert_eq!(result, json!({"queued":true,"restart":restart}));
-        agent.wait(8).await;
-        agent.assert_native_lifecycle("start\nshutdown\nshutdown_save\n");
-        assert_eq!(
-            fs::read_to_string(agent.root.join("mods/prepared")).unwrap(),
-            "download\n"
-        );
         client.close().await.unwrap();
-
-        agent.relaunch();
         if restart {
             let client = agent.client().await;
             call(&client, Request::Stop { notice: None }).await;

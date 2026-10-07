@@ -570,6 +570,12 @@ impl Host {
                 if state.active == "failed" {
                     self.systemd.reset_failed(&unit).await?;
                 }
+                if action == "start" && state.running() {
+                    let status = self.status(number, true).await?;
+                    if !status["recovery"]["closed"].is_null() {
+                        self.call(number, Request::Start {}).await?;
+                    }
+                }
             }
             match action {
                 "start" => self.systemd.start(&unit).await?,
@@ -612,17 +618,20 @@ impl Host {
                     status["recovery"]["closed"]
                 );
                 if status["running"] == false {
-                    if status["desired"] == false {
-                        return Ok(status);
-                    }
-                    bail!("room service stopped before games became ready");
+                    bail!("room Agent service is stopped");
                 }
                 if !status["game"].is_null() {
                     let game = &status["game"];
                     ensure!(game["phase"] != "failed", "room games failed to start");
                     let shards: Vec<crate::model::ShardStatus> =
                         serde_json::from_value(game["shards"].clone())?;
-                    if !shards.is_empty() && shards.iter().all(|shard| shard.readiness.ready()) {
+                    if game["agent"]["ready"] == true
+                        && !shards.is_empty()
+                        && (shards.iter().all(|shard| shard.readiness.ready())
+                            || status["desired"] == false
+                                && game["phase"] == "stopped"
+                                && shards.iter().all(|shard| !shard.readiness.process_running))
+                    {
                         return Ok(status);
                     }
                 }
@@ -690,22 +699,25 @@ impl Host {
                 require_no_failure(&status)?;
                 if status["maintenance"]["phase"]["state"] == "idle" {
                     if status["running"] == false {
-                        ensure!(
-                            !restart
-                                || status["desired"] == false
-                                || status["recovery"]["closed"].is_null(),
-                            "Mods updated, but room recovery remains closed: {}",
-                            status["recovery"]["closed"]
-                        );
-                        ensure!(
-                            !restart || status["desired"] == false,
-                            "room service stopped after Mod maintenance before games became ready"
-                        );
+                        ensure!(!restart, "room Agent service stopped after Mod maintenance");
                         return Ok(json!({"updated":true,"restarted":false}));
                     }
                     if restart && !status["game"].is_null() {
+                        ensure!(
+                            status["desired"] == false || status["recovery"]["closed"].is_null(),
+                            "Mods updated, but room recovery remains closed: {}",
+                            status["recovery"]["closed"]
+                        );
                         let shards: Vec<crate::model::ShardStatus> =
                             serde_json::from_value(status["game"]["shards"].clone())?;
+                        if status["desired"] == false
+                            && status["game"]["agent"]["ready"] == true
+                            && status["game"]["agent"]["requires_container_restart"] == false
+                            && !shards.is_empty()
+                            && shards.iter().all(|shard| !shard.readiness.process_running)
+                        {
+                            return Ok(json!({"updated":true,"restarted":false}));
+                        }
                         if !shards.is_empty() && shards.iter().all(|shard| shard.readiness.ready())
                         {
                             return Ok(json!({"updated":true,"restarted":true}));
@@ -839,10 +851,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_schedule_start_returns_validated_durable_status_without_an_agent() {
+    async fn a_closed_schedule_still_requires_a_resident_agent() {
         let (_temporary, host) = offline_host().await;
         host.set_policy(1, &closed_policy()).await.unwrap();
-        let status = host.start(1, true, Duration::from_secs(2)).await.unwrap();
+        let error = host
+            .start(1, true, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "room Agent service is stopped");
+        let status = host.status(1, true).await.unwrap();
         assert_eq!(status["running"], false);
         assert_eq!(status["desired"], false);
         assert!(status["game"].is_null());
@@ -851,7 +868,7 @@ mod tests {
         assert_eq!(status["maintenance"]["phase"]["state"], "idle");
         assert_eq!(status["recovery"]["restarts_used"], 0);
         assert!(status["configuration_error"].is_null());
-        assert!(host.wait_ready(1, Duration::from_secs(1)).await.is_ok());
+        assert!(host.wait_ready(1, Duration::from_secs(1)).await.is_err());
     }
 
     #[tokio::test]
@@ -944,6 +961,7 @@ mod tests {
         assert_eq!(status["running"], true);
         assert!(status["configuration_error"].is_null());
         assert!(status["error"].is_null());
+        host.start(1, false, Duration::from_secs(2)).await.unwrap();
     }
 
     #[tokio::test]
@@ -1023,7 +1041,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn offline_mod_updates_persist_intent_before_start_and_finish_outside_open_hours() {
+    async fn offline_mod_updates_persist_intent_and_require_the_requested_agent() {
         let (temporary, host) = offline_host().await;
         host.set_policy(1, &closed_policy()).await.unwrap();
         let control = host.rooms.path(1).unwrap().join(files::STATE_FILE);
@@ -1048,10 +1066,15 @@ mod tests {
         )
         .unwrap();
         for restart in [false, true] {
-            assert_eq!(
-                host.update_mods(1, restart, None).await.unwrap(),
-                json!({"updated":true,"restarted":false})
-            );
+            let result = host.update_mods(1, restart, None).await;
+            if restart {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "room Agent service stopped after Mod maintenance"
+                );
+            } else {
+                assert_eq!(result.unwrap(), json!({"updated":true,"restarted":false}));
+            }
             let intent: Value = serde_json::from_slice(&std::fs::read(&observed).unwrap()).unwrap();
             assert_eq!(intent["resume_game"], restart);
         }

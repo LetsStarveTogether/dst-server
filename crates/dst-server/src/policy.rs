@@ -251,6 +251,11 @@ impl Policy {
             state.last_opening = Some(opening);
             if matches!(state.mods.phase, ModPhase::Failed) {
                 state.mods.request()?;
+            } else if self.mod_auto_update
+                && !inputs.game_running
+                && state.mods.phase == ModPhase::Idle
+            {
+                state.mods.phase = ModPhase::Pending;
             }
         }
         if self.mod_auto_update
@@ -288,10 +293,12 @@ impl Policy {
                     reason: StopReason::Schedule,
                     message: None,
                 });
+            } else if state.mods.manual && !inputs.busy && !inputs.writes_in_progress {
+                plan.action = state.mods.action(now, inputs)?;
             }
             return Ok(plan);
         }
-        if inputs.writes_in_progress || inputs.faulted {
+        if inputs.writes_in_progress || inputs.faulted && !state.mods.manual {
             return Ok(plan);
         }
         if matches!(state.mods.phase, ModPhase::Failed) {
@@ -305,9 +312,10 @@ impl Policy {
         }
 
         if !matches!(state.mods.phase, ModPhase::Idle) {
-            let closing_soon = plan.schedule.next_change.is_some_and(|close| {
-                close - now <= TimeDelta::seconds(MOD_NOTICE_DELAY.as_secs() as i64)
-            });
+            let closing_soon = !state.mods.manual
+                && plan.schedule.next_change.is_some_and(|close| {
+                    close - now <= TimeDelta::seconds(MOD_NOTICE_DELAY.as_secs() as i64)
+                });
             if closing_soon {
                 if matches!(state.mods.phase, ModPhase::Announcing { .. }) {
                     state.mods.phase = ModPhase::Pending;

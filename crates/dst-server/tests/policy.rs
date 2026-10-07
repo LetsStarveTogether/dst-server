@@ -388,7 +388,30 @@ fn closing_preempts_mod_notice_and_started_writes_finish_closed() {
             .plan(&mut state, at("2026-10-04T10:00:00Z"), &input)
             .unwrap()
             .action,
-        Some(Action::Start)
+        Some(Action::UpdateMods { attempt: 1 })
+    );
+}
+
+#[test]
+fn manual_mod_maintenance_runs_while_closed_and_recovery_is_exhausted() {
+    let policy = make_policy("UTC", &[("18:00", "00:00")]);
+    let mut state = PolicyState::default();
+    let input = Inputs {
+        faulted: true,
+        ..Inputs::default()
+    };
+    let now = at("2026-10-02T10:00:00Z");
+    state.queue_mod_update(true).unwrap();
+    let plan = policy.plan(&mut state, now, &input).unwrap();
+    assert!(!plan.schedule.open);
+    assert_eq!(plan.action, Some(Action::UpdateMods { attempt: 1 }));
+    state.finish_mod_update(now, Ok(())).unwrap();
+    assert!(
+        policy
+            .plan(&mut state, now, &input)
+            .unwrap()
+            .action
+            .is_none()
     );
 }
 

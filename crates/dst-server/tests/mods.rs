@@ -356,7 +356,10 @@ print({}, flush=True)
             .unwrap()
             .parse()
             .unwrap();
-        wait_until(|| stopped(parent) && stopped(descendant)).await;
+        if cancel {
+            // Aborting the caller only requests cleanup; the supervisor still has to reap.
+            wait_until(|| !Path::new(&format!("/proc/{parent}")).exists()).await;
+        }
         let mut status = 0;
         // SAFETY: checking that our former child has already been reaped.
         assert_eq!(
@@ -367,6 +370,7 @@ print({}, flush=True)
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ECHILD)
         );
+        wait_until(|| stopped(descendant)).await;
     }
 }
 

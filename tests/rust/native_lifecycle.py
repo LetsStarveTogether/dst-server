@@ -119,7 +119,7 @@ class Fixture:
             run("podman", "inspect", "--format", "{{.State.Pid}}", self.name)
         )
 
-    async def connect(self):
+    async def connect(self, phase="running"):
         async with asyncio.timeout(180):
             while self.client is None:
                 try:
@@ -130,8 +130,17 @@ class Fixture:
                     await asyncio.sleep(0.1)
             while True:
                 state = await self.client.call("status")
-                if state["agent"]["ready"] and state["phase"] == "running":
+                if state["agent"]["ready"] and state["phase"] == phase:
                     assert len(state["shards"]) == self.count, state
+                    if phase != "running":
+                        assert all(
+                            not shard["readiness"]["process_running"]
+                            for shard in state["shards"]
+                        ), state
+                        processes = native_processes(self.init_pid)
+                        assert len(processes) == 1, processes
+                        assert next(iter(processes.values()))[0] == "/test/dst-server"
+                        return state
                     assert all(
                         shard["readiness"]["world_loaded"]
                         and shard["readiness"]["control_ready"]
@@ -440,8 +449,8 @@ async def snapshot_gaps(fixture, evidence):
             recovery = state["agent"]["recovery"]
             assert recovery.get("closed") is None, state
         else:
-            state = await fixture.exited()
-            recovery = state["recovery"]
+            state = await fixture.connect("failed")
+            recovery = state["agent"]["recovery"]
             assert recovery["closed"] == "snapshot_gap_exceeded", state
         assert recovery["restarts_used"] == 1, state
         evidence[f"snapshot_gap_{gap}"] = {
@@ -486,8 +495,8 @@ async def check(arguments, report):
                         recovery = state["agent"]["recovery"]
                         assert recovery.get("closed") is None, state
                     else:
-                        state = await fixture.exited()
-                        recovery = state["recovery"]
+                        state = await fixture.connect("failed")
+                        recovery = state["agent"]["recovery"]
                         assert recovery["closed"] == "current_retries_exhausted", state
                     assert recovery["restarts_used"] == min(attempt, 2), state
                     evidence.setdefault("recreated", []).append(state)
