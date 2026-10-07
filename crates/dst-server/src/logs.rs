@@ -781,6 +781,8 @@ pub struct NetdataLogQuery {
     #[serde(default)]
     pub query: Option<String>,
     #[serde(default)]
+    pub userid: Option<String>,
+    #[serde(default)]
     pub fields: Vec<String>,
     #[serde(default = "netdata_limit")]
     pub limit: usize,
@@ -797,12 +799,20 @@ impl NetdataLogQuery {
             service_namespace: None,
             filters: Vec::new(),
             query: None,
+            userid: None,
             fields: Vec::new(),
             limit: 200,
         }
     }
     pub fn validate(&self) -> Result<()> {
         ensure!(self.limit > 0, "Netdata limit must be positive");
+        if let Some(userid) = &self.userid {
+            crate::model::identifier("userid", userid)?;
+            ensure!(
+                self.query.is_none(),
+                "Netdata userid and query cannot be combined"
+            );
+        }
         ensure!(
             self.until.is_none_or(|until| until > self.since),
             "Netdata query until must be later than since"
@@ -962,6 +972,15 @@ impl NetdataLogs {
             if let Some(value) = value {
                 command.push(format!("--{name}={value}").into());
             }
+        }
+        if let Some(userid) = &request.userid {
+            let fields = concat!(
+                "userid|starter_userid|target_userid|clients\\[\\]|",
+                "(?:player|actor|victim|target|initial_target_owner|afflicter|attributed_player|",
+                "reviver|feeder|attacker|redirected|weapon|holder|source|item|rift|trial|last_guard)\\.userid|",
+                "(?:clients|players|voters)\\[\\]\\.userid"
+            );
+            command.push(format!("--query=^body\\.(?:{fields})={}$", regex::escape(userid)).into());
         }
         if !request.filters.is_empty() {
             command.push(

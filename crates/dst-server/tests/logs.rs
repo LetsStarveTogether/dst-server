@@ -649,6 +649,73 @@ fn netdata_request(query: &str) -> NetdataLogQuery {
     }
 }
 
+#[test]
+fn player_queries_match_identity_roles_and_escape_user_input() -> Result<()> {
+    let userid = "KU_a.b+[c]$";
+    let request = NetdataLogQuery {
+        userid: Some(userid.into()),
+        ..NetdataLogQuery::new(1)
+    };
+    let command = NetdataLogs::default().command(&request)?;
+    let query = command
+        .iter()
+        .find_map(|argument| argument.to_str()?.strip_prefix("--query="))
+        .unwrap();
+    let matcher = regex::Regex::new(query)?;
+    for field in [
+        "userid",
+        "player.userid",
+        "actor.userid",
+        "victim.userid",
+        "attributed_player.userid",
+        "afflicter.userid",
+        "target.userid",
+        "feeder.userid",
+        "reviver.userid",
+        "attacker.userid",
+        "initial_target_owner.userid",
+        "starter_userid",
+        "target_userid",
+        "voters[].userid",
+        "players[].userid",
+        "clients[].userid",
+        "clients[]",
+    ] {
+        let line = format!("body.{field}={userid}");
+        assert!(matcher.is_match(&line), "{line}");
+        assert!(!matcher.is_match(&format!("{line}_other")));
+    }
+    for field in [
+        "name",
+        "message",
+        "skin",
+        "result.userid",
+        "unrelated.userid",
+    ] {
+        assert!(!matcher.is_match(&format!("body.{field}={userid}")));
+    }
+    assert!(!matcher.is_match("body.userid=KU_aXb+c$"));
+    for userid in ["".into(), "x".repeat(129), "KU_\ncontrol".into()] {
+        assert!(
+            NetdataLogs::default()
+                .command(&NetdataLogQuery {
+                    userid: Some(userid),
+                    ..request.clone()
+                })
+                .is_err()
+        );
+    }
+    assert!(
+        NetdataLogs::default()
+            .command(&NetdataLogQuery {
+                query: Some("chat".into()),
+                ..request
+            })
+            .is_err()
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn netdata_arguments_window_duplicates_and_reported_counts() -> Result<()> {
     let _isolation = SCRIPT_TESTS.lock().await;

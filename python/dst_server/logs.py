@@ -177,6 +177,7 @@ class NetdataLogQuery:
     service_namespace: str | None = None
     filters: tuple[tuple[str, str], ...] = ()
     query: str | None = None
+    userid: str | None = None
     fields: tuple[str, ...] = ()
     limit: int = 200
 

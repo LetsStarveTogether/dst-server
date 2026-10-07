@@ -152,6 +152,7 @@ print('matched=5 returned=1 window=1..2', file=sys.stderr)
             "until": 2,
             "service_name": "dst",
             "service_namespace": "007",
+            "userid": "KU_example",
             "filters": [["tag", "player"], ["body.userid", "KU_example"]],
             "fields": ["tag", "body.userid"],
             "limit": 1,
@@ -187,6 +188,10 @@ print('matched=5 returned=1 window=1..2', file=sys.stderr)
     assert "--fields=tag,body.userid" in arguments
     assert "--name=dst" in arguments
     assert "--namespace=007" in arguments
+    assert any(
+        value.startswith("--query=^body\\.") and value.endswith("=KU_example$")
+        for value in arguments
+    )
     reaped(reader)
 
 

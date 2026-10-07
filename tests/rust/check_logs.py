@@ -7,6 +7,7 @@ import asyncio
 import gc
 import json
 import os
+import re
 import sys
 import tempfile
 from datetime import UTC, datetime, timedelta, timezone
@@ -204,6 +205,17 @@ async def check_netdata(directory: Path) -> None:
     assert "--query=玩家 | --limit 999" in arguments
     assert "--namespace=" in arguments
     assert "--filter=event=joined,event=left" in arguments
+    await reaped(int(plugin.with_suffix(".pid").read_text()))
+    await reader.query(NetdataLogQuery(since=since, userid="KU_player"))
+    arguments = json.loads(plugin.with_suffix(".args").read_text())
+    query = next(
+        value.removeprefix("--query=")
+        for value in arguments
+        if value.startswith("--query=")
+    )
+    assert re.fullmatch(query, "body.actor.userid=KU_player")
+    assert re.fullmatch(query, "body.target_userid=KU_player")
+    assert not re.fullmatch(query, "body.message=KU_player")
     await reaped(int(plugin.with_suffix(".pid").read_text()))
 
 

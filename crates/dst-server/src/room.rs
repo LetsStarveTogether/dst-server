@@ -360,6 +360,61 @@ impl Room {
         let record = json!({"event":"room_status", "status":self.status(), "observed_timestamp_ns":timestamp()});
         self.events.publish("lifecycle", &record);
     }
+    fn record_admin_operation(
+        &self,
+        operation: &OperationStatus,
+        envelope: &Envelope,
+        result: &Result<Value>,
+    ) {
+        if !matches!(
+            envelope.request,
+            Request::Kick { .. }
+                | Request::Ban { .. }
+                | Request::Unban { .. }
+                | Request::SetAdmin { .. }
+                | Request::Whitelist { .. }
+                | Request::Unwhitelist { .. }
+        ) {
+            return;
+        }
+        let Ok(mut body) = envelope.request.arguments() else {
+            self.losses.record_log_drop(1);
+            return;
+        };
+        let error = result.as_ref().err();
+        body["operation_id"] = json!(operation.id);
+        body["method"] = json!(operation.method);
+        body["target"] = json!(operation.target);
+        body["started_at_ns"] = json!(operation.started_at_ns);
+        body["status"] = json!(match error {
+            None => "success",
+            Some(error) if error.code == ErrorCode::Unknown => "unknown",
+            Some(_) => "failure",
+        });
+        body["result"] = json!(result.as_ref().ok().and_then(Value::as_bool));
+        body["error_code"] = json!(error.map(|error| error.code));
+        let log = LogEvent {
+            event_name: "dst.admin.operation".into(),
+            body,
+            observed_timestamp_ns: timestamp(),
+            severity_text: if error.is_some() { "WARN" } else { "INFO" }.into(),
+            attributes: serde_json::Map::from_iter([
+                ("dst.cluster.name".into(), json!(self.cluster_name)),
+                ("log.record.uid".into(), json!(operation.id)),
+            ]),
+        };
+        let exporter = self.exporter.lock().unwrap().clone();
+        let resource = self.resource.lock().unwrap().clone();
+        publish_log(
+            &log,
+            "lifecycle",
+            &self.events,
+            exporter.as_deref(),
+            &resource,
+            &self.output,
+            &self.losses,
+        );
+    }
     fn refresh_shard(&self, state: &DriverState) {
         if let Some(observer) = self.observability.lock().unwrap().as_ref() {
             observer.observe_state(state, &self.cluster_name);
@@ -488,7 +543,7 @@ impl Room {
                 },
             };
             room.status
-                .send_modify(|state| state.operations.current = Some(operation));
+                .send_modify(|state| state.operations.current = Some(operation.clone()));
             let shard = match &envelope.target {
                 Target::Shard(name) => Some(name.as_str()),
                 Target::Room => None,
@@ -532,6 +587,7 @@ impl Room {
             if let Some(observation) = observation {
                 observation.finish(result.as_ref().err());
             }
+            room.record_admin_operation(&operation, &envelope, &result);
             room.status.send_modify(|state| {
                 if let Some(mut operation) = state.operations.current.take() {
                     operation.completed_at_ns = Some(timestamp());
@@ -651,27 +707,15 @@ impl Room {
                     _ => "events",
                 };
                 if let Ok(log) = LogEvent::from_driver(&event, &cluster) {
-                    #[derive(Serialize)]
-                    struct Record<'a> {
-                        #[serde(flatten)]
-                        log: &'a LogEvent,
-                        resource: &'a serde_json::Map<String, Value>,
-                    }
-                    if let Ok(record) = serde_json::to_value(&Record {
-                        log: &log,
-                        resource: &resource,
-                    }) {
-                        events.publish(kind, &record);
-                        if !serde_json::to_vec(&record).is_ok_and(|encoded| output.submit(&encoded))
-                        {
-                            losses.record_log_drop(1);
-                        }
-                    } else {
-                        losses.record_log_drop(1);
-                    }
-                    if let Some(exporter) = &exporter {
-                        let _ = exporter.submit(&log);
-                    }
+                    publish_log(
+                        &log,
+                        kind,
+                        &events,
+                        exporter.as_deref(),
+                        &resource,
+                        &output,
+                        &losses,
+                    );
                 } else {
                     losses.record_log_drop(1);
                 }
@@ -1900,6 +1944,34 @@ fn driver_error(error: DriverError) -> Error {
     };
     Error::new(code, error.message.clone()).with_details(json!(error))
 }
+fn publish_log(
+    log: &LogEvent,
+    stream: &str,
+    events: &EventHub,
+    exporter: Option<&LogExporter>,
+    resource: &serde_json::Map<String, Value>,
+    output: &LocalOutput,
+    losses: &StreamLossCounters,
+) {
+    #[derive(Serialize)]
+    struct Record<'a> {
+        #[serde(flatten)]
+        log: &'a LogEvent,
+        resource: &'a serde_json::Map<String, Value>,
+    }
+    if let Ok(record) = serde_json::to_value(&Record { log, resource }) {
+        events.publish(stream, &record);
+        if !serde_json::to_vec(&record).is_ok_and(|encoded| output.submit(&encoded)) {
+            losses.record_log_drop(1);
+        }
+    } else {
+        losses.record_log_drop(1);
+    }
+    if let Some(exporter) = exporter {
+        let _ = exporter.submit(log);
+    }
+}
+
 #[derive(Clone)]
 struct LocalOutput {
     shared: Arc<(Mutex<OutputQueue>, Condvar)>,

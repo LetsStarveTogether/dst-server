@@ -315,6 +315,109 @@ fn event() -> LogEvent {
 }
 
 #[tokio::test]
+async fn admin_operations_export_targets_results_and_failures_while_games_are_stopped()
+-> anyhow::Result<()> {
+    use dst_server::{
+        driver::DriverOptions,
+        model::{Envelope, Request, Target},
+        room::Room,
+        rpc::EventHub,
+    };
+    let mut collector = Collector::start(vec![], None).await?;
+    let directory = tempfile::tempdir()?;
+    std::fs::write(directory.path().join("cluster.ini"), "")?;
+    std::fs::create_dir(directory.path().join("Master"))?;
+    std::fs::write(
+        directory.path().join("Master/server.ini"),
+        "[SHARD]\nis_master=true\n",
+    )?;
+    let room = Room::open(
+        directory.path(),
+        "/unused-game",
+        DriverOptions::default(),
+        EventHub::default(),
+    )?;
+    room.set_log_exporter(Some(Arc::new(LogExporter::new(
+        collector.config(),
+        &Default::default(),
+    )?)));
+    for (request, succeeded) in [
+        (
+            Request::Ban {
+                userid: "KU_TARGET".into(),
+                seconds: None,
+            },
+            true,
+        ),
+        (
+            Request::Unban {
+                userid: "KU_ABSENT".into(),
+            },
+            true,
+        ),
+        (
+            Request::Ban {
+                userid: "KU_TARGET".into(),
+                seconds: Some(60),
+            },
+            false,
+        ),
+        (
+            Request::SetAdmin {
+                userid: "KU_ADMIN".into(),
+                enabled: true,
+            },
+            true,
+        ),
+    ] {
+        assert_eq!(
+            room.invoke(Envelope::new(Target::Room, request)?)
+                .await
+                .is_ok(),
+            succeeded
+        );
+    }
+    room.close_telemetry().await?;
+    let received = collector.receive().await?.message;
+    let records = &received.resource_logs[0].scope_logs[0].log_records;
+    assert_eq!(records.len(), 4);
+    for (record, (method, userid, status, result)) in records.iter().zip([
+        ("ban", "KU_TARGET", "success", None),
+        ("unban", "KU_ABSENT", "success", None),
+        ("ban", "KU_TARGET", "failure", None),
+        ("set_admin", "KU_ADMIN", "success", None),
+    ]) {
+        assert_eq!(record.event_name, "dst.admin.operation");
+        let Some(Proto::KvlistValue(body)) = &record.body.as_ref().unwrap().value else {
+            panic!("structured admin log")
+        };
+        for (key, value) in [("method", method), ("userid", userid), ("status", status)] {
+            assert_eq!(
+                attribute(&body.values, key).value,
+                Some(Proto::StringValue(value.into()))
+            );
+        }
+        assert_eq!(attribute(&body.values, "result").value, result);
+        assert_eq!(
+            attribute(&body.values, "operation_id"),
+            attribute(&record.attributes, "log.record.uid")
+        );
+        assert_eq!(
+            attribute(&body.values, "error_code").value,
+            (status == "failure").then(|| Proto::StringValue("not_ready".into()))
+        );
+        if status == "failure" {
+            assert_eq!(
+                attribute(&body.values, "seconds").value,
+                Some(Proto::IntValue(60))
+            );
+        }
+    }
+    collector.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn retries_stop_after_partial_acceptance_and_preserve_counts() -> anyhow::Result<()> {
     let mut collector = Collector::start(
         vec![
