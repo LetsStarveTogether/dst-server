@@ -28,6 +28,7 @@ pub mod rooms;
 pub mod rpc;
 pub mod scripts;
 pub mod settings;
+pub mod steam;
 pub mod telemetry;
 pub mod validation;
 

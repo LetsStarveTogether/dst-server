@@ -1,0 +1,96 @@
+{
+  "response": {
+    "publishedfiledetails": [
+      {
+        "ban_reason": "",
+        "banned": 0,
+        "consumer_app_id": 322330,
+        "creator": "76561198000000001",
+        "creator_app_id": 245850,
+        "description": "Typed Workshop fixture: \u4e2d\u6587 \ud83c\udfae",
+        "favorited": 51762,
+        "file_size": "33439940",
+        "file_url": "",
+        "filename": "",
+        "hcontent_file": "3558921307329919114",
+        "hcontent_preview": "1479948484468384018",
+        "lifetime_favorited": 56122,
+        "lifetime_subscriptions": 1687857,
+        "preview_url": "https://example.test/preview.png",
+        "publishedfileid": "2189004162",
+        "result": 1,
+        "subscriptions": 1519433,
+        "tags": [
+          {
+            "tag": "all_clients_require_mod"
+          },
+          {
+            "tag": "interface"
+          },
+          {
+            "tag": "item"
+          },
+          {
+            "tag": "tweak"
+          },
+          {
+            "tag": "utility"
+          },
+          {
+            "tag": "version:6.0.7"
+          }
+        ],
+        "time_created": 1596707197,
+        "time_updated": 1793675412,
+        "title": "Test MOD 1",
+        "views": 1628917,
+        "visibility": 0
+      },
+      {
+        "ban_reason": "",
+        "banned": 0,
+        "consumer_app_id": 322330,
+        "creator": "76561198000000002",
+        "creator_app_id": 245850,
+        "description": "Typed Workshop fixture: \u4e2d\u6587 \ud83c\udfae",
+        "favorited": 13609,
+        "file_size": "117474",
+        "file_url": "",
+        "filename": "",
+        "hcontent_file": "4423493872500985466",
+        "hcontent_preview": "785233007824414020",
+        "lifetime_favorited": 15312,
+        "lifetime_subscriptions": 477081,
+        "preview_url": "https://example.test/preview.png",
+        "publishedfileid": "1803285852",
+        "result": 1,
+        "subscriptions": 399596,
+        "tags": [
+          {
+            "tag": "environment"
+          },
+          {
+            "tag": "server_only_mod"
+          },
+          {
+            "tag": "version:0.3.1"
+          },
+          {
+            "tag": "worldgen"
+          }
+        ],
+        "time_created": 1563078710,
+        "time_updated": 1778067424,
+        "title": "Test MOD 2",
+        "views": 399829,
+        "visibility": 0
+      },
+      {
+        "publishedfileid": "18446744073709551615",
+        "result": 9
+      }
+    ],
+    "result": 1,
+    "resultcount": 3
+  }
+}
