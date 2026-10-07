@@ -19,12 +19,13 @@ use tokio::sync::{Semaphore, oneshot};
 
 use crate::files::RoomReader;
 use crate::settings::ClusterConfig;
-mod client;
+mod configuration;
 mod importing;
 mod native;
+mod reader;
 pub(crate) mod zip;
 
-pub use importing::{ImportOptions, ImportSource, import_cluster};
+pub use importing::{ImportLevel, ImportSource, ImportedCluster, import_cluster};
 pub use native::encode_klei_id;
 use native::validate_path;
 

@@ -1,0 +1,157 @@
+{
+  "libacl": {
+    "notices": [
+      "GPL-2.txt",
+      "LGPL-2.1.txt",
+      "debian-libacl1.txt",
+      "arch-acl-COPYING.LGPL.txt"
+    ],
+    "sources": [
+      "Debian libacl1 2.3.2-2+b1: /usr/share/doc/libacl1/copyright",
+      "Arch Linux acl 2.4.0-1: /usr/share/doc/acl/COPYING.LGPL"
+    ]
+  },
+  "libarchive": {
+    "notices": [
+      "Apache-2.0.txt",
+      "CC0-1.0.txt",
+      "debian-libarchive13t64.txt",
+      "arch-libarchive-BSD-2-Clause.txt.txt",
+      "arch-libarchive-BSD-4-Clause-UC.txt.txt",
+      "libarchive-3.8.11.txt"
+    ],
+    "sources": [
+      "Debian libarchive13t64 3.7.4-4+deb13u1: /usr/share/doc/libarchive13t64/copyright",
+      "Arch Linux libarchive 3.8.11-1: /usr/share/licenses/libarchive/BSD-2-Clause.txt",
+      "Arch Linux libarchive 3.8.11-1: /usr/share/licenses/libarchive/BSD-4-Clause-UC.txt",
+      "https://raw.githubusercontent.com/libarchive/libarchive/v3.8.11/COPYING"
+    ]
+  },
+  "libbrotlicommon": {
+    "notices": [
+      "arch-brotli-LICENSE.txt"
+    ],
+    "sources": [
+      "Arch Linux brotli 1.2.1-1: /usr/share/licenses/brotli/LICENSE"
+    ]
+  },
+  "libbrotlidec": {
+    "notices": [
+      "arch-brotli-LICENSE.txt"
+    ],
+    "sources": [
+      "Arch Linux brotli 1.2.1-1: /usr/share/licenses/brotli/LICENSE"
+    ]
+  },
+  "libbrotlienc": {
+    "notices": [
+      "arch-brotli-LICENSE.txt"
+    ],
+    "sources": [
+      "Arch Linux brotli 1.2.1-1: /usr/share/licenses/brotli/LICENSE"
+    ]
+  },
+  "libbz2": {
+    "notices": [
+      "GPL-2.txt",
+      "debian-libbz2-1.0.txt",
+      "arch-bzip2-LICENSE.txt"
+    ],
+    "sources": [
+      "Debian libbz2-1.0 1.0.8-6: /usr/share/doc/libbz2-1.0/copyright",
+      "Arch Linux bzip2 1.0.8-6: /usr/share/licenses/bzip2/LICENSE"
+    ]
+  },
+  "libcrypto": {
+    "notices": [
+      "arch-openssl-LICENSE.txt.txt"
+    ],
+    "sources": [
+      "Arch Linux openssl 3.6.5-1: /usr/share/licenses/openssl/LICENSE.txt"
+    ]
+  },
+  "libicudata": {
+    "notices": [
+      "arch-icu-LICENSE.txt"
+    ],
+    "sources": [
+      "Arch Linux icu 78.3-1: /usr/share/licenses/icu/LICENSE"
+    ]
+  },
+  "libicuuc": {
+    "notices": [
+      "arch-icu-LICENSE.txt"
+    ],
+    "sources": [
+      "Arch Linux icu 78.3-1: /usr/share/licenses/icu/LICENSE"
+    ]
+  },
+  "liblz4": {
+    "notices": [
+      "GPL-2.txt",
+      "debian-liblz4-1.txt",
+      "liblz4-1.10.0.txt"
+    ],
+    "sources": [
+      "Debian liblz4-1 1.10.0-4: /usr/share/doc/liblz4-1/copyright",
+      "https://raw.githubusercontent.com/lz4/lz4/v1.10.0/lib/LICENSE"
+    ]
+  },
+  "liblzma": {
+    "notices": [
+      "GPL-2.txt",
+      "GPL-3.txt",
+      "LGPL-2.1.txt",
+      "debian-liblzma5.txt",
+      "arch-xz-COPYING.txt",
+      "arch-xz-COPYING.0BSD.txt"
+    ],
+    "sources": [
+      "Debian liblzma5 5.8.1-1+deb13u2: /usr/share/doc/liblzma5/copyright",
+      "Arch Linux xz 5.8.4-1: /usr/share/doc/xz/COPYING",
+      "Arch Linux xz 5.8.4-1: /usr/share/doc/xz/COPYING.0BSD"
+    ]
+  },
+  "libnettle": {
+    "notices": [
+      "GPL-2.txt",
+      "GPL-3.txt",
+      "LGPL-2.txt",
+      "LGPL-3.txt",
+      "debian-libnettle8t64.txt"
+    ],
+    "sources": [
+      "Debian libnettle8t64 3.10.1-1: /usr/share/doc/libnettle8t64/copyright"
+    ]
+  },
+  "libxml2": {
+    "notices": [
+      "debian-libxml2.txt",
+      "arch-libxml2-Copyright.txt"
+    ],
+    "sources": [
+      "Debian libxml2 2.12.7+dfsg+really2.9.14-2.1+deb13u3: /usr/share/doc/libxml2/copyright",
+      "Arch Linux libxml2 2.15.4-1: /usr/share/licenses/libxml2/Copyright"
+    ]
+  },
+  "libxxhash": {
+    "notices": [
+      "GPL-2.txt",
+      "debian-libxxhash0.txt"
+    ],
+    "sources": [
+      "Debian libxxhash0 0.8.3-2: /usr/share/doc/libxxhash0/copyright"
+    ]
+  },
+  "libzstd": {
+    "notices": [
+      "GPL-2.txt",
+      "debian-libzstd1.txt",
+      "arch-zstd-LICENSE.txt"
+    ],
+    "sources": [
+      "Debian libzstd1 1.5.7+dfsg-1: /usr/share/doc/libzstd1/copyright",
+      "Arch Linux zstd 1.5.7-3: /usr/share/licenses/zstd/LICENSE"
+    ]
+  }
+}

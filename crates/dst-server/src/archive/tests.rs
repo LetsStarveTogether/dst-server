@@ -5,6 +5,12 @@ use std::io::{Read, Write};
 use std::time::Duration;
 use tempfile::TempDir;
 
+async fn import_to(source: ImportSource, destination: PathBuf) -> Result<ClusterConfig> {
+    let imported = import_cluster(source).await?;
+    imported.save(destination)?;
+    Ok(imported.configuration().clone())
+}
+
 fn zip_archive(entries: &[(String, Vec<u8>)]) -> File {
     let mut writer = ZipWriter::new(memory_file().unwrap());
     for (name, bytes) in entries {
@@ -34,6 +40,922 @@ fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
     visit(root, root, &mut entries);
     entries.sort();
     entries
+}
+
+#[tokio::test]
+async fn apply_import_replaces_cumulative_layers_and_preserves_other_files() {
+    use std::os::unix::fs::MetadataExt;
+    let source = cluster();
+    add_secondary(source.path());
+    let imported = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    for level in [ImportLevel::Data, ImportLevel::Runtime, ImportLevel::All] {
+        let target = cluster();
+        add_secondary(target.path());
+        fs::rename(target.path().join("forest"), target.path().join("Surface")).unwrap();
+        fs::rename(
+            target.path().join("underground"),
+            target.path().join("Below"),
+        )
+        .unwrap();
+        let cluster_ini = fs::read_to_string(target.path().join("cluster.ini"))
+            .unwrap()
+            .replace("Shared", "Existing");
+        fs::write(target.path().join("cluster.ini"), cluster_ini).unwrap();
+        fs::write(
+            target.path().join("Surface/modoverrides.lua"),
+            b"return {local_mod={enabled=true}}",
+        )
+        .unwrap();
+        fs::write(
+            target.path().join("Surface/leveldataoverride.lua"),
+            b"return {id=\"SAVED\",name=\"world\",desc=\"\",location=\"forest\",overrides={task_set=\"default\",day=\"onlynight\"}}",
+        )
+        .unwrap();
+        fs::write(
+            target
+                .path()
+                .join("Surface/save/session/0123456789ABCDEF/old-world"),
+            b"old world",
+        )
+        .unwrap();
+        fs::write(target.path().join(".dst-server.json"), br#"{"policy":{"idle":{}},"template":"custom","agent_run":{},"recovery":{},"policy_state":{}}"#).unwrap();
+        drop(RoomLock::try_acquire(target.path()).unwrap());
+        let before: BTreeMap<_, _> = tree(target.path()).into_iter().collect();
+        let lock_inode = fs::metadata(target.path().join(crate::files::ROOM_LOCK_FILE))
+            .unwrap()
+            .ino();
+        let cache = target
+            .path()
+            .join("mods/ugc/content/322330/mod/modmain.lua");
+        let cache_inode = fs::metadata(&cache).unwrap().ino();
+
+        let configuration = imported.apply(target.path(), level).unwrap();
+        assert_eq!(
+            configuration.resolved(),
+            ClusterConfig::load(&RoomReader::open(target.path()).unwrap())
+                .unwrap()
+                .resolved()
+        );
+        for (path, bytes) in before {
+            let parts: Vec<_> = path.split('/').collect();
+            let save = parts.get(1) == Some(&"save");
+            let runtime = path.starts_with("mods/")
+                && matches!(
+                    parts.last(),
+                    Some(&"modsettings.lua" | &"dedicated_server_mods_setup.lua")
+                )
+                || matches!(
+                    parts.get(1),
+                    Some(&"modoverrides.lua" | &"worldgenoverride.lua" | &"leveldataoverride.lua")
+                );
+            let ini = path == "cluster.ini" || parts.get(1) == Some(&"server.ini");
+            if !save
+                && !(runtime && level >= ImportLevel::Runtime)
+                && !(ini && level == ImportLevel::All)
+                && path != crate::files::STATE_FILE
+            {
+                assert_eq!(
+                    fs::read(target.path().join(&path)).unwrap(),
+                    bytes,
+                    "{level:?}: {path}"
+                );
+            }
+        }
+        assert_eq!(
+            fs::metadata(target.path().join(crate::files::ROOM_LOCK_FILE))
+                .unwrap()
+                .ino(),
+            lock_inode
+        );
+        assert_eq!(fs::metadata(&cache).unwrap().ino(), cache_inode);
+        assert_eq!(
+            fs::read(
+                target
+                    .path()
+                    .join("Surface/save/session/0123456789ABCDEF/0000000001")
+            )
+            .unwrap(),
+            b"world\0\xff"
+        );
+        assert!(
+            !target
+                .path()
+                .join("Surface/save/session/0123456789ABCDEF/old-world")
+                .exists()
+        );
+        assert!(!target.path().join("Surface/save/server_temp").exists());
+        let player = if level == ImportLevel::All {
+            "KU_ABCDEFG__"
+        } else {
+            "A7H8MC6JHT1V"
+        };
+        assert_eq!(
+            fs::read(target.path().join(format!(
+                "Below/save/session/FEDCBA9876543210/{player}/0000000002"
+            )))
+            .unwrap(),
+            b"cave-player\0\xff"
+        );
+        let index = lua::parse_return_table(
+            &fs::read_to_string(target.path().join("Below/save/shardindex")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            index["server"]["encode_user_path"],
+            level != ImportLevel::All
+        );
+        if level >= ImportLevel::Runtime {
+            assert_eq!(
+                fs::read(target.path().join("Surface/modoverrides.lua")).unwrap(),
+                imported.files()[Path::new("forest/modoverrides.lua")]
+            );
+            assert!(!target.path().join("Surface/leveldataoverride.lua").exists());
+        }
+        assert_eq!(
+            configuration.resolved()["settings"]["cluster_name"],
+            if level == ImportLevel::All {
+                "Shared"
+            } else {
+                "Existing"
+            }
+        );
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(target.path().join(crate::files::STATE_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            state,
+            serde_json::json!({"policy":{"idle":{}},"template":"custom"})
+        );
+    }
+}
+
+#[tokio::test]
+async fn apply_import_rejects_busy_invalid_and_unsafe_destinations_without_replacing_saves() {
+    let source = cluster();
+    let imported = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    let target = cluster();
+    let lock = RoomLock::try_acquire(target.path()).unwrap();
+    let before = tree(target.path());
+    assert!(
+        format!(
+            "{:#}",
+            imported
+                .apply(target.path(), ImportLevel::Runtime)
+                .unwrap_err()
+        )
+        .contains("busy")
+    );
+    assert_eq!(tree(target.path()), before);
+    drop(lock);
+    let holder = tempfile::tempdir().unwrap();
+    assert!(
+        imported
+            .apply(holder.path().join("missing"), ImportLevel::Runtime)
+            .is_err()
+    );
+    assert!(!holder.path().join("missing").exists());
+
+    std::os::unix::fs::symlink(holder.path(), target.path().join("mods/unsafe")).unwrap();
+    let error = imported
+        .apply(target.path(), ImportLevel::Runtime)
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("symlink"));
+    fs::remove_file(target.path().join("mods/unsafe")).unwrap();
+    assert_eq!(tree(target.path()), before);
+    assert_eq!(fs::read_dir(holder.path()).unwrap().count(), 0);
+
+    add_secondary(target.path());
+    let before = tree(target.path());
+    assert!(
+        format!(
+            "{:#}",
+            imported
+                .apply(target.path(), ImportLevel::Runtime)
+                .unwrap_err()
+        )
+        .contains("same number")
+    );
+    assert_eq!(tree(target.path()), before);
+
+    fs::remove_dir_all(source.path().join("forest/save")).unwrap();
+    let empty = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    let target = cluster();
+    drop(RoomLock::try_acquire(target.path()).unwrap());
+    let before = tree(target.path());
+    assert!(
+        format!(
+            "{:#}",
+            empty
+                .apply(target.path(), ImportLevel::Runtime)
+                .unwrap_err()
+        )
+        .contains("no game saves")
+    );
+    assert_eq!(tree(target.path()), before);
+}
+
+#[tokio::test]
+async fn apply_import_rejects_incomplete_worlds_before_replacing_existing_saves() {
+    for (path, contents, with_index) in [
+        ("recipebook", b"recipe".as_slice(), true),
+        (
+            "session/0123456789ABCDEF/0000000001.meta",
+            b"metadata",
+            true,
+        ),
+        (
+            "session/0123456789ABCDEF/KU_ABCDEFG__/0000000001",
+            b"player",
+            true,
+        ),
+        ("session/0123456789ABCDEF/0000000001", b"", true),
+        ("session/FEDCBA9876543210/0000000001", b"other world", true),
+        ("session/0123456789ABCDEF/0000000001", b"world", false),
+    ] {
+        let source = cluster();
+        let save = source.path().join("forest/save");
+        let index = fs::read(save.join("shardindex")).unwrap();
+        fs::remove_dir_all(&save).unwrap();
+        let partial = save.join(path);
+        fs::create_dir_all(partial.parent().unwrap()).unwrap();
+        fs::write(partial, contents).unwrap();
+        if with_index {
+            fs::write(save.join("shardindex"), index).unwrap();
+        }
+        let imported = import_cluster(ImportSource::Path(source.path().into()))
+            .await
+            .unwrap();
+        let target = cluster();
+        drop(RoomLock::try_acquire(target.path()).unwrap());
+        let before = tree(target.path());
+        let error = imported
+            .apply(target.path(), ImportLevel::Data)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(if with_index {
+                "world snapshot"
+            } else {
+                "missing shardindex"
+            }),
+            "{error:#}"
+        );
+        assert_eq!(tree(target.path()), before);
+    }
+}
+
+#[tokio::test]
+async fn apply_import_checks_the_latest_native_world_snapshot() {
+    for (name, bytes, keep_older, accepted) in [
+        ("0000000002", b"".as_slice(), true, false),
+        ("1", b"world", false, false),
+        ("000000001", b"world", false, false),
+        ("0000000000", b"world", false, false),
+        ("9007199254740991", b"world", false, false),
+        ("4294967296", b"world", true, false),
+        ("9999999999", b"world", true, false),
+        ("4294967295", b"world", true, true),
+    ] {
+        let source = cluster();
+        let session = source.path().join("forest/save/session/0123456789ABCDEF");
+        if !keep_older {
+            fs::remove_dir_all(&session).unwrap();
+            fs::create_dir(&session).unwrap();
+        }
+        fs::write(session.join(name), bytes).unwrap();
+        let imported = import_cluster(ImportSource::Path(source.path().into()))
+            .await
+            .unwrap();
+        let target = cluster();
+        drop(RoomLock::try_acquire(target.path()).unwrap());
+        let before = tree(target.path());
+        let result = imported.apply(target.path(), ImportLevel::Data);
+        assert_eq!(result.is_ok(), accepted, "{name}: {result:?}");
+        if accepted {
+            assert_eq!(
+                fs::read(
+                    target
+                        .path()
+                        .join("forest/save/session/0123456789ABCDEF")
+                        .join(name)
+                )
+                .unwrap(),
+                bytes
+            );
+        } else {
+            assert_eq!(tree(target.path()), before);
+        }
+    }
+}
+
+fn mapping_room(shards: &[(&str, Option<u64>)]) -> TempDir {
+    let root = tempfile::tempdir().unwrap();
+    let shards: BTreeMap<_, _> = shards
+        .iter()
+        .enumerate()
+        .map(|(position, (name, id))| {
+            (
+                *name,
+                serde_json::json!({"settings": {"name": name, "id": id, "is_master": position == 0,
+            "server_port": 11000 + position, "master_server_port": 28000 + position}}),
+            )
+        })
+        .collect();
+    let configuration = ClusterConfig::from_value(serde_json::json!({"settings":{"shard_enabled":true,"master_ip":"127.0.0.1","cluster_key":"mapping-fixture"},"shards":shards})).unwrap();
+    for (path, text) in configuration.files().unwrap() {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    for name in shards.keys() {
+        let save = root.path().join(name).join("save");
+        fs::create_dir_all(save.join("session/0123456789ABCDEF")).unwrap();
+        fs::write(save.join("session/0123456789ABCDEF/0000000001"), name).unwrap();
+        fs::write(save.join("shardindex"), b"KLEI     1 return {session_id=\"0123456789ABCDEF\",world={options={id=\"CUSTOM\",name=\"world\",desc=\"\",location=\"forest\",overrides={task_set=\"default\"}}},server={},enabled_mods={}}").unwrap();
+    }
+    drop(RoomLock::try_acquire(root.path()).unwrap());
+    root
+}
+
+#[tokio::test]
+async fn apply_import_does_not_use_generated_ids_to_resolve_ambiguous_shards() {
+    let source = mapping_room(&[("Master", None), ("East", None), ("West", None)]);
+    let imported = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        imported.configuration().resolved()["shards"]["East"]["settings"]["id"],
+        2
+    );
+    let target = mapping_room(&[
+        ("Surface", Some(1)),
+        ("BelowEast", Some(3)),
+        ("BelowWest", Some(2)),
+    ]);
+    let before = tree(target.path());
+    assert!(
+        imported
+            .apply(target.path(), ImportLevel::Data)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot match")
+    );
+    assert_eq!(tree(target.path()), before);
+
+    let source = mapping_room(&[("Master", Some(1)), ("East", Some(2)), ("West", Some(3))]);
+    let imported = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    imported.apply(target.path(), ImportLevel::Data).unwrap();
+    assert_eq!(
+        fs::read(
+            target
+                .path()
+                .join("BelowEast/save/session/0123456789ABCDEF/0000000001")
+        )
+        .unwrap(),
+        b"West"
+    );
+    assert_eq!(
+        fs::read(
+            target
+                .path()
+                .join("BelowWest/save/session/0123456789ABCDEF/0000000001")
+        )
+        .unwrap(),
+        b"East"
+    );
+}
+
+#[tokio::test]
+async fn apply_import_matches_explicit_ids_before_remaining_roles_regardless_of_directory_order() {
+    let source = mapping_room(&[("Master", Some(1)), ("A", Some(4)), ("B", Some(3))]);
+    for renamed in [false, true] {
+        if renamed {
+            fs::rename(source.path().join("A"), source.path().join("Z")).unwrap();
+        }
+        let target = mapping_room(&[("Surface", Some(1)), ("D", Some(2)), ("E", Some(3))]);
+        let imported = import_cluster(ImportSource::Path(source.path().into()))
+            .await
+            .unwrap();
+        imported.apply(target.path(), ImportLevel::Data).unwrap();
+        assert_eq!(
+            fs::read(
+                target
+                    .path()
+                    .join("D/save/session/0123456789ABCDEF/0000000001")
+            )
+            .unwrap(),
+            b"A"
+        );
+        assert_eq!(
+            fs::read(
+                target
+                    .path()
+                    .join("E/save/session/0123456789ABCDEF/0000000001")
+            )
+            .unwrap(),
+            b"B"
+        );
+    }
+}
+
+#[tokio::test]
+async fn apply_import_only_parses_runtime_configuration_when_preserving_it() {
+    let source = cluster();
+    let imported = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    for level in [ImportLevel::Runtime, ImportLevel::All] {
+        let target = cluster();
+        fs::write(
+            target.path().join("forest/worldgenoverride.lua"),
+            b"return {overrides={day='onlynight'}}",
+        )
+        .unwrap();
+        fs::write(
+            target.path().join("forest/leveldataoverride.lua"),
+            b"return unsupported_dynamic_options()",
+        )
+        .unwrap();
+        fs::write(
+            target.path().join("mods/dedicated_server_mods_setup.lua"),
+            b"for _, id in ipairs(downloads) do ServerModSetup(id) end",
+        )
+        .unwrap();
+        drop(RoomLock::try_acquire(target.path()).unwrap());
+        let before = tree(target.path());
+        assert!(imported.apply(target.path(), ImportLevel::Data).is_err());
+        assert_eq!(tree(target.path()), before);
+        let effective = imported.apply(target.path(), level).unwrap();
+        assert_eq!(
+            effective.resolved(),
+            ClusterConfig::load(&RoomReader::open(target.path()).unwrap())
+                .unwrap()
+                .resolved()
+        );
+        assert_eq!(
+            fs::read(target.path().join("forest/worldgenoverride.lua")).unwrap(),
+            imported.files()[Path::new("forest/worldgenoverride.lua")]
+        );
+        assert!(!target.path().join("forest/leveldataoverride.lua").exists());
+    }
+}
+
+#[tokio::test]
+async fn apply_import_validates_event_configuration_after_merging_runtime_files() {
+    for mode in ["quagmire", "lavaarena"] {
+        let source = mapping_room(&[("Master", Some(1))]);
+        fs::write(
+            source.path().join("cluster.ini"),
+            format!("[GAMEPLAY]\ngame_mode = {mode}\n"),
+        )
+        .unwrap();
+        fs::write(
+            source.path().join("Master/leveldataoverride.lua"),
+            format!(
+                "return {{id=\"{}\",name=\"event\",desc=\"\",location=\"{mode}\",overrides={{task_set=\"{mode}_taskset\"}}}}",
+                mode.to_uppercase()
+            ),
+        )
+        .unwrap();
+        let imported = import_cluster(ImportSource::Path(source.path().into()))
+            .await
+            .unwrap();
+        for level in [ImportLevel::Runtime, ImportLevel::All] {
+            let holder = tempfile::tempdir().unwrap();
+            let target = holder.path().join("room");
+            imported.save(&target).unwrap();
+            let effective = imported.apply(&target, level).unwrap();
+            assert_eq!(effective.resolved()["settings"]["game_mode"], mode);
+            assert_eq!(
+                effective.resolved(),
+                ClusterConfig::load(&RoomReader::open(&target).unwrap())
+                    .unwrap()
+                    .resolved()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn apply_import_cleans_read_only_discarded_directories_after_success_and_rejection() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let source = cluster();
+    let imported = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    for rejected in [false, true] {
+        let holder = tempfile::tempdir().unwrap();
+        let target = holder.path().join("room");
+        imported.save(&target).unwrap();
+        let world = target.join("forest/save/session/0123456789ABCDEF/0000000001");
+        fs::write(&world, b"existing world").unwrap();
+        let cache = target.join("mods/aaa");
+        fs::create_dir(&cache).unwrap();
+        let file = cache.join("modmain.lua");
+        fs::write(&file, b"return {}").unwrap();
+        let inode = fs::metadata(&file).unwrap().ino();
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o555)).unwrap();
+        if rejected {
+            std::os::unix::fs::symlink(&file, target.join("mods/zzz")).unwrap();
+        }
+        let result = imported.apply(&target, ImportLevel::Data);
+        assert_eq!(result.is_err(), rejected, "{result:?}");
+        assert_eq!(
+            fs::read(&world).unwrap(),
+            if rejected {
+                b"existing world".as_slice()
+            } else {
+                b"world\0\xff"
+            }
+        );
+        assert_eq!(
+            fs::metadata(&cache).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert_eq!(fs::metadata(&file).unwrap().ino(), inode);
+        assert_eq!(fs::read(&file).unwrap(), b"return {}");
+        assert_eq!(fs::read_dir(holder.path()).unwrap().count(), 1);
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn apply_import_discards_only_a_stale_agent_socket() {
+    let source = cluster();
+    let imported = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    let holder = tempfile::tempdir().unwrap();
+    let target = holder.path().join("room");
+    imported.save(&target).unwrap();
+    let socket = target.join(crate::host::AGENT_SOCKET);
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let error = imported.apply(&target, ImportLevel::Data).unwrap_err();
+    assert!(error.to_string().contains("socket is still active"));
+    assert!(socket.exists());
+    assert_eq!(fs::read_dir(holder.path()).unwrap().count(), 1);
+    drop(listener);
+    imported.apply(&target, ImportLevel::Data).unwrap();
+    assert!(!socket.exists());
+
+    let other = target.join("unrelated.sock");
+    drop(std::os::unix::net::UnixListener::bind(&other).unwrap());
+    assert!(
+        imported
+            .apply(&target, ImportLevel::Data)
+            .unwrap_err()
+            .to_string()
+            .contains("special file")
+    );
+    assert!(other.exists());
+    assert_eq!(fs::read_dir(holder.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn import_is_in_memory_and_each_parse_gets_a_fresh_shared_key() {
+    let source = cluster();
+    add_secondary(source.path());
+    fs::rename(
+        source.path().join("forest"),
+        source.path().join("Surface One"),
+    )
+    .unwrap();
+    let before = tree(source.path());
+    let first = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    let second = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    assert_eq!(tree(source.path()), before);
+    let config = first.configuration().resolved();
+    assert_ne!(
+        config["settings"]["cluster_key"],
+        second.configuration().resolved()["settings"]["cluster_key"]
+    );
+    assert_eq!(
+        config["shards"]["Surface One"]["settings"]["is_master"],
+        true
+    );
+    assert_eq!(
+        config["shards"]["underground"]["settings"]["encode_user_path"],
+        false
+    );
+    assert_eq!(
+        first.files()
+            [Path::new("underground/save/session/FEDCBA9876543210/KU_ABCDEFG__/0000000002")],
+        b"cave-player\0\xff"
+    );
+    let destination = tempfile::tempdir().unwrap();
+    for name in ["first", "second"] {
+        let path = destination.path().join(name);
+        first.save(&path).unwrap();
+        assert_eq!(
+            ClusterConfig::load(&RoomReader::open(&path).unwrap())
+                .unwrap()
+                .resolved(),
+            first.configuration().resolved()
+        );
+        assert_eq!(
+            tree(&path),
+            first
+                .files()
+                .iter()
+                .map(|(path, bytes)| (path.to_str().unwrap().into(), bytes.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_import_preserves_empty_and_missing_shard_mod_lists() {
+    let source = cluster();
+    add_secondary(source.path());
+    for missing in [false, true] {
+        if missing {
+            fs::remove_file(source.path().join("underground/save/shardindex")).unwrap();
+        }
+        let imported = import_cluster(ImportSource::Path(source.path().into()))
+            .await
+            .unwrap();
+        let config = imported.configuration().resolved();
+        assert_eq!(
+            config["shards"]["underground"]["mods"]["entries"],
+            serde_json::json!({})
+        );
+        assert_eq!(
+            config["shards"]["forest"]["mods"]["entries"]["workshop-123"]["enabled"],
+            true
+        );
+    }
+}
+
+#[tokio::test]
+async fn import_ignores_room_markers_in_excluded_directories() {
+    let source = cluster();
+    for name in [
+        "mods/workshop-999/server.ini",
+        "mods/cluster.ini",
+        "__MACOSX/cluster.ini",
+        ".hidden/server.ini",
+    ] {
+        let path = source.path().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"ignored").unwrap();
+    }
+    let entries = tree(source.path());
+    let wrapped = entries
+        .iter()
+        .map(|(path, bytes)| (format!("Room/{path}"), bytes.clone()))
+        .collect::<Vec<_>>();
+    for input in [
+        ImportSource::Path(source.path().into()),
+        ImportSource::Archive(zip_archive(&entries)),
+        ImportSource::Archive(zip_archive(&wrapped)),
+    ] {
+        let imported = import_cluster(input).await.unwrap();
+        assert_eq!(
+            imported.configuration().resolved()["settings"]["cluster_name"],
+            "Shared"
+        );
+        assert!(
+            !imported
+                .files()
+                .contains_key(Path::new("mods/workshop-999/server.ini"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn exported_wrappers_preserve_the_full_save_path_depth() {
+    let source = cluster();
+    let path = format!(
+        "forest/save/session/0123456789ABCDEF/{}snapshot",
+        "part/".repeat(11)
+    );
+    assert_eq!(Path::new(&path).components().count(), 16);
+    fs::create_dir_all(source.path().join(&path).parent().unwrap()).unwrap();
+    fs::write(source.path().join(&path), b"deep snapshot").unwrap();
+    for name in ["Room", "mods", "console"] {
+        let archive = prepare(
+            &RoomReader::open(source.path()).unwrap(),
+            7,
+            &ExportOptions {
+                room_id: Some(name.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .compress(DEFAULT_COMPRESSION_LEVEL)
+        .await
+        .unwrap();
+        let imported = import_cluster(ImportSource::Archive(archive.into_file()))
+            .await
+            .unwrap();
+        assert_eq!(imported.files()[Path::new(&path)], b"deep snapshot");
+        let holder = tempfile::tempdir().unwrap();
+        imported.save(holder.path().join(name)).unwrap();
+        let from_directory = import_cluster(ImportSource::Path(holder.path().into()))
+            .await
+            .unwrap();
+        assert_eq!(from_directory.files()[Path::new(&path)], b"deep snapshot");
+    }
+}
+
+#[tokio::test]
+async fn import_rejects_paths_that_cannot_be_saved() {
+    let source = cluster();
+    for path in [
+        format!("forest/save/session/0123456789ABCDEF/{}", "x".repeat(256)),
+        format!(
+            "forest/save/session/0123456789ABCDEF/{}snapshot",
+            "part/".repeat(13)
+        ),
+    ] {
+        let mut entries = tree(source.path());
+        entries.push((path, b"snapshot".to_vec()));
+        let result = import_cluster(ImportSource::Archive(zip_archive(&entries))).await;
+        assert!(result.is_err());
+    }
+}
+
+#[tokio::test]
+async fn import_rejects_sevenz_deletion_entries_and_reparse_points() {
+    for anti in [false, true] {
+        let mut writer = ArchiveWriter::new(memory_file().unwrap()).unwrap();
+        let mut entry = ArchiveEntry::new_file("Master/save/session/0123456789ABCDEF/link");
+        entry.is_anti_item = anti;
+        entry.has_windows_attributes = !anti;
+        entry.windows_attributes = 0x400;
+        writer
+            .push_archive_entry(entry, (!anti).then_some(Cursor::new(b"reparse data")))
+            .unwrap();
+        let error = import_cluster(ImportSource::Archive(writer.finish().unwrap()))
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("links and deletion"),
+            "{error:#}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn imports_rar4_and_solid_rar5_with_unicode_names_and_mixed_player_encoding() {
+    // Own fixtures: RAR 6.24/7.23, a -ma4/-ma5 -m5 -md1m -ts- -r; RAR5 adds -s.
+    // World/player bytes are b"world\0\xff" * 4096 and b"player\0\xff" * 1024.
+    for bytes in [
+        include_bytes!("../../tests/fixtures/archives/room-rar4.rar").as_slice(),
+        include_bytes!("../../tests/fixtures/archives/room-rar5.rar").as_slice(),
+    ] {
+        let mut file = memory_file().unwrap();
+        file.write_all(bytes).unwrap();
+        let imported = import_cluster(ImportSource::Archive(file)).await.unwrap();
+        assert_eq!(
+            imported.configuration().resolved()["settings"]["cluster_name"],
+            "RAR fixture"
+        );
+        let session = Path::new("Surface One/save/session/0123456789ABCDEF");
+        assert_eq!(
+            imported.files()[&session.join("000000001")],
+            b"world\0\xff".repeat(4096)
+        );
+        assert_eq!(
+            imported.files()[&session.join("KU_WRv6AVc8_/000000001")],
+            b"player\0\xff".repeat(1024)
+        );
+        assert_eq!(
+            imported.files()[&session.join("世界.meta")],
+            b"unicode metadata"
+        );
+    }
+}
+
+#[tokio::test]
+async fn import_rejects_rar_volumes_including_the_last_one() {
+    // Own fixtures: final volumes from RAR 6.24/7.23, a -r -ds -ma4/-ma5 -m0 -v8k.
+    for bytes in [
+        include_bytes!("../../tests/fixtures/archives/last-volume-rar4.rar").as_slice(),
+        include_bytes!("../../tests/fixtures/archives/last-volume-rar5.rar").as_slice(),
+    ] {
+        let mut file = memory_file().unwrap();
+        file.write_all(bytes).unwrap();
+        let error = import_cluster(ImportSource::Archive(file))
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("multipart RAR"), "{error:#}");
+    }
+}
+
+#[tokio::test]
+async fn rejects_rar_hardlinks_before_interpreting_the_room() {
+    // Own fixture: RAR 7.23, a -ma5 -oh -ts-, with two names for one inode.
+    let mut file = memory_file().unwrap();
+    file.write_all(include_bytes!(
+        "../../tests/fixtures/archives/links-rar5.rar"
+    ))
+    .unwrap();
+    let error = import_cluster(ImportSource::Archive(file))
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        error.to_string().contains("archive links are unsupported"),
+        "{error:#}"
+    );
+}
+
+#[tokio::test]
+async fn import_uses_explicit_settings_and_rejects_ambiguous_master_roles() {
+    let source = cluster();
+    add_secondary(source.path());
+    fs::write(source.path().join("forest/server.ini"), "").unwrap();
+    fs::write(source.path().join("underground/server.ini"), "").unwrap();
+    let imported = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        imported.configuration().resolved()["shards"]["forest"]["settings"]["is_master"],
+        true
+    );
+    fs::copy(
+        source.path().join("forest/worldgenoverride.lua"),
+        source.path().join("underground/worldgenoverride.lua"),
+    )
+    .unwrap();
+    let ambiguous = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .err()
+        .unwrap();
+    assert!(ambiguous.to_string().contains("master shard"));
+    fs::write(
+        source.path().join("underground/server.ini"),
+        "[SHARD]\nis_master = true\n[NETWORK]\nserver_port = 12000\n",
+    )
+    .unwrap();
+    let imported = import_cluster(ImportSource::Path(source.path().into()))
+        .await
+        .unwrap();
+    let config = imported.configuration().resolved();
+    assert_eq!(config["settings"]["cluster_name"], "Shared");
+    assert_eq!(config["shards"]["forest"]["settings"]["is_master"], false);
+    assert_eq!(
+        config["shards"]["underground"]["settings"]["is_master"],
+        true
+    );
+    assert_eq!(
+        config["shards"]["underground"]["settings"]["server_port"],
+        12000
+    );
+}
+
+#[tokio::test]
+async fn imports_sevenz_compression_methods_including_previous_zstandard_exports() {
+    use sevenz_rust2::encoder_options::{LzmaOptions, ZstandardOptions};
+    let source = cluster();
+    let entries = tree(source.path());
+    for method in [
+        LzmaOptions::default().into(),
+        Lzma2Options::default().into(),
+        ZstandardOptions::from_level(19).into(),
+    ] {
+        let mut writer = ArchiveWriter::new(memory_file().unwrap()).unwrap();
+        writer.set_content_methods(vec![method]);
+        writer
+            .push_archive_entries(
+                entries
+                    .iter()
+                    .map(|(name, _)| ArchiveEntry::new_file(name))
+                    .collect(),
+                entries
+                    .iter()
+                    .map(|(_, bytes)| sevenz_rust2::SourceReader::new(Cursor::new(bytes)))
+                    .collect(),
+            )
+            .unwrap();
+        let imported = import_cluster(ImportSource::Archive(writer.finish().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(
+            imported.files()[Path::new("forest/save/session/0123456789ABCDEF/0000000001")],
+            b"world\0\xff"
+        );
+        assert_eq!(
+            imported.files()
+                [Path::new("forest/save/session/0123456789ABCDEF/KU_ABCDEFG__/0000000001")],
+            b"player\0\xff"
+        );
+    }
 }
 
 #[tokio::test]
@@ -110,9 +1032,7 @@ async fn imports_native_directories_zip_and_exported_sevenz_with_the_same_rules(
                 )
             }
         };
-        let configuration = import_cluster(input, output.clone(), ImportOptions { from_client })
-            .await
-            .unwrap();
+        let configuration = import_to(input, output.clone()).await.unwrap();
         let topology = crate::configuration::discover(&output).unwrap();
         assert_eq!(topology.shards.len(), 2);
         let resolved = configuration.resolved();
@@ -125,9 +1045,10 @@ async fn imports_native_directories_zip_and_exported_sevenz_with_the_same_rules(
             resolved["settings"]["cluster_key"].as_str().unwrap().len(),
             64
         );
-        let prefix = output.join("forest");
+        let master = if from_client { "Master" } else { "forest" };
+        let prefix = output.join(master);
         assert_eq!(
-            fs::read(prefix.join("save/session/0123456789ABCDEF/000000001")).unwrap(),
+            fs::read(prefix.join("save/session/0123456789ABCDEF/0000000001")).unwrap(),
             b"world\0\xff"
         );
         assert_eq!(
@@ -140,7 +1061,7 @@ async fn imports_native_directories_zip_and_exported_sevenz_with_the_same_rules(
             b"experience-progress\0\xff"
         );
         assert_eq!(
-            resolved["shards"]["forest"]["mods"]["entries"]["workshop-123"]["configuration_options"]
+            resolved["shards"][master]["mods"]["entries"]["workshop-123"]["configuration_options"]
                 ["difficulty"],
             "hard"
         );
@@ -158,12 +1079,14 @@ async fn imports_native_directories_zip_and_exported_sevenz_with_the_same_rules(
         assert!(!output.join("mods/ugc").exists());
         if from_client {
             assert_eq!(
-                resolved["shards"]["cave"]["settings"]["encode_user_path"],
+                resolved["shards"]["Caves"]["settings"]["encode_user_path"],
                 false
             );
             assert_eq!(
-                fs::read(output.join("cave/save/session/FEDCBA9876543210/KU_ABCDEFG__/000000002"))
-                    .unwrap(),
+                fs::read(
+                    output.join("Caves/save/session/FEDCBA9876543210/KU_ABCDEFG__/0000000002")
+                )
+                .unwrap(),
                 b"cave-player\0\xff"
             );
         }
@@ -181,7 +1104,7 @@ async fn imports_native_directories_zip_and_exported_sevenz_with_the_same_rules(
 }
 
 #[tokio::test]
-async fn client_import_rebuilds_configuration_and_restores_native_names_and_player_paths() {
+async fn import_detects_client_configuration_and_restores_player_paths() {
     let players = [
         ("KU_ABCDEFGH_", "A7H8MC6JHT0H"),
         ("KU_abcdefgh_", "A7KIB6JQ56LB"),
@@ -189,19 +1112,26 @@ async fn client_import_rebuilds_configuration_and_restores_native_names_and_play
         ("KU_ABCDEFG__", "A7H8MC6JHT1V"),
         ("1234567890__", "1234567890__"),
     ];
-    for (caves, encoded) in [(false, false), (false, true), (true, false), (true, true)] {
+    for (caves, encoded, custom) in [
+        (false, false, false),
+        (false, true, true),
+        (true, false, false),
+        (true, true, true),
+    ] {
+        let master = if custom { "Surface One" } else { "Master" };
+        let secondary = if custom { "Lower World" } else { "Caves" };
         let input = tempfile::tempdir().unwrap();
         for name in if caves {
-            vec!["Master", "Caves"]
+            vec![master, secondary]
         } else {
-            vec!["Master"]
+            vec![master]
         } {
-            let encoded = if name == "Master" { encoded } else { !encoded };
+            let encoded = if name == master { encoded } else { !encoded };
             let index = serde_json::json!({
                 "session_id":"0123456789ABCDEF", "version":5,
-                "world":{"options":{"id":if name == "Master" {"SURVIVAL_TOGETHER"} else {"DST_CAVE"}, "name":"Client world", "desc":"Client description", "location":if name == "Master" {"forest"} else {"cave"}, "overrides":{"day":"onlynight", "task_set":if name == "Master" {"default"} else {"cave_default"}}}},
-                "server":{"name":"Client room", "description":"Client world", "game_mode":"survival", "max_players":8, "pvp":true, "online_mode":false, "privacy_type":3, "password":"private-password", "clan":{"id":"123"}, "encode_user_path":encoded},
-                "enabled_mods": if name == "Master" { serde_json::json!({"workshop-123":{"enabled":true,"configuration_options":{"difficulty":"hard"}}}) } else { serde_json::json!({}) },
+                "world":{"options":{"id":if name == master {"SURVIVAL_TOGETHER"} else {"DST_CAVE"}, "name":"Client world", "desc":"Client description", "location":if name == master {"forest"} else {"cave"}, "overrides":{"day":"onlynight", "task_set":if name == master {"default"} else {"cave_default"}}}},
+                "server":{"name":"Client room", "description":"Client world", "game_mode":"survival", "server_language":"zh", "max_players":8, "pvp":true, "online_mode":false, "privacy_type":3, "password":"private-password", "clan":{"id":"123"}, "encode_user_path":encoded},
+                "enabled_mods": if name == master { serde_json::json!({"workshop-123":{"enabled":true,"configuration_options":{"difficulty":"hard"}}}) } else { serde_json::json!({}) },
             });
             let save = input.path().join(name).join("save");
             let session = save.join("session/0123456789ABCDEF");
@@ -211,12 +1141,12 @@ async fn client_import_rebuilds_configuration_and_restores_native_names_and_play
                 format!("KLEI     1 return {}", lua::render_literal(&index).unwrap()),
             )
             .unwrap();
-            fs::write(session.join("000000001"), b"world\0\xff").unwrap();
+            fs::write(session.join("0000000001"), b"world\0\xff").unwrap();
             for (raw, path) in players {
                 let player = session.join(if encoded { path } else { raw });
                 fs::create_dir(&player).unwrap();
-                fs::write(player.join("000000001"), raw.as_bytes()).unwrap();
-                fs::write(player.join("000000001.meta"), b"player-meta\0\xff").unwrap();
+                fs::write(player.join("0000000001"), raw.as_bytes()).unwrap();
+                fs::write(player.join("0000000001.meta"), b"player-meta\0\xff").unwrap();
                 fs::write(player.join("savelocation"), b"location\0\xff").unwrap();
                 fs::write(player.join(".DS_Store"), b"private-cache").unwrap();
             }
@@ -224,10 +1154,9 @@ async fn client_import_rebuilds_configuration_and_restores_native_names_and_play
         }
         let destination = tempfile::tempdir().unwrap();
         let output = destination.path().join("client");
-        let config = import_cluster(
+        let config = import_to(
             ImportSource::Archive(zip_archive(&tree(input.path()))),
             output.clone(),
-            ImportOptions { from_client: true },
         )
         .await
         .unwrap()
@@ -235,13 +1164,12 @@ async fn client_import_rebuilds_configuration_and_restores_native_names_and_play
         let topology = crate::configuration::discover(&output).unwrap();
         assert_eq!(topology.shards.len(), if caves { 2 } else { 1 });
         assert_eq!(config["settings"]["cluster_name"], "Client room");
+        assert_eq!(config["settings"]["cluster_language"], "zh");
         assert_eq!(config["settings"]["offline_cluster"], true);
         assert_eq!(config["settings"]["pvp"], true);
         assert_eq!(config["settings"]["max_players"], 8);
-        assert!(!output.join("Master").exists());
-        assert!(!output.join("Caves").exists());
         for shard in topology.shards {
-            assert_eq!(shard.name, if shard.master { "forest" } else { "cave" });
+            assert_eq!(shard.name, if shard.master { master } else { secondary });
             let expected = &config["shards"][&shard.name];
             assert_eq!(expected["settings"]["name"], shard.name);
             assert_eq!(expected["settings"]["encode_user_path"], false);
@@ -262,9 +1190,9 @@ async fn client_import_rebuilds_configuration_and_restores_native_names_and_play
                     .join(&shard.name)
                     .join("save/session/0123456789ABCDEF")
                     .join(raw);
-                assert_eq!(fs::read(player.join("000000001")).unwrap(), raw.as_bytes());
+                assert_eq!(fs::read(player.join("0000000001")).unwrap(), raw.as_bytes());
                 assert_eq!(
-                    fs::read(player.join("000000001.meta")).unwrap(),
+                    fs::read(player.join("0000000001.meta")).unwrap(),
                     b"player-meta\0\xff"
                 );
                 assert_eq!(
@@ -292,7 +1220,7 @@ async fn client_import_rebuilds_configuration_and_restores_native_names_and_play
                 for (raw, encoded) in players {
                     assert_eq!(
                         exported[&format!(
-                            "Cluster_7/{shard}/save/session/0123456789ABCDEF/{encoded}/000000001"
+                            "Cluster_7/{shard}/save/session/0123456789ABCDEF/{encoded}/0000000001"
                         )],
                         raw.as_bytes()
                     );
@@ -336,14 +1264,10 @@ async fn client_import_rejects_invalid_and_colliding_player_paths_before_writing
         ));
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("restored");
-        let error = import_cluster(
-            ImportSource::Archive(zip_archive(&entries)),
-            output.clone(),
-            ImportOptions { from_client: true },
-        )
-        .await
-        .err()
-        .unwrap();
+        let error = import_to(ImportSource::Archive(zip_archive(&entries)), output.clone())
+            .await
+            .err()
+            .unwrap();
         assert!(error.to_string().contains(expected), "{error}");
         assert!(!output.exists());
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
@@ -377,18 +1301,14 @@ async fn import_rejects_ambiguous_unsafe_and_corrupt_inputs_without_publishing()
         "C:/outside",
         "forest/save/session/X/CON.txt",
         "forest/save/session/X/../outside",
-        "forest\\save\\world",
+        "..\\outside",
+        "\\outside",
     ] {
         let root = tempfile::tempdir().unwrap();
         let output = root.path().join("result");
         let mut invalid = entries.clone();
         invalid.push((bad.into(), b"bad".to_vec()));
-        let result = import_cluster(
-            ImportSource::Archive(zip_archive(&invalid)),
-            output.clone(),
-            ImportOptions::default(),
-        )
-        .await;
+        let result = import_to(ImportSource::Archive(zip_archive(&invalid)), output.clone()).await;
         assert!(result.is_err(), "{bad}");
         assert!(!output.exists());
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
@@ -403,6 +1323,10 @@ async fn import_rejects_ambiguous_unsafe_and_corrupt_inputs_without_publishing()
             ("forest/save/session/X/entry", b"a"),
             ("forest/save/session/X/entry/b", b"b"),
         ],
+        vec![
+            ("forest/save/session/X/same", b"a"),
+            ("forest\\save\\session\\X\\same", b"b"),
+        ],
     ] {
         let root = tempfile::tempdir().unwrap();
         let output = root.path().join("result");
@@ -413,13 +1337,9 @@ async fn import_rejects_ambiguous_unsafe_and_corrupt_inputs_without_publishing()
                 .map(|(name, bytes)| (name.into(), bytes.to_vec())),
         );
         assert!(
-            import_cluster(
-                ImportSource::Archive(zip_archive(&invalid)),
-                output.clone(),
-                ImportOptions::default()
-            )
-            .await
-            .is_err()
+            import_to(ImportSource::Archive(zip_archive(&invalid)), output.clone())
+                .await
+                .is_err()
         );
         assert!(!output.exists());
     }
@@ -436,13 +1356,9 @@ async fn import_rejects_ambiguous_unsafe_and_corrupt_inputs_without_publishing()
         .unwrap();
     archive.rewind().unwrap();
     assert!(
-        import_cluster(
-            ImportSource::Archive(archive),
-            output.clone(),
-            ImportOptions::default()
-        )
-        .await
-        .is_err()
+        import_to(ImportSource::Archive(archive), output.clone())
+            .await
+            .is_err()
     );
     assert!(!output.exists());
     fs::write(
@@ -451,13 +1367,9 @@ async fn import_rejects_ambiguous_unsafe_and_corrupt_inputs_without_publishing()
     )
     .unwrap();
     assert!(
-        import_cluster(
-            ImportSource::Path(fixture.path().into()),
-            output.clone(),
-            ImportOptions::default()
-        )
-        .await
-        .is_err()
+        import_to(ImportSource::Path(fixture.path().into()), output.clone())
+            .await
+            .is_err()
     );
     assert!(!output.exists());
 }
@@ -470,13 +1382,7 @@ async fn import_preserves_existing_destinations_and_refuses_links() {
     let output = root.path().join("existing");
     fs::create_dir(&output).unwrap();
     fs::write(output.join("keep"), b"existing").unwrap();
-    let attempt = |path| {
-        import_cluster(
-            ImportSource::Path(source.path().into()),
-            path,
-            ImportOptions::default(),
-        )
-    };
+    let attempt = |path| import_to(ImportSource::Path(source.path().into()), path);
     assert!(attempt(output.clone()).await.is_err());
     assert_eq!(tree(&output), vec![("keep".into(), b"existing".to_vec())]);
     let link = root.path().join("link");
@@ -550,7 +1456,7 @@ async fn export_reads_an_owned_room_without_service_calls_or_disk_artifacts() {
         b"private-agent-state"
     );
     assert_eq!(
-        contents(archive)["001/forest/save/session/0123456789ABCDEF/000000001"],
+        contents(archive)["001/forest/save/session/0123456789ABCDEF/0000000001"],
         b"world\0\xff"
     );
 }
@@ -569,10 +1475,10 @@ fn cluster() -> TempDir {
             ("forest/worldgenoverride.lua", b"return {override_enabled=true,preset=\"SURVIVAL_TOGETHER\"}"),
             ("forest/modoverrides.lua", b"return {[\"workshop-123\"]={enabled=true,configuration_options={difficulty=\"hard\"}}}"),
             ("forest/save/shardindex", b"KLEI     1 return {session_id=\"0123456789ABCDEF\",world={password=\"world-progress\"},server={password=\"private-index-password\",cluster_key=\"private-key\",clan={id=\"123\"},privacy_type=3,encode_user_path=false},enabled_mods={[\"workshop-123\"]={enabled=true,configuration_options={difficulty=\"hard\"}}}}"),
-            ("forest/save/session/0123456789ABCDEF/000000001", b"world\0\xff"),
-            ("forest/save/session/0123456789ABCDEF/000000001.meta", b"world-meta\0\xff"),
-            ("forest/save/session/0123456789ABCDEF/KU_ABCDEFG__/000000001", b"player\0\xff"),
-            ("forest/save/session/0123456789ABCDEF/KU_ABCDEFG__/000000001.meta", b"player-meta\0\xff"),
+            ("forest/save/session/0123456789ABCDEF/0000000001", b"world\0\xff"),
+            ("forest/save/session/0123456789ABCDEF/0000000001.meta", b"world-meta\0\xff"),
+            ("forest/save/session/0123456789ABCDEF/KU_ABCDEFG__/0000000001", b"player\0\xff"),
+            ("forest/save/session/0123456789ABCDEF/KU_ABCDEFG__/0000000001.meta", b"player-meta\0\xff"),
             ("forest/save/session/0123456789ABCDEF/KU_ABCDEFG__/savelocation", b"\x81\0\0\0\x01\0\0\0\x02"),
             ("forest/save/session/0123456789ABCDEF/KU_ABCDEFG__/.dst-server.json", b"private-control"),
             ("forest/save/session/0123456789ABCDEF/.dst-maintenance/private", b"private-ignored"),
@@ -617,8 +1523,8 @@ fn add_secondary(root: &Path) {
             ("underground/server.ini", b"[SHARD]\nis_master = false\nname = Below\nid = 2\ncluster_key = private-key\n[NETWORK]\nserver_port = 11000\n[STEAM]\nmaster_server_port = 27017\n[ACCOUNT]\nencode_user_path = true\n".as_slice()),
             ("underground/worldgenoverride.lua", b"return {override_enabled=true,preset=\"DST_CAVE\"}"),
             ("underground/save/shardindex", b"KLEI     1 return {session_id=\"FEDCBA9876543210\",version=5,world={options={location=\"cave\"}},server={encode_user_path=true},enabled_mods={}}"),
-            ("underground/save/session/FEDCBA9876543210/000000002", b"cave-world\0\xff"),
-            ("underground/save/session/FEDCBA9876543210/A7H8MC6JHT1V/000000002", b"cave-player\0\xff"),
+            ("underground/save/session/FEDCBA9876543210/0000000002", b"cave-world\0\xff"),
+            ("underground/save/session/FEDCBA9876543210/A7H8MC6JHT1V/0000000002", b"cave-player\0\xff"),
             ("underground/save/session/FEDCBA9876543210/A7H8MC6JHT1V/savelocation", b"\x81\0\0\0\x02\0\0\0\x02"),
         ] {
             let path = root.join(name);
@@ -698,11 +1604,34 @@ async fn round_trip_preserves_native_progress_and_removes_targeted_credentials()
         } else {
             options()
         };
+        let source_before = tree(root.path());
         let prepared = prepare(&lock, 1, &options).unwrap();
+        let configuration = ClusterConfig::from_files(&prepared.entries)
+            .unwrap()
+            .resolved();
+        let key = configuration["settings"]["cluster_key"].as_str().unwrap();
+        assert_eq!(key.len(), 64);
+        assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(
+            configuration["shards"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|shard| shard["settings"]["cluster_key"].is_null())
+        );
+        let repeated = prepare(&lock, 1, &options).unwrap();
+        let repeated = ClusterConfig::from_files(&repeated.entries)
+            .unwrap()
+            .resolved();
+        assert_ne!(
+            configuration["settings"]["cluster_key"],
+            repeated["settings"]["cluster_key"]
+        );
+        assert_eq!(tree(root.path()), source_before);
         // Compression uses the bytes already captured, even if the game saves again.
         fs::write(
             root.path()
-                .join("forest/save/session/0123456789ABCDEF/000000001"),
+                .join("forest/save/session/0123456789ABCDEF/0000000001"),
             b"new world",
         )
         .unwrap();
@@ -721,14 +1650,14 @@ async fn round_trip_preserves_native_progress_and_removes_targeted_credentials()
         };
         let prefix = format!("{directory}/{shard}");
         let base = format!("{prefix}/save/session/0123456789ABCDEF");
-        assert_eq!(&files[&format!("{base}/000000001")], b"world\0\xff");
+        assert_eq!(&files[&format!("{base}/0000000001")], b"world\0\xff");
         let player = if client || source_encoded {
             encode_klei_id("KU_ABCDEFG_").unwrap()
         } else {
             "KU_ABCDEFG__".into()
         };
         assert_eq!(
-            &files[&format!("{base}/{player}/000000001")],
+            &files[&format!("{base}/{player}/0000000001")],
             b"player\0\xff"
         );
         assert_eq!(
@@ -736,7 +1665,7 @@ async fn round_trip_preserves_native_progress_and_removes_targeted_credentials()
             b"\x81\0\0\0\x01\0\0\0\x02"
         );
         assert_eq!(
-            &files[&format!("{base}/{player}/000000001.meta")],
+            &files[&format!("{base}/{player}/0000000001.meta")],
             b"player-meta\0\xff"
         );
         assert_eq!(
@@ -768,7 +1697,7 @@ async fn round_trip_preserves_native_progress_and_removes_targeted_credentials()
         assert_eq!(mods, index["enabled_mods"]);
         let ini = String::from_utf8_lossy(&files[&format!("{directory}/cluster.ini")]);
         assert!(!ini.contains("steam_group"));
-        assert!(!ini.contains("cluster_key"));
+        assert!(ini.contains(&format!("cluster_key = {key}")));
         let ini = String::from_utf8_lossy(&files[&format!("{prefix}/server.ini")]);
         assert!(ini.contains(&format!("encode_user_path = {}", client || source_encoded)));
         if client {
@@ -779,9 +1708,9 @@ async fn round_trip_preserves_native_progress_and_removes_targeted_credentials()
                     .any(|path| path.contains("/forest/") || path.contains("/underground/"))
             );
             let cave = "Cluster_1/Caves/save/session/FEDCBA9876543210";
-            assert_eq!(&files[&format!("{cave}/000000002")], b"cave-world\0\xff");
+            assert_eq!(&files[&format!("{cave}/0000000002")], b"cave-world\0\xff");
             assert_eq!(
-                &files[&format!("{cave}/A7H8MC6JHT1V/000000002")],
+                &files[&format!("{cave}/A7H8MC6JHT1V/0000000002")],
                 b"cave-player\0\xff"
             );
             assert_eq!(

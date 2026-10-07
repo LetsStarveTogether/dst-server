@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 
 use crate::files::{self, IniDocument, RoomReader, render_ini};
 use crate::settings::ClusterConfig;
@@ -17,7 +17,7 @@ pub(super) const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(super) enum Conversion {
     None,
     ToClient,
-    FromClient,
+    Import,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -33,7 +33,9 @@ pub(super) fn kind(path: &Path) -> Option<Kind> {
         .iter()
         .map(|name| name.to_str())
         .collect::<Option<_>>()?;
-    if parts.iter().any(|name| noise(name)) {
+    if parts.iter().any(|name| noise(name))
+        || parts.first().is_some_and(|name| name.starts_with('.'))
+    {
         return None;
     }
     use Kind::{Configuration, Directory, Progress};
@@ -68,7 +70,7 @@ pub(super) fn kind(path: &Path) -> Option<Kind> {
     }
 }
 
-fn noise(name: &str) -> bool {
+pub(super) fn noise(name: &str) -> bool {
     sdk_entry(name)
         || matches!(name, "__MACOSX" | ".DS_Store" | "Thumbs.db" | "desktop.ini")
         || name.starts_with("._")
@@ -80,7 +82,6 @@ pub(super) struct Paths(BTreeMap<PathBuf, (PathBuf, bool)>);
 
 impl Paths {
     pub(super) fn insert(&mut self, path: &Path, directory: bool) -> Result<()> {
-        validate_path(path)?;
         let mut prefix = PathBuf::new();
         let mut folded = PathBuf::new();
         for part in path.iter() {
@@ -177,6 +178,7 @@ impl NativeFiles {
     }
 
     pub(super) fn insert(&mut self, path: PathBuf, bytes: Vec<u8>) -> Result<()> {
+        validate_path(&path)?;
         self.paths.insert(&path, false)?;
         self.bytes += bytes.len() as u64;
         ensure!(
@@ -249,14 +251,7 @@ impl NativeFiles {
                     },
                     true,
                 ),
-                Conversion::FromClient => (
-                    match name.as_str() {
-                        "Master" => "forest",
-                        "Caves" => "cave",
-                        _ => bail!("client import requires Master and optionally Caves"),
-                    },
-                    false,
-                ),
+                Conversion::Import => (name.as_str(), false),
             };
             targets.insert(name.as_str(), target);
             let save = Path::new(name).join("save");
@@ -281,16 +276,15 @@ impl NativeFiles {
             if path.extension().is_some_and(|extension| extension == "ini") {
                 let mut ini = configuration::Ini::parse(&path, &contents, None)?.into_sections();
                 sanitize_ini(&mut ini);
-                if path.file_name().is_some_and(|name| name == "server.ini") {
-                    let (name, encoded) = targets[path.iter().next().unwrap().to_str().unwrap()];
+                if path == Path::new("cluster.ini") {
+                    ini.entry("shard".into())
+                        .or_default()
+                        .insert("cluster_key".into(), crate::settings::new_cluster_key()?);
+                } else if path.file_name().is_some_and(|name| name == "server.ini") {
+                    let (_, encoded) = targets[path.iter().next().unwrap().to_str().unwrap()];
                     ini.entry("account".into())
                         .or_default()
                         .insert("encode_user_path".into(), encoded.to_string());
-                    if conversion == Conversion::FromClient {
-                        ini.entry("shard".into())
-                            .or_default()
-                            .insert("name".into(), name.into());
-                    }
                 }
                 contents = render_ini(&ini)?;
             }
@@ -316,19 +310,11 @@ impl NativeFiles {
                     std::str::from_utf8(&bytes).context("shard index is not UTF-8")?,
                     target_encoded,
                 )?;
-            } else if encoded != target_encoded && parts[2] == "session" && parts.len() >= 6 {
-                let mut renamed = parts.clone();
-                if target_encoded && parts[4].starts_with("KU_") {
-                    let userid = if parts[4].len() == 12 && parts[4].ends_with('_') {
-                        &parts[4][..11]
-                    } else {
-                        &parts[4]
-                    };
-                    renamed[4] = encode_klei_id(userid)?;
-                } else if !target_encoded && parts[4].starts_with("A7") {
-                    // Encoded Klei IDs start with A7; offline IDs keep their native names.
-                    renamed[4] = format!("{}_", decode_klei_id(&parts[4])?);
-                }
+            } else if (encoded != target_encoded || conversion == Conversion::Import)
+                && parts[2] == "session"
+                && parts.len() >= 6
+            {
+                let renamed = player_path(&path, target_encoded)?;
                 let player: PathBuf = renamed.iter().take(5).collect();
                 let original: PathBuf = parts.iter().take(5).collect();
                 if let Some(previous) = players.insert(player, original.clone()) {
@@ -337,7 +323,7 @@ impl NativeFiles {
                         "player save directories collide after conversion"
                     );
                 }
-                target = remap(&renamed.iter().collect::<PathBuf>());
+                target = remap(&renamed);
             }
             output.insert(target, bytes)?;
         }
@@ -364,7 +350,7 @@ fn sanitize_ini(ini: &mut IniDocument) {
     ini.retain(|_, fields| !fields.is_empty());
 }
 
-fn sanitize_shard_index(source: &str, encode: bool) -> Result<Vec<u8>> {
+pub(super) fn sanitize_shard_index(source: &str, encode: bool) -> Result<Vec<u8>> {
     let mut index = lua::parse_return_table(source)?;
     let server = index
         .get_mut("server")
@@ -391,6 +377,27 @@ fn sanitize_shard_index(source: &str, encode: bool) -> Result<Vec<u8>> {
     Ok(format!("KLEI     1 return {}\n", lua::render_literal(&index)?).into_bytes())
 }
 
+pub(super) fn player_path(path: &Path, encoded: bool) -> Result<PathBuf> {
+    let mut parts: Vec<_> = path
+        .iter()
+        .map(|part| part.to_str().unwrap().to_owned())
+        .collect();
+    if parts.len() >= 6 && parts[1] == "save" && parts[2] == "session" {
+        if parts[4].starts_with("KU_") {
+            let userid = if parts[4].len() == 12 && parts[4].ends_with('_') {
+                &parts[4][..11]
+            } else {
+                &parts[4]
+            };
+            let name = encode_klei_id(userid)?;
+            parts[4] = if encoded { name } else { format!("{userid}_") };
+        } else if !encoded && parts[4].starts_with("A7") {
+            parts[4] = format!("{}_", decode_klei_id(&parts[4])?);
+        }
+    }
+    Ok(parts.iter().collect())
+}
+
 fn sdk_entry(name: &str) -> bool {
     matches!(name, ".last_login" | "dst_server_driver.json")
         || [
@@ -404,13 +411,7 @@ fn sdk_entry(name: &str) -> bool {
 }
 
 pub(super) fn validate_path(path: &Path) -> Result<()> {
-    ensure!(path.components().next().is_some(), "empty archive path");
-    ensure!(path.components().count() <= 64, "archive path is too deep");
-    for component in path.components() {
-        let Component::Normal(name) = component else {
-            bail!("archive path must be relative");
-        };
-        let name = name.to_str().context("archive path is not UTF-8")?;
+    for name in files::relative_components(path)? {
         ensure!(
             !name.ends_with(['.', ' '])
                 && !name

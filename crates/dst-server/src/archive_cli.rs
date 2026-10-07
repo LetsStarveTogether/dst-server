@@ -2,12 +2,12 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde_json::json;
 
 use crate::{
-    archive::{self, ExportOptions, ImportOptions, ImportSource, S3Options},
+    archive::{self, ExportOptions, ImportLevel, ImportSource, S3Options},
     host::Host,
     settings::ClusterConfig,
 };
@@ -58,15 +58,18 @@ impl Source {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Rebuild one native room from a directory, ZIP or 7z archive.
+    /// Parse one room from a directory or archive, optionally saving its native files.
     Import {
         source: PathBuf,
         /// A new directory for the imported room.
+        #[arg(long, conflicts_with = "into")]
+        output: Option<PathBuf>,
+        /// Apply to an existing room after stopping its Agent and games.
         #[arg(long)]
-        output: PathBuf,
-        /// Reconstruct server settings from a client's Master/Caves shard indexes.
-        #[arg(long)]
-        from_client: bool,
+        into: Option<PathBuf>,
+        /// Cumulative import layers: data, runtime (default), or all.
+        #[arg(long, value_enum, requires = "into")]
+        level: Option<ImportLevel>,
     },
     /// Export one room to an explicit local archive path.
     Export {
@@ -106,18 +109,25 @@ pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
         Command::Import {
             source,
             output,
-            from_client,
+            into,
+            level,
         } => {
-            let configuration = archive::import_cluster(
-                ImportSource::Path(source),
-                output.clone(),
-                ImportOptions { from_client },
-            )
-            .await?;
-            super::emit(
-                &json!({"path": output, "configuration": configuration}),
-                compact,
-            )?;
+            for path in output.iter().chain(into.iter()) {
+                path.to_str()
+                    .context("import destination path must be valid UTF-8")?;
+            }
+            let imported = archive::import_cluster(ImportSource::Path(source)).await?;
+            let result = if let Some(path) = into {
+                let level = level.unwrap_or_default();
+                let configuration = imported.apply(&path, level)?;
+                json!({"path": path, "level": level, "configuration": configuration})
+            } else {
+                if let Some(path) = &output {
+                    imported.save(path)?;
+                }
+                json!({"path": output, "configuration": imported.configuration(), "files": imported.files().keys().collect::<Vec<_>>()})
+            };
+            super::emit(&result, compact)?;
         }
         Command::Export { source, output } => {
             let archive = archive::export_host(

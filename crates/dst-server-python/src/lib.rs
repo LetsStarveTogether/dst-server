@@ -268,14 +268,8 @@ fn inspect(py: Python<'_>, directory: PathBuf) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-fn run_cli(py: Python<'_>, arguments: Vec<String>) -> u8 {
-    py.detach(move || {
-        dst_server::cli::main(
-            std::iter::once("dst-server".into())
-                .chain(arguments)
-                .map(Into::into),
-        )
-    })
+fn run_cli(py: Python<'_>, arguments: Vec<std::ffi::OsString>) -> u8 {
+    py.detach(move || dst_server::cli::main(std::iter::once("dst-server".into()).chain(arguments)))
 }
 
 #[pymodule]

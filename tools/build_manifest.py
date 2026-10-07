@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import tomllib
+import zipfile
 from pathlib import Path
 
 
@@ -34,6 +35,39 @@ def protocol(path: Path, expression: str) -> int:
     return int(match[1])
 
 
+def check_wheel_notices(path: Path) -> None:
+    with zipfile.ZipFile(path) as wheel:
+        names = wheel.namelist()
+        metadata = next(
+            (
+                name
+                for name in names
+                if name.endswith(
+                    ".dist-info/licenses/licenses/third-party/manifest.json"
+                )
+            ),
+            None,
+        )
+        if metadata is None:
+            message = f"missing bundled library license notice manifest: {path}"
+            raise ValueError(message)
+        directory = metadata.removesuffix("manifest.json")
+        libraries = json.loads(wheel.read(metadata))
+        for name in names:
+            if not Path(name).parent.name.endswith(".libs") or name.endswith("/"):
+                continue
+            library = re.sub(r"(?:-[0-9a-f]+)?\.so(?:\..*)?$", "", Path(name).name)
+            notices = libraries.get(library, {}).get("notices", [])
+            if not notices:
+                message = f"bundled library has no license notices: {name}"
+                raise ValueError(message)
+            for notice in notices:
+                member = directory + notice
+                if member not in names or not wheel.read(member).strip():
+                    message = f"missing license notice for {name}: {notice}"
+                    raise ValueError(message)
+
+
 def source_digest(root: Path) -> str:
     source_files = {}
     for name in (
@@ -44,6 +78,7 @@ def source_digest(root: Path) -> str:
         "Containerfile",
         "README.md",
         "LICENSE",
+        "licenses",
         "tools/build_manifest.py",
         "crates",
         "python",
@@ -117,6 +152,8 @@ def main() -> None:
     for path in args.artifact:
         if path.name in artifacts or path.resolve() == args.output.resolve():
             parser.error(f"duplicate artifact or manifest self-reference: {path}")
+        if path.suffix == ".whl":
+            check_wheel_notices(path)
         artifacts[path.name] = {"sha256": sha256(path), "bytes": path.stat().st_size}
     manifest = {
         "format": 1,

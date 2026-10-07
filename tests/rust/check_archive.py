@@ -16,6 +16,7 @@ from unittest.mock import patch
 from dst_server.archive import (
     ArchiveUploadResult,
     ClusterArchive,
+    ImportedCluster,
     export_cluster,
     import_cluster,
 )
@@ -101,20 +102,47 @@ async def check_import(
     directory: Path, archive: ClusterArchive, output: Path, length: int
 ) -> None:
     restored = directory / "restored-memory"
-    config = await import_cluster(archive, restored)
+    imported = await import_cluster(archive)
+    config = imported.configuration
+    assert not restored.exists()
+    assert "cluster.ini" in imported.files
+    key = config.dump(defaults=True, secrets=True)["settings"]["cluster_key"]
+    assert key in imported.read_file("cluster.ini").decode()
+    assert await imported.save(restored) is None
     assert config.model == "ClusterConfig"
     assert config.dump(defaults=True, secrets=True)["token"] == ""
     assert (restored / "cluster_token.txt").read_bytes() == b""
     assert (restored / "cluster.ini").is_file()
     assert archive.stream.tell() == length
-    assert (
-        await import_cluster(output, directory / "restored-file")
-    ).model == "ClusterConfig"
-    assert (
-        await import_cluster(restored, directory / "restored-directory")
-    ).model == "ClusterConfig"
+    for source in (output, restored):
+        parsed = await import_cluster(source)
+        assert parsed.configuration.model == "ClusterConfig"
+        assert (
+            parsed.configuration.dump(defaults=True, secrets=True)["settings"][
+                "cluster_key"
+            ]
+            != key
+        )
+    assert imported.read_file("cluster.ini") == (restored / "cluster.ini").read_bytes()
+    for attempt in range(8):
+        parent = directory / f"batch-{attempt}" / "new-parent"
+        targets = [parent / f"room-{index}" for index in range(8)]
+        assert await asyncio.gather(*(imported.save(path) for path in targets)) == [
+            None
+        ] * len(targets)
+        assert all(
+            (path / "cluster.ini").read_bytes() == imported.read_file("cluster.ini")
+            for path in targets
+        )
     try:
-        await import_cluster(archive, restored)
+        imported.read_file("../cluster.ini")
+    except KeyError:
+        pass
+    else:
+        message = "read_file accepted a missing path"
+        raise AssertionError(message)
+    try:
+        await imported.save(restored)
     except ValueError as error:
         if "already exists" not in str(error):
             raise
@@ -129,42 +157,305 @@ async def check_client_import(directory: Path) -> None:
     source = directory / "client.zip"
     index = (
         'KLEI     1 return {session_id="0123456789ABCDEF",version=5,'
-        'server={name="Client fixture",encode_user_path=true,online_mode=false},'
+        'server={name="Client fixture",server_language="zh",'
+        "encode_user_path=true,online_mode=false},"
         'world={options={id="SURVIVAL_TOGETHER",name="World",desc="",location="forest",overrides={task_set="default"}}},'
         'enabled_mods={["workshop-123"]={enabled=true}}}'
     )
     with ZipFile(source, "w") as archive:
         archive.writestr("Cluster_9/Master/save/shardindex", index)
         archive.writestr(
-            "Cluster_9/Master/save/session/0123456789ABCDEF/000000001", b"world\x00\xff"
+            "Cluster_9/Master/save/session/0123456789ABCDEF/0000000001",
+            b"world\x00\xff",
         )
         archive.writestr(
-            "Cluster_9/Master/save/session/0123456789ABCDEF/A7K1NP32JUC8/000000001",
+            "Cluster_9/Master/save/session/0123456789ABCDEF/A7K1NP32JUC8/0000000001",
             b"player\x00\xff",
         )
         archive.writestr("Cluster_9/Master/save/server_temp/cache", b"discard")
     destination = directory / "client-import"
-    config = await import_cluster(source, destination, from_client=True)
+    imported = await import_cluster(source)
+    config = imported.configuration
+    assert not destination.exists()
+    await imported.save(destination)
     assert config.dump(defaults=True)["settings"]["cluster_name"] == "Client fixture"
-    shard = config.dump(defaults=True)["shards"]["forest"]
-    assert shard["settings"]["name"] == "forest"
+    assert config.dump(defaults=True)["settings"]["cluster_language"] == "zh"
+    shard = config.dump(defaults=True)["shards"]["Master"]
+    assert shard["settings"]["name"] == "Master"
     assert shard["settings"]["encode_user_path"] is False
     assert (
-        destination / "forest/save/session/0123456789ABCDEF/000000001"
+        destination / "Master/save/session/0123456789ABCDEF/0000000001"
     ).read_bytes() == b"world\x00\xff"
     assert (
-        destination / "forest/save/session/0123456789ABCDEF/KU_WRv6AVc8_/000000001"
+        destination / "Master/save/session/0123456789ABCDEF/KU_WRv6AVc8_/0000000001"
     ).read_bytes() == b"player\x00\xff"
-    assert not (destination / "Master").exists()
-    assert not (destination / "forest/save/server_temp").exists()
+    assert not (destination / "Master/save/server_temp").exists()
     assert "123" in (destination / "mods/dedicated_server_mods_setup.lua").read_text()
+    (destination / "cluster.ini").write_text("[NETWORK]\ncluster_language = en\n")
+    restored = await import_cluster(destination)
+    assert (
+        restored.configuration.dump(defaults=True)["settings"]["cluster_language"]
+        == "en"
+    )
+    await check_apply(imported, destination)
+
+
+async def check_apply(imported: ImportedCluster, destination: Path) -> None:
+    (destination / "cluster_token.txt").write_text("keep-token")
+    overrides = destination / "Master/modoverrides.lua"
+    overrides.write_text("return {}\n")
+    applied = await imported.apply(destination, level="data")
+    assert applied.dump(defaults=True)["settings"]["cluster_language"] == "en"
+    assert overrides.read_text() == "return {}\n"
+    applied = await imported.apply(destination)
+    assert applied.dump(defaults=True)["settings"]["cluster_language"] == "en"
+    assert overrides.read_bytes() == imported.read_file("Master/modoverrides.lua")
+    applied = await imported.apply(destination, level="all")
+    assert applied.dump(defaults=True)["settings"]["cluster_language"] == "zh"
+    assert (destination / "cluster_token.txt").read_text() == "keep-token"
     try:
-        await import_cluster(source, directory / "invalid-option", from_client=1)  # ty: ignore[invalid-argument-type]
-    except ValueError:
-        pass
+        await imported.apply(destination, level="invalid")
+    except ValueError as error:
+        message = str(error)
     else:
-        message = "from_client accepted a non-boolean option"
+        message = "invalid import level was accepted"
         raise AssertionError(message)
+    assert "level must be" in message
+    from zipfile import ZipFile
+
+    partial_path = destination.parent / "partial.zip"
+    with ZipFile(partial_path, "w") as archive:
+        archive.writestr("Master/server.ini", "[SHARD]\nis_master = true\n")
+        archive.writestr("Master/save/recipebook", b"recipe progress")
+    partial = await import_cluster(partial_path)
+    world = destination / "Master/save/session/0123456789ABCDEF/0000000001"
+    before = world.read_bytes()
+    try:
+        await partial.apply(destination)
+    except ValueError as error:
+        if "missing shardindex" not in str(error):
+            raise
+    else:
+        message = "incomplete import replaced an existing world"
+        raise AssertionError(message)
+    assert world.read_bytes() == before
+    await check_apply_acl(imported, destination.parent)
+
+
+async def check_apply_acl(imported: ImportedCluster, directory: Path) -> None:
+    import struct
+
+    # Linux POSIX ACL entries: owner, owning group, optional mask, others.
+    acls = {
+        name: struct.pack("<I", 2)
+        + b"".join(struct.pack("<HHI", tag, mode, 0xFFFFFFFF) for tag, mode in entries)
+        for name, entries in [
+            ("system.posix_acl_access", [(1, 7), (4, 0), (16, 5), (32, 0)]),
+            ("system.posix_acl_default", [(1, 7), (4, 0), (32, 0)]),
+        ]
+    }
+    target = directory / "acl-room"
+    await imported.save(target)
+    cache = target / "mods/cache"
+    cache.mkdir()
+    token = target / "cluster_token.txt"
+    token.write_bytes(b"keep-acl-fixture-token")
+    token.chmod(0o640)
+    inode = token.stat().st_ino
+    for path in [target, cache]:
+        for name, value in acls.items():
+            os.setxattr(path, name, value)
+    await imported.apply(target, level="data")
+    for path in [target, cache]:
+        for name, value in acls.items():
+            assert os.getxattr(path, name) == value
+        created = path / "new-file"
+        created.write_bytes(b"private fixture")
+        assert created.stat().st_mode & 0o777 == 0o600
+    assert token.stat().st_ino == inode
+    assert token.read_bytes() == b"keep-acl-fixture-token"
+
+    parent = directory / "acl-parent"
+    parent.mkdir()
+    os.setxattr(parent, "system.posix_acl_default", acls["system.posix_acl_access"])
+    target = parent / "room"
+    await imported.save(target)
+    for name in acls:
+        os.removexattr(target, name)
+    mode = target.stat().st_mode
+    await imported.apply(target, level="data")
+    assert target.stat().st_mode == mode
+    assert acls.keys().isdisjoint(os.listxattr(target))
+
+
+async def check_formats(directory: Path) -> None:
+    import io
+    import tarfile
+    import zipfile
+
+    session = "Surface One/save/session/0123456789ABCDEF"
+    entries = {
+        "cluster.ini": b"[NETWORK]\ncluster_name = Format fixture\n",
+        "Surface One/server.ini": b"[SHARD]\nis_master = true\n",
+        f"{session}/世界.meta": b"metadata\x00\xff",
+        f"{session}/A7K1NP32JUC8/0000000001": b"encoded player\x00\xff",
+        f"{session}/KU_ABCDEFGH/0000000001": b"raw player\x00\xff",
+    }
+    archives: list[bytes] = []
+    for method in (
+        zipfile.ZIP_STORED,
+        zipfile.ZIP_DEFLATED,
+    ):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression=method) as writer:
+            for name, data in entries.items():
+                writer.writestr(f"Room/{name}", data)
+        archives.append(stream.getvalue())
+    for mode in ("w", "w:gz", "w:bz2", "w:xz", "w:zst"):
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode=mode) as writer:
+            for name, data in entries.items():
+                info = tarfile.TarInfo(f"./Room/{name}")
+                info.size = len(data)
+                writer.addfile(info, io.BytesIO(data))
+        archives.append(stream.getvalue())
+    before = await asyncio.to_thread(lambda: sorted(directory.iterdir()))
+    for data in archives:
+        with ClusterArchive("unknown-format.bin", io.BytesIO(data)) as source:
+            imported = await import_cluster(source)
+        assert (
+            imported.configuration.dump(defaults=True)["settings"]["cluster_name"]
+            == "Format fixture"
+        )
+        session = "Surface One/save/session/0123456789ABCDEF"
+        assert imported.read_file(f"{session}/世界.meta") == b"metadata\x00\xff"
+        assert (
+            imported.read_file(f"{session}/KU_WRv6AVc8_/0000000001")
+            == b"encoded player\x00\xff"
+        )
+        assert (
+            imported.read_file(f"{session}/KU_ABCDEFGH_/0000000001")
+            == b"raw player\x00\xff"
+        )
+    assert await asyncio.to_thread(lambda: sorted(directory.iterdir())) == before
+
+    for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE):
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as writer:
+            info = tarfile.TarInfo("Surface One/save/session/0123456789ABCDEF/link")
+            info.type = kind
+            info.linkname = "/etc/passwd"
+            writer.addfile(info)
+        with ClusterArchive("links.tar", io.BytesIO(stream.getvalue())) as source:
+            try:
+                await import_cluster(source)
+            except ValueError as error:
+                if "links" not in str(error) and "regular files" not in str(error):
+                    raise
+            else:
+                message = "archive accepted a link or special file"
+                raise AssertionError(message)
+
+
+async def check_archive_integrity_and_names() -> None:
+    import gzip
+    import io
+    import tarfile
+    import zipfile
+
+    session = "Master/save/session/0123456789ABCDEF"
+    entries = {
+        "cluster.ini": b"[NETWORK]\ncluster_name = Integrity fixture\n",
+        "Master/server.ini": b"[SHARD]\nis_master = true\n",
+        f"{session}/cafx.meta": b"snapshot\x00\xff",
+    }
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as writer:
+        for name, data in entries.items():
+            writer.writestr(name, data)
+    zipped = stream.getvalue().replace(b"cafx.meta", b"caf\x82.meta")
+    with ClusterArchive("cp437.zip", io.BytesIO(zipped)) as source:
+        imported = await import_cluster(source)
+    assert imported.read_file(f"{session}/café.meta") == b"snapshot\x00\xff"
+
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as writer:
+        for name, data in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            writer.addfile(info, io.BytesIO(data))
+    packed = gzip.compress(stream.getvalue(), compresslevel=0, mtime=0)
+    damaged = packed.replace(b"snapshot\x00\xff", b"corrupt!\x00\xff", 1)
+    assert damaged != packed
+    for data in (
+        zipped.replace(b"snapshot\x00\xff", b"corrupt!\x00\xff", 1),
+        damaged,
+        packed[:-1],
+        packed + damaged,
+        gzip.compress(damaged),
+        zipped.replace(b"caf\x82.meta", b"caf\x00.meta"),
+    ):
+        with ClusterArchive("damaged.bin", io.BytesIO(data)) as source:
+            try:
+                await import_cluster(source)
+            except ValueError, OSError:
+                pass
+            else:
+                message = "archive accepted a corrupt or incomplete stream"
+                raise AssertionError(message)
+
+
+async def check_compressed_tar_integrity() -> None:
+    import bz2
+    import hashlib
+    import io
+    import lzma
+    import tarfile
+    from compression import zstd
+
+    name = "Master/save/session/0123456789ABCDEF/0000000001"
+    world = hashlib.shake_256(b"archive integrity").digest(120_000)
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as writer:
+        for path, data in {
+            "cluster.ini": b"[NETWORK]\ncluster_name = Integrity\n",
+            "Master/server.ini": b"[SHARD]\nis_master = true\n",
+            name: world,
+        }.items():
+            info = tarfile.TarInfo(path)
+            info.size = len(data)
+            writer.addfile(info, io.BytesIO(data))
+    tar = stream.getvalue()
+    cases = (
+        (bz2.compress(tar), bz2.decompress, -2),
+        (lzma.compress(tar), lzma.decompress, -12),
+        (
+            zstd.compress(tar, options={zstd.CompressionParameter.checksum_flag: 1}),
+            zstd.decompress,
+            -1,
+        ),
+    )
+    for packed, decode, offset in cases:
+        with ClusterArchive("valid.bin", io.BytesIO(packed)) as source:
+            imported = await import_cluster(source)
+        assert imported.read_file(name) == world
+        damaged = bytearray(packed)
+        damaged[offset] ^= 1
+        try:
+            decode(damaged)
+        except OSError, lzma.LZMAError, zstd.ZstdError:
+            pass
+        else:
+            message = "test fixture did not damage the compression checksum"
+            raise AssertionError(message)
+        with ClusterArchive("damaged.bin", io.BytesIO(damaged)) as source:
+            try:
+                await import_cluster(source)
+            except ValueError, OSError:
+                pass
+            else:
+                message = "TAR ended before validating its compressed stream"
+                raise AssertionError(message)
 
 
 class Secret:
@@ -307,6 +598,9 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         asyncio.run(check_export(Path(temporary)))
         asyncio.run(check_client_import(Path(temporary)))
+        asyncio.run(check_formats(Path(temporary)))
+        asyncio.run(check_archive_integrity_and_names())
+        asyncio.run(check_compressed_tar_integrity())
         asyncio.run(check_upload())
 
 

@@ -1,6 +1,11 @@
 //! Native archive files with Python BinaryIO access and awaited upload cleanup.
 
-use std::{io::Write, os::fd::AsRawFd, path::PathBuf, sync::Mutex};
+use std::{
+    io::Write,
+    os::fd::AsRawFd,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use dst_server::archive as native;
 use pyo3::{
@@ -17,30 +22,82 @@ use crate::{
 };
 
 #[pyfunction]
-#[pyo3(signature = (source, destination, *, options=None))]
-fn import_archive<'py>(
-    py: Python<'py>,
-    source: &Bound<'_, PyAny>,
-    destination: PathBuf,
-    options: Option<&Bound<'_, PyAny>>,
-) -> PyResult<Bound<'py, PyAny>> {
+fn import_archive<'py>(py: Python<'py>, source: &Bound<'_, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     let source = if let Ok(archive) = source.extract::<PyRef<'_, ClusterArchive>>() {
         native::ImportSource::Archive(archive.copy()?.into_file())
     } else {
         native::ImportSource::Path(source.extract()?)
     };
-    let options = options
-        .map(|value| from_python(value, 0, &mut 0))
-        .transpose()?
-        .unwrap_or_else(|| serde_json::json!({}));
-    let options = serde_json::from_value::<native::ImportOptions>(options)
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        native::import_cluster(source, destination, options)
+        native::import_cluster(source)
             .await
-            .map(Configuration::from_cluster)
+            .map(|inner| ImportedCluster {
+                inner: Arc::new(inner),
+            })
             .map_err(error)
     })
+}
+
+#[pyclass(name = "ImportedCluster", module = "dst_server._native", frozen)]
+struct ImportedCluster {
+    inner: Arc<native::ImportedCluster>,
+}
+
+#[pymethods]
+impl ImportedCluster {
+    #[getter]
+    fn configuration(&self) -> Configuration {
+        Configuration::from_cluster(self.inner.configuration().clone())
+    }
+
+    #[getter]
+    fn files(&self) -> Vec<String> {
+        self.inner
+            .files()
+            .keys()
+            .map(|path| path.to_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn read_file<'py>(&self, py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = self
+            .inner
+            .files()
+            .get(&path)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(path))?;
+        Ok(PyBytes::new(py, bytes))
+    }
+
+    fn save<'py>(&self, py: Python<'py>, destination: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let imported = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            tokio::task::spawn_blocking(move || imported.save(destination))
+                .await
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+                .map_err(error)?;
+            Ok(Python::attach(|py| py.None()))
+        })
+    }
+
+    #[pyo3(signature = (destination, *, level="runtime"))]
+    fn apply<'py>(
+        &self,
+        py: Python<'py>,
+        destination: PathBuf,
+        level: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let level = serde_json::from_value(serde_json::Value::String(level.to_owned()))
+            .map_err(|_| PyValueError::new_err("level must be data, runtime or all"))?;
+        let imported = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let configuration =
+                tokio::task::spawn_blocking(move || imported.apply(destination, level))
+                    .await
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+                    .map_err(error)?;
+            Ok(Configuration::from_cluster(configuration))
+        })
+    }
 }
 
 #[pyclass(name = "ClusterArchive", module = "dst_server._native")]
@@ -269,6 +326,7 @@ fn level(value: &Bound<'_, PyAny>) -> PyResult<u32> {
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<ClusterArchive>()?;
+    module.add_class::<ImportedCluster>()?;
     module.add_class::<Upload>()?;
     module.add_function(wrap_pyfunction!(export_archive, module)?)?;
     module.add_function(wrap_pyfunction!(import_archive, module)?)?;

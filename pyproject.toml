@@ -4,8 +4,8 @@ version = "0.5.0"
 description = "Native SDK and room agent for Don't Starve Together."
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
-requires-python = ">=3.14,<3.15"
+license-files = ["LICENSE", "licenses/third-party/*"]
+requires-python = ">=3.15"
 dependencies = []
 
 [project.scripts]

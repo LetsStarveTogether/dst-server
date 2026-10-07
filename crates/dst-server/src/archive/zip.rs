@@ -39,7 +39,11 @@ fn le64(bytes: &[u8], offset: usize) -> u64 {
 
 /// zip's name index overwrites duplicate entries. Check the bounded central
 /// directory first, before the library allocates its index or hides duplicates.
-fn preflight_directory(file: &mut File, max_bytes: u64, max_entries: usize) -> Result<usize> {
+pub(super) fn preflight_directory(
+    file: &mut File,
+    max_bytes: u64,
+    max_entries: usize,
+) -> Result<usize> {
     let size = file.metadata()?.len();
     ensure!(
         (22..=max_bytes).contains(&size),
@@ -139,10 +143,10 @@ fn preflight_directory(file: &mut File, max_bytes: u64, max_entries: usize) -> R
             record_length <= entry.len() && le16(entry, 34) == 0,
             "truncated or split ZIP directory entry"
         );
-        let name = std::str::from_utf8(&entry[46..46 + name_length])
-            .context("ZIP archive names must be UTF-8")?;
+        let name = &entry[46..46 + name_length];
+        ensure!(!name.contains(&0), "ZIP archive name contains NUL");
         ensure!(
-            names.insert(name.to_owned()),
+            names.insert(name),
             "unsupported or duplicate ZIP archive entry"
         );
         ensure!(

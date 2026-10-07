@@ -33,7 +33,7 @@ ARG BETA
 ARG SOURCE_REVISION
 ARG NATIVE_SCRIPTS_REVISION
 RUN install -D target/release/dst-server /out/native/dst-server-linux-x86_64 && \
-    cp LICENSE /out/native/LICENSE && \
+    cp LICENSE /out/native/ && \
     python3 tools/build_manifest.py --output /out/build-manifest.json \
         --revision="${SOURCE_REVISION}" \
         --native-scripts-revision="${NATIVE_SCRIPTS_REVISION}" \
@@ -100,6 +100,7 @@ RUN set -e; \
 USER root
 COPY --from=sdk-build /out/native/dst-server-linux-x86_64 /usr/local/bin/dst-server
 COPY --from=sdk-build /out/build-manifest.json /usr/local/share/dst-server/build-manifest.json
+COPY LICENSE /usr/local/share/licenses/dst-server/
 RUN dst-server scripts build /install/data/databundles/scripts.zip \
         --output /install/data/databundles/scripts.zip && \
     dst-server scripts verify /install/data/databundles/scripts.zip

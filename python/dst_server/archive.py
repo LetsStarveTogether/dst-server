@@ -9,6 +9,7 @@ from os import PathLike
 from typing import Any, BinaryIO, Protocol, Self, cast
 
 from ._native import ClusterArchive as _Archive
+from ._native import ImportedCluster
 from ._native import export_archive as _export_archive
 from ._native import import_archive as _import_archive
 from .host import Host
@@ -124,21 +125,17 @@ async def export_cluster(
 
 async def import_cluster(
     source: str | PathLike[str] | ClusterArchive,
-    destination: str | PathLike[str],
-    *,
-    from_client: bool = False,
-) -> Configuration:
-    """Import a directory or archive into a new native save directory."""
+) -> ImportedCluster:
+    """Parse in memory; save() creates a room, apply() updates a stopped room."""
     return await _import_archive(
         source._archive if isinstance(source, ClusterArchive) else source,
-        destination,
-        options={"from_client": from_client},
     )
 
 
 __all__ = [
     "ArchiveUploadResult",
     "ClusterArchive",
+    "ImportedCluster",
     "SecretValue",
     "export_cluster",
     "import_cluster",

@@ -670,6 +670,10 @@ impl LevelDataOverride {
 
 impl ClusterConfig {
     pub(crate) fn from_files(files: &BTreeMap<PathBuf, Vec<u8>>) -> Result<Self> {
+        Self::from_value(Self::read_files(files)?)
+    }
+
+    pub(crate) fn read_files(files: &BTreeMap<PathBuf, Vec<u8>>) -> Result<Value> {
         let read_bytes = |path: &Path| {
             files
                 .get(path)
@@ -712,13 +716,13 @@ impl ClusterConfig {
         world_kinds: &BTreeMap<String, String>,
         level_kinds: &BTreeMap<String, String>,
     ) -> Result<Self> {
-        load_cluster(
+        Self::from_value(load_cluster(
             &|path| room.read_optional_text(path),
             &|path| room.read_optional_bytes(path),
             room.shard_directories()?,
             world_kinds,
             level_kinds,
-        )
+        )?)
     }
     pub fn files(&self) -> Result<FileChanges> {
         let multi = self.0.shards.len() > 1;
@@ -923,7 +927,7 @@ fn load_cluster(
     directories: Vec<String>,
     world_kinds: &BTreeMap<String, String>,
     level_kinds: &BTreeMap<String, String>,
-) -> Result<ClusterConfig> {
+) -> Result<Value> {
     let required = |path: &Path| {
         read(path)?.with_context(|| format!("missing native configuration: {}", path.display()))
     };
@@ -993,7 +997,7 @@ fn load_cluster(
     if let Some(source) = read(Path::new("mods/dedicated_server_mods_setup.lua"))? {
         cluster["downloads"] = WorkshopDownloads::parse(&source)?.into_value();
     }
-    ClusterConfig::from_value(cluster)
+    Ok(cluster)
 }
 
 impl RoomPreset {

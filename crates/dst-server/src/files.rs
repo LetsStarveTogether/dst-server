@@ -7,7 +7,7 @@ use std::fs::{File, TryLockError};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -190,6 +190,12 @@ impl RoomLock {
             _lock: lock,
             owner_pid: std::process::id(),
         };
+        let current = Directory::open(directory)?.0.metadata()?;
+        let opened = room.root.0.metadata()?;
+        ensure!(
+            (current.dev(), current.ino()) == (opened.dev(), opened.ino()),
+            "room directory changed while acquiring its lock"
+        );
         let legacy = ".dst-control.json";
         if room.root.kind(legacy)?.is_some() {
             room.root.require_regular_or_absent(legacy)?;
@@ -271,6 +277,83 @@ impl RoomLock {
         );
         self.root.replace(STATE_FILE, &encoded, 0o600)?;
         Ok(result)
+    }
+
+    /// Prepare the complete room before exchanging it, retaining the lock inode.
+    pub(crate) fn replace_import(
+        self,
+        changes: &BTreeMap<PathBuf, impl AsRef<[u8]>>,
+        replaced: &BTreeSet<PathBuf>,
+    ) -> Result<()> {
+        let destination = std::path::absolute(self.directory())?;
+        let opened = self.root.0.metadata()?;
+        for ancestor in std::env::current_dir()?.ancestors() {
+            let current = std::fs::metadata(ancestor)?;
+            ensure!(
+                (current.dev(), current.ino()) != (opened.dev(), opened.ino()),
+                "import destination contains the current working directory; run the import from outside the room"
+            );
+        }
+        let parent = Directory::open(destination.parent().context("room must have a parent")?)?;
+        let name = destination.file_name().context("room must have a name")?;
+        let temporary = parent.import_directory()?;
+        let temporary_name = temporary.path().file_name().unwrap().to_owned();
+        let discarded = destination.with_file_name(&temporary_name);
+        let mut published = false;
+        let result = (|| -> Result<()> {
+            let root = parent.child_os(&temporary_name, false, 0o700)?;
+            set_owner(&root.0, &self.root.0.metadata()?)?;
+            root.write_imported(changes)?;
+            self.root.preserve_import(&root, Path::new(""), replaced)?;
+            let current = parent.child_os(name, false, 0)?.0.metadata()?;
+            ensure!(
+                (current.dev(), current.ino()) == (opened.dev(), opened.ino()),
+                "room directory changed during import"
+            );
+            let source = CString::new(temporary_name.as_bytes())?;
+            let destination = CString::new(name.as_bytes())?;
+            // SAFETY: both names and their owned parent descriptor remain live.
+            if unsafe {
+                libc::renameat2(
+                    parent.0.as_raw_fd(),
+                    source.as_ptr(),
+                    parent.0.as_raw_fd(),
+                    destination.as_ptr(),
+                    libc::RENAME_EXCHANGE,
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error()).context("publish imported room");
+            }
+            published = true;
+            parent.sync()
+        })();
+        let temporary_path = temporary.keep();
+        if published && result.is_err() {
+            return result.with_context(|| {
+                format!(
+                    "import applied but durability is unconfirmed; previous room retained at {}",
+                    discarded.display()
+                )
+            });
+        }
+        let cleanup = (|| -> Result<()> {
+            parent
+                .child_os(&temporary_name, false, 0)?
+                .allow_removal()?;
+            std::fs::remove_dir_all(&temporary_path)?;
+            parent.sync()
+        })();
+        match (result, cleanup) {
+            (Err(error), Err(cleanup)) => Err(error.context(format!(
+                "import rejected; cleanup failed at {}: {cleanup:#}",
+                discarded.display()
+            ))),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), cleanup) => cleanup.with_context(|| {
+                format!("import applied; cleanup failed at {}", discarded.display())
+            }),
+        }
     }
 }
 
@@ -478,7 +561,7 @@ fn identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-fn relative_components(path: &Path) -> Result<Vec<&str>> {
+pub(crate) fn relative_components(path: &Path) -> Result<Vec<&str>> {
     let text = path.to_str().context("configuration path must be UTF-8")?;
     ensure!(
         !text.is_empty() && text.len() <= 4096 && !text.contains(['\0', '\r', '\n', '\\']),
@@ -519,24 +602,10 @@ pub(crate) fn write_new_directory(
             .unwrap_or(Path::new(".")),
         true,
     )?;
-    let temporary = tempfile::Builder::new()
-        .prefix(".dst-import-")
-        .tempdir_in(format!("/proc/self/fd/{}", parent.0.as_raw_fd()))?;
+    let temporary = parent.import_directory()?;
     let temporary_name = temporary.path().file_name().unwrap();
     let root = parent.child_os(temporary_name, false, 0o700)?;
-    for (path, bytes) in files {
-        let (directory, filename) = root.parent(path, true)?;
-        let mut file = directory.open_file(
-            &filename,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-            0o600,
-        )?;
-        file.write_all(bytes)
-            .context("write imported native file")?;
-        file.sync_all()?;
-        directory.sync()?;
-    }
-    root.sync()?;
+    root.write_imported(files)?;
     let source = CString::new(temporary_name.as_bytes())?;
     let destination = CString::new(name.as_bytes())?;
     // SAFETY: both names are NUL terminated and parent owns the directory descriptor.
@@ -562,6 +631,159 @@ pub fn directory_names(path: impl AsRef<Path>) -> Result<Vec<String>> {
 }
 
 impl Directory {
+    fn import_directory(&self) -> Result<tempfile::TempDir> {
+        tempfile::Builder::new()
+            .prefix(".dst-import-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(format!("/proc/self/fd/{}", self.0.as_raw_fd()))
+            .context("create private import directory")
+    }
+
+    fn allow_removal(&self) -> Result<()> {
+        let mode = self.0.metadata()?.permissions().mode();
+        self.0
+            .set_permissions(std::fs::Permissions::from_mode(mode | 0o700))?;
+        for entry in std::fs::read_dir(format!("/proc/self/fd/{}", self.0.as_raw_fd()))? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                self.child_os(&entry.file_name(), false, 0)?
+                    .allow_removal()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_imported(&self, files: &BTreeMap<PathBuf, impl AsRef<[u8]>>) -> Result<()> {
+        let owner = self.0.metadata()?;
+        for (path, bytes) in files {
+            let mut parts = relative_components(path)?;
+            let name = parts.pop().expect("validated path");
+            let mut directory = self.duplicate()?;
+            for part in parts {
+                directory = directory.child(part, true, 0o755)?;
+                set_owner(&directory.0, &owner)?;
+            }
+            let mut file =
+                directory.open_file(name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600)?;
+            file.write_all(bytes.as_ref())
+                .context("write imported native file")?;
+            set_owner(&file, &owner)?;
+            file.sync_all()?;
+            directory.sync()?;
+        }
+        self.sync()
+    }
+
+    fn preserve_import(
+        &self,
+        destination: &Self,
+        relative: &Path,
+        replaced: &BTreeSet<PathBuf>,
+    ) -> Result<()> {
+        for (name, kind) in self.entries()? {
+            let path = relative.join(&name);
+            if relative.as_os_str().is_empty()
+                && name == crate::host::AGENT_SOCKET
+                && kind.is_socket()
+            {
+                match std::os::unix::net::UnixStream::connect(format!(
+                    "/proc/self/fd/{}/{name}",
+                    self.0.as_raw_fd()
+                )) {
+                    Ok(_) => bail!("room Agent socket is still active"),
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => continue,
+                    Err(error) => return Err(error).context("inspect room Agent socket"),
+                }
+            }
+            ensure!(
+                kind.is_dir() || kind.is_file(),
+                "room contains a symlink or special file: {}",
+                path.display()
+            );
+            if replaced.contains(&path) {
+                ensure!(
+                    kind.is_dir() == (path.file_name().unwrap() == "save"),
+                    "unexpected type for imported path: {}",
+                    path.display()
+                );
+                continue;
+            }
+            if kind.is_dir() {
+                self.child(&name, false, 0)?.preserve_import(
+                    &destination.child(&name, true, 0o700)?,
+                    &path,
+                    replaced,
+                )?;
+            } else {
+                let name = CString::new(name)?;
+                // SAFETY: both directories are owned, and the name is NUL terminated.
+                if unsafe {
+                    libc::linkat(
+                        self.0.as_raw_fd(),
+                        name.as_ptr(),
+                        destination.0.as_raw_fd(),
+                        name.as_ptr(),
+                        0,
+                    )
+                } != 0
+                {
+                    return Err(std::io::Error::last_os_error())
+                        .context("preserve existing room file");
+                }
+            }
+        }
+        let metadata = self.0.metadata()?;
+        set_owner(&destination.0, &metadata)?;
+        self.copy_acl(destination)?;
+        destination.0.set_permissions(metadata.permissions())?;
+        destination.sync()
+    }
+
+    fn copy_acl(&self, destination: &Self) -> Result<()> {
+        // Restore ACLs before chmod can expose the copied files through group permissions.
+        let mut value = vec![0_u8; 64 * 1024];
+        for name in [c"system.posix_acl_access", c"system.posix_acl_default"] {
+            // SAFETY: owned descriptors and a writable buffer remain live during the call.
+            let size = unsafe {
+                libc::fgetxattr(
+                    self.0.as_raw_fd(),
+                    name.as_ptr(),
+                    value.as_mut_ptr().cast(),
+                    value.len(),
+                )
+            };
+            if size < 0 {
+                let error = std::io::Error::last_os_error();
+                if !matches!(error.raw_os_error(), Some(libc::ENODATA | libc::ENOTSUP)) {
+                    return Err(error).context("read room directory ACL");
+                }
+                // SAFETY: the descriptor and attribute name remain live during the call.
+                if unsafe { libc::fremovexattr(destination.0.as_raw_fd(), name.as_ptr()) } != 0 {
+                    let error = std::io::Error::last_os_error();
+                    if !matches!(error.raw_os_error(), Some(libc::ENODATA | libc::ENOTSUP)) {
+                        return Err(error).context("remove inherited directory ACL");
+                    }
+                }
+            } else {
+                // SAFETY: fgetxattr initialized size bytes, and both arguments remain live.
+                if unsafe {
+                    libc::fsetxattr(
+                        destination.0.as_raw_fd(),
+                        name.as_ptr(),
+                        value.as_ptr().cast(),
+                        size as usize,
+                        0,
+                    )
+                } != 0
+                {
+                    return Err(std::io::Error::last_os_error())
+                        .context("preserve room directory ACL");
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn open(path: &Path) -> Result<Self> {
         Self::open_with_creation(path, false)
     }
@@ -649,8 +871,10 @@ impl Directory {
         {
             // SAFETY: same descriptor and name validity as openat above.
             if unsafe { libc::mkdirat(self.0.as_raw_fd(), name.as_ptr(), mode) } != 0 {
-                return Err(std::io::Error::last_os_error())
-                    .context("create configuration directory");
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error).context("create configuration directory");
+                }
             }
             self.sync()?;
             // SAFETY: same descriptor and name validity as openat above.
@@ -830,12 +1054,42 @@ impl Directory {
     }
 }
 
+fn set_owner(file: &File, owner: &std::fs::Metadata) -> Result<()> {
+    let current = file.metadata()?;
+    if (current.uid(), current.gid()) != (owner.uid(), owner.gid()) {
+        // SAFETY: file owns the descriptor, and uid/gid come from existing metadata.
+        if unsafe { libc::fchown(file.as_raw_fd(), owner.uid(), owner.gid()) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("preserve room ownership");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::{net::UnixStream, process::CommandExt};
     use std::process::Command;
     use std::time::Duration;
+
+    #[test]
+    fn import_staging_keeps_hardlinked_files_behind_private_directory_permissions() {
+        let holder = tempfile::tempdir().unwrap();
+        let token = holder.path().join("token");
+        std::fs::write(&token, b"private fixture token").unwrap();
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let parent = Directory::open(holder.path()).unwrap();
+        let staging = parent.import_directory().unwrap();
+        std::fs::hard_link(&token, staging.path().join("token")).unwrap();
+        assert_eq!(
+            staging.path().metadata().unwrap().permissions().mode() & 0o077,
+            0
+        );
+        assert_eq!(
+            staging.path().join("token").metadata().unwrap().ino(),
+            token.metadata().unwrap().ino()
+        );
+    }
 
     fn paused_before_exec(
         mut action: impl FnMut() -> std::io::Result<()> + Send + Sync + 'static,

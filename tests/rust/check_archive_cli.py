@@ -6,6 +6,7 @@
 import fcntl
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -15,6 +16,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from zipfile import ZipFile
 
 from dst_server.settings import Room, RoomStore, build_template
 
@@ -112,6 +114,19 @@ def check(directory: Path) -> None:
 
 
 def check_import(directory: Path, source: Path) -> None:
+    before = sorted(directory.iterdir())
+    parsed = subprocess.run(
+        [*arguments(directory), "import", str(source)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert parsed.returncode == 0, parsed.stderr
+    result = json.loads(parsed.stdout)
+    assert result["path"] is None
+    assert "cluster.ini" in result["files"]
+    assert sorted(directory.iterdir()) == before
     restored = directory / "restored"
     imported = subprocess.run(
         [*arguments(directory), "import", str(source), "--output", str(restored)],
@@ -137,8 +152,6 @@ def check_import(directory: Path, source: Path) -> None:
     assert existing_import.returncode == 1
     assert "already exists" in existing_import.stderr
 
-    from zipfile import ZipFile
-
     client_input = directory / "client.zip"
     with ZipFile(client_input, "w") as archive:
         archive.writestr(
@@ -148,10 +161,11 @@ def check_import(directory: Path, source: Path) -> None:
             'world={options={id="SURVIVAL_TOGETHER",name="World",desc="",location="forest",overrides={task_set="default"}}},enabled_mods={}}',
         )
         archive.writestr(
-            "Cluster_2/Master/save/session/0123456789ABCDEF/000000001", b"world\x00\xff"
+            "Cluster_2/Master/save/session/0123456789ABCDEF/0000000001",
+            b"world\x00\xff",
         )
         archive.writestr(
-            "Cluster_2/Master/save/session/0123456789ABCDEF/A7K1NP32JUC8/000000001",
+            "Cluster_2/Master/save/session/0123456789ABCDEF/A7K1NP32JUC8/0000000001",
             b"player\x00\xff",
         )
         archive.writestr("Cluster_2/Master/save/server_temp/cache", b"discard")
@@ -161,7 +175,6 @@ def check_import(directory: Path, source: Path) -> None:
             *arguments(directory),
             "import",
             str(client_input),
-            "--from-client",
             "--output",
             str(client_output),
         ],
@@ -176,16 +189,141 @@ def check_import(directory: Path, source: Path) -> None:
         == "Client fixture"
     )
     assert (
-        client_output / "forest/save/session/0123456789ABCDEF/000000001"
+        client_output / "Master/save/session/0123456789ABCDEF/0000000001"
     ).read_bytes() == b"world\x00\xff"
-    shard = json.loads(client_import.stdout)["configuration"]["shards"]["forest"]
-    assert shard["settings"]["name"] == "forest"
+    shard = json.loads(client_import.stdout)["configuration"]["shards"]["Master"]
+    assert shard["settings"]["name"] == "Master"
     assert shard["settings"]["encode_user_path"] is False
     assert (
-        client_output / "forest/save/session/0123456789ABCDEF/KU_WRv6AVc8_/000000001"
+        client_output / "Master/save/session/0123456789ABCDEF/KU_WRv6AVc8_/0000000001"
     ).read_bytes() == b"player\x00\xff"
-    assert not (client_output / "Master").exists()
-    assert not (client_output / "forest/save/server_temp").exists()
+    assert not (client_output / "Master/save/server_temp").exists()
+
+    check_apply(directory, client_input, client_output)
+
+    import io
+    import tarfile
+
+    tar_input = directory / "format-detected.data"
+    with tarfile.open(tar_input, "w:gz") as writer, ZipFile(client_input) as archive:
+        for name in archive.namelist():
+            data = archive.read(name)
+            info = tarfile.TarInfo(f"./{name}")
+            info.size = len(data)
+            writer.addfile(info, io.BytesIO(data))
+        info = tarfile.TarInfo(
+            "./Cluster_2/Master/save/session/0123456789ABCDEF/世界.meta"
+        )
+        info.size = 3
+        writer.addfile(info, io.BytesIO(b"abc"))
+    parsed_tar = subprocess.run(
+        [*arguments(directory), "import", str(tar_input)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert parsed_tar.returncode == 0, parsed_tar.stderr
+    assert (
+        "Master/save/session/0123456789ABCDEF/世界.meta"
+        in json.loads(parsed_tar.stdout)["files"]
+    )
+
+
+def check_apply(directory: Path, client_input: Path, client_output: Path) -> None:
+    cluster_ini = client_output / "cluster.ini"
+    cluster_ini.write_text("[NETWORK]\ncluster_name = Existing\n")
+    overrides = client_output / "Master/modoverrides.lua"
+    overrides.write_text("return {local_mod={enabled=true}}\n")
+    apply = [
+        *arguments(directory),
+        "import",
+        str(client_input),
+        "--into",
+        str(client_output),
+    ]
+    for options, level in [
+        (["--level", "data"], "data"),
+        ([], "runtime"),
+        (["--level", "all"], "all"),
+    ]:
+        result = subprocess.run(
+            [*apply, *options], capture_output=True, text=True, check=False, timeout=30
+        )
+        assert result.returncode == 0, result.stderr
+        receipt = json.loads(result.stdout)
+        assert receipt["level"] == level
+        assert receipt["path"] == str(client_output)
+        assert receipt["configuration"]["settings"]["cluster_name"] == (
+            "Client fixture" if level == "all" else "Existing"
+        )
+        assert ("local_mod" in overrides.read_text()) == (level == "data")
+    for options in [["--output", str(directory / "conflict")], ["--level", "invalid"]]:
+        result = subprocess.run(
+            [*apply, *options], capture_output=True, text=True, check=False, timeout=30
+        )
+        assert result.returncode == 2, result.stderr
+    with (client_output / ".dst-room.lock").open("r+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(
+            apply, capture_output=True, text=True, check=False, timeout=30
+        )
+        assert result.returncode == 1
+        assert "busy" in result.stderr
+
+    partial = directory / "partial.zip"
+    with ZipFile(partial, "w") as archive:
+        archive.writestr("Master/server.ini", "[SHARD]\nis_master = true\n")
+        archive.writestr("Master/save/recipebook", b"recipe progress")
+    world = client_output / "Master/save/session/0123456789ABCDEF/0000000001"
+    before = world.read_bytes()
+    result = subprocess.run(
+        [*arguments(directory), "import", str(partial), "--into", str(client_output)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 1
+    assert "missing shardindex" in result.stderr
+    assert world.read_bytes() == before
+
+    for cwd in [client_output, client_output / "Master"]:
+        current = apply.copy()
+        current[0] = str(Path(current[0]).absolute())
+        if cwd == client_output:
+            current[-1] = "."
+        inode = cwd.stat().st_ino
+        result = subprocess.run(
+            current, cwd=cwd, capture_output=True, text=True, check=False, timeout=30
+        )
+        assert result.returncode == 1, result.stderr
+        assert "current working directory" in result.stderr
+        assert cwd.stat().st_ino == inode
+        assert world.read_bytes() == before
+
+    invalid = directory / os.fsdecode(b"destination-\xff")
+    for option in ["--output", "--into"]:
+        if option == "--into":
+            shutil.copytree(client_output, invalid)
+            (invalid / world.relative_to(client_output)).write_bytes(
+                b"keep previous world"
+            )
+        result = subprocess.run(
+            [*arguments(directory), "import", str(client_input), option, str(invalid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 1, result.stderr
+        assert "valid UTF-8" in result.stderr
+        if option == "--output":
+            assert not invalid.exists()
+        else:
+            assert (
+                invalid / world.relative_to(client_output)
+            ).read_bytes() == b"keep previous world"
 
 
 def check_upload_termination(directory: Path) -> None:
