@@ -36,6 +36,7 @@ Keep concrete regressions for failures such as parser stack exhaustion and room 
 The Rust sources remain ordinary `#[test]` and `#[tokio::test]` functions.
 nextest controls their execution without adding an application dependency.
 The repository uses four concurrent test processes and a two minute timeout per test.
+The daily schedule test allows 210 seconds to cross real opening and closing boundaries.
 CI collects all failures; automatic retries are disabled by nextest's default configuration.
 Investigate an intermittent failure before adding a retry.
 
@@ -77,6 +78,24 @@ uv run --locked --only-group dev pytest tests/lua --scripts /tmp/native/source/s
 
 Missing interpreters, native scripts or the SDK executable fail the suite instead of silently skipping tests.
 Use `cargo test --locked -p dst-server --doc` when adding executable Rust documentation examples.
+
+The Steam API tests use local HTTP responses to exercise typed decoding, batch correlation, retries and cancellation.
+Workshop monitor tests cover installed manifests, opaque content handles, unavailable items and bounded batches.
+Agent fixtures verify maintenance decisions, query failures, policy changes and shutdown during a stalled check.
+They also check deadlines and limits on compressed and streamed bodies.
+Retry tests cover all three HTTP date formats, expired dates and delays beyond the call budget.
+A local HTTP/2 peer sends GOAWAY debug data.
+The test checks that display, debug output and every error source discard that text.
+The fixture preserves response shapes observed on 2026-11-11, with synthetic author IDs, URLs and prose.
+Run the anonymous Steam acceptance test explicitly when checking the live service:
+
+```sh
+cargo test --locked -p dst-server --lib steam::tests
+cargo test --locked -p dst-server --test steam -- --ignored --nocapture
+```
+
+The live test queries five public DST Workshop items, a nonexistent ID, repeated IDs and a single item without credentials.
+It is ignored during ordinary test runs because network availability and Workshop visibility can change.
 
 ## Writing Cases That Survive Refactoring
 

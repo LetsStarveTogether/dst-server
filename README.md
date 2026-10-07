@@ -6,29 +6,30 @@
 English | [简体中文](README.zh-Hans.md)
 
 A Rust SDK, Agent and CLI for Don't Starve Together, with Python bindings.
-Each room runs in one container: one Agent supervises every configured shard and exits with the games when the room closes.
-An external scheduler starts the container at each opening.
-Published binaries and Python wheels support Linux x86_64 and CPython 3.14.
+Each room runs in one container with a resident Agent supervising every configured shard.
+The Agent starts and stops games according to the room policy and keeps its control socket available between openings.
+Published binaries and Python wheels support Linux x86_64 and CPython 3.15.
 The control socket is for trusted callers on the same host.
 
 Version `0.4.0` replaced the earlier Python implementation.
-Version `0.5.0` exits each container when its room closes and uses external scheduling for the next opening.
+The Agent owns daily opening and closing without an external scheduler.
 See the [migration guide](docs/migration.md) for API changes, verification and known limitations.
 Internal readiness does not establish public network reachability.
 
-Install the Python SDK with `pip install dst-server==0.5.0` in a CPython 3.14 environment.
-The [GitHub release](https://github.com/LetsStarveTogether/dst-server/releases/tag/v0.5.0) also includes a standalone Linux x86_64 CLI.
+Install the Python SDK with `pip install dst-server==0.5.0` in a CPython 3.15 environment.
+The [GitHub release](https://github.com/LetsStarveTogether/dst-server/releases/tag/v0.5.0) also includes a native Linux x86_64 CLI, which requires libarchive 3.7 or newer.
+Python wheels bundle libarchive and its required libraries, with their copyright and license texts under `.dist-info/licenses/`.
 
 ## Build and Create a Room
 
-Install Rust 1.99, a C/C++ build toolchain, Cap'n Proto, and [uv](https://docs.astral.sh/uv/).
+Install the latest stable Rust, a C/C++ build toolchain, Cap'n Proto, pkg-config, libarchive development files, and [uv](https://docs.astral.sh/uv/).
 Host deployment additionally requires Podman with Quadlet and systemd.
 From this checkout:
 
 ```sh
 cargo build --locked --release -p dst-server --bin dst-server
 export PATH="$PWD/target/release:$PATH"
-uv sync --python 3.14
+uv sync --python 3
 dst-server --help
 uv run python -m dst_server --help
 ```
@@ -140,10 +141,11 @@ dst-server subscribe lifecycle --socket /srv/dst/299/.dst-agent.sock
 
 `call stop` gracefully closes every shard, then exits the Agent and container with code `0`.
 `host stop --room 299` stops the container service, including its Agent.
-Either stop permits the independent external scheduler to start the service at its next trigger.
-`call restart` confirms the stop and requests container replacement; its reply does not confirm the next startup.
+Stopping the container also stops automatic scheduling until its service is started again.
+`call restart` stops and starts games within the same Agent and waits for readiness during opening hours.
+`call start` requests policy reconciliation and resets exhausted recovery for an always-open room.
 Use `host start` or `host restart` to wait for all shards to become ready.
-Outside opening hours, startup exits successfully with the room closed.
+Outside opening hours, startup leaves the Agent available with the games stopped.
 Recovery that remains exhausted is reported as an error.
 Stop the service before offline configuration changes:
 
@@ -299,6 +301,48 @@ Use permission operations for online changes.
 Structured Lua reads parse Lua 5.1 literals without execution.
 Dynamic configurations can be loaded by the game; this API cannot structurally edit them.
 
+## Player Management and Votes
+
+Account operations and votes address the whole room.
+`Client` offers named methods; `Host` accepts the same arguments after a room number.
+
+```python
+await client.ban("KU_example", seconds=600)
+await client.ban("KU_example")  # Replace the timed ban with a permanent ban.
+await client.unban("KU_example")
+await client.set_admin("KU_example", enabled=True)
+await client.whitelist("KU_example")
+permissions = await client.read_permissions()
+disconnected = await client.kick("KU_example")
+
+commands = await client.list_vote_commands()
+status = await client.start_vote(
+    "kick", starter_userid="KU_starter", target_userid="KU_target"
+)
+status = await client.get_vote()
+cancelled = await client.cancel_vote()
+```
+
+Permission writes return `None`; repeated writes succeed.
+`blocklist()`, `is_blocked()`, `is_admin()` and `is_whitelisted()` read their respective state.
+`unwhitelist()` removes whitelist membership.
+Permanent permission edits also work while games are stopped, or through `Host` with an inactive service.
+`read_permissions()`, `blocklist()` and `is_blocked()` read permanent permission lists.
+Native temporary bans are separate; `unban()` removes permanent entries and temporary bans expire on their own.
+A permanent ban adds a persistent entry, including for a temporarily banned account.
+Existing permanent ban timestamps and profile metadata are preserved.
+`kick()` checks connections on every shard, including clients choosing or loading a character and migrating clients.
+It returns `False` if the client is absent; shard failures or unconfirmed disconnections raise an error.
+
+Votes use the standard native world voter and registered vote commands, including Mod commands.
+The starter and any required target must be connected.
+Native access restrictions, minimum player count, player age, custom checks and cooldowns apply.
+Starting a vote returns its observed state; it does not guarantee that the vote will pass.
+`get_vote()` returns `enabled` and nullable `current`, including countdown, options, counts and voter selections.
+Selections are one-based; pending and ineligible voters have `selection=None`, with eligibility in `can_vote`.
+`cancel_vote()` returns `False` when idle and applies the native cancellation cooldown when active.
+Vote control works with telemetry disabled; modes using a different voter return `unsupported`.
+
 ## Opening Hours, Maintenance and Recovery
 
 The default policy uses system local time (`timezone: "local"`) and opens all day.
@@ -321,14 +365,16 @@ JSON
 ```
 
 The Agent checks opening hours at startup and every 30 seconds while running, including windows across midnight.
-At closing time it stops all games and exits the container with code `0`.
-Startup outside opening hours also exits with code `0` before starting games.
-Configure an independent host scheduler to activate the service at each opening; see the [systemd timer example](docs/migration.md#external-opening-timer).
-Update that scheduler separately when changing policy times or timezone.
-Stopping a room leaves the external scheduler active; manage the scheduler separately when its next trigger should be suppressed.
-Pending Mod maintenance runs in the next container's startup before opening games.
-`call update_mods` queues maintenance and returns before the next container performs it.
-With `restart: false`, that container closes after the update.
+At closing time it stops all games and remains available for the next opening.
+Startup outside opening hours keeps the Agent running with no game processes.
+Changes to policy times or timezone trigger reconciliation in the same Agent.
+Stop the container service to suspend automatic operation.
+Pending Mod maintenance completes before games open; enabled automatic maintenance checks Mods at each new opening.
+While games run, the Agent checks enabled Workshop items every five minutes against their installed manifests.
+Checks run independently of room operations and feed confirmed content changes into the same maintenance queue.
+`status.agent.mod_check` reports the last check, unavailable items and errors; failed checks do not stop games.
+`call update_mods` queues maintenance in the current Agent and returns before it completes.
+With `restart: false`, the Agent exits after the update.
 Explicit Mod maintenance may run outside opening hours, but games still follow the schedule.
 The default maintenance countdown is 60 seconds with announcements every 30 seconds.
 Failed downloads or validation receive two additional attempts, five minutes apart, then leave games closed.
@@ -336,9 +382,8 @@ An explicit maintenance request or a later opening can retry.
 
 A required shard crash or sustained control failure stops the whole room.
 Abnormal process exits, forced termination and IPC faults persist recovery state and exit with code `1` for container replacement.
-Intentional restart and Mod maintenance use code `8`.
-The generated Quadlet treats it as successful and forces a restart through the same startup path.
-Update existing Quadlets with the [required restart directives](docs/migration.md#container-exit-contract) before using this lifecycle.
+Normal game restart and Mod maintenance reuse the Agent.
+Generated Quadlets use `Restart=on-failure`; see [resident Agent deployment](docs/migration.md#resident-agent-deployment) when upgrading.
 Retryable failures allow two restarts of the current save, 30 seconds apart.
 The latest snapshot numbers across all required shards may differ by at most `MAX_SNAPSHOT_GAP = 3`.
 Native shard synchronization may change these numbers during a restart.
@@ -350,7 +395,8 @@ Recovery state omits empty fields and keeps current snapshot identities only ins
 Interrupted rollback rechecks every shard against the fixed target, without a separate progress list.
 Unknown state, missing targets, unsupported failure causes or failed recovery leave the room closed.
 Thirty minutes of stable operation restores the budget.
-Exhausted rooms get another opportunity at the next opening, or explicit start for an always-open room.
+An exhausted room keeps its Agent available and gets another opportunity at the next opening.
+An always-open room can also recover through explicit start.
 
 Idle regeneration runs only when enabled, during opening hours, with every shard ready and reliably empty.
 Its retention periods are 6, 24, 36, 72 and 168 hours according to world age.
@@ -363,6 +409,28 @@ History keeps work completion and item activity, omitting individual tool swings
 Combat details cover players and entities attributed to players; deaths and spell actions remain recorded.
 History records container transfers as changes to the selected slot; failed attempts and automatic inventory churn are omitted.
 Local portals, including wormholes and temporary map exits, emit `dst.player.teleport_started` when native activation succeeds.
+Client authentication and disconnection events record `userid`, `steam_id`, `name`, `admin` and `moderator`.
+`userid` is the Klei ID; `steam_id` is a SteamID64 string.
+`dst.server.presence` includes these client records at startup and every 60 seconds.
+Its `players` entries include character `prefab` and `is_ghost`.
+Names and permissions refresh from the native client table; disconnection uses the last observation.
+A new authentication clears the previous identity.
+Names are bounded to 256 UTF-8 bytes; unavailable names, permissions or valid Steam IDs are null.
+`list_players` and `get_player` expose the same identity fields, including lobby connections.
+`dst.player.loaded` records the observed name, Steam ID, ghost state and `age_seconds`, including shard arrivals.
+Death and revival events also include `age_seconds`, the native age component's cumulative age, or null when unavailable.
+Presence snapshots include `world` season, phase, moon phase, nightmare phase and weather flags.
+Weather flags cover rain, snow, acid rain and lunar hail; caves use their own phase and moon phase.
+Equip, unequip and selected container-slot transfers include available item `condition` values.
+The fields are `uses_percent`, `fuel_percent`, `freshness_percent` and `armor_percent`.
+These values preserve native fractions, normally 0–1; unavailable components are omitted.
+
+Accepted SDK kick, ban, unban, administrator and whitelist mutations emit `dst.admin.operation` after completion.
+This includes operations on stopped rooms.
+The lifecycle stream and logs record the target `userid`, method, supplied ban duration, operation ID and start time.
+They also record status, nullable boolean result and error code.
+Status is `success`, `failure` or `unknown`; success describes method completion.
+Permission writes have a null result; a false kick result means the client was absent.
 Events are bounded and best effort.
 Source gaps, subscriber overflow, output loss and export rejection have separate counters.
 RPC uses a shared Tokio broadcast cache per stream: the latest 128 records, at most 64 KiB each (8 MiB of payload per stream).
@@ -385,6 +453,20 @@ The CLI accepts those same query fields, including cursors, direction and filter
 dst-server logs journal --unit dst-299.service --query '{"limit":100,"since":"today"}'
 dst-server logs journal --unit dst-299.service --follow
 dst-server logs telemetry '{"since":1790899200,"until":1790985600,"limit":100}'
+dst-server logs telemetry '{"since":1790899200,"until":1790985600,"userid":"KU_example"}'
+```
+
+Use `userid` to match a player's identity across actors, targets, deaths, votes, presence and SDK administration.
+This also works with existing history.
+It can be combined with time, service and field filters; `userid` and free-text `query` are mutually exclusive.
+Records retain the name observed at that time; older records without the new metadata are not backfilled.
+
+```python
+from dst_server.logs import NetdataLogQuery, NetdataLogs
+
+history = await NetdataLogs().query(
+    NetdataLogQuery(since=1790899200, until=1790985600, userid="KU_example")
+)
 ```
 
 A follow stream emits one record at a time; interrupting a log query waits for its reader process to exit.
@@ -395,6 +477,20 @@ HTTP failures are distinct from successful empty results.
 Season, mode, intent and character prefab retain unknown strings from game updates or Mods.
 Additional response fields are also preserved.
 
+Rust's [`dst_server::steam`](crates/dst-server/src/steam.rs) provides anonymous Workshop metadata queries.
+Call `Client::published_file_details(&[PublishedFileId(...)])` for `GetPublishedFileDetails`.
+Each `PublishedFile` retains its ID and a `Result<PublishedFileDetails, ResultCode>`.
+Item failures remain distinct from request failures.
+Metadata has typed IDs, content handles, UTC timestamps, visibility, URLs and tags, with full 64-bit precision.
+Calls accept up to 100 IDs and restore request order, including repeated IDs.
+Incomplete or mismatched responses return errors.
+Client clones share the HTTP connection pool.
+Calls have an 8 MiB response limit, a 30 second total budget and at most two retries for temporary failures.
+Retries honor `Retry-After` seconds and all three HTTP date formats within the call budget.
+`Error::Transport` carries a `TransportError` category.
+Display, debug output and error sources exclude URLs and upstream error text.
+The Agent uses this client for Workshop update detection alongside native game notifications.
+
 Archive export reads persistent world/player saves and Mod progress while games keep running.
 It captures the selected files in memory and creates a seekable 7z archive using the encoder's LZMA2 level 9 preset.
 Compression levels range from 1 to 9; dictionary and match parameters use the encoder's presets.
@@ -403,7 +499,8 @@ Each process runs one export compressor at a time; no staging directory or trans
 Exports include room/shard settings, world generation, Mod configuration, native sessions and `shardindex`.
 Recipe progress, worldjump saves, and ReForged achievements and experience are also included.
 It excludes downloaded Mods/UGC, `server_temp`, `client_temp`, logs, backups, indexes/profile caches and SDK runtime files.
-Credentials and permission lists remain excluded, including when the source has no token file.
+Source credentials and permission lists are excluded, including when the source has no token file.
+Each export generates a fresh random `cluster_key` in `cluster.ini` for all shards to share.
 Basic export preserves the source shard names and player path encoding.
 The optional `client_compatible=True` (`--client-compatible`) requires exactly two shards: one master and one secondary.
 It places them under `Cluster_<number>/Master` and `Cluster_<number>/Caves`.
@@ -436,30 +533,75 @@ dst-server archive upload 299 --client-compatible --bucket saves --endpoint "$AW
 ```
 
 The output path must not already exist.
-`import_cluster(source, destination, from_client=False)` accepts a native directory, ZIP/7z path, or `ClusterArchive`.
-It returns a `Configuration`.
-The CLI equivalent is `dst-server archive import SOURCE --output DESTINATION [--from-client]`.
+`import_cluster(source)` returns an `ImportedCluster` held in memory.
+It accepts a directory, archive path, or `ClusterArchive`; format detection uses file contents rather than the filename.
+Supported inputs include ZIP (stored/Deflate), 7z (LZMA/LZMA2 and previous Zstandard exports), RAR4/RAR5, and TAR.
+TAR supports gzip, bzip2, XZ and Zstandard compression.
+RAR5 solid archives are supported; RAR4 solid archives, encryption and multipart archives are unsupported.
 Inputs contain one room directly or inside one enclosing directory.
+Native settings and shard indexes determine the layout automatically, including custom shard directory names.
+INI settings take precedence; indexes supply missing room, world and Mod configuration.
+The master is identified from explicit shard settings, the `Master` name, or a unique forest world.
+Ambiguous layouts require an explicit `SHARD.is_master` in `server.ini`.
+Import preserves shard directory names and restores encoded or raw Klei player directories to `KU_…_` paths.
+It sets `encode_user_path=false` in both INI and shard index, retaining all snapshots and metadata.
 Import and export share file selection, configuration rendering, index sanitization and path validation.
-By default, import preserves native shard names and player encoding and excludes the same caches and credentials.
-It creates a fresh shared shard key.
-With `from_client=True`, the input contains `Master` and optionally `Caves`.
-They become `forest` and `cave`, including the shard names in configuration.
-Encoded player directories return to their case-sensitive `KU_…_` paths, with `encode_user_path=false` in both INI and index.
-Shard indexes supply server settings and missing world/Mod configuration.
-The importer reads and validates in memory, writes the selected files once, and publishes a new destination directory.
-Existing paths are never overwritten.
-It does not register a service or start the game.
+Imported credentials and permission lists are removed, and each parse generates a fresh random shared `cluster_key`.
+Read `imported.configuration`, enumerate `imported.files`, and access bytes with `imported.read_file(path)`.
+`await imported.save(destination)` publishes the same parsed files and key to a new directory.
+`save()` rejects existing destinations.
+The CLI parses in memory with `dst-server archive import SOURCE`; add `--output DESTINATION` to save.
+Its JSON result includes the configuration and selected file paths.
+Import does not register a service or start the game.
 Archives are limited to 100,000 entries and 2 GiB unpacked; native configuration files are limited to 1 MiB each.
+Paths inside the room allow at most 16 components, 255 UTF-8 bytes per component and 4096 bytes overall.
+An optional enclosing directory is excluded from these limits.
 Legacy `saveindex` and client sessions using legacy paths must first be migrated by the game.
 
 ```python
 from dst_server.archive import import_cluster
 
-configuration = await import_cluster(
-    "client-save.zip", "/tmp/restored", from_client=True
-)
+imported = await import_cluster("client-save.zip")
+configuration = imported.configuration
+world = imported.read_file("Master/save/session/0123456789ABCDEF/0000000001")
+await imported.save("/tmp/restored")
 ```
+
+To update an existing room, stop its Agent and all game processes, then call `await imported.apply(path, level="runtime")`.
+It returns the resulting configuration and supports three cumulative levels:
+
+| Level | Replaced content |
+| --- | --- |
+| `data` | World and player saves, snapshots, indexes and saved game progress. |
+| `runtime` (default) | `data`, Mod settings and downloads, `modoverrides.lua`, `worldgenoverride.lua` and `leveldataoverride.lua`. |
+| `all` | `runtime`, `cluster.ini` and each shard's `server.ini`, including ports. |
+
+Unselected configuration files, existing tokens and permission lists retain their original bytes.
+Each selected save directory is replaced completely, and absent imported override files are removed at `runtime` or `all`.
+Shard counts must match, and each source shard needs a session index with a nonempty latest native world snapshot.
+Snapshot names use ten digits and positive 32-bit IDs; invalid IDs and empty latest snapshots are rejected.
+Matching uses directory names, then explicit source IDs, then a unique remaining master/secondary role.
+Generated IDs cannot resolve ambiguity; ambiguous matches fail before writing.
+Player paths and shard indexes use the resulting destination `encode_user_path` setting.
+The room lock prevents applying while its Agent owns the room.
+The complete result is staged beside the destination and published in one directory exchange.
+This requires a writable parent on the same filesystem.
+Run the import from a working directory outside the target room; targets containing the caller's working directory are rejected.
+Staging starts with private permissions, and discarded read-only directories are made writable only for cleanup.
+Retained directories preserve their access and default ACLs; failure to preserve them aborts publication.
+Errors after publication explicitly say `import applied` and identify any retained old directory.
+An abandoned Agent socket is discarded after confirming that it has no listener.
+Saved Agent run targets, recovery and policy execution state are cleared; policy configuration is retained.
+Changing ports with `all` also requires reviewing the deployment's published ports.
+
+```sh
+dst-server archive import client-save.zip --into /srv/dst/rooms/007
+dst-server archive import client-save.zip --into /srv/dst/rooms/007 --level data
+```
+
+`--into` and `--output` are mutually exclusive; `--level` requires `--into`.
+CLI destination paths must be valid UTF-8 and are checked before writing.
+An apply result includes the destination path, level and effective configuration.
 
 See [the migration guide](docs/migration.md) for entry points and evidence.
 
@@ -483,7 +625,7 @@ cargo nextest run --locked -p dst-server --all-targets
 uv run ruff check python tests/rust tools
 uv run ty check python
 uv run --locked --only-group dev pytest tests/lua
-uv build --python 3.14 --out-dir dist --no-sources
+uv build --python 3 --out-dir dist --no-sources
 ```
 
 CI builds a wheel from the source distribution and installs it in an isolated environment.

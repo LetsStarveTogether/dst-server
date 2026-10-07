@@ -6,28 +6,29 @@
 [English](README.md) | 简体中文
 
 通过 Rust SDK、Agent、CLI 和 Python 绑定管理饥荒联机版服务端。
-每个房间使用一个容器，由一个 Agent 管理全部配置分片；闭馆时游戏、Agent 和容器一起退出。
-外部调度器在每次开放时启动容器。
-发布的二进制和 Python wheel 支持 Linux x86_64、CPython 3.14 和同机可信调用。
+每个房间使用一个容器，由常驻 Agent 管理全部配置分片。
+Agent 按房间策略启动和关闭游戏，闭馆期间保持控制接口可用。
+发布的二进制和 Python wheel 支持 Linux x86_64、CPython 3.15 和同机可信调用。
 
 `0.4.0` 使用 Rust 重写了原有 Python 实现。
-`0.5.0` 在关服时退出整个容器，由外部调度负责下一次开服。
+每日开放和关闭均由 Agent 管理，无需外部调度器。
 接口变化、验证方法及已知限制见 [迁移指南](docs/migration.md)。
 内部就绪不代表公网可达。
 
-在 CPython 3.14 环境中执行 `pip install dst-server==0.5.0`，安装 Python SDK。
-[GitHub Release](https://github.com/LetsStarveTogether/dst-server/releases/tag/v0.5.0) 同时提供独立的 Linux x86_64 CLI。
+在 CPython 3.15 环境中执行 `pip install dst-server==0.5.0`，安装 Python SDK。
+[GitHub Release](https://github.com/LetsStarveTogether/dst-server/releases/tag/v0.5.0) 同时提供原生 Linux x86_64 CLI，需要 libarchive 3.7 或更新版本。
+Python wheel 已包含 libarchive 及其所需的共享库，相关版权和许可文本位于 `.dist-info/licenses/`。
 
 ## 构建并创建房间
 
-安装 Rust 1.99、C/C++ 编译工具、Cap'n Proto 和 [uv](https://docs.astral.sh/uv/)。
+安装最新版稳定 Rust、C/C++ 编译工具、Cap'n Proto、pkg-config、libarchive 开发文件和 [uv](https://docs.astral.sh/uv/)。
 宿主部署还需要 Podman、Quadlet 和 systemd。
 在本仓库运行：
 
 ```sh
 cargo build --locked --release -p dst-server --bin dst-server
 export PATH="$PWD/target/release:$PATH"
-uv sync --python 3.14
+uv sync --python 3
 dst-server --help
 uv run python -m dst_server --help
 ```
@@ -136,10 +137,11 @@ dst-server subscribe lifecycle --socket /srv/dst/299/.dst-agent.sock
 
 `call stop` 正常关闭全部分片，随后 Agent 和容器以退出码 `0` 结束。
 `host stop --room 299` 停止整个容器服务，包括 Agent。
-两种停止方式都允许独立的外部调度器在下次触发时启动服务。
-`call restart` 确认停服并请求更换容器；返回时下一次启动尚未确认就绪。
+停止容器后，自动调度也随之停止，直到重新启动服务。
+`call restart` 在同一个 Agent 内重启游戏，开放时段会等待全部分片就绪。
+`call start` 请求重新执行开放策略，并为全天开放房间重置耗尽的恢复额度。
 使用 `host start` 或 `host restart` 等待全部分片就绪。
-非开放时段启动会正常退出并保持闭馆，恢复额度仍然耗尽则报告错误。
+非开放时段启动会保持 Agent 在线、游戏关闭；恢复额度仍然耗尽则报告错误。
 离线修改配置之前停止服务：
 
 ```sh
@@ -281,6 +283,43 @@ updated = room.edit("/cluster/settings/cluster_description", "周五游戏")
 离线写入持有房间锁，拒绝符号链接，并逐个替换文件。
 写入失败时可能只有部分文件更新；修复错误后重新应用配置。
 常规配置保存保留游戏更新的管理员、封禁和白名单；在线修改使用权限接口。
+
+账号管理和投票统一作用于整个房间。
+`Client` 提供具名方法，`Host` 在相同参数前增加房间编号：
+
+```python
+await client.ban("KU_example", seconds=600)
+await client.ban("KU_example")  # 将临时封禁替换为永久封禁。
+await client.unban("KU_example")
+await client.set_admin("KU_example", enabled=True)
+await client.whitelist("KU_example")
+permissions = await client.read_permissions()
+disconnected = await client.kick("KU_example")
+
+commands = await client.list_vote_commands()
+status = await client.start_vote(
+    "kick", starter_userid="KU_starter", target_userid="KU_target"
+)
+status = await client.get_vote()
+cancelled = await client.cancel_vote()
+```
+
+权限写入统一返回 `None`，重复设置成功完成。
+`blocklist()`、`is_blocked()`、`is_admin()` 和 `is_whitelisted()` 查询对应状态，`unwhitelist()` 移出白名单。
+永久权限修改支持游戏停服状态，`Host` 也支持整个服务停止后的文件修改。
+`read_permissions()`、`blocklist()` 和 `is_blocked()` 读取永久权限名单。
+原生临时封禁单独维护，`unban()` 移除永久记录，临时封禁自行到期。
+临时封禁的账号可以追加永久封禁，已有永久记录的时间戳及资料会保留。
+`kick()` 检查所有分片的客户端连接，覆盖选人、加载和迁移中的客户端。
+客户端已离线时返回 `False`；部分分片失败或无法确认断开时抛出错误。
+
+投票使用游戏原生 `worldvoter`，可发现已注册的投票命令，包括 Mod 命令。
+发起者和命令要求的目标必须在线，原生权限、人数、玩家年龄、自定义条件及冷却限制仍然生效。
+发起成功返回观察到的投票状态；最终是否通过由原生投票决定。
+`get_vote()` 返回 `enabled` 和可空的 `current`，包含倒计时、选项、票数及参与者选择。
+选项从 1 开始编号；未投票或无投票资格时 `selection=None`，资格由 `can_vote` 表示。
+`cancel_vote()` 在没有投票时返回 `False`，取消进行中的投票会触发原生取消冷却。
+关闭追踪日志不影响投票控制；使用其他投票组件的模式返回 `unsupported`。
 结构化 Lua 读取只静态解析 Lua 5.1 字面量。
 动态配置可以交给游戏原生加载，但不能通过结构化配置接口修改。
 
@@ -305,28 +344,30 @@ JSON
 ```
 
 Agent 在启动时及运行期间每 30 秒检查开放时间，支持跨午夜窗口。
-闭馆时停止全部游戏，容器以退出码 `0` 结束。
-非开放时段启动也会在启动游戏前以退出码 `0` 结束。
-配置独立的宿主调度器，在每次开放时启动服务，参见 [systemd timer 示例](docs/migration.md#external-opening-timer)。
-修改策略时间或时区后，单独更新外部调度器。
-停止房间会保留外部调度；如需取消下次启动，单独管理调度器。
-待处理的 Mod 维护由新容器在启动游戏前执行。
-`call update_mods` 排入维护请求并返回，下一容器执行更新；`restart: false` 会在更新后退出该容器。
+闭馆时停止全部游戏，Agent 保持在线，等待下一次开放。
+非开放时段启动容器时，Agent 常驻，游戏进程保持关闭。
+修改策略时间或时区会触发当前 Agent 重新检查日程。
+需要暂停自动运行时，直接停止容器服务。
+待处理的 Mod 维护在启动游戏前完成；启用自动维护时，每个新的开放时段都会检查 Mod。
+游戏运行期间，Agent 每五分钟查询已启用的创意工坊 MOD，并与实际安装清单比较。
+检测独立于房间操作，确认内容变更后进入同一维护队列。
+`status.agent.mod_check` 提供最近检测时间、不可查询的条目和错误；检测失败不会关闭游戏。
+`call update_mods` 排入维护请求并返回，由当前 Agent 执行；`restart: false` 会在更新后退出 Agent。
 显式 Mod 维护可以在非开放时段执行，游戏启动仍遵循日程。
 默认维护倒计时 60 秒，每 30 秒公告一次。
 下载或校验失败最多额外尝试两次，间隔五分钟；仍失败则保持关闭，等待明确维护请求或下个开放期。
 
 必需分片崩溃或持续失控会停止整个房间。
 异常退出、强制终止和 IPC 故障会保存恢复状态，并以退出码 `1` 结束，交给宿主更换容器。
-主动重启和 Mod 维护使用退出码 `8`；生成的 Quadlet 将其视为成功并强制重启，统一执行完整启动流程。
-使用新的生命周期前，按 [必要的重启指令](docs/migration.md#container-exit-contract) 更新已有 Quadlet。
+正常游戏重启和 Mod 维护复用当前 Agent。
+生成的 Quadlet 使用 `Restart=on-failure`；升级方法见 [常驻 Agent 部署](docs/migration.md#resident-agent-deployment)。
 可重试故障最多使用当前存档重启两次，间隔 30 秒。
 只有确认的存档加载失败，才允许再尝试一次前一个完整房间快照；目标与各分片最新存档最多相差三个快照编号。
 修改前固定全部目标，中断后继续同一目标。
 恢复状态省略空字段，当前存档身份只保存在待执行的重试中。
 回档中断后重新核对所有分片的固定目标，不单独保存分片进度表。
 状态未知、目标缺失、故障原因不受支持或恢复失败时保持关闭。
-连续稳定运行 30 分钟后恢复额度；额度耗尽后，下个开放期可重新尝试，全天开放房间需显式启动。
+连续稳定运行 30 分钟后恢复额度；额度耗尽后 Agent 仍可查询和管理，下个开放期可重新尝试，全天开放房间需显式启动。
 
 闲置世界重建只在显式启用、开放时段、全部分片就绪且可靠确认无人时执行。
 按世界天数使用 6、24、36、72、168 小时保留期。
@@ -339,6 +380,21 @@ Agent 在启动时及运行期间每 30 秒检查开放时间，支持跨午夜�
 战斗细节覆盖玩家及归属于玩家的实体之间的交互；死亡和施法动作仍会记录。
 历史记录包含容器取放后所选槽位的物品变化，省略失败尝试和自动库存变动。
 虫洞、地图临时出口等本地传送在原生激活成功后产生 `dst.player.teleport_started`。
+客户端认证和断开连接事件记录 `userid`（Klei ID）、`steam_id`（SteamID64 字符串）、昵称 `name`、`admin` 和 `moderator`。
+`dst.server.presence` 在启动时及每隔 60 秒通过 `clients` 记录这些信息，`players` 同时记录角色 `prefab` 和幽灵状态 `is_ghost`。
+昵称和权限从原生客户端列表刷新；退出事件使用最近一次观察，下一次认证前清除旧身份。
+昵称最多保留 256 个 UTF-8 字节；无法取得的昵称、权限或有效 Steam ID 为 null。
+`list_players` 和 `get_player` 返回相同身份字段，包括仍在大厅中的连接。
+`dst.player.loaded` 记录当时的昵称、Steam ID、幽灵状态和 `age_seconds`，包括从其他分片迁入的玩家。
+死亡和复活事件也记录 `age_seconds`，值为原生 age 组件累计的角色年龄秒数，无法获取时为 null。
+在线快照的 `world` 记录季节、昼夜、月相、噩梦周期及雨、雪、酸雨和月雹状态；洞穴使用自身的昼夜和月相。
+装备、卸下和容器所选槽位的取放记录可用的物品 `condition`：`uses_percent`、`fuel_percent`、`freshness_percent` 和 `armor_percent`。
+这些值保留原生比例，通常为 0–1；缺失的组件字段省略。
+
+已受理的 SDK 踢出、封禁、解封、管理员和白名单修改在执行完成后产生 `dst.admin.operation`，包括关闭房间时的操作。
+生命周期订阅和日志记录目标 `userid`、方法、传入的封禁时长、操作 ID、开始时间、状态、可空布尔结果及错误码。
+状态为 `success`、`failure` 或 `unknown`；成功表示方法完成。
+权限写入结果为 null；踢人结果为 false 表示客户端已离线。
 事件采用有界、尽力交付；源事件缺口、订阅溢出、输出丢弃和导出拒收分别计数。
 RPC 的每类订阅共用 Tokio 广播缓存，保留最近 128 条，每条最多 64 KiB，缓存载荷最多 8 MiB。
 慢客户端通过 `dropped` 获知被覆盖的记录数，超长记录也计为丢失。
@@ -358,6 +414,19 @@ CLI 使用相同查询字段，支持游标、方向及过滤条件：
 dst-server logs journal --unit dst-299.service --query '{"limit":100,"since":"today"}'
 dst-server logs journal --unit dst-299.service --follow
 dst-server logs telemetry '{"since":1790899200,"until":1790985600,"limit":100}'
+dst-server logs telemetry '{"since":1790899200,"until":1790985600,"userid":"KU_example"}'
+```
+
+使用 `userid` 可统一查询玩家作为操作者、目标、死者、投票参与者，以及在线快照和 SDK 管理操作中的记录，也支持已有历史。
+它可与时间、服务和字段过滤条件组合；`userid` 和全文 `query` 不能同时使用。
+每条记录保留当时观察到的昵称，旧记录不会补写新增元信息。
+
+```python
+from dst_server.logs import NetdataLogQuery, NetdataLogs
+
+history = await NetdataLogs().query(
+    NetdataLogQuery(since=1790899200, until=1790985600, userid="KU_example")
+)
 ```
 
 跟随模式逐条输出记录；中断日志查询时会等待读取进程退出。
@@ -367,6 +436,16 @@ Rust 枚举及事件数据类型定义事件契约，并保留必填空值和数
 季节、模式、服务器意图和角色 prefab 保留游戏更新或 Mod 返回的未知字符串，响应中的新增字段也会保留。
 请求失败和成功但没有结果分别表达。
 
+Rust 的 [`dst_server::steam`](crates/dst-server/src/steam.rs) 提供匿名工坊元数据查询。
+使用 `Client::published_file_details(&[PublishedFileId(...)])` 调用 `GetPublishedFileDetails`。
+每个 `PublishedFile` 保留 ID 和 `Result<PublishedFileDetails, ResultCode>`，分别表达单项不可用与整次请求失败。
+元数据包含明确类型的 ID、内容标识、UTC 时间、可见性、URL 和标签，完整保留 64 位数值精度。
+每次最多查询 100 个 ID，结果按请求顺序返回并保留重复 ID，不完整或不匹配的响应会报错。
+客户端克隆共享 HTTP 连接池，响应上限为 8 MiB，总时限为 30 秒；这个只读 POST 遇到临时故障时最多重试两次。
+重试在总时限内遵循 `Retry-After`，支持秒数和三种 HTTP 日期格式。
+`Error::Transport` 使用 `TransportError` 表达错误类别，普通输出、调试输出和错误源均不包含 URL 或上游错误文本。
+Agent 使用此客户端检测创意工坊更新，同时保留游戏原生更新通知。
+
 存档导出可在游戏运行时进行，保留世界、玩家及 Mod 进度。
 所需文件读取一次后保存在内存中，默认使用编码器的 LZMA2 9 级预设生成可寻址的 7z 内存文件。
 压缩级别范围为 1–9，字典和匹配参数采用编码器预设。
@@ -375,7 +454,8 @@ Rust 枚举及事件数据类型定义事件契约，并保留必填空值和数
 导出包含房间及分片配置、世界生成和 Mod 配置、原生 session、`shardindex` 及食谱。
 支持的 Mod 进度包括世界跳转、ReForged 成就和经验。
 排除 Mod/UGC 下载内容、`server_temp`、`client_temp`、日志、backup、索引和 profile 缓存及 SDK 运行文件。
-凭据和权限名单仍会移除；源房间没有 token 文件也可导出。
+原凭据和权限名单会移除；源房间没有 token 文件也可导出。
+每次导出都会在 `cluster.ini` 中生成新的随机 `cluster_key`，供所有分片共用。
 基础导出保留原分片目录名和玩家路径编码方式。
 可选的 `client_compatible=True`（CLI 为 `--client-compatible`）仅适用于一个主分片和一个副分片，共两个分片。
 启用后，主副分片分别放到 `Cluster_<房间编号>/Master` 和 `Cluster_<房间编号>/Caves`。
@@ -405,27 +485,74 @@ dst-server archive upload 299 --client-compatible --bucket saves --endpoint "$AW
 ```
 
 输出文件必须尚不存在。
-`import_cluster(source, destination, from_client=False)` 接受原生目录、ZIP/7z 路径或内存中的 `ClusterArchive`。
-返回值为 `Configuration` 配置对象。
-对应 CLI 为 `dst-server archive import SOURCE --output DESTINATION [--from-client]`。
-输入支持直接包含一个房间，或在外面包一层目录。
-导入和导出共用文件筛选、配置生成、索引脱敏和路径校验。
-默认导入保留原生分片名和玩家编码方式，排除相同的缓存与凭据，并生成新的分片通信密钥。
-启用 `from_client=True` 时，输入为 `Master` 和可选的 `Caves`；从分片索引恢复房间设置，并补齐缺失的世界和 Mod 配置。
-分片目录和配置中的名称分别映射为 `forest`、`cave`。
-玩家目录还原为区分大小写的 `KU_…_` 路径，并将 `server.ini` 和 `shardindex` 中的 `encode_user_path` 同步设为 `false`。
-导入先在内存中读取、校验，再将选中的文件写入一次，发布到尚不存在的目标目录。
+`import_cluster(source)` 返回保存在内存中的 `ImportedCluster`。
+输入可以是目录、压缩包路径或 `ClusterArchive`，根据文件内容自动识别格式。
+支持 ZIP（未压缩、Deflate）、7z（LZMA/LZMA2 和历史 Zstandard 导出包）、RAR4/RAR5 和 TAR。
+TAR 支持 gzip、bzip2、XZ 和 Zstandard 压缩。
+支持 RAR5 固实压缩；不支持 RAR4 固实压缩、加密压缩包和分卷压缩包。
+输入直接包含一个房间，或在外面包一层目录。
+原生配置与分片索引用于自动识别存档结构，支持自定义分片目录名。
+INI 配置优先，索引补齐缺失的房间、世界和 Mod 配置。
+主分片依次根据明确的分片配置、`Master` 名称或唯一的森林世界识别。
+无法确定时，需要在 `server.ini` 中明确设置 `SHARD.is_master`。
+导入保留分片目录名，将已编码或未编码的 Klei 玩家目录统一还原为 `KU_…_` 路径。
+同时将 INI 和分片索引中的 `encode_user_path` 设为 `false`，保留所有快照和元数据。
+导入与导出共用文件筛选、配置生成、索引脱敏和路径校验。
+原凭据和权限名单会移除，每次解析都会生成新的随机共享 `cluster_key`。
+通过 `imported.configuration` 读取配置，`imported.files` 枚举文件，`imported.read_file(path)` 读取内容。
+显式调用 `await imported.save(destination)` 才会把同一份解析结果和密钥写入新目录。
+`save()` 会拒绝已有目标。
+CLI 用 `dst-server archive import SOURCE` 在内存中解析，添加 `--output DESTINATION` 才保存。
+JSON 输出包含配置和所选文件路径。
 导入不会注册服务或启动游戏。
 压缩包最多包含 100,000 项，解压后总量不超过 2 GiB；单个原生配置文件不超过 1 MiB。
+房间内部路径最多 16 层，每段最多 255 个 UTF-8 字节，总长最多 4096 字节，与保存时的限制一致。
+可选的外层包裹目录不计入这些限制。
 旧 `saveindex` 和使用旧路径的客户端 session 需先由游戏迁移。
 
 ```python
 from dst_server.archive import import_cluster
 
-configuration = await import_cluster(
-    "client-save.zip", "/tmp/restored", from_client=True
-)
+imported = await import_cluster("client-save.zip")
+configuration = imported.configuration
+world = imported.read_file("Master/save/session/0123456789ABCDEF/0000000001")
+await imported.save("/tmp/restored")
 ```
+
+要更新已有房间，先停止 Agent 和所有游戏进程，再调用 `await imported.apply(path, level="runtime")`。
+它返回应用后的配置，支持三个累计层级：
+
+| 层级 | 替换内容 |
+| --- | --- |
+| `data` | 世界和玩家存档、快照、索引及已保存的游戏进度。 |
+| `runtime`（默认） | `data`，加上 Mod 配置和下载列表、`modoverrides.lua`、`worldgenoverride.lua`、`leveldataoverride.lua`。 |
+| `all` | `runtime`，加上 `cluster.ini` 和各分片的 `server.ini`，包括端口。 |
+
+未选中的配置文件、已有 token 和权限名单保留原始字节。
+所选存档目录会整体替换；`runtime` 和 `all` 也会删除导入内容中已不存在的 override 文件。
+源和目标的分片数量必须相同，每个源分片的会话必须包含非空的最新原生世界快照。
+快照文件名使用十位数字，编号为正的 32 位无符号整数；非法编号和空的最新快照会被拒绝。
+分片依次按目录名、源文件明确提供的 ID、剩余唯一的主副分片角色匹配。
+自动补出的 ID 不参与消除歧义；无法确定时会在写入前报错。
+玩家路径和分片索引会适配目标最终使用的 `encode_user_path` 配置。
+Agent 持有房间锁时无法应用导入。
+完整结果先在目标旁准备，再一次交换目录，因此需要同一文件系统中可写的父目录。
+应在目标房间之外的工作目录执行导入；目标包含调用方工作目录时会被拒绝。
+暂存目录从创建时就限制访问权限，已丢弃的只读目录副本会在清理时恢复写权限。
+保留目录的访问 ACL 和默认 ACL 会一并保留，无法保留时会在发布前报错。
+发布后的错误会明确提示 `import applied`，并指出尚未清理的旧目录。
+遗留的 Agent socket 在确认无人监听后会被移除。
+旧的 Agent 运行目标、恢复记录和策略执行状态会清空，策略配置保留。
+使用 `all` 改变端口时，还需要检查部署的端口映射。
+
+```sh
+dst-server archive import client-save.zip --into /srv/dst/rooms/007
+dst-server archive import client-save.zip --into /srv/dst/rooms/007 --level data
+```
+
+`--into` 和 `--output` 互斥，`--level` 需要与 `--into` 一起使用。
+CLI 目标路径必须是有效的 UTF-8，写入前会完成检查。
+应用后的 JSON 输出包含目标路径、层级和实际配置。
 
 入口和验证情况见 [迁移记录](docs/migration.md)。
 
@@ -449,7 +576,7 @@ cargo nextest run --locked -p dst-server --all-targets
 uv run ruff check python tests/rust tools
 uv run ty check python
 uv run --locked --only-group dev pytest tests/lua
-uv build --python 3.14 --out-dir dist --no-sources
+uv build --python 3 --out-dir dist --no-sources
 ```
 
 CI 从源码包构建 wheel，在隔离环境安装并运行绑定和进程测试。

@@ -1,15 +1,11 @@
 # Migration Guide
 
-This guide covers the `0.4.0` Rust rewrite and the `0.5.0` container lifecycle changes.
+This guide covers the Rust implementation and the resident Agent lifecycle.
 [English README](../README.md) · [简体中文 README](../README.zh-Hans.md)
 
-Upgrading from `0.4.x` requires the [container exit configuration](#container-exit-contract).
-Scheduled rooms also require an [external opening timer](#external-opening-timer).
-
-An external scheduler opens room containers.
-Each Agent enforces closing hours, performs maintenance and supervises one game run.
-Closing the room exits its Agent and container.
-Existing installations require the deployment procedure below.
+Each room has a resident Agent that owns opening hours, game processes, maintenance and recovery.
+Scheduled closure stops the games and keeps the Agent, control socket and room lock available for the next opening.
+See [resident Agent deployment](#resident-agent-deployment) when upgrading an existing installation.
 
 ## Interface and Deployment Changes
 
@@ -26,22 +22,38 @@ Existing installations require the deployment procedure below.
 | Ownership | The Agent holds `.dst-room.lock` until container exit; offline writers require exclusive ownership. |
 | Socket | `/cluster/.dst-agent.sock` in the container, normally `/srv/dst/NNN/.dst-agent.sock` on the host. |
 | Host lifecycle | `host start/stop/restart` operate the whole systemd service; start/restart normally wait for game readiness. |
-| Agent lifecycle | `call stop` exits the container; `call restart` requests a fresh container; `call start` only reports an already running room. |
+| Agent lifecycle | Scheduled closure keeps the Agent available; `call restart` restarts games within it; `call start` reconciles policy and permits an explicit recovery retry for an always-open room. |
 | Offline status | `host status` exposes saved `policy`, current `schedule`, `maintenance` and `recovery` after Agent exit, with `game: null`. |
 | CLI | Native and Python entry points share Rust parsing and dispatch; `describe` provides the current operation schemas. |
 
-The release targets Linux x86_64, CPython 3.14 and trusted callers on the same host.
+The release targets Linux x86_64, CPython 3.15 and trusted callers on the same host.
 The socket has mode `0600`; the server checks peer credentials and limits connections.
 RPC protocol 2 replaces JSON payload blobs with typed commands and recursive native values.
+Protocol 3 changes account and vote requests and uses a new Cap'n Proto interface identity.
+Older peers are rejected instead of interpreting `set_admin.enabled` as the previous inverted flag.
 Upgrade the Agent and SDK together; the RPC interface has a new ID and requires matching versions.
 Dynamic numbers use `Int64`, `UInt64` and `Float64`.
 Exact numbers outside those representations use decimal text in a dedicated numeric field.
 Game event payloads now use Rust enums and `garde` validation, preserving required nulls and exact JSON numbers.
 The `event_schema()` API has been removed; use `event_names()` to list supported names and `validate_event()` to check data.
+Presence event `clients` entries now contain `{userid, steam_id, name, admin, moderator}` instead of bare Klei ID strings.
+Authentication and disconnection use the same client record; all fields except `userid` accept null when unavailable.
+Player queries expose these identity fields, including nullable names and permissions.
+Presence players also require `prefab` and `is_ghost`.
+Presence requires a `world` object with nullable environment fields.
+Loaded events require nullable `steam_id`, `name` and `age_seconds`, plus `is_ghost`.
+Death and revival events require nullable `age_seconds`.
+Item references may carry an optional `condition` object with available native condition fractions.
+Update event consumers together with the Agent and game scripts; historical records are not rewritten.
+SDK administration emits `dst.admin.operation` through lifecycle subscriptions and logs, including while games are stopped.
+This operational record is separate from the Lua game events validated by `validate_event()`.
+`NetdataLogQuery(userid="KU_example", since=...)` searches player identity roles in new and historical logs.
+It cannot be combined with `query`.
 Archive export reads the room directory directly and builds its 7z/LZMA2 archive in memory, including while games run.
 Export no longer uses Agent `export_archive` / `release_archive` requests or transfer artifacts.
 Callers need read access to the native room directory.
 Basic exports now preserve native shard names and player path encoding.
+Every export generates a fresh random shared shard key in `cluster.ini`.
 The former `encode_user_path` export argument is replaced by `client_compatible`, which defaults to `false`.
 Client export requires exactly one master and one secondary.
 It writes `Cluster_<number>/Master` and `Cluster_<number>/Caves`.
@@ -49,17 +61,50 @@ It converts player paths together with their INI/index flags.
 It cannot be combined with a custom `room_id`.
 Rust callers pass the room number to `archive::prepare(reader, number, options)`.
 Both modes retain Mod configuration and return an archive in memory; disk saving and R2/S3 upload remain explicit operations.
-`archive::import_cluster(ImportSource, destination, ImportOptions)` rebuilds a new native directory.
-It accepts a directory, ZIP or 7z stream.
-Python exposes `import_cluster(source, destination, from_client=False)`, returning a `Configuration`.
+`archive::import_cluster(ImportSource)` parses one room into an `ImportedCluster` in memory.
+It accepts directories, ZIP, 7z, RAR4/RAR5 and compressed TAR streams, detecting the format from contents.
+ZIP supports stored/Deflate; 7z supports LZMA/LZMA2 and previous Zstandard exports.
+TAR supports gzip, bzip2, XZ and Zstandard; RAR5 supports solid archives.
+RAR4 solid archives, encrypted archives and multipart archives are unsupported.
+Python exposes `import_cluster(source)`, returning the configuration, file paths and `read_file(path)` access.
 A `ClusterArchive` can be passed directly without saving it first.
-The CLI uses `archive import SOURCE --output DESTINATION [--from-client]`.
+Call `await imported.save(destination)` in Python or `imported.save(destination)` in Rust to publish a new directory.
+The CLI uses `archive import SOURCE [--output DESTINATION]`, with no disk output by default.
+To update an existing, stopped room, use `await imported.apply(path, level="runtime")` in Python.
+Rust uses `imported.apply(path, ImportLevel::Runtime)`.
+The CLI uses `archive import SOURCE --into PATH [--level data|runtime|all]`.
+CLI destination paths must be valid UTF-8 and are validated before writing.
+The cumulative levels replace saves (`data`) and add Mod/world/level overrides (`runtime`, the default).
+The `all` level also replaces `cluster.ini` and `server.ini`.
+Unselected configuration files, tokens and permission lists retain their bytes.
+Save directories are replaced completely, and missing selected overrides are removed.
+Shard counts must match; names, explicit source IDs, then unique remaining roles determine the mapping.
+Automatically assigned IDs never resolve ambiguity.
+Each shard needs an index with a nonempty latest native world snapshot; incomplete saves and ambiguous matches are rejected.
+Snapshot names use ten digits and positive 32-bit IDs; invalid IDs and empty latest snapshots are rejected.
+Player path encoding follows the resulting destination settings.
+The Agent and game processes must exit first; the room lock excludes concurrent managed writes.
+Applying stages the result beside the room and exchanges directories atomically, retaining the lock inode.
+It requires a writable parent on the same filesystem.
+The caller's working directory must be outside the target room to survive the exchange and cleanup.
+Staging is private from creation, and discarded directory copies are made writable for cleanup.
+Retained directories preserve their access and default ACLs; preservation errors abort publication.
+Post-publication errors explicitly report that the import was applied and identify retained old files.
+Stale Agent sockets are discarded only after confirming that they have no listener.
+It clears saved Agent run targets, recovery and policy execution state while retaining policy configuration.
+An `all` import can change ports, so deployment port mappings need review.
+The old destination argument, `ImportOptions` and `from_client` switch are removed.
 Both directions share native file filtering, configuration rendering, index sanitization and path validation.
-Import accepts one room at the root or one directory below it; multiple rooms and existing destinations are rejected.
-Client import accepts `Master` and optional `Caves` and reconstructs missing configuration from shard indexes.
-It maps shard directories and configuration names to `forest` and `cave`.
-It restores case-sensitive `KU_…_` player paths and sets `encode_user_path=false` in both INI and shard index.
-Imported credentials and permission lists are removed; the new directory gets a fresh shared shard key.
+Import accepts one room at the root or one directory below it; multiple rooms are rejected.
+The `save()` method requires a new destination.
+INI files and shard indexes supply settings automatically, including custom shard directory names.
+INI settings take precedence and directory names are preserved.
+Explicit roles, the `Master` name or a unique forest world determine the master; ambiguous roles are rejected.
+Encoded and raw player paths become case-sensitive `KU_…_` paths, with `encode_user_path=false` in INI and index.
+Imported credentials and permission lists are removed; each parse generates a fresh shared shard key.
+Saving the parsed result retains that same key.
+Source builds require pkg-config and libarchive development files; native binaries require libarchive 3.7 or newer.
+Python wheels include the required shared libraries and their copyright and license texts under `.dist-info/licenses/`.
 Service registration and game startup remain separate host operations.
 There is no public RPC listener or remotely authenticated control service.
 
@@ -69,7 +114,7 @@ Importing former controller or per-shard Agent classes is unsupported.
 Use `host run` for shared host request objects, for example:
 
 ```sh
-dst-server host run '{"operation":"permission","kind":"whitelist","userid":"KU_example"}' --room 299
+dst-server host run '{"operation":"call","request":{"method":"whitelist","arguments":{"userid":"KU_example"}}}' --room 299
 dst-server host run '{"operation":"update_mods","restart":true}' --room 299
 ```
 
@@ -134,8 +179,8 @@ Omitting `timezone`, or setting it to `local`, uses system local time.
 An explicit IANA timezone remains supported.
 Existing policies with `timezone: "Asia/Shanghai"` keep that override until changed to `local`.
 Translate legacy `schedule` and `recycle` settings explicitly.
-The external scheduler can start the service after any stop, including `host stop`.
-Manage that scheduler separately when its next trigger should be suppressed.
+Policy times and timezone are the only schedule configuration.
+Use `host stop` to stop the resident Agent and suspend automatic operation.
 Never delete the new recovery state to force a retry; use the supported start or maintenance operations.
 Load-failure evidence in `agent_run.failure` now uses `{kind: "load_failure", shards: {name: {session_id, world_file}}}`.
 Saved evidence in the former single-shard format requires migration before upgrading; it is not accepted automatically.
@@ -152,81 +197,40 @@ Later deployment of an existing room requires these steps:
 This repository does not automatically replace an existing Pod installation.
 Validate the generated services and each room's readiness during deployment.
 
-## Container Exit Contract
+## Resident Agent Deployment
 
-Before upgrading an existing room, stop its service and confirm the container has exited.
-Add `Timezone=local` to its `[Container]` section so Podman gives the container the host timezone.
-Newly generated Quadlets include this setting; managed files without it fail deployment validation.
-In the existing `dst-NNN.container` file, add or replace these two lines in `[Service]`, keeping its existing `Restart=on-failure`:
+Upgrade the Agent image and SDK together.
+Keep `Timezone=local` in the Quadlet's `[Container]` section and `Restart=on-failure` in `[Service]`.
+Remove the former `SuccessExitStatus=8` and `RestartForceExitStatus=8` directives.
+Normal restart and Mod maintenance now run within the Agent.
+Disable any previously installed room opening or closing timers so the Agent owns the complete schedule.
+Run `systemctl daemon-reload` after updating the Quadlet.
+The running Agent needs a service restart to use the new image; reloading systemd alone does not replace it.
 
-```ini
-SuccessExitStatus=8
-RestartForceExitStatus=8
-```
+The Agent stays available when the schedule is closed, Mod maintenance has failed, or recovery is exhausted.
+It checks the policy on startup, every 30 seconds, and after configuration or maintenance changes.
+At an opening it completes pending maintenance and recovery before starting all configured shards.
+At closure it saves and stops all games, keeping the container and control socket available.
+Changing policy times or timezone takes effect through the same scheduler.
 
-Upgrade the Agent image and these directives together, then run `systemctl daemon-reload`.
-Then start the room, for example with `dst-server host start --room 299`.
-Newly generated Quadlets already contain both directives.
-Existing files without both `8` directives fail deployment validation.
-Code `0` closes the container; the external scheduler can start it later.
-Code `8` requests an intentional replacement.
-This is a project convention chosen to avoid systemd's predefined LSB status names for codes `2` through `7`.
-The new container follows the complete startup path for readiness, pending maintenance and recovery.
-Code `1` records a runtime fault for recovery in a fresh container.
+`host start` and `host restart` wait for all shards to be ready during opening hours.
+Outside opening hours they wait for an available Agent with stopped games.
+Use `host stop` to stop the container and suspend automatic operation.
+`call stop` also shuts down the Agent after stopping games.
+These explicit stops exit with code `0`.
+Abnormal game exits, forced termination and persistent control faults exit with code `1` for recovery in a fresh container.
 
-`call restart` replies after stopping the current games and requesting replacement.
+`call restart` normally waits for replacement games to become ready within the same Agent.
 `call update_mods` persists the maintenance request and replies with `queued: true`.
-The next container runs the updater and then starts games if requested and currently permitted.
+The current Agent runs the updater and then starts games if requested and permitted by the schedule.
 With `restart: false`, it exits after completing maintenance.
-These replies do not confirm that the next container is ready.
-Use `host start`, `host restart` or `host wait` when game readiness is required.
-Startup outside opening hours exits normally before launching games, and Host reports the closed schedule.
-Host reports recovery that remains exhausted or unsafe as an error.
-
-## External Opening Timer
-
-For the `18:00–00:00` policy above, create `/etc/systemd/system/dst-299-opening.timer` on the host:
-
-```ini
-[Unit]
-Description=Open DST room 299
-
-[Timer]
-OnCalendar=*-*-* 18:00:00
-Unit=dst-299.service
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
-
-The timer activates the existing Quadlet service directly.
-Enable and inspect it with:
-
-```sh
-systemd-analyze calendar '*-*-* 18:00:00'
-systemctl daemon-reload
-systemctl enable --now dst-299-opening.timer
-systemctl list-timers dst-299-opening.timer
-```
-
-For user services, place the timer in `~/.config/systemd/user/` and use `systemctl --user`.
-Configure an `OnCalendar` entry for each opening and update the timer separately whenever policy times or timezone change.
-This example uses the host's local time.
-When the policy specifies an IANA timezone, append that same timezone to `OnCalendar`.
-Calendar expressions accept an IANA timezone, as documented in [systemd.time](https://www.freedesktop.org/software/systemd/man/latest/systemd.time.html).
-`Persistent=true` catches up a missed activation when the timer becomes active again.
-The Agent still checks the current opening hours before starting games.
-A timer trigger leaves an already active service running, as documented in [systemd.timer](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html).
-Either `call stop` or `host stop` leaves this timer enabled for its next activation.
-To suspend future openings, manage the timer directly with `systemctl disable --now dst-299-opening.timer`.
-Enabling it again may catch up a missed activation.
+A queued maintenance reply does not confirm game readiness; use Host operations to wait for the result.
 
 ## Operations, Closure and Recovery
 
 | Operation | Confirmation required |
 | --- | --- |
-| Host start or restart | Every configured shard loaded, control available, expected shard links ready; outside opening hours, successful exit with the room closed. |
+| Host start or restart | Every configured shard loaded, control available, expected shard links ready; outside opening hours, an available Agent with stopped games. |
 | Save | The native command accepts the request and returns `true`; persistence can finish later. |
 | Stop | Every child exited with code zero, was reaped without forced termination, and drained its output without a protocol fault. |
 | Reset or rollback | Requested worlds reloaded and the new runtime generation is ready. |
@@ -250,13 +254,35 @@ A timed-out or disconnected mutation is never automatically resent.
 Current operation and last result are process-local status, not a durable replay queue.
 Player lookup distinguishes disconnected, loading, migrating and conflicting identities.
 Entity references bind world session and runtime generation.
-Ban, unban, blocklist and permission checks use the native master as their authoritative source.
+While games are running, ban, unban, blocklist and permission checks use the native master as their authoritative source.
 A build `756039` test found that a secondary forwards `Ban` but retains a stale local blacklist until reloading permissions.
 Unban changes a local list, so writing independent cached lists could replace newer shared data.
-The SDK routes these operations through the master even when the request names a secondary.
+Account operations now require room scope; naming a shard is rejected.
+While games are stopped, the Agent handles permanent bans and whitelist edits under the room lock.
+Timed bans require running games.
+`Host.permission()` and the `permission` host operation are removed.
+Use `ban`, `unban`, `whitelist`, `unwhitelist`, `set_admin` and the separate query methods on `Client` or `Host`.
+`Host.call()` uses the shared permission implementation when the service is inactive.
+`set_admin` requires `enabled`, replacing the inverted `remove` argument.
+Permission writes return null (`None` in Python), including repeated writes; queries return the current lists or membership.
+A permanent ban adds a persistent entry even when the account has a native temporary ban.
+Native temporary bans are absent from `GetBlacklist()` and permission files.
+Blacklist queries cover permanent bans; `unban` removes permanent entries and temporary bans expire independently.
+Existing permanent ban timestamps and profile metadata are retained.
+`kick` targets client connections across all shards and no longer requires a loaded player entity.
+It returns a boolean for confirmed disconnection or absence, and errors for incomplete or partial outcomes.
+
+`list_vote_commands`, `get_vote`, `start_vote` and `cancel_vote` operate on the master world voter.
+`start_vote` takes `command`, `starter_userid` and an optional `target_userid` required by user-targeted commands.
+Native vote restrictions and cancellation cooldowns apply; no ballots or passing result are fabricated.
+The response contains `enabled` and nullable `current`, with countdown, options and voters.
+Vote selections are one-based, or null for pending and ineligible voters; `can_vote` distinguishes eligibility.
+Control state is maintained even with telemetry off.
+Custom modes without the standard world voter return `unsupported`.
+Upgrade the Agent, Lua bundle and Python SDK together for these request and return-value changes.
 
 A required shard failure stops the entire room.
-Normal closure exits the Agent and container with code `0`.
+Scheduled closure keeps the Agent running; explicit stop exits the container with code `0`.
 Abnormal exits, forced termination or an IPC fault require a fresh container, with the recovery decision persisted first.
 Known configuration, disk, permission or Mod problems remain closed and report the cause.
 Retryable faults receive two current-save restarts, 30 seconds apart.
@@ -276,7 +302,7 @@ Preparation rechecks all shards and records completion once, after every native 
 It never repeatedly reinterprets "previous snapshot".
 
 Thirty stable minutes restore the recovery budget.
-An exhausted scheduled room gets a new opportunity at the next opening.
+An exhausted room keeps its Agent available; a scheduled room gets a new opportunity at the next opening.
 Repeated checks within the same opening do not reset it.
 An always-open room requires an explicit Host start after exhaustion.
 Container startup reads the persisted recovery state and preserves its remaining budget.
@@ -287,10 +313,14 @@ They use system local time unless an IANA timezone is explicitly configured.
 Clock baselines persist between policy ticks and reset when the Agent restarts.
 With automatic Mod maintenance enabled, setup code queues a download before the first opening.
 Changing the Mod setup through Configure also queues maintenance before reopening.
+While games run, a separate task checks enabled Workshop items every five minutes, with a 30-second check budget.
+It compares installed content handles and update times; cached remote details do not prove installation.
+Unavailable or banned items do not trigger maintenance, and network errors appear in `status.agent.mod_check`.
+Observations crossed by room operations, installation changes or policy changes are discarded.
 Default Mod announcements use a 60-second countdown and 30-second intervals.
 One native download attempt has a 30-minute budget; policy permits two extra attempts five minutes apart.
 Closing takes precedence over automatic maintenance, which remains queued for the next opening.
-Explicit maintenance may run outside opening hours and exits after updating if games cannot open.
+Explicit maintenance may run outside opening hours; the Agent waits for the next opening when games cannot open.
 Only `DST_SERVER_MOD_PROXY` supplies the native updater proxy.
 Idle regeneration is off by default and requires an open, ready, reliably empty room.
 Its world-age retention periods are 6, 24, 36, 72 and 168 hours.
@@ -308,7 +338,7 @@ They do not imply that every real game mode, real player interaction or producti
 | Game and player operations | `model`, `room`, `driver`, `rpc` | `Client.call`, `call`, `describe`, `console` | Model/pipe/RPC contracts; Agent lifecycle tests; isolated real-game 1/2/5-world smoke. |
 | Save and recovery | `recovery`, `preloader`; Lua load observer | `save`, `rollback*`, lifecycle status | Fixed-target idempotence, invalid-session refusal, player restoration and native catalog checks. |
 | Mods and policy | `mods`, `policy`, `agent` | `update_mods`, `set_policy`, Host operations | Native updater subprocess ownership; cancellation/reaping; windows, retry limits and closure decisions. |
-| Archives and upload | `archive::prepare`, `archive::import_cluster`, `PreparedArchive::compress`, `ClusterArchive::start_upload` | `dst_server.archive.export_cluster/import_cluster`, `ClusterArchive`, `archive import/export/upload` | Native directory and ZIP/7z round trips; client configuration reconstruction; progress and encoding; unsafe paths and existing destinations; export while running; cache exclusions; RAM streams; sanitization; multipart success, failure and abort. |
+| Archives and upload | `archive::prepare`, `archive::import_cluster`, `PreparedArchive::compress`, `ClusterArchive::start_upload` | `dst_server.archive.export_cluster/import_cluster`, `ClusterArchive`, `archive import/export/upload` | Memory parsing and explicit saving; ZIP/7z/RAR/TAR decoding; automatic configuration reconstruction; progress and encoding; unsafe paths and existing destinations; export while running; cache exclusions; RAM streams; sanitization; multipart success, failure and abort. |
 | Live events and OTLP | `events`, `telemetry`, `observability`, `rpc::EventHub` | `Client.subscribe`, `subscribe`, `event_names`, `validate_event` | gRPC loopback type preservation, retry/RetryInfo, partial rejection, overflow and shutdown. |
 | Historical logs | `logs` | `JournalLogs`, `NetdataLogs`, `Host.journal`, `logs journal/telemetry` | Cursor/limit/error handling, native process cancellation and reaping. |
 | Klei services | `external::KleiClient` | `KleiClient` | Local HTTP fixtures for bounds, errors, authentication and per-query batch outcomes. |
