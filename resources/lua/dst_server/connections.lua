@@ -1,9 +1,11 @@
 local telemetry = require("dst_server.telemetry")
 local state = require("dst_server.state")
+local values = require("dst_server.values")
 local last_active, observed_since
 local installed = false
 local reliable = false
 local observation_epoch = 0
+local identities = {}
 
 local function activity()
     local ok, now = pcall(GetTimeReal)
@@ -14,6 +16,49 @@ local function activity()
     end
 end
 local connections = {}
+
+local function client_record(userid)
+    return {
+        userid = userid or json.null, steam_id = json.null, name = json.null,
+        admin = json.null, moderator = json.null,
+    }
+end
+
+local function is_steam_id(value)
+    -- Public individual accounts; Lua numbers cannot preserve SteamID64 precision.
+    return type(value) == "string" and #value == 17 and value:match("^%d+$")
+        and value >= "76561197960265729" and value <= "76561202255233023"
+end
+
+function connections.steam_id(userid, netid)
+    if type(userid) ~= "string" or userid == "" then return json.null end
+    local client = identities[userid] or client_record(userid)
+    identities[userid] = client
+    if is_steam_id(netid) then
+        client.steam_id = netid
+    elseif client.steam_id == json.null then
+        local ok, value = pcall(function() return TheNet:GetNetIdForUser(userid) end)
+        if ok and is_steam_id(value) then client.steam_id = value end
+    end
+    return client.steam_id
+end
+
+function connections.client(userid, native)
+    if type(userid) ~= "string" or userid == "" then return client_record(nil) end
+    local client = identities[userid] or client_record(userid)
+    identities[userid] = client
+    if native == nil then
+        local ok, value = pcall(function() return TheNet:GetClientTableForUser(userid) end)
+        if ok and type(value) == "table" then native = value end
+    end
+    if native ~= nil then
+        if type(native.name) == "string" then client.name = values.text(native.name, 256) end
+        if type(native.admin) == "boolean" then client.admin = native.admin end
+        if type(native.moderator) == "boolean" then client.moderator = native.moderator end
+    end
+    connections.steam_id(userid, native ~= nil and native.netid or nil)
+    return client
+end
 
 function connections.install(inst)
     for name, paused in pairs({ OnSimPaused = true, OnSimUnpaused = false }) do
@@ -47,7 +92,15 @@ function connections.install(inst)
             local userid = data.userid
             if userid == nil or userid == "" then return end
             assert(type(userid) == "string", "invalid client identity type")
-            telemetry.emit(event_name, { userid = userid })
+            local client
+            if event_name == "dst.client.authenticated" then
+                identities[userid] = nil
+                client = connections.client(userid)
+            else
+                client = identities[userid] or client_record(userid)
+                identities[userid] = nil
+            end
+            telemetry.emit(event_name, client)
         end, true))
     end
     installed = true
@@ -60,21 +113,39 @@ local function snapshot()
         local userid = client.userid
         if type(userid) == "string" and userid ~= "" and not seen[userid] then
             seen[userid] = true
-            clients[#clients + 1] = userid
+            clients[#clients + 1] = connections.client(userid, client)
         end
     end
-    table.sort(clients)
+    for userid in pairs(identities) do
+        if not seen[userid] then identities[userid] = nil end
+    end
+    table.sort(clients, function(a, b) return a.userid < b.userid end)
     local players = {}
     for _, player in ipairs(AllPlayers) do
         if player:IsValid() and type(player.userid) == "string" and player.userid ~= "" then
-            players[#players + 1] = { userid = player.userid, guid = player.GUID }
+            players[#players + 1] = {
+                userid = player.userid, guid = player.GUID, prefab = player.prefab,
+                is_ghost = player:HasTag("playerghost"),
+            }
         end
     end
     table.sort(players, function(a, b) return a.guid < b.guid end)
     if #native_clients > 0 or #players > 0 then activity() end
+    local world = TheWorld.state
+    local cave = TheWorld:HasTag("cave")
     return {
         clients = clients,
         players = players,
+        world = {
+            season = values.text(world.season, 128),
+            phase = values.text(world[cave and "cavephase" or "phase"], 128),
+            moonphase = values.text(world[cave and "cavemoonphase" or "moonphase"], 128),
+            nightmarephase = values.text(world.nightmarephase, 128),
+            israining = world.israining == nil and json.null or world.israining,
+            issnowing = world.issnowing == nil and json.null or world.issnowing,
+            isacidraining = world.isacidraining == nil and json.null or world.isacidraining,
+            islunarhailing = world.islunarhailing == nil and json.null or world.islunarhailing,
+        },
         max_players = TheNet:GetServerMaxPlayers(),
         health = require("dst_server").health(),
     }, #native_clients

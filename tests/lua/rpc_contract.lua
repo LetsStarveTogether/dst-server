@@ -245,6 +245,7 @@ GetPlayerClientTable = function()
     return {
         {
             userid = "KU_TEST",
+            netid = "76561198000000001",
             name = "Wilson",
             prefab = "wilson",
             admin = true,
@@ -253,6 +254,7 @@ GetPlayerClientTable = function()
         },
         {
             userid = "KU_LOADING",
+            netid = "76561198000000002",
             name = "Loading",
             admin = false,
             moderator = false,
@@ -334,11 +336,23 @@ local calls = {
 
 for _, call in ipairs(calls) do
     local result = driver.call(call[1], call[2])
+    if call[1] == "list_players" then
+        assert(result[1].steam_id == "76561198000000001" and result[2].steam_id == "76561198000000002")
+    elseif call[1] == "get_player" then
+        assert(result.userid == "KU_LOADING" and result.steam_id == "76561198000000002")
+    end
     print(call[1] .. "|" .. require("dst_server.wire").encode({
         ok = true,
         data = result,
     }))
 end
+
+assert(driver.call("locate_player", { userid = "KU_TEST" }).player.steam_id == "76561198000000001")
+local native_clients = GetPlayerClientTable
+GetPlayerClientTable = function() return {} end
+assert(driver.call("get_player", { userid = "KU_TEST" }).steam_id == "76561198000000001")
+assert(driver.call("get_player", { userid = "KU_LOADING" }) == json.null)
+GetPlayerClientTable = native_clients
 
 assert(observed.world_listener == "ms_playerjoined")
 assert(observed.player_listener == "ms_skilltreeinitialized")

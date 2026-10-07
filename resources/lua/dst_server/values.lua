@@ -107,6 +107,29 @@ function values.item_ref(inst)
     }
 end
 
+local function percent(inst, component)
+    local value = inst.components ~= nil and inst.components[component] or nil
+    if value == nil then return nil end
+    local ok, result = pcall(value.GetPercent, value)
+    return ok and finite(result) and result or nil
+end
+
+function values.item_condition(inst)
+    local condition = {
+        uses_percent = percent(inst, "finiteuses"),
+        fuel_percent = percent(inst, "fueled"),
+        freshness_percent = percent(inst, "perishable"),
+        armor_percent = percent(inst, "armor"),
+    }
+    return next(condition) ~= nil and condition or nil
+end
+
+function values.item_state(inst)
+    local item = values.item_ref(inst)
+    if item ~= json.null then item.condition = values.item_condition(inst) end
+    return item
+end
+
 function values.entity(inst)
     if not valid_entity(inst) then
         return json.null
@@ -167,6 +190,14 @@ end
 
 function values.player_data(player)
     return { player = values.entity_ref(player) }
+end
+
+function values.player_age(player)
+    local age = player ~= nil and player.userid ~= nil and player.components ~= nil
+        and player.components.age or nil
+    if age == nil then return json.null end
+    local ok, seconds = pcall(age.GetAge, age)
+    return ok and finite(seconds) and seconds >= 0 and seconds or json.null
 end
 
 function values.combat_data(player, data)

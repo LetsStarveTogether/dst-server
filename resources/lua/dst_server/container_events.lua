@@ -5,7 +5,7 @@ local container_events = {}
 local publish = telemetry.guard("container.transfer", function(snapshot, component, slot)
     if snapshot == nil then return end
     local before = snapshot.before
-    local after = values.item_ref(component:GetItemInSlot(slot))
+    local after = values.item_state(component:GetItemInSlot(slot))
     if before == after or before ~= json.null and after ~= json.null
         and before.guid == after.guid and before.stack_size == after.stack_size then return end
     snapshot.after = after
@@ -17,7 +17,7 @@ local function wrap(component, name, opener_arg, target_arg)
     local capture = telemetry.guard("container.capture", function(self, slot, ...)
         local player = opener_arg ~= nil and select(opener_arg, ...) or self.inst
         if player == nil or not player:HasTag("player") then return end
-        local before = values.item_ref(self:GetItemInSlot(slot))
+        local before = values.item_state(self:GetItemInSlot(slot))
         -- These branches delegate to another wrapped handler, which captures the change.
         if name == "PutAllOfActiveItemInSlot" and before ~= json.null
             or name == "SwapActiveItemWithSlot" and before == json.null then return end

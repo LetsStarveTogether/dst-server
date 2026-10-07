@@ -372,7 +372,7 @@ impl Observability {
                         .collect();
                     state.clients = clients
                         .iter()
-                        .filter_map(|client| client.as_str().map(str::to_owned))
+                        .filter_map(|client| client["userid"].as_str().map(str::to_owned))
                         .collect();
                 }
             }

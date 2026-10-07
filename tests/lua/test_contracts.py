@@ -69,6 +69,9 @@ def test_event_profiles(
         "snapshot_failure",
         "invalid_authentication",
         "authentication_output_failure",
+        "steam_identity",
+        "metadata",
+        "cave",
     ],
 )
 def test_connections(

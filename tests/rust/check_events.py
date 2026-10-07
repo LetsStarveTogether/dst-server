@@ -30,6 +30,9 @@ def main() -> None:
             ("input_events_spec.lua", ROOT, scripts, "critical"),
             ("gameplay_events_spec.lua", ROOT, scripts, "history"),
             ("mode_votes_spec.lua", ROOT, scripts, "forge"),
+            ("connections_spec.lua", ROOT, scripts, "steam_identity"),
+            ("connections_spec.lua", ROOT, scripts, "metadata"),
+            ("connections_spec.lua", ROOT, scripts, "cave"),
         ]
         for fixture, *arguments in fixtures:
             result = subprocess.run(

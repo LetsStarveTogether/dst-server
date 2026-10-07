@@ -70,7 +70,11 @@ async fn structured_event_survives_protobuf_and_real_grpc_export() -> anyhow::Re
                 "min_integer": i64::MIN,
                 "max_integer": i64::MAX,
                 "nested": {"list": [null, 0, "", false, 0.5, {}, []]},
-                "userid": "18446744073709551616"
+                "userid": "18446744073709551616",
+                "steam_id": "76561198000000001",
+                "name": "玩家改名后",
+                "admin": false,
+                "age_seconds": 4800.25
             }),
             observed_timestamp_ns: 1_791_013_234_567_890_123,
             severity_text: "info".into(),
@@ -120,6 +124,10 @@ async fn structured_event_survives_protobuf_and_real_grpc_export() -> anyhow::Re
             ("null", None),
             ("zero", Some(Proto::IntValue(0))),
             ("empty", Some(Proto::StringValue(String::new()))),
+            ("steam_id", Some(Proto::StringValue("76561198000000001".into()))),
+            ("name", Some(Proto::StringValue("玩家改名后".into()))),
+            ("admin", Some(Proto::BoolValue(false))),
+            ("age_seconds", Some(Proto::DoubleValue(4800.25))),
             ("false", Some(Proto::BoolValue(false))),
             ("float", Some(Proto::DoubleValue(1.0))),
             ("large_integer", Some(Proto::IntValue(9_007_199_254_740_993))),

@@ -1,6 +1,7 @@
 local state = require("dst_server.state")
 local telemetry = require("dst_server.telemetry")
 local values = require("dst_server.values")
+local connections = require("dst_server.connections")
 local player_events = {}
 local incidents = { sink = "sink", sink_fast = "sink", abyss_fall = "fall_in_void" }
 
@@ -18,6 +19,7 @@ local function attach_lifecycle(player)
     listen(player, "ms_respawnedfromghost", function(_, data)
         telemetry.emit("dst.player.revived", {
             player = values.entity_ref(player),
+            age_seconds = values.player_age(player),
             corpse = data ~= nil and data.corpse == true,
             method = data ~= nil and data.corpse == true and "corpse" or "ghost",
             reviver = values.entity_ref(data ~= nil and data.reviver or nil),
@@ -183,13 +185,13 @@ local function attach_inventory(player)
     end)
     listen(player, "equip", function(_, data)
         local event = values.player_data(player)
-        event.item = values.item_ref(data.item)
+        event.item = values.item_state(data.item)
         event.slot = tostring(data.eslot)
         telemetry.emit("dst.player.equipped", event)
     end)
     listen(player, "unequip", function(_, data)
         local event = values.player_data(player)
-        event.item = values.item_ref(data.item)
+        event.item = values.item_state(data.item)
         event.slot = tostring(data.eslot)
         event.slip = data.slip == true
         telemetry.emit("dst.player.unequipped", event)
@@ -219,7 +221,14 @@ function player_events.attach(player)
     state.players[player] = true
     -- Completed world loads, including migration, renew room activity even with telemetry off.
     player:ListenForEvent("ms_skilltreeinitialized", telemetry.guard("player.ms_skilltreeinitialized", function()
-        telemetry.emit("dst.player.loaded", { player = values.entity_ref(player) })
+        local identity = connections.client(player.userid)
+        telemetry.emit("dst.player.loaded", {
+            player = values.entity_ref(player),
+            steam_id = identity.steam_id,
+            name = identity.name,
+            is_ghost = player:HasTag("playerghost"),
+            age_seconds = values.player_age(player),
+        })
     end, true))
     if state.requested_profile ~= "off" then
         attach_optional(player)
@@ -235,6 +244,7 @@ function player_events.install_lifecycle()
     local capture = telemetry.guard("player.charlie_revived", function(player)
         telemetry.emit("dst.player.revived", {
             player = values.entity_ref(player),
+            age_seconds = values.player_age(player),
             corpse = false,
             method = "charlie",
             reviver = json.null,

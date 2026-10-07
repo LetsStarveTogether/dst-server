@@ -193,6 +193,14 @@ function scenarios.chat_capture_error()
 end
 
 local function player_loaded(profile)
+    local native_id
+    local lookups = 0
+    TheNet.GetNetIdForUser = function(_, userid)
+        assert(userid == "KU_JOINING" or userid == "KU_MIGRATING")
+        lookups = lookups + 1
+        return native_id
+    end
+    TheNet.GetClientTableForUser = function(_, userid) return {name = "玩家" .. userid} end
     POSTACTIVATEHANDSHAKE = { NONE = 0, CTS_LOADED = 1, STC_SENDINGSTATE = 2, READY = 3 }
     local native = require("prefabs/player_common_extensions")
     -- A player already loaded before installation must not become a new login.
@@ -206,7 +214,9 @@ local function player_loaded(profile)
     joining._PostActivateHandshakeState_Server = POSTACTIVATEHANDSHAKE.NONE
     joining.PostActivateHandshake = function() end
     joining.components.skilltreeupdater = { SendFromSkillTreeBlob = function() end }
+    joining.components.age = {GetAge = function() return 720.5 end}
     TheWorld:PushEvent("ms_playerjoined", joining)
+    assert(require("dst_server.connections").steam_id(joining.userid) == json.null)
     assert(#records("dst.player.loaded") == 0, "joining precedes the loading handshake")
     assert(#records("dst.player.shard_entered") == (profile == "off" and 0 or 1))
     assert(not pcall(driver.install, options(profile)))
@@ -214,13 +224,29 @@ local function player_loaded(profile)
         native.OnPostActivateHandshake_Server(joining, phase)
         assert(#records("dst.player.loaded") == 0, "loading is not yet complete")
     end
+    native_id = "76561198000000001"
     native.OnPostActivateHandshake_Server(joining, POSTACTIVATEHANDSHAKE.READY)
     local loaded = records("dst.player.loaded")
     assert(#loaded == 1 and loaded[1].data.player.userid == joining.userid)
     assert(loaded[1].session_id == "SESSION")
+    assert(loaded[1].data.name == "玩家KU_JOINING" and not loaded[1].data.is_ghost)
+    assert(loaded[1].data.age_seconds == 720.5)
+    assert(loaded[1].data.steam_id == native_id and lookups == 2, "loading retries an unavailable identity")
     native.OnPostActivateHandshake_Server(joining, POSTACTIVATEHANDSHAKE.READY)
     assert(not pcall(driver.install, options(profile)))
     assert(#records("dst.player.loaded") == 1, "duplicate handshake or install must not renew activity")
+    local arriving = entity("wilson", 5, "KU_MIGRATING")
+    arriving._PostActivateHandshakeState_Server = POSTACTIVATEHANDSHAKE.NONE
+    arriving.components.age = {GetAge = function() error("mod age unavailable") end}
+    TheWorld:PushEvent("ms_playerjoined", arriving)
+    native_id = "76561198000000002"
+    native.OnPostActivateHandshake_Server(arriving, POSTACTIVATEHANDSHAKE.READY)
+    loaded = records("dst.player.loaded")
+    assert(#loaded == 2 and loaded[2].data.player.userid == "KU_MIGRATING")
+    assert(loaded[2].data.name == "玩家KU_MIGRATING" and loaded[2].data.age_seconds == nil)
+    assert(loaded[2].data.steam_id == native_id and lookups == 3, "migration arrival needs no authentication callback")
+    native_id = nil
+    assert(require("dst_server.connections").steam_id(arriving.userid) == "76561198000000002" and lookups == 3)
     assert(driver.health().errors == 0)
 end
 

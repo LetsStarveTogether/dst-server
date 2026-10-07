@@ -238,7 +238,11 @@ async fn official_sdk_exports_six_instruments_and_operation_spans() -> anyhow::R
     observability.observe_state(&source, "cluster");
     observability.observe_driver(&event(&source, "dst.server.presence", json!({
         "players":[{"guid":1,"userid":"KU_A"},{"guid":2,"userid":"KU_A"},{"guid":3,"userid":"KU_B"}],
-        "clients":["KU_A","KU_A","KU_B"]
+        "clients":[
+            {"userid":"KU_A","steam_id":"76561198000000001"},
+            {"userid":"KU_A","steam_id":"76561198000000001"},
+            {"userid":"KU_B","steam_id":null}
+        ]
     })), "cluster");
     observability.observe_driver(
         &event(

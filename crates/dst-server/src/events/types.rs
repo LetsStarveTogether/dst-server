@@ -86,7 +86,7 @@ game_events! {
     PlayerHarvested(HarvestedData) => "dst.player.harvested",
     PlayerHoundWarning(HoundWarningData) => "dst.player.hound_warning",
     PlayerIncident(IncidentData) => "dst.player.incident",
-    PlayerLoaded(PlayerData) => "dst.player.loaded",
+    PlayerLoaded(PlayerLoadedData) => "dst.player.loaded",
     PlayerMigrationStarted(MigrationStartedData) => "dst.player.migration_started",
     PlayerPicked(PickedData) => "dst.player.picked",
     PlayerPlanted(PlantedData) => "dst.player.planted",
@@ -123,6 +123,30 @@ game_events! {
 pub struct ClientData {
     #[garde(dive)]
     pub userid: Identifier,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(inner(custom(steam_user_id)))]
+    pub steam_id: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(dive)]
+    pub name: Option<EventText>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(skip)]
+    pub admin: Option<bool>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(skip)]
+    pub moderator: Option<bool>,
+}
+
+fn steam_user_id(value: &str, _: &()) -> garde::Result {
+    if value.len() == 17
+        && value
+            .parse::<u64>()
+            .is_ok_and(|id| (76_561_197_960_265_729..=76_561_202_255_233_023).contains(&id))
+    {
+        Ok(())
+    } else {
+        Err(garde::Error::new("must be a public individual SteamID64"))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
@@ -133,6 +157,9 @@ pub struct Identifier(#[garde(length(chars, min = 1, max = 128))] pub String);
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct EntityDeathData {
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(inner(custom(valid_age_seconds)))]
+    pub age_seconds: Option<FiniteNumber>,
     #[serde(deserialize_with = "Option::deserialize")]
     #[garde(dive)]
     pub afflicter: Option<EntityRef>,
@@ -220,6 +247,13 @@ pub struct ActionData {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct ItemRef {
+    #[serde(
+        default,
+        deserialize_with = "crate::validation::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[garde(dive)]
+    pub condition: Option<ItemCondition>,
     #[garde(dive)]
     pub guid: PositiveCounter,
     #[garde(dive)]
@@ -229,6 +263,39 @@ pub struct ItemRef {
     pub skin: Option<Identifier>,
     #[garde(dive)]
     pub stack_size: PositiveCounter,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct ItemCondition {
+    #[serde(
+        default,
+        deserialize_with = "crate::validation::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[garde(dive)]
+    pub uses_percent: Option<FiniteNumber>,
+    #[serde(
+        default,
+        deserialize_with = "crate::validation::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[garde(dive)]
+    pub fuel_percent: Option<FiniteNumber>,
+    #[serde(
+        default,
+        deserialize_with = "crate::validation::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[garde(dive)]
+    pub freshness_percent: Option<FiniteNumber>,
+    #[serde(
+        default,
+        deserialize_with = "crate::validation::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[garde(dive)]
+    pub armor_percent: Option<FiniteNumber>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
@@ -658,6 +725,36 @@ pub struct PlayerData {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
+pub struct PlayerLoadedData {
+    #[garde(dive)]
+    pub player: EntityRef,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(inner(custom(steam_user_id)))]
+    pub steam_id: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(dive)]
+    pub name: Option<EventText>,
+    #[garde(skip)]
+    pub is_ghost: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(inner(custom(valid_age_seconds)))]
+    pub age_seconds: Option<FiniteNumber>,
+}
+
+fn valid_age_seconds(value: &FiniteNumber, _: &()) -> garde::Result {
+    if value
+        .0
+        .as_f64()
+        .is_some_and(|age| age.is_finite() && age >= 0.0)
+    {
+        Ok(())
+    } else {
+        Err(garde::Error::new("must be a non-negative finite age"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct MigrationStartedData {
     #[serde(deserialize_with = "Option::deserialize")]
     #[garde(dive)]
@@ -716,6 +813,9 @@ pub struct PlayerRequestData {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct RevivedData {
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(inner(custom(valid_age_seconds)))]
+    pub age_seconds: Option<FiniteNumber>,
     #[garde(skip)]
     pub corpse: bool,
     #[garde(skip)]
@@ -818,13 +918,15 @@ pub enum PauseData {
 #[serde(deny_unknown_fields)]
 pub struct PresenceData {
     #[garde(dive)]
-    pub clients: Vec<Identifier>,
+    pub clients: Vec<ClientData>,
     #[garde(dive)]
     pub health: DriverHealth,
     #[garde(dive)]
     pub max_players: Counter,
     #[garde(dive)]
     pub players: Vec<PresencePlayer>,
+    #[garde(dive)]
+    pub world: PresenceWorld,
     #[garde(skip)]
     pub reason: PresenceReason,
 }
@@ -929,6 +1031,39 @@ pub struct PresencePlayer {
     pub guid: PositiveCounter,
     #[garde(dive)]
     pub userid: Identifier,
+    #[garde(dive)]
+    pub prefab: Identifier,
+    #[garde(skip)]
+    pub is_ghost: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct PresenceWorld {
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(dive)]
+    pub season: Option<Identifier>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(dive)]
+    pub phase: Option<Identifier>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(dive)]
+    pub moonphase: Option<Identifier>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(dive)]
+    pub nightmarephase: Option<Identifier>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(skip)]
+    pub israining: Option<bool>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(skip)]
+    pub issnowing: Option<bool>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(skip)]
+    pub isacidraining: Option<bool>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[garde(skip)]
+    pub islunarhailing: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

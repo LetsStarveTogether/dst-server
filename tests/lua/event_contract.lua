@@ -39,6 +39,7 @@ local function item(prefab, guid)
 end
 
 local player = entity("wilson", 42, "KU_TEST", 1, 2)
+player.components = {age = {GetAge = function() return 720.5 end}}
 player.ListenForEvent = function(_, name, callback)
     player_listeners[name] = callback
 end
@@ -74,8 +75,13 @@ Networking_SystemMessage = function() end
 Networking_RollAnnouncement = function() end
 OnSimPaused = function() end
 OnSimUnpaused = function() end
-TheNet = { GetServerMaxPlayers = function() return 9 end }
-GetPlayerClientTable = function() return { { userid = "KU_TEST" } } end
+TheNet = {
+    GetServerMaxPlayers = function() return 9 end,
+    GetNetIdForUser = function(_, userid)
+        return userid == "KU_LOBBY" and "76561198000000001" or "76561198000000002"
+    end,
+}
+GetPlayerClientTable = function() return { { userid = "KU_TEST", netid = "76561198000000002" } } end
 MAX_CHAT_INPUT_LENGTH = 150
 string.utf8len = function(value) return #value end
 Ents = { [42] = player }
@@ -133,6 +139,8 @@ TheWorld.net.components.worldvoter:OnUpdate()
 local target = entity("hound", 44, nil, 3, 4)
 local redirected = entity("wall", 45, nil, 5, 6)
 local spear = item("spear", 43)
+spear.components.finiteuses = {GetPercent = function() return .25 end}
+spear.components.armor = {GetPercent = function() return .75 end}
 local loot = item("twigs", 46)
 local action = {
     action = { id = "CHOP" },

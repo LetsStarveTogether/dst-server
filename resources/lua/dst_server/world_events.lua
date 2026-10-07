@@ -57,6 +57,7 @@ function world_events.install_world()
             and not victim:HasTag("epic") and attributed == nil then return end
         telemetry.emit("dst.entity.death", {
             victim = values.entity_ref(victim),
+            age_seconds = values.player_age(victim),
             cause = values.text(data.cause, 256),
             afflicter = values.entity_ref(data.afflicter),
             attributed_player = values.entity_ref(attributed),

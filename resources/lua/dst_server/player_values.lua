@@ -1,4 +1,5 @@
 local values = require("dst_server.values")
+local connections = require("dst_server.connections")
 local player_values = {}
 
 local function state(client, player)
@@ -46,15 +47,17 @@ local function state(client, player)
 end
 
 function player_values.player(client, player)
+    local identity = connections.client(client.userid, client)
     local value = {
         userid = client.userid,
-        name = client.name or "",
+        steam_id = identity.steam_id,
+        name = identity.name,
         prefab = (player ~= nil and player.prefab ~= "" and player.prefab)
             or (client.prefab ~= "" and client.prefab)
             or (client.lobbycharacter ~= "" and client.lobbycharacter)
             or json.null,
-        admin = client.admin == true,
-        moderator = client.moderator == true,
+        admin = identity.admin,
+        moderator = identity.moderator,
         is_ghost = json.null,
         position = json.null,
         age = json.null,
@@ -130,6 +133,7 @@ function player_values.player(client, player)
 end
 
 function player_values.item(item)
+    local condition = values.item_condition(item) or {}
     local value = {
         prefab = item.prefab or "",
         guid = item.GUID,
@@ -138,27 +142,15 @@ function player_values.item(item)
             and item.components.stackable:StackSize()
             or 1,
         moisture_percent = json.null,
-        uses_percent = json.null,
-        freshness_percent = json.null,
-        fuel_percent = json.null,
-        armor_percent = json.null,
+        uses_percent = condition.uses_percent or json.null,
+        freshness_percent = condition.freshness_percent or json.null,
+        fuel_percent = condition.fuel_percent or json.null,
+        armor_percent = condition.armor_percent or json.null,
         charge_percent = json.null,
     }
     local components = item.components
     if components.inventoryitem ~= nil then
         value.moisture_percent = components.inventoryitem:GetMoisturePercent()
-    end
-    if components.finiteuses ~= nil then
-        value.uses_percent = components.finiteuses:GetPercent()
-    end
-    if components.perishable ~= nil then
-        value.freshness_percent = components.perishable:GetPercent()
-    end
-    if components.fueled ~= nil then
-        value.fuel_percent = components.fueled:GetPercent()
-    end
-    if components.armor ~= nil then
-        value.armor_percent = components.armor:GetPercent()
     end
     if components.rechargeable ~= nil then
         value.charge_percent = components.rechargeable:GetPercent()

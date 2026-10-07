@@ -43,9 +43,14 @@ OnSimUnpaused = function() TheWorld:PushEvent("ms_simunpaused") end
 world_events.install_world()
 require("dst_server.connections").install(TheWorld)
 
+player.components.age = {GetAge = function() return 4800.25 end}
 player:PushEvent("ms_respawnedfromghost")
+assert(json.decode(outputs[#outputs]:sub(10)).data.age_seconds == 4800.25)
+player.components.age.GetAge = function() error("mod age unavailable") end
 player:PushEvent("ms_respawnedfromghost", { corpse = true, reviver = player })
 assert(#outputs == 2)
+assert(json.decode(outputs[#outputs]:sub(10)).data.age_seconds == nil)
+player.components.age.GetAge = function() return 4800.25 end
 
 -- Execute the shipped rescue function: a restored body, not a rescue request.
 TUNING = { SANITY_BECOME_SANE_THRESH = .3, STARTING_TEMP = 20, RESURRECT_HEALTH = 50 }
@@ -72,6 +77,7 @@ extensions.OnRespawnFromVineSave(player)
 assert(not player.charlie_vinesave)
 assert(player.components.health.currenthealth == 50 and announcements == 1)
 assert(#outputs == 3, "a vine rescue emits one revival")
+assert(json.decode(outputs[#outputs]:sub(10)).data.age_seconds == 4800.25)
 local failure = {}
 player.components.inventory.Show = function() error(failure, 0) end
 local ok, err = pcall(extensions.OnRespawnFromVineSave, player)

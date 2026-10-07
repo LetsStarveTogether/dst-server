@@ -336,6 +336,23 @@ inventory.GetActiveItem = get_active
 assert(not succeeded and failure_value == native_error)
 transfer(function() box:PutAllOfActiveItemInSlot(1, player) end, box, player, 0, 4)
 
+local condition_calls = 0
+box.slots[1].components.finiteuses = {GetPercent = function()
+    condition_calls = condition_calls + 1
+    return .25
+end}
+box.slots[1].components.fueled = {GetPercent = function() return 0 end}
+box.slots[1].components.perishable = {GetPercent = function() return 0/0 end}
+box.slots[1].components.armor = {GetPercent = function() error("mod condition unavailable") end}
+transfer(function() box:TakeActiveItemFromAllOfSlot(1, player) end, box, player, 4, 0)
+assert(condition_calls == (history and 1 or 0), "only the selected item is inspected")
+if history then
+    local rows = records(transfer_event)
+    local condition = rows[#rows].before.condition
+    assert(condition.uses_percent == .25 and condition.fuel_percent == 0)
+    assert(condition.freshness_percent == nil and condition.armor_percent == nil)
+end
+
 -- Wormholes, temporary map exits and other local portals share the actual teleporter component.
 local Teleporter = require("components/teleporter")
 if enabled then capture.install_teleporters() end
