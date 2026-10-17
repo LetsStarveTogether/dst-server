@@ -2,10 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::future::{Future, poll_fn};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::task::Poll;
 use std::time::Duration;
@@ -17,6 +15,7 @@ use ulid::Ulid;
 
 use crate::configuration::{self, Cluster};
 use crate::process::{EventKind, GameProcess, ProcessSpec, StreamKind, native_message};
+use crate::{driver::DriverOptions, files::RoomLock};
 
 struct Shard {
     name: String,
@@ -31,11 +30,12 @@ struct Shard {
     native_done: bool,
     busy: bool,
     result: Option<Value>,
-    saves: VecDeque<Value>,
+    control_records: VecDeque<Value>,
     tail: VecDeque<String>,
 }
 
 struct Room {
+    lock: RoomLock,
     shards: Vec<Shard>,
     cursor: usize,
     recovering: bool,
@@ -69,6 +69,7 @@ pub async fn run(cluster: &Path, executable: &Path, timeout: u64, rounds: usize)
     let mut previous_sessions: Option<Vec<Value>> = None;
     for round in 1..=rounds {
         let mut room = Room {
+            lock: RoomLock::try_acquire(&cluster.directory)?,
             shards: Vec::new(),
             cursor: 0,
             recovering: false,
@@ -125,15 +126,23 @@ pub async fn recovery(
         .canonicalize()
         .context("resolve game executable")?;
     let mut room = Room {
+        lock: RoomLock::try_acquire(&cluster.directory)?,
         shards: Vec::new(),
         cursor: 0,
         recovering: true,
         player: None,
     };
     let result = timeout_at(deadline(timeout)?, async {
-        room.launch(&cluster, &executable, Some(&requests))?;
-        while room.shards.iter().any(|shard| !shard.ended) {
-            room.pump(true).await?;
+        for shard in &cluster.shards {
+            let single = Cluster {
+                shards: vec![shard.clone()],
+                ..cluster.clone()
+            };
+            room.launch(&single, &executable, Some(&requests[&shard.name]))?;
+            while room.shards.iter().any(|shard| !shard.ended) {
+                room.pump(true).await?;
+            }
+            room.shards.last().unwrap().process.wait().await?;
         }
         let mut records = BTreeMap::new();
         for shard in &room.shards {
@@ -147,11 +156,11 @@ pub async fn recovery(
                 shard.name
             );
             ensure!(
-                shard.saves.len() == 1,
+                shard.control_records.len() == 1,
                 "{} recovery did not publish exactly one result",
                 shard.name
             );
-            let record = &shard.saves[0];
+            let record = &shard.control_records[0];
             let request = &requests[&shard.name];
             if targets.is_some() {
                 ensure!(
@@ -203,6 +212,7 @@ pub async fn player_fixture(
         .canonicalize()
         .context("resolve game executable")?;
     let mut room = Room {
+        lock: RoomLock::try_acquire(&cluster.directory)?,
         shards: Vec::new(),
         cursor: 0,
         recovering: false,
@@ -318,31 +328,18 @@ impl Room {
         &mut self,
         cluster: &Cluster,
         executable: &Path,
-        recovery: Option<&BTreeMap<String, Value>>,
+        recovery: Option<&Value>,
     ) -> Result<()> {
+        let mut options = DriverOptions {
+            profile: "history".into(),
+            actions: vec!["ATTACK".into(), "MIGRATE".into()],
+            ..Default::default()
+        };
+        if let Some(request) = recovery {
+            options.control["recovery"] = request.clone();
+        }
+        let nonce = options.save(&mut self.lock)?;
         for shard in &cluster.shards {
-            let nonce = Ulid::new().to_string();
-            let options_path = cluster
-                .directory
-                .join(&shard.name)
-                .join("dst_server_driver.json");
-            let mut options = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(options_path)
-                .context("write disposable driver options")?;
-            let mut configuration = json!({"nonce": nonce,
-                "profile": "history", "actions": ["ATTACK", "MIGRATE"],
-                "control": {"observe_saves": true}});
-            if let Some(requests) = recovery {
-                configuration["control"]["recovery"] = requests[&shard.name].clone();
-            }
-            serde_json::to_writer(&mut options, &configuration)?;
-            options.write_all(b"\n")?;
-            options.sync_all()?;
             let args: Vec<OsString> = vec![
                 "-persistent_storage_root".into(),
                 cluster.directory.parent().unwrap().into(),
@@ -369,7 +366,7 @@ impl Room {
             self.shards.push(Shard {
                 name: shard.name.clone(),
                 process,
-                nonce,
+                nonce: nonce.clone(),
                 generation: None,
                 ready: false,
                 native_ready: false,
@@ -379,7 +376,7 @@ impl Room {
                 native_done: false,
                 busy: false,
                 result: None,
-                saves: VecDeque::new(),
+                control_records: VecDeque::new(),
                 tail: VecDeque::new(),
             });
             eprintln!(
@@ -462,56 +459,34 @@ impl Room {
             "save was not accepted"
         );
         eprintln!("probe: waiting for coordinated snapshot {target}");
-        let completed = loop {
-            let matches: Vec<_> = self
-                .shards
-                .iter()
-                .zip(&runtimes)
-                .map(|(shard, runtime)| {
-                    shard
-                        .saves
-                        .iter()
-                        .find(|save| {
-                            save["event"] == "save_complete"
-                                && save["snapshot_id"] == target
-                                && save["session_id"] == runtime["session_id"]
-                                && save["shutdown"] == false
-                        })
-                        .cloned()
-                })
-                .collect();
-            if matches.iter().all(Option::is_some) {
-                break matches.into_iter().map(Option::unwrap).collect::<Vec<_>>();
-            }
-            self.pump(false).await?;
-        };
         let mut records = Vec::new();
-        for index in 0..self.shards.len() {
-            let runtime = self.rpc(index, "runtime", json!({})).await?;
-            ensure!(
-                runtime["session_id"] == runtimes[index]["session_id"]
-                    && runtime["snapshot"].as_u64() == target.checked_add(1),
-                "{} did not advance to the coordinated snapshot",
-                self.shards[index].name
-            );
-            let catalog = self
-                .rpc(index, "list_snapshots", json!({"limit": 10}))
-                .await?;
-            ensure!(
-                catalog["session_id"] == runtime["session_id"]
-                    && catalog["snapshots"]
-                        .as_array()
-                        .is_some_and(|snapshots| snapshots
+        for (index, previous) in runtimes.iter().enumerate() {
+            let (runtime, catalog) = loop {
+                let runtime = self.rpc(index, "runtime", json!({})).await?;
+                ensure!(
+                    runtime["session_id"] == previous["session_id"],
+                    "{} changed session during saving",
+                    self.shards[index].name
+                );
+                let catalog = self
+                    .rpc(index, "list_snapshots", json!({"limit": 10}))
+                    .await?;
+                if runtime["snapshot"]
+                    .as_u64()
+                    .is_some_and(|snapshot| snapshot > target)
+                    && catalog["session_id"] == runtime["session_id"]
+                    && catalog["snapshots"].as_array().is_some_and(|snapshots| {
+                        snapshots
                             .iter()
-                            .any(|snapshot| snapshot["snapshot_id"] == target)),
-                "{} has no native catalog entry for completed snapshot",
-                self.shards[index].name
-            );
-            records.push(
-                json!({"name": self.shards[index].name, "pid": self.shards[index].process.pid(),
-                "generation": self.shards[index].generation, "runtime": runtime,
-                "save_completion": completed[index], "catalog": catalog}),
-            );
+                            .any(|snapshot| snapshot["snapshot_id"] == target)
+                    })
+                {
+                    break (runtime, catalog);
+                }
+                self.idle(Duration::from_millis(250)).await?;
+            };
+            records.push(json!({"name": self.shards[index].name, "pid": self.shards[index].process.pid(),
+                "generation": self.shards[index].generation, "runtime": runtime, "catalog": catalog}));
         }
         // Every shard owns a process; request native saving before waiting on any exit.
         for shard in &self.shards {
@@ -626,7 +601,7 @@ impl Room {
         arguments: &Value,
     ) -> Result<Option<Value>> {
         let shard = &mut self.shards[index];
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         let frame = format!(
             "DST_RPC|{}\n",
             json!({"v": 1, "nonce": shard.nonce,
@@ -842,24 +817,21 @@ impl Room {
                             record["event"].as_str(),
                             Some("recovery_catalog" | "recovery_applied" | "recovery_failed")
                         ),
-                    "{} saved or published unexpected control during recovery: {record}",
+                    "{} published unexpected control during recovery: {record}",
                     shard.name
                 );
                 ensure!(
-                    !matches!(
-                        record["event"].as_str(),
-                        Some("save_failed" | "save_unconfirmed" | "recovery_failed")
-                    ),
-                    "{} native save could not be confirmed: {record}",
+                    !matches!(record["event"].as_str(), Some("recovery_failed")),
+                    "{} native recovery failed: {record}",
                     shard.name
                 );
                 ensure!(
-                    shard.saves.len() < 128,
+                    shard.control_records.len() < 128,
                     "{} exceeded probe control evidence limit",
                     shard.name
                 );
                 eprintln!("probe: {} control {}", shard.name, record);
-                shard.saves.push_back(record);
+                shard.control_records.push_back(record);
             }
         }
         Ok(())

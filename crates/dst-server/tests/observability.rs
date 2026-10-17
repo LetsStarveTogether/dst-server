@@ -188,6 +188,7 @@ fn source() -> DriverState {
     DriverState {
         shard: "Master".into(),
         pid: 1,
+        process_id: ulid::Ulid::generate().to_string(),
         nonce: "attempt-one".into(),
         generation: Some(1),
         generation_changes: 0,
@@ -217,6 +218,7 @@ fn source() -> DriverState {
 
 fn event(source: &DriverState, name: &str, data: Value) -> DriverEvent {
     DriverEvent {
+        id: ulid::Ulid::generate().to_string(),
         kind: DriverEventKind::Telemetry,
         shard: source.shard.clone(),
         nonce: source.nonce.clone(),

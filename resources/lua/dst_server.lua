@@ -67,7 +67,6 @@ function driver.install(options)
     state.generation = generation
     state.requested_profile = profile
     state.action_allowlist = action_allowlist
-    require("dst_server.save_observer").refresh()
 
     local original = Networking_ModOutOfDateAnnouncement
     if type(original) ~= "function" then
@@ -126,7 +125,6 @@ function driver.call(name, args)
     if not state.installed then
         error("driver is not installed")
     end
-    require("dst_server.save_observer").refresh()
     local method = methods[name]
     if method == nil then
         error("unknown driver method: " .. tostring(name))

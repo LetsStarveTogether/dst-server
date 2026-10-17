@@ -1,11 +1,9 @@
-//! Native configuration I/O, room ownership, and durable offline replacement.
-//!
-//! A published configuration manifest is always completed by rolling forward.
-//! The caller must recover it with the game stopped before starting any shard.
+//! Native configuration I/O and room ownership.
+//! Offline edits validate their inputs, then replace each file independently.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CString, OsStr};
-use std::fs::File;
+use std::fs::{File, TryLockError};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -13,19 +11,15 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{configuration, lua};
 
 pub const ROOM_LOCK_FILE: &str = ".dst-room.lock";
-pub const CONTROL_FILE: &str = ".dst-control.json";
+pub const STATE_FILE: &str = ".dst-server.json";
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
-pub const MAX_TRANSACTION_FILES: usize = 1024;
-pub const MAX_TRANSACTION_BYTES: usize = 16 * 1024 * 1024;
-const TRANSACTION_DIR: &str = ".dst-config-transaction";
-const MANIFEST: &str = "manifest.json";
-const STAGING_MANIFEST: &str = ".manifest.tmp";
+pub const MAX_CONFIG_FILES: usize = 1024;
+pub const MAX_CONFIG_BYTES: usize = 16 * 1024 * 1024;
 const WRITE_TEMPORARY: &str = ".dst-config-write.tmp";
 const PERMISSION_FILES: [&str; 3] = ["adminlist.txt", "whitelist.txt", "blocklist.txt"];
 
@@ -74,54 +68,23 @@ pub(crate) fn edit_permission(source: &[u8], userid: &str, remove: bool) -> Vec<
     output
 }
 
-/// Hold this lock for the Agent's complete lifetime, including running games.
-/// Host operations use the same lock and fail immediately while the Agent owns it.
-/// The lock file must never be removed or replaced while the room exists.
-pub struct RoomLock {
+/// Read native files without taking ownership of the room or following symlinks.
+pub struct RoomReader {
     directory: PathBuf,
     root: Directory,
-    _lock: File,
-    owner_pid: u32,
 }
 
-impl Drop for RoomLock {
-    fn drop(&mut self) {
-        if self.owner_pid == std::process::id() {
-            // Forked children share this open file description until exec. Close
-            // alone can retain the lock; only the acquiring process may unlock it.
-            // SAFETY: self still owns a valid lock descriptor throughout Drop.
-            unsafe { libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN) };
-        }
-    }
-}
-
-impl RoomLock {
-    pub fn try_acquire(directory: impl AsRef<Path>) -> Result<Self> {
+impl RoomReader {
+    pub fn open(directory: impl AsRef<Path>) -> Result<Self> {
         let directory = directory.as_ref();
-        let root = Directory::open(directory)?;
-        let lock = root.open_file(ROOM_LOCK_FILE, libc::O_RDWR | libc::O_CREAT, 0o600)?;
-        // SAFETY: lock owns a valid descriptor; flock does not retain pointers.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("room is busy or cannot be locked");
-        }
         Ok(Self {
             directory: directory.to_owned(),
-            root,
-            _lock: lock,
-            owner_pid: std::process::id(),
+            root: Directory::open(directory)?,
         })
     }
 
     pub fn directory(&self) -> &Path {
         &self.directory
-    }
-
-    /// The caller must ensure every game process has exited and its output has
-    /// drained before creating this handle, and keep games stopped until it drops.
-    /// This is an ownership contract, not process detection or a stop operation.
-    pub fn while_stopped(&mut self) -> StoppedRoom<'_> {
-        StoppedRoom { room: self }
     }
 
     pub fn read_text(&self, relative: impl AsRef<Path>) -> Result<String> {
@@ -145,24 +108,6 @@ impl RoomLock {
             return Ok(None);
         }
         parent.read_bytes(&name, MAX_FILE_BYTES).map(Some)
-    }
-
-    /// Admin lists have no native mutation API; the Agent reloads permissions
-    /// after this replacement while holding its operation and room locks.
-    pub(crate) fn replace_adminlist(&mut self, contents: &[u8]) -> Result<()> {
-        self.replace_permission("adminlist.txt", contents)
-    }
-
-    fn replace_permission(&mut self, name: &str, contents: &[u8]) -> Result<()> {
-        ensure!(
-            PERMISSION_FILES.contains(&name),
-            "invalid permission filename"
-        );
-        ensure!(
-            contents.len() <= MAX_FILE_BYTES,
-            "permission file exceeds the byte limit"
-        );
-        self.root.replace(name, contents, 0o600)
     }
 
     pub(crate) fn open_regular(&self, relative: impl AsRef<Path>) -> Result<File> {
@@ -198,27 +143,122 @@ impl RoomLock {
     pub fn read_lua_table(&self, relative: impl AsRef<Path>) -> Result<Value> {
         lua::parse_return_table(&self.read_text(relative)?)
     }
+}
 
-    pub fn read_control(&self) -> Result<Map<String, Value>> {
-        if self.root.kind(CONTROL_FILE)?.is_none() {
+/// Hold this lock for the Agent's complete lifetime, including running games.
+/// Mutating Host operations use the same lock and fail while the Agent owns it.
+/// The lock file must never be removed or replaced while the room exists.
+pub struct RoomLock {
+    reader: RoomReader,
+    _lock: File,
+    owner_pid: u32,
+}
+
+impl std::ops::Deref for RoomLock {
+    type Target = RoomReader;
+    fn deref(&self) -> &RoomReader {
+        &self.reader
+    }
+}
+
+impl Drop for RoomLock {
+    fn drop(&mut self) {
+        if self.owner_pid == std::process::id() {
+            // Forked children share this open file description until exec. Close
+            // alone can retain the lock; only the acquiring process may unlock it.
+            let _ = self._lock.unlock();
+        }
+    }
+}
+
+impl RoomLock {
+    pub fn try_acquire(directory: impl AsRef<Path>) -> Result<Self> {
+        let directory = directory.as_ref();
+        let root = Directory::open(directory)?;
+        let lock = root.open_file(ROOM_LOCK_FILE, libc::O_RDWR | libc::O_CREAT, 0o600)?;
+        lock.try_lock()
+            .map_err(|error| match error {
+                TryLockError::WouldBlock => std::io::Error::from_raw_os_error(libc::EWOULDBLOCK),
+                TryLockError::Error(error) => error,
+            })
+            .context("room is busy or cannot be locked")?;
+        let room = Self {
+            reader: RoomReader {
+                directory: directory.to_owned(),
+                root,
+            },
+            _lock: lock,
+            owner_pid: std::process::id(),
+        };
+        let legacy = ".dst-control.json";
+        if room.root.kind(legacy)?.is_some() {
+            room.root.require_regular_or_absent(legacy)?;
+            ensure!(
+                room.root.kind(STATE_FILE)?.is_none(),
+                "both old and new room state files exist"
+            );
+            room.root.rename(legacy, STATE_FILE)?;
+            room.root.sync()?;
+        }
+        Ok(room)
+    }
+
+    /// The caller must ensure every game process has exited and its output has
+    /// drained before creating this handle, and keep games stopped until it drops.
+    /// This is an ownership contract, not process detection or a stop operation.
+    pub fn while_stopped(&mut self) -> StoppedRoom<'_> {
+        StoppedRoom { room: self }
+    }
+
+    /// Admin lists have no native mutation API; the Agent reloads permissions
+    /// after this replacement while holding its operation and room locks.
+    pub(crate) fn replace_adminlist(&mut self, contents: &[u8]) -> Result<()> {
+        self.replace_permission("adminlist.txt", contents)
+    }
+
+    fn replace_permission(&mut self, name: &str, contents: &[u8]) -> Result<()> {
+        ensure!(
+            PERMISSION_FILES.contains(&name),
+            "invalid permission filename"
+        );
+        ensure!(
+            contents.len() <= MAX_FILE_BYTES,
+            "permission file exceeds the byte limit"
+        );
+        self.root.replace(name, contents, 0o600)
+    }
+
+    /// The native storage API can read a shard's parent, but rejects room-level traversal.
+    pub(crate) fn write_driver_options(&self, encoded: &[u8]) -> Result<()> {
+        for shard in self.shard_directories()? {
+            let directory = self.root.child(&shard, false, 0o755)?;
+            if directory.kind("server.ini")?.is_some() {
+                directory.replace("dst_server_driver.json", encoded, 0o600)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn read_state(&self) -> Result<Map<String, Value>> {
+        if self.root.kind(STATE_FILE)?.is_none() {
             return Ok(Map::new());
         }
-        let source = self.root.read_text(CONTROL_FILE, MAX_FILE_BYTES)?;
+        let source = self.root.read_text(STATE_FILE, MAX_FILE_BYTES)?;
         let value: Value = serde_json::from_str(&source)
-            .map_err(|_| anyhow::anyhow!("invalid room control JSON"))?;
+            .map_err(|_| anyhow::anyhow!("invalid room state JSON"))?;
         match value {
             Value::Object(object) => Ok(object),
-            _ => bail!("room control JSON must be an object"),
+            _ => bail!("room state JSON must be an object"),
         }
     }
 
-    /// Re-read the native control file before changing one part of it so recovery,
+    /// Re-read the SDK state file before changing one part of it so recovery,
     /// policy and activity updates preserve each other's fields.
-    pub fn update_control<T>(
+    pub fn update_state<T>(
         &mut self,
         update: impl FnOnce(&mut Map<String, Value>) -> Result<T>,
     ) -> Result<T> {
-        let mut value = self.read_control()?;
+        let mut value = self.read_state()?;
         let original = value.clone();
         let result = update(&mut value)?;
         if value == original {
@@ -227,9 +267,9 @@ impl RoomLock {
         let encoded = serde_json::to_vec(&value)?;
         ensure!(
             encoded.len() <= MAX_FILE_BYTES,
-            "room control JSON exceeds the byte limit"
+            "room state JSON exceeds the byte limit"
         );
-        self.root.replace(CONTROL_FILE, &encoded, 0o600)?;
+        self.root.replace(STATE_FILE, &encoded, 0o600)?;
         Ok(result)
     }
 }
@@ -278,6 +318,8 @@ impl StoppedRoom<'_> {
         self.room.shard_directories()
     }
 
+    /// Replace files in order, stopping at the first I/O error.
+    /// Earlier writes remain applied; reapply the configuration after fixing the error.
     pub(crate) fn open_regular(&self, relative: impl AsRef<Path>) -> Result<File> {
         self.room.open_regular(relative)
     }
@@ -291,231 +333,117 @@ impl StoppedRoom<'_> {
 
     /// Commit a complete set of explicit replacements. Files absent from the set
     /// are untouched. A failure after manifest publication requires `recover`.
-    pub fn commit(
-        &mut self,
-        files: FileChanges,
-        permission_files: PermissionFiles,
-    ) -> Result<Vec<PathBuf>> {
-        self.commit_with_deletions(files, Vec::new(), permission_files)
-    }
-
-    /// Replace and remove native configuration in the same recoverable transaction.
-    /// Removed paths are regular files; directories and saves are never removed.
-    pub fn commit_with_deletions(
+    pub fn write_files(
         &mut self,
         files: FileChanges,
         removed: Vec<PathBuf>,
-        permission_files: PermissionFiles,
+        permissions: PermissionFiles,
     ) -> Result<Vec<PathBuf>> {
-        if files.is_empty() && removed.is_empty() {
-            return Ok(Vec::new());
-        }
-        let transaction = Transaction {
-            version: 1,
-            replace_permissions: permission_files == PermissionFiles::ReplaceOffline,
-            files: files
-                .into_iter()
-                .map(|(path, contents)| Replacement { path, contents })
-                .collect(),
-            removed,
-        };
-        self.prepare(&transaction)?;
-        self.finish(&transaction)
-    }
-
-    /// Complete a published transaction, or discard unpublished staging.
-    /// This must run before starting game processes after an interrupted commit.
-    pub fn recover(&mut self) -> Result<Vec<PathBuf>> {
-        if self.room.root.kind(TRANSACTION_DIR)?.is_none() {
-            return Ok(Vec::new());
-        }
-        let staging = self.room.root.child(TRANSACTION_DIR, false, 0o700)?;
-        if staging.kind(MANIFEST)?.is_none() {
-            staging.remove_regular_if_present(STAGING_MANIFEST)?;
-            staging.sync()?;
-            self.room.root.remove_directory(TRANSACTION_DIR)?;
-            return Ok(Vec::new());
-        }
-        let source = staging.read_text(MANIFEST, MAX_TRANSACTION_BYTES)?;
-        let transaction: Transaction = serde_json::from_str(&source)
-            .map_err(|_| anyhow::anyhow!("invalid configuration transaction manifest"))?;
-        transaction.validate()?;
-        self.finish(&transaction)
-    }
-
-    fn prepare(&self, transaction: &Transaction) -> Result<()> {
-        transaction.validate()?;
-        ensure!(
-            self.room.root.kind(TRANSACTION_DIR)?.is_none(),
-            "configuration transaction already exists; recover it before editing"
-        );
-        // Validate all current targets before publishing anything. Missing parent
-        // directories are created only after the complete intent is durable.
-        for replacement in &transaction.files {
-            self.room.root.check_target(&replacement.path)?;
-        }
-        for path in &transaction.removed {
+        validate_changes(&files, &removed, permissions)?;
+        for path in files.keys().chain(&removed) {
             self.room.root.check_target(path)?;
         }
-        let encoded = serde_json::to_vec(transaction)?;
-        ensure!(
-            encoded.len() <= MAX_TRANSACTION_BYTES,
-            "configuration transaction exceeds the byte limit"
-        );
-        let staging = self.room.root.child(TRANSACTION_DIR, true, 0o700)?;
-        let mut manifest = staging.open_file(
-            STAGING_MANIFEST,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-            0o600,
-        )?;
-        manifest
-            .write_all(&encoded)
-            .context("write staged configuration")?;
-        manifest.sync_all().context("sync staged configuration")?;
-        staging.rename(STAGING_MANIFEST, MANIFEST)?;
-        staging.sync()?;
-        self.room.root.sync()?;
-        Ok(())
-    }
-
-    fn finish(&self, transaction: &Transaction) -> Result<Vec<PathBuf>> {
-        let mut written = Vec::with_capacity(transaction.files.len());
-        for replacement in &transaction.files {
-            self.apply(replacement)?;
-            written.push(replacement.path.clone());
+        let mut written = Vec::with_capacity(files.len() + removed.len());
+        for (path, contents) in files {
+            let (parent, name) = self.room.root.parent(&path, true)?;
+            let private = ["cluster.ini", "cluster_token.txt", "server.ini"]
+                .contains(&name.as_str())
+                || PERMISSION_FILES.contains(&name.as_str());
+            parent
+                .replace(
+                    &name,
+                    contents.as_bytes(),
+                    if private { 0o600 } else { 0o644 },
+                )
+                .with_context(|| format!("write configuration {}", path.display()))?;
+            written.push(path);
         }
-        for path in &transaction.removed {
-            if let Some((parent, name)) = self.room.root.existing_parent(path)? {
+        for path in removed {
+            if let Some((parent, name)) = self.room.root.existing_parent(&path)? {
                 parent.remove_regular_if_present(&name)?;
                 parent.sync()?;
             }
-            written.push(path.clone());
+            written.push(path);
         }
-        let staging = self.room.root.child(TRANSACTION_DIR, false, 0o700)?;
-        staging.remove_regular_if_present(MANIFEST)?;
-        staging.remove_regular_if_present(STAGING_MANIFEST)?;
-        staging.sync()?;
-        self.room.root.remove_directory(TRANSACTION_DIR)?;
         Ok(written)
     }
+}
 
-    fn apply(&self, replacement: &Replacement) -> Result<()> {
-        let (parent, name) = self.room.root.parent(&replacement.path, true)?;
-        let mode = if ["cluster.ini", "cluster_token.txt", "server.ini"].contains(&name.as_str()) {
-            0o600
-        } else {
-            0o644
-        };
-        parent.replace(&name, replacement.contents.as_bytes(), mode)
+fn validate_changes(
+    files: &FileChanges,
+    removed: &[PathBuf],
+    permissions: PermissionFiles,
+) -> Result<()> {
+    ensure!(
+        files.len() + removed.len() <= MAX_CONFIG_FILES,
+        "configuration update file count is outside its limit"
+    );
+    let mut paths: BTreeSet<_> = files.keys().cloned().collect();
+    let mut bytes = 0_usize;
+    for (path, contents) in files {
+        let components = relative_components(path)?;
+        ensure!(
+            !components.iter().any(|name| name.starts_with(".dst-")),
+            "configuration update cannot replace controller files"
+        );
+        ensure!(
+            contents.len() <= MAX_FILE_BYTES,
+            "configuration file exceeds the byte limit"
+        );
+        ensure!(
+            !contents.contains('\0'),
+            "configuration text cannot contain NUL"
+        );
+        bytes = bytes
+            .checked_add(contents.len())
+            .context("configuration update size overflow")?;
+        ensure!(
+            bytes <= MAX_CONFIG_BYTES,
+            "configuration update exceeds the byte limit"
+        );
+        if components.len() == 1 && PERMISSION_FILES.contains(&components[0]) {
+            ensure!(
+                permissions == PermissionFiles::ReplaceOffline,
+                "permission files require an explicit offline replacement"
+            );
+            ensure!(
+                !contents.contains('\r'),
+                "permission files cannot contain CR"
+            );
+        }
+        if path.extension().is_some_and(|extension| extension == "ini") {
+            configuration::Ini::parse(path, contents, ini_kind(path))?;
+        }
     }
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Transaction {
-    version: u8,
-    replace_permissions: bool,
-    files: Vec<Replacement>,
-    #[serde(default)]
-    removed: Vec<PathBuf>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Replacement {
-    path: PathBuf,
-    contents: String,
-}
-
-impl Transaction {
-    fn validate(&self) -> Result<()> {
+    for path in removed {
+        let parts = relative_components(path)?;
         ensure!(
-            self.version == 1,
-            "unsupported configuration transaction version"
+            parts.len() == 2
+                && !parts[0].starts_with('.')
+                && parts[0] != "mods"
+                && [
+                    "server.ini",
+                    "worldgenoverride.lua",
+                    "leveldataoverride.lua"
+                ]
+                .contains(&parts[1]),
+            "only shard configuration files can be removed"
         );
         ensure!(
-            !self.files.is_empty() || !self.removed.is_empty(),
-            "configuration transaction is empty"
+            paths.insert(path.clone()),
+            "duplicate configuration update path"
         );
-        ensure!(
-            self.files.len() + self.removed.len() <= MAX_TRANSACTION_FILES,
-            "configuration transaction file count is outside its limit"
-        );
-        let mut paths = BTreeSet::new();
-        let mut bytes = 0_usize;
-        for file in &self.files {
-            let components = relative_components(&file.path)?;
-            ensure!(
-                !components.iter().any(|name| name.starts_with(".dst-")),
-                "configuration transaction cannot replace controller files"
-            );
-            ensure!(
-                paths.insert(file.path.clone()),
-                "duplicate configuration transaction path"
-            );
-            ensure!(
-                file.contents.len() <= MAX_FILE_BYTES,
-                "configuration file exceeds the byte limit"
-            );
-            ensure!(
-                !file.contents.contains('\0'),
-                "configuration text cannot contain NUL"
-            );
-            bytes = bytes
-                .checked_add(file.contents.len())
-                .context("configuration transaction size overflow")?;
-            ensure!(
-                bytes <= MAX_TRANSACTION_BYTES,
-                "configuration transaction exceeds the byte limit"
-            );
-            if components.len() == 1 && PERMISSION_FILES.contains(&components[0]) {
-                ensure!(
-                    self.replace_permissions,
-                    "permission files require an explicit offline replacement"
-                );
-                ensure!(
-                    !file.contents.contains('\r'),
-                    "permission files cannot contain CR"
-                );
-            }
-            if file
-                .path
-                .extension()
-                .is_some_and(|extension| extension == "ini")
-            {
-                configuration::Ini::parse(&file.path, &file.contents, ini_kind(&file.path))?;
-            }
-        }
-        for path in &self.removed {
-            let parts = relative_components(path)?;
-            ensure!(
-                parts.len() == 2
-                    && !parts[0].starts_with('.')
-                    && parts[0] != "mods"
-                    && [
-                        "server.ini",
-                        "worldgenoverride.lua",
-                        "leveldataoverride.lua"
-                    ]
-                    .contains(&parts[1]),
-                "only shard configuration files can be removed"
-            );
-            ensure!(
-                paths.insert(path.clone()),
-                "duplicate configuration transaction path"
-            );
-        }
-        for path in &paths {
-            ensure!(
-                !path
-                    .ancestors()
-                    .skip(1)
-                    .any(|ancestor| paths.contains(ancestor)),
-                "a configuration file cannot be another file's parent directory"
-            );
-        }
-        Ok(())
     }
+    for path in &paths {
+        ensure!(
+            !path
+                .ancestors()
+                .skip(1)
+                .any(|ancestor| paths.contains(ancestor)),
+            "a configuration file cannot be another file's parent directory"
+        );
+    }
+    Ok(())
 }
 
 pub fn render_ini(document: &IniDocument) -> Result<String> {
@@ -907,16 +835,6 @@ impl Directory {
         Ok(())
     }
 
-    fn remove_directory(&self, name: &str) -> Result<()> {
-        let name = CString::new(name)?;
-        // SAFETY: AT_REMOVEDIR removes only the named empty directory, never its contents.
-        if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("remove configuration staging directory");
-        }
-        self.sync()
-    }
-
     fn sync(&self) -> Result<()> {
         self.0.sync_all().context("sync configuration directory")
     }
@@ -1005,8 +923,10 @@ mod tests {
                 return Err(std::io::Error::last_os_error());
             }
             drop(RoomLock {
-                directory: PathBuf::new(),
-                root: Directory(directory),
+                reader: RoomReader {
+                    directory: PathBuf::new(),
+                    root: Directory(directory),
+                },
                 // SAFETY: dup returned a newly owned descriptor.
                 _lock: unsafe { File::from_raw_fd(lock_fd) },
                 owner_pid,
@@ -1042,14 +962,20 @@ mod tests {
     }
 
     #[test]
-    fn native_data_reads_and_offline_commit_preserve_permissions() {
+    fn native_data_reads_and_offline_writes_preserve_permissions() {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("adminlist.txt"), "KU_new_game_write\n").unwrap();
         let mut lock = RoomLock::try_acquire(root.path()).unwrap();
-        assert!(RoomLock::try_acquire(root.path()).is_err());
+        let error = RoomLock::try_acquire(root.path())
+            .err()
+            .unwrap()
+            .downcast::<std::io::Error>()
+            .unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(error.raw_os_error(), Some(libc::EWOULDBLOCK));
         let written = lock
             .while_stopped()
-            .commit(changes(), PermissionFiles::Preserve)
+            .write_files(changes(), Vec::new(), PermissionFiles::Preserve)
             .unwrap();
         assert_eq!(written.len(), 3);
         assert_eq!(
@@ -1072,7 +998,6 @@ mod tests {
                 & 0o777,
             0o600
         );
-        assert!(!root.path().join(TRANSACTION_DIR).exists());
         let ini = lock.read_ini("cluster.ini").unwrap();
         assert_eq!(
             configuration::Ini::parse(Path::new("cluster.ini"), &render_ini(&ini).unwrap(), None)
@@ -1098,41 +1023,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_commit_rolls_forward_with_fixed_contents() {
-        let root = tempfile::tempdir().unwrap();
-        let transaction = Transaction {
-            version: 1,
-            replace_permissions: false,
-            removed: Vec::new(),
-            files: changes()
-                .into_iter()
-                .map(|(path, contents)| Replacement { path, contents })
-                .collect(),
-        };
-        let mut lock = RoomLock::try_acquire(root.path()).unwrap();
-        {
-            let offline = lock.while_stopped();
-            offline.prepare(&transaction).unwrap();
-            offline.apply(&transaction.files[0]).unwrap();
-        }
-        drop(lock);
-        assert!(root.path().join(TRANSACTION_DIR).join(MANIFEST).is_file());
-        let mut lock = RoomLock::try_acquire(root.path()).unwrap();
-        assert!(
-            lock.while_stopped()
-                .commit(changes(), PermissionFiles::Preserve)
-                .is_err()
-        );
-        assert_eq!(lock.while_stopped().recover().unwrap().len(), 3);
-        for (path, content) in changes() {
-            assert_eq!(lock.read_text(path).unwrap(), content);
-        }
-        assert!(lock.while_stopped().recover().unwrap().is_empty());
-        assert!(!root.path().join(TRANSACTION_DIR).exists());
-    }
-
-    #[test]
-    fn interrupted_deactivation_removes_only_configuration_and_rejects_save_deletion() {
+    fn deactivation_removes_only_configuration_and_rejects_save_deletion() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("Caves/save")).unwrap();
         fs::write(
@@ -1142,17 +1033,14 @@ mod tests {
         .unwrap();
         fs::write(root.path().join("Caves/save/world"), "saved world").unwrap();
         let mut lock = RoomLock::try_acquire(root.path()).unwrap();
-        let transaction = Transaction {
-            version: 1,
-            replace_permissions: false,
-            files: Vec::new(),
-            removed: vec![PathBuf::from("Caves/server.ini")],
-        };
-        lock.while_stopped().prepare(&transaction).unwrap();
-        drop(lock);
-        let mut lock = RoomLock::try_acquire(root.path()).unwrap();
         assert_eq!(
-            lock.while_stopped().recover().unwrap(),
+            lock.while_stopped()
+                .write_files(
+                    FileChanges::new(),
+                    vec![PathBuf::from("Caves/server.ini")],
+                    PermissionFiles::Preserve,
+                )
+                .unwrap(),
             vec![PathBuf::from("Caves/server.ini")]
         );
         assert!(!root.path().join("Caves/server.ini").exists());
@@ -1162,7 +1050,7 @@ mod tests {
         );
         assert!(
             lock.while_stopped()
-                .commit_with_deletions(
+                .write_files(
                     FileChanges::new(),
                     vec![PathBuf::from("Caves/save/world")],
                     PermissionFiles::Preserve
@@ -1174,27 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn unpublished_or_completed_manifest_cleanup_is_safe() {
-        for leftover in [true, false] {
-            let root = tempfile::tempdir().unwrap();
-            fs::write(root.path().join("cluster.ini"), "original").unwrap();
-            fs::create_dir(root.path().join(TRANSACTION_DIR)).unwrap();
-            if leftover {
-                fs::write(
-                    root.path().join(TRANSACTION_DIR).join(STAGING_MANIFEST),
-                    "{incomplete",
-                )
-                .unwrap();
-            }
-            let mut lock = RoomLock::try_acquire(root.path()).unwrap();
-            assert!(lock.while_stopped().recover().unwrap().is_empty());
-            assert_eq!(lock.read_text("cluster.ini").unwrap(), "original");
-            assert!(!root.path().join(TRANSACTION_DIR).exists());
-        }
-    }
-
-    #[test]
-    fn invalid_input_and_permission_replacement_fail_before_commit() {
+    fn invalid_input_and_permission_replacement_fail_before_writing() {
         let root = tempfile::tempdir().unwrap();
         let mut lock = RoomLock::try_acquire(root.path()).unwrap();
         for path in [
@@ -1204,44 +1072,46 @@ mod tests {
             "a//b",
             "a/./b",
             ".dst-room.lock",
-            ".dst-control.json",
+            ".dst-server.json",
             "adminlist.txt",
         ] {
             assert!(
                 lock.while_stopped()
-                    .commit(
+                    .write_files(
                         BTreeMap::from([(PathBuf::from(path), "value".to_owned())]),
+                        Vec::new(),
                         PermissionFiles::Preserve
                     )
                     .is_err(),
                 "{path}"
             );
-            assert!(!root.path().join(TRANSACTION_DIR).exists());
         }
         let permissions =
             BTreeMap::from([(PathBuf::from("adminlist.txt"), "KU_explicit\n".to_owned())]);
         lock.while_stopped()
-            .commit(permissions, PermissionFiles::ReplaceOffline)
+            .write_files(permissions, Vec::new(), PermissionFiles::ReplaceOffline)
             .unwrap();
         assert_eq!(lock.read_text("adminlist.txt").unwrap(), "KU_explicit\n");
         assert!(
             lock.while_stopped()
-                .commit(
+                .write_files(
                     BTreeMap::from([(
                         PathBuf::from("oversized.lua"),
                         "x".repeat(MAX_FILE_BYTES + 1)
                     )]),
+                    Vec::new(),
                     PermissionFiles::Preserve
                 )
                 .is_err()
         );
         assert!(
             lock.while_stopped()
-                .commit(
+                .write_files(
                     BTreeMap::from([
                         (PathBuf::from("a"), "file".to_owned()),
                         (PathBuf::from("a/b"), "child".to_owned())
                     ]),
+                    Vec::new(),
                     PermissionFiles::Preserve
                 )
                 .is_err()
@@ -1249,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn symlinks_are_rejected_during_read_write_and_recovery() {
+    fn symlinks_are_rejected_during_read_and_write() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         fs::write(outside.path().join("target"), "outside").unwrap();
@@ -1261,65 +1131,97 @@ mod tests {
         for path in ["linked/target", "file-link"] {
             assert!(
                 lock.while_stopped()
-                    .commit(
+                    .write_files(
                         BTreeMap::from([(PathBuf::from(path), "changed".to_owned())]),
+                        Vec::new(),
                         PermissionFiles::Preserve
                     )
                     .is_err()
             );
         }
-        let transaction = Transaction {
-            version: 1,
-            replace_permissions: false,
-            removed: Vec::new(),
-            files: vec![Replacement {
-                path: "fresh/target".into(),
-                contents: "changed".into(),
-            }],
-        };
-        lock.while_stopped().prepare(&transaction).unwrap();
-        symlink(outside.path(), root.path().join("fresh")).unwrap();
-        assert!(lock.while_stopped().recover().is_err());
         assert_eq!(
             fs::read_to_string(outside.path().join("target")).unwrap(),
             "outside"
         );
-        assert!(root.path().join(TRANSACTION_DIR).join(MANIFEST).is_file());
         let links = tempfile::tempdir().unwrap();
         symlink(root.path(), links.path().join("room")).unwrap();
         assert!(RoomLock::try_acquire(links.path().join("room")).is_err());
     }
 
     #[test]
-    fn control_updates_preserve_other_fields_and_report_bad_data() {
+    fn state_migration_preserves_recovery_and_rejects_conflicting_files() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join(".dst-control.json");
+        let current = root.path().join(STATE_FILE);
+        let state = r#"{"policy":{"idle_regeneration":false},"recovery":{"restarts_used":2}}"#;
+        fs::write(&legacy, state).unwrap();
+        let mut room = RoomLock::try_acquire(root.path()).unwrap();
+        assert!(!legacy.exists());
+        assert_eq!(fs::read_to_string(&current).unwrap(), state);
+        let shard = root.path().join("Caves");
+        fs::create_dir(&shard).unwrap();
+        fs::write(shard.join("server.ini"), "[SHARD]\nis_master=false\n").unwrap();
+        fs::write(shard.join("dst_server_driver.json"), "old launch").unwrap();
+        crate::driver::DriverOptions::default()
+            .save(&mut room)
+            .unwrap();
+        assert_eq!(room.read_state().unwrap()["recovery"]["restarts_used"], 2);
+        assert_eq!(
+            room.read_state().unwrap()["policy"]["idle_regeneration"],
+            false
+        );
+        let launch: Value =
+            serde_json::from_slice(&fs::read(shard.join("dst_server_driver.json")).unwrap())
+                .unwrap();
+        assert_eq!(launch["driver"], room.read_state().unwrap()["driver"]);
+        assert!(launch.get("recovery").is_none());
+        drop(room);
+        fs::write(&legacy, "second state").unwrap();
+        assert!(RoomLock::try_acquire(root.path()).is_err());
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), "second state");
+        assert!(
+            fs::read_to_string(&current)
+                .unwrap()
+                .contains("restarts_used")
+        );
+        fs::remove_file(&legacy).unwrap();
+        fs::remove_file(&current).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        symlink(outside.path(), &legacy).unwrap();
+        assert!(RoomLock::try_acquire(root.path()).is_err());
+        assert!(!current.exists());
+    }
+
+    #[test]
+    fn state_updates_preserve_other_fields_and_report_bad_data() {
         let root = tempfile::tempdir().unwrap();
         let mut lock = RoomLock::try_acquire(root.path()).unwrap();
-        lock.update_control(|control| {
+        lock.update_state(|control| {
             control.insert("policies".into(), json!({"open": true}));
             Ok(())
         })
         .unwrap();
-        lock.update_control(|control| {
+        lock.update_state(|control| {
             control.insert("recovery".into(), json!({"attempts": 1}));
             Ok(())
         })
         .unwrap();
         assert_eq!(
-            Value::Object(lock.read_control().unwrap()),
+            Value::Object(lock.read_state().unwrap()),
             json!({"policies": {"open": true}, "recovery": {"attempts": 1}})
         );
-        let inode = fs::metadata(root.path().join(CONTROL_FILE)).unwrap().ino();
-        lock.update_control(|_| Ok(())).unwrap();
+        let inode = fs::metadata(root.path().join(STATE_FILE)).unwrap().ino();
+        lock.update_state(|_| Ok(())).unwrap();
         assert_eq!(
-            fs::metadata(root.path().join(CONTROL_FILE)).unwrap().ino(),
+            fs::metadata(root.path().join(STATE_FILE)).unwrap().ino(),
             inode
         );
-        fs::write(root.path().join(CONTROL_FILE), "{broken PRIVATE_SECRET").unwrap();
-        let error = lock.read_control().unwrap_err().to_string();
+        fs::write(root.path().join(STATE_FILE), "{broken PRIVATE_SECRET").unwrap();
+        let error = lock.read_state().unwrap_err().to_string();
         assert!(!error.contains("PRIVATE_SECRET"));
-        assert!(lock.update_control(|_| Ok(())).is_err());
+        assert!(lock.update_state(|_| Ok(())).is_err());
         assert_eq!(
-            fs::read_to_string(root.path().join(CONTROL_FILE)).unwrap(),
+            fs::read_to_string(root.path().join(STATE_FILE)).unwrap(),
             "{broken PRIVATE_SECRET"
         );
     }

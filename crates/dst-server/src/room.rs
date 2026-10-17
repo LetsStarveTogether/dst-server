@@ -79,8 +79,7 @@ impl Room {
         options: DriverOptions,
         events: EventHub,
     ) -> Result<Arc<Self>> {
-        let mut lock = RoomLock::try_acquire(directory.as_ref()).map_err(internal)?;
-        lock.while_stopped().recover().map_err(internal)?;
+        let lock = RoomLock::try_acquire(directory.as_ref()).map_err(internal)?;
         crate::archive::clear_artifacts(directory.as_ref(), true).map_err(internal)?;
         let cluster = configuration::discover(directory.as_ref()).map_err(internal)?;
         let initial = RoomStatus {
@@ -467,7 +466,7 @@ impl Room {
             })?)
         };
         let operation = OperationStatus {
-            id: ulid::Ulid::new().to_string(),
+            id: ulid::Ulid::generate().to_string(),
             method: envelope.request.method().into(),
             target: envelope.target.clone(),
             started_at_ns: timestamp(),
@@ -781,23 +780,28 @@ impl Room {
         });
         self.drivers.lock().unwrap().clear();
         self.set_phase(Phase::Starting, None);
+        let options = self.options.lock().unwrap().clone();
+        let nonce = self
+            .with_lock(|lock| options.save(lock))
+            .inspect_err(|error| {
+                self.set_phase(Phase::Failed, Some(error.clone()));
+            })?;
         for shard in &cluster.shards {
-            let mut options = self.options.lock().unwrap().clone();
+            let mut extra_args = options.extra_args.clone();
             if let Some(port) = self.ports.lock().unwrap().get(&shard.name) {
-                options
-                    .extra_args
-                    .extend(["-external_port".into(), port.to_string().into()]);
+                extra_args.extend(["-external_port".into(), port.to_string().into()]);
             }
-            let driver = match Driver::spawn(&cluster, &self.executable, &shard.name, options) {
-                Ok(driver) => driver,
-                Err(error) => {
-                    let error = internal(error);
-                    self.set_phase(Phase::Failed, Some(error.clone()));
-                    let _ = self.stop_inner(false).await;
-                    self.set_phase(Phase::Failed, Some(error.clone()));
-                    return Err(error);
-                }
-            };
+            let driver =
+                match Driver::spawn(&cluster, &self.executable, &shard.name, &nonce, extra_args) {
+                    Ok(driver) => driver,
+                    Err(error) => {
+                        let error = internal(error);
+                        self.set_phase(Phase::Failed, Some(error.clone()));
+                        let _ = self.stop_inner(false).await;
+                        self.set_phase(Phase::Failed, Some(error.clone()));
+                        return Err(error);
+                    }
+                };
             self.drivers
                 .lock()
                 .unwrap()
@@ -917,15 +921,12 @@ impl Room {
         self.set_phase(Phase::Stopping, None);
         let drivers = self.drivers();
         let stopped = join_all(drivers.into_iter().map(|(name, driver)| async move {
-            let before = driver.snapshot();
             let report = if force {
                 driver.kill().await
             } else {
                 driver.stop(Duration::from_secs_f64(STOP_TIMEOUT)).await
             };
             let after = driver.snapshot();
-            // Retain the original boundary when cleanup resumes the same shutdown worker.
-            let before = driver.stop_snapshot().unwrap_or(before);
             let stopped = ShardStopped {
                 returncode: report
                     .as_ref()
@@ -934,7 +935,6 @@ impl Room {
                 output_drained: report
                     .as_ref()
                     .map_or(after.output_drained, |report| report.output_drained),
-                saved_snapshot: saved_after(&after, &before, last_save_id(&before), None, true),
             };
             let result = report.map_err(driver_error).and_then(|report| {
                 if !report.output_drained {
@@ -989,114 +989,38 @@ impl Room {
     }
     async fn save(&self) -> Result<Value> {
         self.require_ready()?;
-        let drivers = self.drivers();
-        let mut expected = BTreeMap::new();
-        for (name, driver) in &drivers {
+        let master = self.master();
+        let runtime = self.native(&master, "runtime", json!({})).await?;
+        let target = runtime["snapshot"]
+            .as_u64()
+            .ok_or_else(|| Error::new(ErrorCode::Protocol, "runtime snapshot is missing"))?;
+        for (name, driver) in self.drivers() {
+            if name == master {
+                continue;
+            }
             let runtime = driver
                 .request("runtime", json!({}), COMMAND)
                 .await
                 .map_err(driver_error)?;
-            expected.insert(
-                name.clone(),
-                (
-                    driver.snapshot(),
-                    runtime["snapshot"].as_u64().ok_or_else(|| {
-                        Error::new(ErrorCode::Protocol, "runtime snapshot is missing")
-                    })?,
-                ),
-            );
-        }
-        let master = self.master();
-        let (master_before, target) = &expected[&master];
-        let target = *target;
-        if let Some((shard, (_, snapshot))) = expected
-            .iter()
-            .find(|(_, (_, snapshot))| *snapshot > target)
-        {
-            return Err(Error::new(
-                ErrorCode::Conflict,
-                "a secondary snapshot is ahead of the master; saving could roll it backward",
-            )
-            .with_details(
-                json!({"shard":shard,"snapshot_id":snapshot,"master_snapshot_id":target}),
-            ));
-        }
-        self.driver(&master)?
-            .request(
-                "save",
-                json!({"session_id":master_before.session_id,"snapshot_id":target}),
-                COMMAND,
-            )
-            .await
-            .map_err(driver_error)?;
-        let results = join_all(drivers.into_iter().map(|(name, driver)| {
-            let (before, _) = expected[&name].clone();
-            async move {
-                let baseline = last_save_id(&before);
-                let mut watch = driver.watch();
-                let result = timeout(Duration::from_secs_f64(SAVE_TIMEOUT), async {
-                    loop {
-                        let current = watch.borrow_and_update().clone();
-                        if let Some(saved) =
-                            saved_after(&current, &before, baseline, Some(target), false)
-                        {
-                            return Ok(saved);
-                        }
-                        if !current.running
-                            || current.generation != before.generation
-                            || current.nonce != before.nonce
-                        {
-                            return Err(Error::new(
-                                ErrorCode::Unknown,
-                                "world exited or changed before the save callback",
-                            ));
-                        }
-                        if current.control_records.iter().any(|record| {
-                            record["save_id"].as_u64().is_some_and(|id| id > baseline)
-                                && record["snapshot_id"] == target
-                                && matches!(
-                                    record["event"].as_str(),
-                                    Some("save_failed" | "save_unconfirmed")
-                                )
-                        }) {
-                            return Err(Error::new(
-                                ErrorCode::Unknown,
-                                "native save callback did not confirm the target snapshot",
-                            ));
-                        }
-                        watch.changed().await.map_err(|_| {
-                            Error::new(ErrorCode::Transport, "save observer closed")
-                        })?;
-                    }
-                })
-                .await
-                .unwrap_or_else(|_| {
-                    Err(Error::new(
-                        ErrorCode::Unknown,
-                        "save callback deadline expired",
-                    ))
-                });
-                ShardResult {
-                    shard: name,
-                    result: result.into(),
-                }
+            let snapshot = runtime["snapshot"]
+                .as_u64()
+                .ok_or_else(|| Error::new(ErrorCode::Protocol, "runtime snapshot is missing"))?;
+            if snapshot > target {
+                return Err(Error::new(
+                    ErrorCode::Conflict,
+                    "a secondary snapshot is ahead of the master; saving could roll it backward",
+                )
+                .with_details(
+                    json!({"shard":name,"snapshot_id":snapshot,"master_snapshot_id":target}),
+                ));
             }
-        }))
-        .await;
-        let result = SaveResult { shards: results };
-        if result
-            .shards
-            .iter()
-            .any(|shard| matches!(shard.result, Outcome::Failure { .. }))
-        {
-            Err(Error::new(
-                ErrorCode::PartialFailure,
-                "not every shard confirmed its save callback",
-            )
-            .with_details(value(&result)?))
-        } else {
-            value(result)
         }
+        self.native(
+            &master,
+            "save",
+            json!({"session_id":runtime["session_id"],"snapshot_id":target}),
+        )
+        .await
     }
 
     fn require_ready(&self) -> Result<()> {
@@ -1205,33 +1129,18 @@ impl Room {
         {
             return Ok(());
         }
-        let deadline = Instant::now() + Duration::from_secs_f64(notice.delay);
-        loop {
-            let remaining = deadline
-                .saturating_duration_since(Instant::now())
-                .as_secs_f64()
-                .ceil() as u64;
-            let mut parameters = notice.parameters.clone();
-            parameters.insert("remaining".into(), json!(remaining));
-            parameters.insert("minutes".into(), json!(remaining.div_ceil(60)));
-            parameters.insert(
-                "when".into(),
-                json!(if remaining == 0 {
-                    "现在".to_owned()
-                } else {
-                    format!("将在 {remaining} 秒后")
-                }),
-            );
-            self.native(&self.master(), "announce", json!({"message":render_notice(&notice.template, &parameters), "count":1, "interval":notice.interval})).await?;
-            if remaining == 0 {
-                return Ok(());
-            }
-            sleep(
-                Duration::from_secs_f64(notice.interval)
-                    .min(deadline.saturating_duration_since(Instant::now())),
+        crate::policy::countdown(notice, |message| async move {
+            self.native(
+                &self.master(),
+                "announce",
+                json!({"message": message, "count": 1}),
             )
-            .await;
-        }
+            .await?;
+            Ok(true)
+        })
+        .await
+        .map(|_| ())
+        .map_err(|error| error.downcast::<Error>().unwrap_or_else(internal))
     }
 
     async fn announce(&self, message: &str, count: u64, interval: f64) -> Result<Value> {
@@ -1645,7 +1554,7 @@ impl Room {
                 ErrorCode::NotReady,
                 "player entity has no native GUID"
             ))?);
-        let destination = if let Request::Migrate { shard_id, .. } = request {
+        if let Request::Migrate { shard_id, .. } = request {
             let mut destination = None;
             for (candidate, driver) in self.drivers() {
                 let runtime = driver
@@ -1668,10 +1577,7 @@ impl Room {
                     "player already occupies the requested shard",
                 ));
             }
-            Some(destination)
-        } else {
-            None
-        };
+        }
         let result = self.native(name, request.method(), args).await?;
         if matches!(request, Request::Kick { .. } | Request::Despawn { .. }) && result == true {
             let deadline = Instant::now() + COMMAND;
@@ -1694,27 +1600,7 @@ impl Room {
                 sleep(Duration::from_millis(100)).await;
             }
         }
-        if let Some(destination) = destination {
-            if result != true {
-                return Ok(result);
-            }
-            let deadline = Instant::now() + Duration::from_secs_f64(RELOAD_TIMEOUT);
-            loop {
-                let (location, _) = self.locate(userid, None).await?;
-                if location.state == PlayerState::Active
-                    && location.shard.as_deref() == Some(&destination)
-                {
-                    return value(location);
-                }
-                if Instant::now() >= deadline {
-                    return Err(Error::new(
-                        ErrorCode::Unknown,
-                        "player migration did not finish entering the destination",
-                    ));
-                }
-                sleep(Duration::from_millis(250)).await;
-            }
-        }
+
         Ok(result)
     }
 
@@ -1763,7 +1649,7 @@ impl Room {
             }
             Request::ReadConfiguration {} => self.with_lock(|lock| {
                 let cluster=crate::settings::ClusterConfig::load(lock)?;
-                let control=lock.read_control()?;
+                let control=lock.read_state()?;
                 Ok(json!({"cluster":cluster.as_value(),"policy":control.get("policy").cloned().unwrap_or_else(||json!({})),"template":control.get("template").cloned()}))
             }),
             Request::ReadPermissions {} => self.with_lock(|lock| {
@@ -1928,46 +1814,10 @@ fn identity(state: &DriverState) -> Result<SessionIdentity> {
         session_id: state.session_id.clone().ok_or_else(|| {
             Error::new(ErrorCode::NotReady, "native world session is unavailable")
         })?,
-        process_id: state.nonce.clone(),
+        process_id: state.process_id.clone(),
         generation: state
             .generation
             .ok_or_else(|| Error::new(ErrorCode::NotReady, "Lua generation is unavailable"))?,
-    })
-}
-fn last_save_id(state: &DriverState) -> u64 {
-    state
-        .control_records
-        .iter()
-        .filter_map(|record| record["save_id"].as_u64())
-        .max()
-        .unwrap_or(0)
-}
-fn saved_after(
-    state: &DriverState,
-    before: &DriverState,
-    baseline: u64,
-    target: Option<u64>,
-    shutdown: bool,
-) -> Option<SavedSnapshot> {
-    if state.nonce != before.nonce || state.generation != before.generation {
-        return None;
-    }
-    state.control_records.iter().rev().find_map(|record| {
-        let id = record["save_id"].as_u64()?;
-        let snapshot = record["snapshot_id"].as_u64()?;
-        if id <= baseline
-            || record["event"] != "save_complete"
-            || record["session_id"].as_str() != before.session_id.as_deref()
-            || target.is_some_and(|target| snapshot != target)
-            || shutdown && record["shutdown"] != true
-        {
-            return None;
-        }
-        Some(SavedSnapshot {
-            identity: identity(before).ok()?,
-            snapshot_id: snapshot,
-            save_id: id,
-        })
     })
 }
 fn value(value: impl Serialize) -> Result<Value> {
@@ -2007,31 +1857,6 @@ fn driver_error(error: DriverError) -> Error {
     };
     Error::new(code, error.message.clone()).with_details(json!(error))
 }
-fn render_notice(template: &str, parameters: &BTreeMap<String, Value>) -> String {
-    let mut output = String::new();
-    let mut chars = template.chars().peekable();
-    while let Some(character) = chars.next() {
-        if character == '{' && chars.peek() == Some(&'{') {
-            chars.next();
-            output.push('{');
-        } else if character == '}' && chars.peek() == Some(&'}') {
-            chars.next();
-            output.push('}');
-        } else if character == '{' {
-            let name: String = chars
-                .by_ref()
-                .take_while(|character| *character != '}')
-                .collect();
-            if let Some(value) = parameters.get(&name) {
-                output.push_str(value.as_str().unwrap_or(&value.to_string()));
-            }
-        } else {
-            output.push(character);
-        }
-    }
-    output
-}
-
 #[derive(Clone)]
 struct LocalOutput {
     shared: Arc<(Mutex<OutputQueue>, Condvar)>,

@@ -238,6 +238,10 @@ fn versions_and_lua_players_preserve_source_fields() -> anyhow::Result<()> {
     }
     let mut row = room_row("row-1");
     row["region"] = json!("us-east-1");
+    row["season"] = json!("mod_season_未收录");
+    row["mode"] = json!("mod_mode_v2");
+    row["intent"] = json!("custom_intent");
+    row["platform"] = json!(33);
     let room: Room = serde_json::from_value(row)?;
     assert_eq!(room.players[0].prefab, "workshop-123-character");
     assert_eq!(room.players[0].netid, "76561198000000002");
@@ -246,7 +250,12 @@ fn versions_and_lua_players_preserve_source_fields() -> anyhow::Result<()> {
         json!(9_007_199_254_740_993_i64)
     );
     assert!(!room.lobby.extra.contains_key("players"));
-    assert_eq!(serde_json::to_value(room)?["tick"], 12345);
+    let serialized = serde_json::to_value(room)?;
+    assert_eq!(serialized["tick"], 12345);
+    assert_eq!(serialized["season"], "mod_season_未收录");
+    assert_eq!(serialized["mode"], "mod_mode_v2");
+    assert_eq!(serialized["intent"], "custom_intent");
+    assert_eq!(serialized["platform"], 33);
     Ok(())
 }
 

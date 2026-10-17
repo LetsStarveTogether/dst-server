@@ -122,7 +122,7 @@ impl Policy {
 
     pub fn load(room: &RoomLock) -> Result<Self> {
         let policy = room
-            .read_control()?
+            .read_state()?
             .remove("policy")
             .map(serde_json::from_value)
             .transpose()
@@ -134,7 +134,7 @@ impl Policy {
 
     pub fn save(&self, room: &mut RoomLock) -> Result<()> {
         self.validate()?;
-        room.update_control(|control| {
+        room.update_state(|control| {
             control.insert("policy".into(), serde_json::to_value(self)?);
             Ok(())
         })
@@ -589,7 +589,7 @@ impl PolicyState {
 
     pub fn load(room: &RoomLock) -> Result<Self> {
         let state = room
-            .read_control()?
+            .read_state()?
             .remove("policy_state")
             .map(serde_json::from_value)
             .transpose()
@@ -601,7 +601,7 @@ impl PolicyState {
 
     pub fn save(&self, room: &mut RoomLock) -> Result<()> {
         self.validate()?;
-        room.update_control(|control| {
+        room.update_state(|control| {
             control.insert("policy_state".into(), serde_json::to_value(self)?);
             Ok(())
         })

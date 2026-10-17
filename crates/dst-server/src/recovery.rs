@@ -238,7 +238,7 @@ impl RecoveryState {
 }
 
 pub fn load(room: &RoomLock) -> Result<RecoveryState> {
-    decode(&room.read_control()?)
+    decode(&room.read_state()?)
 }
 
 fn decode(document: &serde_json::Map<String, serde_json::Value>) -> Result<RecoveryState> {
@@ -254,12 +254,12 @@ fn update<T>(
     room: &mut RoomLock,
     change: impl FnOnce(&mut RecoveryState) -> Result<T>,
 ) -> Result<T> {
-    room.update_control(|document| {
+    room.update_state(|document| {
         let mut state = decode(document)?;
         let result = change(&mut state)?;
         state.validate()?;
         document.insert("recovery".into(), serde_json::to_value(state)?);
-        // update_control synchronizes the file and directory before returning this decision.
+        // update_state synchronizes the file and directory before returning this decision.
         Ok(result)
     })
 }
@@ -825,7 +825,7 @@ mod tests {
     fn fixed_target_survives_partial_application_and_never_falls_back() {
         let directory = tempfile::tempdir().unwrap();
         let mut room = RoomLock::try_acquire(directory.path()).unwrap();
-        room.update_control(|control| {
+        room.update_state(|control| {
             control.insert("policy".into(), json!({"paused": false}));
             Ok(())
         })
@@ -857,7 +857,7 @@ mod tests {
             panic!("expected one fixed rollback")
         };
         assert_eq!(target.snapshot_id, 11);
-        let stored = room.read_control().unwrap();
+        let stored = room.read_state().unwrap();
         assert_eq!(stored["recovery"]["target"]["snapshot_id"], 11);
         assert_eq!(stored["policy"], json!({"paused": false}));
         assert!(begin_recovered_room(&mut room).is_err());

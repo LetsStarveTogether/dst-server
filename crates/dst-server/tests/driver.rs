@@ -2,8 +2,9 @@
 use std::time::Duration;
 
 use dst_server::{
-    driver::{Driver, DriverErrorCode, DriverState},
+    driver::{Driver, DriverErrorCode, DriverEventKind, DriverState},
     process::ProcessSpec,
+    telemetry::LogEvent,
 };
 use serde_json::json;
 use tokio::{
@@ -29,8 +30,7 @@ def ready():
     os.write(5, f'DST_SessionId|S{generation}\nDST_Master_Ready\n'.encode())
 def control(shutdown=False):
     emit(4, b'DST_CONTROL|', {'v': 1, 'nonce': nonce, 'generation': generation,
-        'event': 'save_complete', 'session_id': f'S{generation}', 'snapshot_id': 5,
-        'save_id': 1, 'shutdown': shutdown})
+        'event': 'world_load_decoded', 'session_id': f'S{generation}', 'shutdown': shutdown})
 if mode == 'delay_ready':
     bootstrap()
     time.sleep(0.15)
@@ -88,11 +88,17 @@ while True:
                 'session_id': f'S{generation}', 'seq': sequence, 'event': 'dst.world.state_changed',
                 'tick': sequence, 'monotonic_ms': sequence, 'cycle': None, 'data': {'name': 'cycles', 'value': sequence}})
     data = {'session_id': f'S{generation}', 'snapshot': 6, 'shard_id': '1', 'is_master_shard': True} if method == 'runtime' else count
+    if method == 'presence':
+        data = {'observation_epoch': request['arguments'].get('epoch', 0), 'session_id': f'S{generation}'}
     emit(4, b'DST_RPC|', {**header, 'result': {'ok': True, 'data': data}})
     os.write(4, b'DST_RemoteCommandDone\n')
 "#;
 
 fn fixture(mode: &str) -> Driver {
+    fixture_on_shard(mode, "World")
+}
+
+fn fixture_on_shard(mode: &str, shard: &str) -> Driver {
     Driver::attach(
         ProcessSpec {
             program: "python3".into(),
@@ -106,7 +112,7 @@ fn fixture(mode: &str) -> Driver {
             cwd: std::env::temp_dir(),
         },
         NONCE.into(),
-        "World".into(),
+        shard.into(),
     )
     .unwrap()
 }
@@ -124,6 +130,124 @@ async fn until(driver: &Driver, condition: impl Fn(&DriverState) -> bool) -> Dri
     })
     .await
     .expect("driver state condition")
+}
+
+#[tokio::test]
+async fn shared_nonce_keeps_distinct_ulids_across_shards_and_subscribers() {
+    let drivers = [
+        fixture_on_shard("normal", "Master"),
+        fixture_on_shard("normal", "Caves"),
+    ];
+    let mut ids = std::collections::BTreeSet::new();
+    for driver in &drivers {
+        driver.wait_ready(Duration::from_secs(3)).await.unwrap();
+        let process_id = driver.snapshot().process_id;
+        assert_eq!(
+            process_id.parse::<ulid::Ulid>().unwrap().to_string(),
+            process_id
+        );
+        assert!(ids.insert(process_id));
+        let mut first = driver.subscribe();
+        let mut second = driver.subscribe();
+        driver
+            .request("telemetry", json!({}), Duration::from_secs(1))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(3), async {
+            let mut sequences = Vec::new();
+            while sequences.len() < 2 {
+                let event = first.recv().await.unwrap();
+                let duplicate = second.recv().await.unwrap();
+                assert_eq!(event.id, duplicate.id);
+                assert_eq!(
+                    event.id.parse::<ulid::Ulid>().unwrap().to_string(),
+                    event.id
+                );
+                assert!(ids.insert(event.id.clone()));
+                let log = LogEvent::from_driver(&event, "cluster").unwrap();
+                assert_eq!(log.attributes["log.record.uid"], event.id);
+                assert_eq!(
+                    log.attributes["log.record.uid"],
+                    LogEvent::from_driver(&duplicate, "cluster")
+                        .unwrap()
+                        .attributes["log.record.uid"]
+                );
+                if matches!(event.kind, DriverEventKind::Telemetry) {
+                    assert_eq!(event.nonce, NONCE);
+                    assert_eq!(event.generation, Some(1));
+                    sequences.push(event.data["seq"].as_u64().unwrap());
+                }
+            }
+            assert_eq!(sequences, [1, 3]);
+        })
+        .await
+        .unwrap();
+        driver.kill().await.unwrap();
+    }
+    let restarted = fixture_on_shard("normal", "Master");
+    assert!(ids.insert(restarted.snapshot().process_id));
+    restarted.kill().await.unwrap();
+}
+
+#[tokio::test]
+async fn presence_ulid_tracks_observation_epochs_and_world_reloads() {
+    let driver = fixture("normal");
+    driver.wait_ready(Duration::from_secs(3)).await.unwrap();
+    let process_id = driver.snapshot().process_id;
+    let first = driver
+        .request("presence", json!({}), Duration::from_secs(1))
+        .await
+        .unwrap();
+    let id = first["observation"].as_str().unwrap();
+    assert_eq!(id.parse::<ulid::Ulid>().unwrap().to_string(), id);
+    assert!(first.get("observation_epoch").is_none());
+    assert_eq!(
+        driver
+            .request("presence", json!({}), Duration::from_secs(1))
+            .await
+            .unwrap(),
+        first
+    );
+    let next = driver
+        .request("presence", json!({"epoch": 1}), Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_ne!(next["observation"], first["observation"]);
+    assert_eq!(
+        driver
+            .request("presence", json!({"epoch": 1}), Duration::from_secs(1))
+            .await
+            .unwrap(),
+        next
+    );
+    assert!(
+        driver
+            .request("reload", json!({}), Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+    until(&driver, |state| state.ready && state.generation == Some(2)).await;
+    assert_eq!(driver.snapshot().process_id, process_id);
+    let reloaded = driver
+        .request("presence", json!({}), Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_ne!(reloaded["observation"], first["observation"]);
+    assert_ne!(reloaded["observation"], next["observation"]);
+    assert!(
+        driver
+            .request("presence", json!({"epoch": -1}), Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+    assert!(
+        driver
+            .snapshot()
+            .failure
+            .unwrap()
+            .contains("invalid presence observation epoch")
+    );
+    driver.kill().await.unwrap();
 }
 
 #[tokio::test]
@@ -239,7 +363,7 @@ async fn generation_change_invalidates_pending_work_and_refreshes_runtime() {
 }
 
 #[tokio::test]
-async fn subscriber_pressure_preserves_save_evidence() {
+async fn subscriber_pressure_preserves_control_evidence() {
     let driver = fixture("normal");
     let subscriber = driver.subscribe();
     driver.wait_ready(Duration::from_secs(3)).await.unwrap();
@@ -251,7 +375,7 @@ async fn subscriber_pressure_preserves_save_evidence() {
     assert!(state.running && state.ready);
     assert_eq!(
         state.last_control.as_ref().unwrap()["event"],
-        "save_complete"
+        "world_load_decoded"
     );
     assert_eq!(state.control_records.len(), 1);
     timeout(Duration::from_secs(3), async {
@@ -303,7 +427,7 @@ async fn cancelled_native_stop_completes_and_drains_control_evidence() {
 }
 
 #[tokio::test]
-async fn native_stop_retains_abnormal_exit_codes_and_prior_save_confirmation() {
+async fn native_stop_retains_abnormal_exit_codes_and_control_evidence() {
     for (mode, code) in [("abort_shutdown", -libc::SIGABRT), ("error_shutdown", 7)] {
         let driver = fixture(mode);
         driver.wait_ready(Duration::from_secs(3)).await.unwrap();

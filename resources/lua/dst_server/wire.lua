@@ -175,8 +175,8 @@ end
 
 -- The native JSON decoder uses loadstring, accepts Lua expressions and loses
 -- nulls and object/array identity. RPC input needs actual JSON instead.
-function wire.decode(source)
-    if type(source) ~= "string" or #source > maximum_line_bytes then error("invalid_request", 0) end
+function wire.decode(source, limit)
+    if type(source) ~= "string" or #source > (limit or maximum_line_bytes) then error("invalid_request", 0) end
     local position, length = 1, #source
     local parse
     local function invalid() error("invalid_request", 0) end

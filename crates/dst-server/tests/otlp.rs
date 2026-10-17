@@ -74,7 +74,7 @@ async fn structured_event_survives_protobuf_and_real_grpc_export() -> anyhow::Re
             }),
             observed_timestamp_ns: 1_791_013_234_567_890_123,
             severity_text: "info".into(),
-            attributes: json!({"log.record.uid": "attempt:generation:42", "optional": null})
+            attributes: json!({"log.record.uid": ulid::Ulid::generate().to_string(), "optional": null})
                 .as_object().unwrap().clone(),
         };
         let resource = json!({"service.name": "dst-server", "dst.cluster.name": "房间"});

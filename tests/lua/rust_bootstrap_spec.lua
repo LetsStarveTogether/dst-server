@@ -17,7 +17,7 @@ TheSim = {
     end,
 }
 ExecuteConsoleCommand = function() end
-StartDedicatedServer = function() assert(scenario == "default" or scenario == "save") end
+StartDedicatedServer = function() assert(scenario == "default" or scenario == "load") end
 ShardIndex = { Load = function(_, callback) return callback("native", nil, 7) end }
 TheNet = {
     GetIsServer = function() return true end,
@@ -39,9 +39,9 @@ ShardIndex.Load(index, function(a, b, c)
 end)
 assert(not continued, "configuration must resolve before native world loading continues")
 local control = scenario == "catalog" and ',"control":{"recovery":{"mode":"catalog"}}'
-    or scenario == "save" and ',"control":{"observe_saves":true}'
+    or scenario == "load" and ',"control":{"observe_loads":true}'
     or scenario == "invalid" and ',"control":{"recovery":{"mode":"apply"}}' or ""
-configuration(true, '{"nonce":"01ARZ3NDEKTSV4RRFFQ69G5FAV","profile":"off","actions":[]' .. control .. '}')
+configuration(true, '{"driver":{"nonce":"01ARZ3NDEKTSV4RRFFQ69G5FAV","profile":"off","actions":[]' .. control .. '}}')
 if scenario == "catalog" then
     assert(not continued and shutdowns == 1 and #records == 1)
     assert(records[1].event == "recovery_catalog" and records[1].session_id == "SESSION")
@@ -49,13 +49,7 @@ elseif scenario == "invalid" then
     assert(not continued and shutdowns == 1 and #records == 1 and records[1].event == "recovery_failed")
 else
     assert(continued and shutdowns == 0)
-    if scenario == "save" then
-        TheWorld = { meta = { session_identifier = "SESSION" } }
-        assert(SaveGame(false, function() return "native result" end) == "native result")
-        assert(#records == 2 and records[2].event == "save_complete" and records[2].snapshot_id == 2)
-    else
-        assert(SaveGame == original_save and #records == 0)
-    end
+    assert(SaveGame == original_save and #records == 0)
 end
 for _, record in ipairs(records) do
     assert(record.v == 1)

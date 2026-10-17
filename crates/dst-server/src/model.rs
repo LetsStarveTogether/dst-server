@@ -14,7 +14,6 @@ pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_SOURCE_BYTES: usize = 3072;
 pub const COMMAND_TIMEOUT: f64 = 120.0;
 pub const START_TIMEOUT: f64 = 900.0;
-pub const SAVE_TIMEOUT: f64 = 300.0;
 pub const RELOAD_TIMEOUT: f64 = 900.0;
 pub const STOP_TIMEOUT: f64 = 120.0;
 pub const OUTPUT_DRAIN_TIMEOUT: f64 = 30.0;
@@ -348,7 +347,7 @@ requests! {
         #[serde(default = "one")] count: u64,
         #[serde(default = "notice_interval")] interval: f64,
     } => ("announce", true, ROOM, COMMAND_TIMEOUT),
-    Save {} => ("save", true, ROOM, SAVE_TIMEOUT),
+    Save {} => ("save", true, ROOM, COMMAND_TIMEOUT),
     Pause { paused: bool } => ("pause", true, BOTH, COMMAND_TIMEOUT),
     Reset {} => ("reset", true, ROOM, RELOAD_TIMEOUT),
     Rollback { #[serde(default = "one")] count: u64 }
@@ -398,7 +397,7 @@ requests! {
     Revive { userid: String } => ("revive", true, BOTH, COMMAND_TIMEOUT),
     Despawn { userid: String } => ("despawn", true, BOTH, COMMAND_TIMEOUT),
     Migrate { userid: String, shard_id: String, #[serde(default = "one")] portal_id: u64 }
-        => ("migrate", true, BOTH, RELOAD_TIMEOUT),
+        => ("migrate", true, BOTH, COMMAND_TIMEOUT),
     Teleport { userid: String, x: f64, y: f64, z: f64 }
         => ("teleport", true, BOTH, COMMAND_TIMEOUT),
     Give { userid: String, item: String, #[serde(default = "one")] count: u64 }
@@ -1001,7 +1000,7 @@ pub struct OperationHistory {
 #[serde(deny_unknown_fields)]
 pub struct SessionIdentity {
     pub session_id: String,
-    /// The process driver's nonce; Lua generation alone can restart at zero.
+    /// The room attempt nonce and process ID; Lua generation alone can restart at zero.
     pub process_id: String,
     pub generation: u64,
 }
@@ -1138,21 +1137,6 @@ impl PlayerLocation {
     }
 }
 
-/// Emitted only after the matching final native save callback.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SavedSnapshot {
-    pub identity: SessionIdentity,
-    pub snapshot_id: u64,
-    pub save_id: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SaveResult {
-    pub shards: Vec<ShardResult<SavedSnapshot>>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShardStopped {
@@ -1160,7 +1144,6 @@ pub struct ShardStopped {
     pub returncode: Option<i32>,
     pub forced: bool,
     pub output_drained: bool,
-    pub saved_snapshot: Option<SavedSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

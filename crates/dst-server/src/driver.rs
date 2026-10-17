@@ -4,8 +4,6 @@ use std::{
     collections::VecDeque,
     ffi::OsString,
     fmt,
-    fs::{self, File},
-    io::Write,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -25,6 +23,7 @@ use ulid::Ulid;
 
 use crate::{
     configuration::Cluster,
+    files::RoomLock,
     process::{
         EventKind, ExitReport, GameProcess, MAX_PROTOCOL_LINE_BYTES, MAX_REQUEST_BYTES,
         ProcessSpec, StreamKind, native_message,
@@ -68,7 +67,7 @@ pub const DEFAULT_ACTIONS: &[&str] = &[
 pub struct DriverOptions {
     pub profile: String,
     pub actions: Vec<String>,
-    /// Native save observation and, optionally, a fixed pre-load recovery target.
+    /// Native load observation and, optionally, a fixed pre-load recovery target.
     pub control: Value,
     pub extra_args: Vec<OsString>,
 }
@@ -81,9 +80,31 @@ impl Default for DriverOptions {
                 .iter()
                 .map(|action| (*action).into())
                 .collect(),
-            control: json!({"observe_saves": true}),
+            control: json!({"observe_loads": true}),
             extra_args: vec!["-skip_update_server_mods".into()],
         }
+    }
+}
+
+impl DriverOptions {
+    /// Save one launch configuration while all games are stopped.
+    /// Every shard in this room attempt reads the same configuration, including after Lua reloads.
+    pub fn save(&self, room: &mut RoomLock) -> SetupResult<String> {
+        validate_options(self)?;
+        let nonce = Ulid::generate().to_string();
+        let options = json!({"nonce": nonce, "profile": self.profile,
+            "actions": self.actions, "control": self.control});
+        let encoded = serde_json::to_vec(&json!({"driver": options}))?;
+        ensure!(
+            encoded.len() < MAX_PROTOCOL_LINE_BYTES,
+            "driver options exceed the native size limit"
+        );
+        room.update_state(|state| {
+            state.insert("driver".into(), options);
+            Ok(())
+        })?;
+        room.write_driver_options(&encoded)?;
+        Ok(nonce)
     }
 }
 
@@ -149,6 +170,7 @@ pub struct RequestRecord {
 pub struct DriverState {
     pub shard: String,
     pub pid: u32,
+    pub process_id: String,
     pub nonce: String,
     pub generation: Option<u64>,
     pub generation_changes: u64,
@@ -189,6 +211,7 @@ pub enum DriverEventKind {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DriverEvent {
+    pub id: String,
     pub kind: DriverEventKind,
     pub shard: String,
     pub nonce: String,
@@ -259,16 +282,13 @@ impl Pending {
 struct Shared {
     state: DriverState,
     stop_requested: bool,
+    // Lua reports a local epoch; its public identity is allocated here.
+    observation: Option<(u64, String)>,
     // Only one native command may be awaiting its uncorrelated Done/Busy marker.
     active: Option<Pending>,
 }
 
 type StopCompletion = Option<DriverResult<ExitReport>>;
-
-struct StopState {
-    before: Option<DriverState>,
-    completion: watch::Receiver<StopCompletion>,
-}
 
 struct Inner {
     process: Arc<GameProcess>,
@@ -278,7 +298,7 @@ struct Inner {
     slots: Arc<Semaphore>,
     subscribers: Mutex<Vec<Subscriber>>,
     pump_finished: watch::Receiver<bool>,
-    stop: Mutex<Option<StopState>>,
+    stop: Mutex<Option<watch::Receiver<StopCompletion>>>,
 }
 
 impl Inner {
@@ -301,6 +321,7 @@ impl Inner {
         }
         let state = self.snapshots.borrow();
         let event = Arc::new(DriverEvent {
+            id: Ulid::generate().to_string(),
             kind,
             shard: state.shard.clone(),
             nonce: state.nonce.clone(),
@@ -388,7 +409,8 @@ impl Driver {
         cluster: &Cluster,
         executable: &Path,
         shard: &str,
-        options: DriverOptions,
+        nonce: &str,
+        extra_args: Vec<OsString>,
     ) -> SetupResult<Self> {
         ensure!(
             cluster
@@ -397,34 +419,9 @@ impl Driver {
                 .any(|candidate| candidate.name == shard),
             "shard is not part of the validated cluster"
         );
-        validate_options(&options)?;
         let executable = executable
             .canonicalize()
             .context("resolve game executable")?;
-        let nonce = Ulid::new().to_string();
-        let directory = cluster.directory.join(shard);
-        let options_path = directory.join("dst_server_driver.json");
-        match fs::symlink_metadata(&options_path) {
-            Ok(metadata) => ensure!(
-                metadata.is_file() && !metadata.file_type().is_symlink(),
-                "driver options must be a regular file"
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error).context("inspect driver options"),
-        }
-        let encoded = serde_json::to_vec(&json!({"nonce": nonce, "profile": options.profile,
-            "actions": options.actions, "control": options.control}))?;
-        ensure!(
-            encoded.len() < MAX_PROTOCOL_LINE_BYTES,
-            "driver options exceed the native size limit"
-        );
-        let mut file = tempfile::NamedTempFile::new_in(&directory)?;
-        file.write_all(&encoded)?;
-        file.write_all(b"\n")?;
-        file.as_file().sync_all()?;
-        file.persist(options_path)
-            .context("commit driver options")?;
-        File::open(&directory)?.sync_all()?;
         let mut args: Vec<OsString> = vec![
             "-persistent_storage_root".into(),
             cluster
@@ -447,7 +444,7 @@ impl Driver {
             "-monitor_parent_process".into(),
             std::process::id().to_string().into(),
         ];
-        args.extend(options.extra_args);
+        args.extend(extra_args);
         args.push("-cloudserver".into());
         let cwd = executable
             .parent()
@@ -459,7 +456,7 @@ impl Driver {
                 args,
                 cwd,
             },
-            nonce,
+            nonce.to_owned(),
             shard.to_owned(),
         )
     }
@@ -467,7 +464,7 @@ impl Driver {
     /// Attach the same driver to an explicit launch command, useful for isolated tests.
     pub fn attach(spec: ProcessSpec, nonce: String, shard: String) -> SetupResult<Self> {
         ensure!(
-            Ulid::from_string(&nonce).is_ok() && nonce == nonce.to_ascii_uppercase(),
+            Ulid::from_string(&nonce).is_ok_and(|id| id.to_string() == nonce),
             "nonce must be a canonical ULID"
         );
         ensure!(
@@ -478,6 +475,7 @@ impl Driver {
         let state = DriverState {
             shard,
             pid: process.pid(),
+            process_id: Ulid::generate().to_string(),
             nonce,
             generation: None,
             generation_changes: 0,
@@ -510,6 +508,7 @@ impl Driver {
             shared: Mutex::new(Shared {
                 state,
                 stop_requested: false,
+                observation: None,
                 active: None,
             }),
             snapshots,
@@ -615,7 +614,7 @@ impl Driver {
         let generation = state
             .generation
             .ok_or_else(|| DriverError::new(DriverErrorCode::NotReady, "generation is unknown"))?;
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         let frame = format!(
             "DST_RPC|{}\n",
             json!({"v": 1, "nonce": state.nonce, "id": id,
@@ -671,16 +670,6 @@ impl Driver {
         self.wait().await
     }
 
-    pub(crate) fn stop_snapshot(&self) -> Option<DriverState> {
-        self.handle
-            .inner
-            .stop
-            .lock()
-            .expect("stop state lock")
-            .as_ref()
-            .and_then(|stop| stop.before.clone())
-    }
-
     /// Native saving shutdown, followed by SIGTERM and SIGKILL when its deadline expires.
     /// The shared worker continues even when every stop caller cancels its wait.
     pub async fn stop(&self, grace: Duration) -> DriverResult<ExitReport> {
@@ -693,12 +682,8 @@ impl Driver {
                 tokio::spawn(async move {
                     complete.send_replace(Some(stop_native(&inner, deadline).await));
                 });
-                StopState {
-                    before: None,
-                    completion,
-                }
+                completion
             })
-            .completion
             .clone()
         };
         loop {
@@ -758,12 +743,12 @@ fn validate_options(options: &DriverOptions) -> SetupResult<()> {
     ensure!(
         control
             .keys()
-            .all(|key| ["observe_saves", "recovery"].contains(&key.as_str())),
+            .all(|key| ["observe_loads", "recovery"].contains(&key.as_str())),
         "unknown control option"
     );
     ensure!(
-        control.get("observe_saves").is_none_or(Value::is_boolean),
-        "observe_saves must be boolean"
+        control.get("observe_loads").is_none_or(Value::is_boolean),
+        "observe_loads must be boolean"
     );
     if let Some(recovery) = control.get("recovery") {
         let request = recovery.as_object().context("recovery must be an object")?;
@@ -923,10 +908,6 @@ async fn stop_native(inner: &Arc<Inner>, deadline: Instant) -> DriverResult<Exit
     });
     if inner.snapshot().running {
         if let Ok(_native) = timeout_at(deadline, inner.native_command.lock()).await {
-            let before = inner.snapshot();
-            if let Some(stop) = inner.stop.lock().expect("stop state lock").as_mut() {
-                stop.before = Some(before);
-            }
             let _ = timeout_at(deadline, inner.process.send(b"c_shutdown()\n")).await;
         }
         if timeout_at(deadline, inner.process.wait()).await.is_err() {
@@ -1071,6 +1052,7 @@ fn advance_generation(shared: &mut Shared, generation: u64) -> bool {
     shared.state.load_failure = None;
     shared.state.control_records.clear();
     shared.state.telemetry_sequence = 0;
+    shared.observation = None;
     if let Some(active) = &mut shared.active
         && active.record.generation != generation
     {
@@ -1165,7 +1147,28 @@ fn rpc(inner: &Inner, payload: &[u8]) -> Result<(), String> {
             }
             if result["ok"] == true && result.get("data").is_some() {
                 active.record.accepted = true;
-                let data = result["data"].clone();
+                let mut data = result["data"].clone();
+                if active.record.method == "presence"
+                    && shared.state.generation == Some(active.record.generation)
+                {
+                    let fields = data.as_object_mut().ok_or("invalid presence result")?;
+                    let epoch = fields
+                        .remove("observation_epoch")
+                        .as_ref()
+                        .and_then(safe_integer)
+                        .ok_or("invalid presence observation epoch")?;
+                    if shared
+                        .observation
+                        .as_ref()
+                        .is_none_or(|(previous, _)| *previous != epoch)
+                    {
+                        shared.observation = Some((epoch, Ulid::generate().to_string()));
+                    }
+                    fields.insert(
+                        "observation".into(),
+                        json!(shared.observation.as_ref().unwrap().1),
+                    );
+                }
                 if active.record.method == "runtime"
                     && shared.state.generation == Some(active.record.generation)
                 {
@@ -1357,7 +1360,7 @@ mod tests {
 
     #[tokio::test]
     async fn telemetry_sequence_updates_do_not_wake_control_watchers() {
-        let nonce = Ulid::new().to_string();
+        let nonce = Ulid::generate().to_string();
         let driver = Driver::attach(
             ProcessSpec {
                 program: "python3".into(),
@@ -1389,7 +1392,7 @@ mod tests {
         telemetry(inner, b"{invalid");
         assert!(states.has_changed().unwrap());
         assert_eq!(states.borrow_and_update().invalid_telemetry, 1);
-        event["nonce"] = json!(Ulid::new().to_string());
+        event["nonce"] = json!(Ulid::generate().to_string());
         telemetry(inner, &serde_json::to_vec(&event).unwrap());
         assert_eq!(states.borrow_and_update().invalid_telemetry, 2);
 

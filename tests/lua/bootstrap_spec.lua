@@ -5,6 +5,7 @@ require("class")
 local outputs = {}
 nolineprint = function(value) outputs[#outputs + 1] = value end
 local encoded = io.read("*a")
+if encoded ~= "" then encoded = '{"driver":' .. encoded .. '}' end
 local configuration_callback
 TheSim = {
     LuaPrintRemote = function() error("bootstrap does not send RPC replies") end,

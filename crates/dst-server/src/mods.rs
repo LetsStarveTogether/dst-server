@@ -200,7 +200,7 @@ pub fn prepare_shared(room: &mut RoomLock) -> Result<Setup> {
         changes.insert(SETTINGS.into(), String::new());
     }
     room.while_stopped()
-        .commit(changes, PermissionFiles::Preserve)
+        .write_files(changes, Vec::new(), PermissionFiles::Preserve)
         .map_err(file_error)?;
     Ok(setup)
 }

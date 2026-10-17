@@ -169,35 +169,18 @@ def verify_world(template: str, name: str, observed: dict) -> None:
         assert observed["overrides"]["day"] == "onlynight"
 
 
-def verify_lifecycle(
-    method: str, value: Any, expected: set[str], *, saves: bool = True
-) -> None:
-    if method not in {"save", "stop"}:
+def verify_lifecycle(method: str, value: Any, expected: set[str]) -> None:
+    if method == "save":
+        assert value is True, value
+    if method != "stop":
         return
     assert {shard["shard"] for shard in value["shards"]} == expected, value
     for shard in value["shards"]:
         result = shard["result"]
         assert result["status"] == "success", shard
-        if method == "save":
-            assert result["value"]["snapshot_id"] > 0, shard
-        else:
-            assert result["value"]["forced"] is False, shard
-            assert result["value"]["output_drained"] is True, shard
-            assert result["value"]["returncode"] == 0, shard
-            saved = result["value"]["saved_snapshot"]
-            assert saved["snapshot_id"] > 0 if saves else saved is None, shard
-
-
-def verify_unconfirmed(error: DstError, expected: set[str], seconds: float) -> None:
-    assert seconds < 15, (seconds, error)
-    assert error.code == "partial_failure", error
-    shards = error.details["shards"]
-    assert {shard["shard"] for shard in shards} == expected, error.details
-    for shard in shards:
-        outcome = shard["result"]
-        assert outcome["status"] == "failure", outcome
-        assert outcome["error"]["code"] == "unknown", outcome
-        assert "snapshot" in outcome["error"]["message"], outcome
+        assert result["value"]["forced"] is False, shard
+        assert result["value"]["output_drained"] is True, shard
+        assert result["value"]["returncode"] == 0, shard
 
 
 async def connect_ready(
@@ -248,10 +231,6 @@ async def exercise(
             "started_at": datetime.now(UTC).isoformat(),
         }
         save_report(root, report)
-        before = {}
-        if method == "save" and report["save_expectation"] == "unconfirmed":
-            for name in report["mods_by_shard"]:
-                before[name] = await client.call("runtime", shard=name)
         try:
             result = await client.call(method, value, shard=shard, timeout=300)
         except DstError as error:
@@ -268,19 +247,7 @@ async def exercise(
                 },
             })
             save_report(root, report)
-            if method != "save" or report["save_expectation"] != "unconfirmed":
-                raise
-            verify_unconfirmed(error, set(report["mods_by_shard"]), seconds)
-            after = {}
-            for name, previous in before.items():
-                after[name] = await client.call("runtime", shard=name)
-                assert after[name]["snapshot"] == previous["snapshot"]
-                assert after[name]["session_id"] == previous["session_id"]
-            operations[-1]["runtime_before"] = before
-            operations[-1]["runtime_after"] = after
-            del report["pending_operation"]
-            save_report(root, report)
-            return None
+            raise
         operations.append({
             "method": method,
             "arguments": value,
@@ -290,9 +257,7 @@ async def exercise(
         })
         del report["pending_operation"]
         save_report(root, report)
-        saves = report["save_expectation"] == "confirmed"
-        assert method != "save" or saves, "save unexpectedly reported success"
-        verify_lifecycle(method, result, set(report["mods_by_shard"]), saves=saves)
+        verify_lifecycle(method, result, set(report["mods_by_shard"]))
         return result
 
     try:
@@ -336,7 +301,7 @@ async def exercise(
         assert await asyncio.to_thread(process.wait, timeout=390) == 0
         await client.close()
         assert not (root / "cluster/.dst-agent.sock").exists()
-        stopped = json.loads((root / "cluster/.dst-control.json").read_text())
+        stopped = json.loads((root / "cluster/.dst-server.json").read_text())
         assert stopped["agent_run"]["active"] is False
         with (root / "agent-2.log").open("w", encoding="utf-8") as log:
             process = await asyncio.to_thread(
@@ -373,9 +338,6 @@ def main() -> None:
     parser.add_argument("--download-mods", action="store_true")
     parser.add_argument("--download-timeout", type=float, default=600)
     parser.add_argument("--start-timeout", type=float, default=900)
-    parser.add_argument(
-        "--save-expectation", choices=("confirmed", "unconfirmed"), default="confirmed"
-    )
     args = parser.parse_args()
     root = args.directory.resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -393,7 +355,7 @@ def main() -> None:
     cluster = root / "cluster"
     configuration.save(cluster)
     (cluster / ".dst-rust-probe").touch()
-    (cluster / ".dst-control.json").write_text(
+    (cluster / ".dst-server.json").write_text(
         json.dumps({"policy": {"mod_auto_update": False}}), encoding="utf-8"
     )
     (cluster / "mods/ugc").mkdir(exist_ok=True)
@@ -413,7 +375,6 @@ def main() -> None:
         "actual_connected_players": 0,
         "max_players": configuration.dump(defaults=True)["settings"]["max_players"],
         "game_mode": configuration.dump(defaults=True)["settings"]["game_mode"],
-        "save_expectation": args.save_expectation,
         "expected_mods": sorted({mod for values in mods.values() for mod in values}),
         "mods_by_shard": mods,
         "binary_sha256": digest(args.binary),

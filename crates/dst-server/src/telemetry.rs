@@ -57,7 +57,7 @@ impl LogEvent {
         if let Some(generation) = event.generation {
             attributes.insert("dst.runtime.generation".into(), json!(generation));
         }
-        let (event_name, body, severity, uid) = match event.kind {
+        let (event_name, body, severity) = match event.kind {
             DriverEventKind::Telemetry => {
                 let record = &event.data;
                 let generation = record["generation"]
@@ -104,7 +104,6 @@ impl LogEvent {
                     } else {
                         "INFO"
                     },
-                    format!("{}:{generation}:{sequence}", event.nonce),
                 )
             }
             kind => {
@@ -131,15 +130,10 @@ impl LogEvent {
                     ),
                     DriverEventKind::Telemetry => unreachable!(),
                 };
-                (
-                    name,
-                    event.data.clone(),
-                    severity,
-                    ulid::Ulid::new().to_string(),
-                )
+                (name, event.data.clone(), severity)
             }
         };
-        attributes.insert("log.record.uid".into(), Value::String(uid));
+        attributes.insert("log.record.uid".into(), Value::String(event.id.clone()));
         Ok(Self {
             event_name,
             body,
@@ -342,7 +336,7 @@ impl TelemetryConfig {
             ("service.version".into(), json!(env!("CARGO_PKG_VERSION"))),
             (
                 "service.instance.id".into(),
-                json!(ulid::Ulid::new().to_string()),
+                json!(ulid::Ulid::generate().to_string()),
             ),
         ]);
         if let Some(value) = get("OTEL_RESOURCE_ATTRIBUTES") {

@@ -33,7 +33,7 @@ use crate::{
 };
 
 /// A clean stop requesting a fresh container from the service manager.
-pub const RESTART_EXIT: u8 = 76;
+pub const RESTART_EXIT: u8 = 8;
 
 pub struct Options {
     pub cluster: PathBuf,
@@ -77,7 +77,7 @@ impl Controller {
     fn run_state(&self) -> model::Result<RunState> {
         self.room.with_lock(|lock| {
             Ok(lock
-                .read_control()?
+                .read_state()?
                 .remove("agent_run")
                 .map(serde_json::from_value)
                 .transpose()?
@@ -86,7 +86,7 @@ impl Controller {
     }
     fn save_run(&self, state: RunState) -> model::Result<()> {
         self.room.with_lock(|lock| {
-            lock.update_control(|control| {
+            lock.update_state(|control| {
                 control.insert("agent_run".into(), serde_json::to_value(state)?);
                 Ok(())
             })
@@ -320,7 +320,7 @@ impl Controller {
             };
         let wait = envelope.timeout()?;
         let operation = OperationStatus {
-            id: ulid::Ulid::new().to_string(),
+            id: ulid::Ulid::generate().to_string(),
             method: envelope.request.method().into(),
             target: envelope.target.clone(),
             started_at_ns: now_ns(),
@@ -545,7 +545,7 @@ impl Controller {
             if state.mods.phase == ModPhase::Updating {
                 state.finish_mod_update(now, Err("Mod update interrupted by shutdown".into()))?;
             }
-            lock.update_control(|control| {
+            lock.update_state(|control| {
                 control.insert("policy_state".into(), serde_json::to_value(state)?);
                 control.insert(
                     "agent_run".into(),
@@ -897,7 +897,7 @@ fn internal(error: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Internal, error.to_string())
 }
 
-/// Return 75 only after a failed container's game children have been reaped.
+/// Return 1 only after a failed container's game children have been reaped.
 /// The outer LocalSet is shared with the Cap'n Proto server.
 pub async fn run(options: Options) -> Result<u8> {
     let mut termination =
@@ -968,7 +968,7 @@ pub async fn run(options: Options) -> Result<u8> {
             }
             result = &mut server => {
                 terminal_error = result.map_err(anyhow::Error::from).and_then(|result| result.map_err(Into::into)).err();
-                exit = 75;
+                exit = 1;
                 break;
             }
             _ = interrupt.recv() => break,
@@ -979,15 +979,15 @@ pub async fn run(options: Options) -> Result<u8> {
                     Ok(Err(error)) => {
                         eprintln!("room preparation failed: {error}");
                         *controller.error.lock().unwrap() = Some(error.to_string());
-                        controller.request_exit(if room.requires_container_restart() { 75 } else { 0 });
+                        controller.request_exit(if room.requires_container_restart() { 1 } else { 0 });
                     }
                     Ok(Ok(())) => {},
-                    Err(error) => { terminal_error = Some(error.into()); exit = 75; break; }
+                    Err(error) => { terminal_error = Some(error.into()); exit = 1; break; }
                 }
                 tick.reset_immediately();
             }
             _ = room_changes.changed() => {
-                if room.requires_container_restart() { exit = 75; break; }
+                if room.requires_container_restart() { exit = 1; break; }
             }
             _ = workers.join_next(), if !workers.is_empty() => {},
             Some(incoming) = requests.recv() => {
@@ -996,7 +996,7 @@ pub async fn run(options: Options) -> Result<u8> {
             }
             _ = tick.tick() => {
                 if room.requires_container_restart() {
-                    exit = 75;
+                    exit = 1;
                     break;
                 }
                 if policy_task.as_ref().is_none_or(tokio::task::JoinHandle::is_finished) {
@@ -1029,9 +1029,9 @@ pub async fn run(options: Options) -> Result<u8> {
         terminal_error.get_or_insert_with(|| error.into());
     }
     if room.requires_container_restart() {
-        exit = 75;
+        exit = 1;
     }
-    let recorded = if exit == 75 {
+    let recorded = if exit == 1 {
         controller.persist_failure().await
     } else if !room.driver_states().is_empty() {
         controller.record_stop()
@@ -1103,8 +1103,11 @@ mod tests {
         (directory, cluster, controller)
     }
 
-    fn enable_idle_regeneration(controller: &Controller) {
-        let states = controller.room.driver_states();
+    async fn enable_idle_regeneration(controller: &Controller) {
+        let inputs = controller
+            .inputs(&controller.room.status(), false)
+            .await
+            .unwrap();
         controller
             .room
             .with_lock(|lock| {
@@ -1116,20 +1119,21 @@ mod tests {
                 .save(lock)?;
                 let mut state = PolicyState::load(lock)?;
                 state.activity = Some(policy::Activity {
-                    sessions: states
+                    sessions: inputs
+                        .presence
                         .iter()
-                        .map(|(name, state)| (name.clone(), state.session_id.clone().unwrap()))
+                        .map(|(name, presence)| (name.clone(), presence.session_id.clone()))
                         .collect(),
-                    observations: states
+                    observations: inputs
+                        .presence
                         .iter()
-                        .map(|(name, state)| {
-                            (
-                                name.clone(),
-                                format!("{}:{}", state.nonce, state.generation.unwrap()),
-                            )
-                        })
+                        .map(|(name, presence)| (name.clone(), presence.observation.clone()))
                         .collect(),
-                    observed_seconds: states.keys().map(|name| (name.clone(), 0.0)).collect(),
+                    observed_seconds: inputs
+                        .presence
+                        .iter()
+                        .map(|(name, presence)| (name.clone(), presence.observed_seconds))
+                        .collect(),
                     last_active_at: Utc::now() - chrono::TimeDelta::hours(7),
                     clean_shutdown: false,
                     interrupted: false,
@@ -1152,7 +1156,7 @@ mod tests {
     #[tokio::test]
     async fn policy_queries_allow_mutations_and_discard_the_earlier_idle_observation() {
         let (_directory, cluster, controller) = running_controller().await;
-        enable_idle_regeneration(&controller);
+        enable_idle_regeneration(&controller).await;
         let hold = cluster.join("Master/hold-world");
         fs::write(&hold, "").unwrap();
         let tick = {
@@ -1187,7 +1191,7 @@ mod tests {
         );
 
         // Current observations still trigger the intended idle policy.
-        enable_idle_regeneration(&controller);
+        enable_idle_regeneration(&controller).await;
         let hold = cluster.join("Master/hold-regenerate");
         fs::write(&hold, "").unwrap();
         controller.tick().await.unwrap();
@@ -1215,7 +1219,7 @@ mod tests {
     #[tokio::test]
     async fn policy_discards_observations_when_a_generation_changes_in_the_same_session() {
         let (_directory, cluster, controller) = running_controller().await;
-        enable_idle_regeneration(&controller);
+        enable_idle_regeneration(&controller).await;
         let hold = cluster.join("Master/hold-world");
         fs::write(&hold, "").unwrap();
         let tick = {
