@@ -56,7 +56,6 @@ enum Command {
         #[arg(long)]
         field: Option<String>,
     },
-    Schema,
     /// Create one room from its complete JSON definition, @file, or stdin (-).
     Create {
         value: String,
@@ -188,10 +187,6 @@ pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
                 serde_json::to_value(room)?
             };
             super::emit(&value, compact)?;
-            return Ok(true);
-        }
-        Command::Schema => {
-            super::emit(&rooms::schema(), compact)?;
             return Ok(true);
         }
         Command::Create { value } => {

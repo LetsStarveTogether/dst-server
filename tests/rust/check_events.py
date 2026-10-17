@@ -8,16 +8,16 @@ import subprocess
 from pathlib import Path
 
 from dst_server import DstError
-from dst_server.events import event_schema, validate_event
+from dst_server.events import event_names, validate_event
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> None:
-    schema = event_schema()
-    assert len(schema["discriminator"]["mapping"]) == 56
-    schema["discriminator"]["mapping"].clear()
-    assert len(event_schema()["discriminator"]["mapping"]) == 56
+    names = event_names()
+    assert len(names) == 56
+    names.clear()
+    assert len(event_names()) == 56
 
     count = 0
     for name in ("lua5.1", "luajit"):
@@ -50,7 +50,7 @@ def main() -> None:
                 assert validated["data"] is not record["data"]
                 emitted.add(validated["event"])
                 count += 1
-        assert emitted == set(event_schema()["discriminator"]["mapping"])
+        assert emitted == set(event_names())
 
     event = {
         "v": 3,

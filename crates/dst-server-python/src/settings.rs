@@ -111,7 +111,7 @@ impl Configuration {
             )
             .unwrap(),
             "DailyWindow" => self.value.clone(),
-            model => native::resolved(model, &self.value),
+            model => native::resolved(model, &self.value).map_err(error)?,
         })
     }
 }
@@ -163,10 +163,6 @@ impl Configuration {
                 native::redact(value)
             },
         )
-    }
-
-    fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        configuration_schema(py, &self.model)
     }
 
     #[pyo3(signature = (**changes))]
@@ -290,7 +286,6 @@ impl Configuration {
             files::create_directory(&directory)?;
             let mut room = RoomLock::try_acquire(&directory)?;
             let mut stopped = room.while_stopped();
-            stopped.recover()?;
             let changed = cluster.save(
                 &mut stopped,
                 if replace_permissions {
@@ -407,10 +402,6 @@ impl Room {
             },
         )
     }
-    #[staticmethod]
-    fn schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
-        to_python(py, rooms::schema())
-    }
     #[pyo3(signature = (pointer=""))]
     fn get(&self, py: Python<'_>, pointer: &str) -> PyResult<Py<PyAny>> {
         to_python(py, self.inner.get(pointer).map_err(error)?)
@@ -526,25 +517,6 @@ impl RoomStore {
         py.detach(|| self.inner.save_policy(&room.inner))
             .map_err(error)
     }
-}
-
-#[pyfunction]
-fn configuration_schema(py: Python<'_>, model: &str) -> PyResult<Py<PyAny>> {
-    let schema = match model {
-        "Room" => rooms::schema(),
-        "Policy" => rooms::schema()["properties"]["policy"].clone(),
-        "DailyWindow" => {
-            rooms::schema()["properties"]["policy"]["properties"]["schedule"]["items"].clone()
-        }
-        "DeploymentOptions" => {
-            let room = rooms::schema();
-            let mut schema = room["$defs"]["RoomDeployment"].clone();
-            schema["$defs"] = room["$defs"].clone();
-            schema
-        }
-        _ => native::schema(model).map_err(error)?.clone(),
-    };
-    to_python(py, schema)
 }
 
 #[pyfunction]
@@ -671,7 +643,6 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Configuration>()?;
     module.add_class::<Room>()?;
     module.add_class::<RoomStore>()?;
-    module.add_function(wrap_pyfunction!(configuration_schema, module)?)?;
     module.add_function(wrap_pyfunction!(template_names, module)?)?;
     module.add_function(wrap_pyfunction!(preset_names, module)?)?;
     module.add_function(wrap_pyfunction!(preset, module)?)?;

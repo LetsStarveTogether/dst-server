@@ -28,6 +28,7 @@ pub mod rpc;
 pub mod scripts;
 pub mod settings;
 pub mod telemetry;
+pub mod validation;
 
 #[allow(clippy::all, dead_code)]
 pub(crate) mod room_capnp {

@@ -1,8 +1,11 @@
 """Run with the isolated native wheel interpreter."""
 
+import errno
+import fcntl
 import json
 import sys
 import tempfile
+from functools import partial
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -20,7 +23,6 @@ from dst_server.settings import (
     build_bundle,
     build_template,
     compose,
-    configuration_schema,
     fleet_room,
     load_configuration,
     parse_component,
@@ -52,7 +54,7 @@ def configuration() -> Configuration:
     assert cluster.dump(secrets=True)["token"] == DUMMY_TOKEN
     assert (
         cluster.dump(defaults=True)["shards"]["Surface"]["settings"]["encode_user_path"]
-        is True
+        is False
     )
     assert settings.replace(cluster_name=None).dump()["cluster_name"] is None
     assert "cluster_name" not in settings.dump()
@@ -83,15 +85,11 @@ def configuration() -> Configuration:
 
 def presets() -> None:
     assert len(template_names()) == 12
-    assert room_numbers() == [*range(100), *range(200, 220)]
+    assert room_numbers() == [*range(101), *range(200, 220)]
     built = compose([preset("FOREST_CAVES"), preset("ENDLESS")]).build(
         token=DUMMY_TOKEN
     )
     assert built.dump()["shards"]["forest"]["world"]["settings_preset"] == "ENDLESS"
-    schema = configuration_schema("Room")
-    assert "policy" in schema["properties"]
-    assert "schedule" not in schema["properties"]
-    assert "ports" in schema["$defs"]["RoomDeployment"]["properties"]
 
 
 def rooms(cluster: Configuration, root: Path) -> None:
@@ -101,6 +99,21 @@ def rooms(cluster: Configuration, root: Path) -> None:
     assert store.numbers() == [250]
     assert store.load(250).cluster.dump(secrets=True)["token"] == DUMMY_TOKEN
     assert load_configuration(store.path(250)).files() == cluster.files()
+    with (store.path(250) / ".dst-room.lock").open("rb") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for operation in (
+            partial(store.load, 250),
+            partial(store.save, room),
+            partial(store.save_policy, room),
+            partial(load_configuration, store.path(250)),
+            partial(cluster.save, store.path(250)),
+        ):
+            try:
+                operation()
+            except BlockingIOError as error:
+                assert error.errno == errno.EWOULDBLOCK  # ruff: ignore[pytest-assert-in-except]
+            else:
+                raise AssertionError
     permissions = store.path(250) / "blocklist.txt"
     permissions.write_bytes(b"KU_NEW\r\n")
     edited = store.load(250).edit("/cluster/settings/max_players", 10)
@@ -118,7 +131,7 @@ def rooms(cluster: Configuration, root: Path) -> None:
         pass
     else:
         raise AssertionError
-    control = json.loads((store.path(250) / ".dst-control.json").read_text())
+    control = json.loads((store.path(250) / ".dst-server.json").read_text())
     assert "policy" in control
     assert "cluster" not in control
 
@@ -144,6 +157,18 @@ def tools(root: Path) -> None:
     )
     assert fields == ["---@field value number"]
     assert "---@return string" in methods[0]
+    for opening, closing, depth in [
+        ("(", ")", 1000),
+        ("f(", ")", 56),
+        ("f{", "}", 44),
+    ]:
+        nested = "local value = " + opening * depth + "1" + closing * depth
+        try:
+            parse_component(nested, "widget", "Widget", "components")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError
 
 
 def main() -> None:

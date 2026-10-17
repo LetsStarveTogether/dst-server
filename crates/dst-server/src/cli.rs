@@ -190,10 +190,6 @@ enum Annotations {
 
 #[derive(Subcommand)]
 enum Config {
-    Schema {
-        #[arg(default_value = "ClusterConfig")]
-        model: String,
-    },
     Validate {
         model: String,
         value: String,
@@ -472,10 +468,6 @@ async fn run(arguments: Arguments) -> Result<u8> {
             )?,
         },
         Command::Config(command) => match command {
-            Config::Schema { model } if model == "Room" => {
-                emit(&dst_server::rooms::schema(), compact)?
-            }
-            Config::Schema { model } => emit(settings::schema(&model)?, compact)?,
             Config::Validate {
                 model,
                 value,
@@ -493,7 +485,7 @@ async fn run(arguments: Arguments) -> Result<u8> {
                 } else {
                     settings::validate(&model, &value)?;
                     if resolved {
-                        settings::resolved(&model, &value)
+                        settings::resolved(&model, &value)?
                     } else {
                         value
                     }
@@ -534,7 +526,7 @@ async fn run(arguments: Arguments) -> Result<u8> {
                     settings.as_ref(),
                 )?;
                 if secrets {
-                    emit(configuration.as_value(), compact)?;
+                    emit(&configuration.as_value(), compact)?;
                 } else {
                     emit(&configuration, compact)?;
                 }

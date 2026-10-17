@@ -1316,12 +1316,12 @@ fn telemetry(inner: &Inner, payload: &[u8]) {
             shared.state.invalid_telemetry += 1;
             return false;
         };
-        if record["nonce"] != shared.state.nonce {
+        if record.nonce() != shared.state.nonce {
             shared.state.invalid_telemetry += 1;
             return false;
         }
-        let sequence = record["seq"].as_u64().expect("validated sequence");
-        if record["generation"].as_u64() != shared.state.generation
+        let sequence = record.sequence();
+        if Some(record.generation()) != shared.state.generation
             || sequence <= shared.state.telemetry_sequence
         {
             shared.state.stale_telemetry += 1;
@@ -1344,7 +1344,10 @@ fn telemetry(inner: &Inner, payload: &[u8]) {
     });
     drop(shared);
     if accepted {
-        inner.publish(DriverEventKind::Telemetry, record.expect("validated event"));
+        inner.publish(
+            DriverEventKind::Telemetry,
+            record.expect("validated event").into_value(),
+        );
     }
 }
 
