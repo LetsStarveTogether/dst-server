@@ -169,15 +169,7 @@ pub async fn run(arguments: Arguments, compact: bool) -> Result<bool> {
     host.systemd.user = arguments.user;
     let (selection, operation) = match arguments.command {
         Command::List => {
-            return emit_batch(
-                &host
-                    .batch(
-                        &host.rooms.numbers()?,
-                        &HostOperation::Status { game: false },
-                    )
-                    .await?,
-                compact,
-            );
+            return emit_batch(&host.list().await?, compact);
         }
         Command::Show { number, field } => {
             let room = host.load(number).await?;

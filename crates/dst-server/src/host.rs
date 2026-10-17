@@ -255,6 +255,15 @@ impl Host {
         Ok(Client::connect(self.rooms.path(number)?.join(AGENT_SOCKET)).await?)
     }
     pub async fn call(&self, number: u16, request: Request) -> Result<Value> {
+        if matches!(
+            request,
+            Request::Restart { .. } | Request::UpdateMods { .. }
+        ) {
+            ContainerUnit::load_for_room(
+                self.quadlet_dir.join(format!("dst-{number:03}.container")),
+                &self.rooms.path(number)?,
+            )?;
+        }
         let client = self.connect(number).await?;
         let result = client.call(Envelope::new(Target::Room, request)?).await;
         let closed = client.close().await;
@@ -279,9 +288,11 @@ impl Host {
             .get("template")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        room.deployment =
-            ContainerUnit::load(self.quadlet_dir.join(format!("dst-{number:03}.container")))?
-                .options;
+        room.deployment = ContainerUnit::load_for_room(
+            self.quadlet_dir.join(format!("dst-{number:03}.container")),
+            &self.rooms.path(number)?,
+        )?
+        .options;
         room.validate()?;
         Ok(room)
     }
@@ -367,13 +378,6 @@ impl Host {
         Ok(
             json!({"number":number,"desired":desired,"running":state.running(),"load":state.load,"active":state.active,"sub":state.sub,"job_id":state.job_id,"units":{Self::unit(number):state},"game":agent,"policy":policy,"schedule":schedule,"maintenance":maintenance,"recovery":recovery,"error":error.or_else(||configuration_error.clone()),"configuration_error":configuration_error}),
         )
-    }
-    pub async fn list(&self) -> Result<Vec<Value>> {
-        let mut result = Vec::new();
-        for number in self.rooms.numbers()? {
-            result.push(self.status(number, false).await?);
-        }
-        Ok(result)
     }
     pub async fn journal(&self, numbers: &[u16], query: &JournalQuery) -> Result<JournalResult> {
         let units = numbers
@@ -514,7 +518,8 @@ impl Host {
         }
         crate::rooms::save_policy(lock, definition)?;
         unit.save(&self.quadlet_dir)?;
-        allocation.commit()
+        drop(allocation);
+        Ok(())
     }
     async fn require_inactive(&self, number: u16) -> Result<()> {
         ensure!(
@@ -547,7 +552,10 @@ impl Host {
         timeout_at(deadline, async {
             let unit = Self::unit(number);
             if action != "stop" {
-                ContainerUnit::load(self.quadlet_dir.join(format!("dst-{number:03}.container")))?;
+                ContainerUnit::load_for_room(
+                    self.quadlet_dir.join(format!("dst-{number:03}.container")),
+                    &self.rooms.path(number)?,
+                )?;
                 self.systemd.reload().await?;
                 let state = self.systemd.status(&unit).await?;
                 if !state.running() {
@@ -656,7 +664,10 @@ impl Host {
             if state.running() {
                 self.call(number, request).await?;
             } else {
-                ContainerUnit::load(self.quadlet_dir.join(format!("dst-{number:03}.container")))?;
+                ContainerUnit::load_for_room(
+                    self.quadlet_dir.join(format!("dst-{number:03}.container")),
+                    &self.rooms.path(number)?,
+                )?;
                 {
                     let mut lock = RoomLock::try_acquire(self.rooms.path(number)?)?;
                     self.require_inactive(number).await?;
@@ -841,6 +852,79 @@ mod tests {
         assert_eq!(status["recovery"]["version"], 1);
         assert!(status["configuration_error"].is_null());
         assert!(host.wait_ready(1, Duration::from_secs(1)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mismatched_quadlet_cannot_start_a_room_or_queue_maintenance() {
+        let (_temporary, host) = offline_host().await;
+        let path = host.quadlet_dir.join("dst-001.container");
+        let mut unit = ContainerUnit::load(&path).unwrap();
+        unit.cluster = host.rooms.path(2).unwrap();
+        std::fs::write(&path, unit.render().unwrap()).unwrap();
+        let directory = host.rooms.path(1).unwrap();
+        let before = std::fs::read(directory.join(crate::files::STATE_FILE)).unwrap();
+        let expected = "Quadlet must mount the selected room directory";
+        assert_eq!(host.load(1).await.unwrap_err().to_string(), expected);
+        for (active, sub) in [("inactive", "dead"), ("active", "running")] {
+            std::fs::write(&host.systemd.executable, format!(
+                "#!/bin/sh\ncase \"$*\" in *show*) printf 'Id=dst-001.service\\nLoadState=loaded\\nActiveState={active}\\nSubState={sub}\\nJob=0\\nResult=success\\n';; *) exit 1;; esac\n"
+            )).unwrap();
+            assert_eq!(
+                host.start(1, false, Duration::from_secs(2))
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                host.restart(1, false, Duration::from_secs(2))
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+            for restart in [false, true] {
+                assert_eq!(
+                    host.update_mods(1, restart, None)
+                        .await
+                        .unwrap_err()
+                        .to_string(),
+                    expected
+                );
+            }
+        }
+        for request in [
+            Request::Restart { notice: None },
+            Request::UpdateMods {
+                restart: false,
+                notice: None,
+            },
+            Request::UpdateMods {
+                restart: true,
+                notice: None,
+            },
+        ] {
+            assert_eq!(
+                host.operate(1, &crate::host_operations::HostOperation::Call { request })
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        }
+        assert_eq!(
+            host.call(1, Request::Status {})
+                .await
+                .unwrap_err()
+                .downcast::<crate::model::Error>()
+                .unwrap()
+                .code,
+            crate::model::ErrorCode::Transport
+        );
+        assert_eq!(
+            std::fs::read(directory.join(crate::files::STATE_FILE)).unwrap(),
+            before
+        );
     }
 
     #[tokio::test]

@@ -8,7 +8,8 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{
-    DateTime, Days, LocalResult, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Timelike, Utc,
+    DateTime, Days, Local, LocalResult, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Timelike,
+    Utc,
 };
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -91,7 +92,7 @@ pub struct Policy {
 impl Default for Policy {
     fn default() -> Self {
         Self {
-            timezone: "Asia/Shanghai".into(),
+            timezone: "local".into(),
             schedule: Vec::new(),
             mod_auto_update: true,
             idle_regeneration: false,
@@ -109,10 +110,19 @@ pub struct ScheduleState {
 }
 
 impl Policy {
+    fn zone(&self) -> Result<Option<Tz>> {
+        if self.timezone == "local" {
+            Ok(None)
+        } else {
+            self.timezone
+                .parse()
+                .map(Some)
+                .context("unknown IANA schedule timezone")
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
-        self.timezone
-            .parse::<Tz>()
-            .context("unknown IANA schedule timezone")?;
+        self.zone()?;
         ensure!(self.schedule.len() <= 1440, "too many daily windows");
         for window in &self.schedule {
             window.validate()?;
@@ -145,6 +155,13 @@ impl Policy {
     /// Thus a repeated DST hour belongs to one opening and one recovery opportunity.
     pub fn schedule_at(&self, now: DateTime<Utc>) -> Result<ScheduleState> {
         self.validate()?;
+        match self.zone()? {
+            Some(zone) => self.schedule_in(now, zone),
+            None => self.schedule_in(now, Local),
+        }
+    }
+
+    fn schedule_in(&self, now: DateTime<Utc>, zone: impl TimeZone) -> Result<ScheduleState> {
         let windows = merged_minutes(&self.schedule);
         if windows.is_empty() || windows == [(0, 1440)] {
             return Ok(ScheduleState {
@@ -153,7 +170,6 @@ impl Policy {
                 next_change: None,
             });
         }
-        let zone: Tz = self.timezone.parse()?;
         let today = now.with_timezone(&zone).date_naive();
         let mut intervals = Vec::new();
         for offset in -2_i64..=3 {
@@ -174,8 +190,8 @@ impl Policy {
                 let end_local = end_date
                     .and_hms_opt(end_minute / 60, end_minute % 60, 0)
                     .context("invalid window end")?;
-                let start = resolve_local(zone, start_local, false)?;
-                let end = resolve_local(zone, end_local, true)?;
+                let start = resolve_local(&zone, start_local, false)?;
+                let end = resolve_local(&zone, end_local, true)?;
                 if start < end {
                     intervals.push((start, end));
                 }
@@ -354,13 +370,14 @@ impl Policy {
             return Ok(None);
         }
         let next = self.schedule_at(close)?.next_change;
-        let zone: Tz = self.timezone.parse()?;
+        let zone = self.zone()?;
         let opening = next
             .map(|time| {
-                format!(
-                    "下次开放时间：{}。",
-                    time.with_timezone(&zone).format("%H:%M")
-                )
+                let time = match zone {
+                    Some(zone) => time.with_timezone(&zone).time(),
+                    None => time.with_timezone(&Local).time(),
+                };
+                format!("下次开放时间：{}。", time.format("%H:%M"))
             })
             .unwrap_or_default();
         state.last_closing_notice = Some(notice);
@@ -405,7 +422,7 @@ fn merged_minutes(windows: &[DailyWindow]) -> Vec<(u32, u32)> {
     merged
 }
 
-fn resolve_local(zone: Tz, local: NaiveDateTime, end: bool) -> Result<DateTime<Utc>> {
+fn resolve_local(zone: &impl TimeZone, local: NaiveDateTime, end: bool) -> Result<DateTime<Utc>> {
     // IANA includes a whole skipped civil date (for example Pacific/Apia).
     for minute in 0..=1440 {
         let candidate = local

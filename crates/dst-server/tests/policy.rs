@@ -56,6 +56,70 @@ fn elapsed(input: &mut Inputs, seconds: f64) {
 }
 
 #[test]
+fn default_schedule_follows_system_timezone() {
+    const CHILD: &str = "DST_TEST_SYSTEM_TIMEZONE";
+    let cases = [
+        ("UTC", "2026-10-01T09:00:00Z"),
+        ("Asia/Tokyo", "2026-10-01T00:00:00Z"),
+    ];
+    if let Ok(zone) = std::env::var(CHILD) {
+        let start = at(cases.iter().find(|(name, _)| *name == zone).unwrap().1);
+        let policy: Policy = serde_json::from_value(json!({
+            "schedule": [{"start": "09:00", "end": "11:00"}]
+        }))
+        .unwrap();
+        assert!(
+            !policy
+                .schedule_at(start - TimeDelta::seconds(1))
+                .unwrap()
+                .open
+        );
+        let current = policy.schedule_at(start).unwrap();
+        assert!(current.open);
+        assert_eq!(current.opening_id, Some(start));
+        assert_eq!(current.next_change, Some(start + TimeDelta::hours(2)));
+        let explicit = make_policy("America/New_York", &[("09:00", "11:00")]);
+        assert_eq!(
+            explicit
+                .schedule_at(at("2026-10-01T13:00:00Z"))
+                .unwrap()
+                .opening_id,
+            Some(at("2026-10-01T13:00:00Z"))
+        );
+        let notice = policy
+            .plan(
+                &mut PolicyState::default(),
+                start + TimeDelta::minutes(119),
+                &running(),
+            )
+            .unwrap();
+        assert!(
+            matches!(notice.action, Some(Action::Announce { message }) if message.contains("09:00"))
+        );
+        return;
+    }
+    // Each process gets its own timezone; parallel tests keep their environment.
+    for (zone, _) in cases {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "default_schedule_follows_system_timezone",
+                "--nocapture",
+            ])
+            .env(CHILD, zone)
+            .env("TZ", zone)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{zone}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn schedules_merge_across_midnight_and_include_start_only() {
     let policy = make_policy("Asia/Shanghai", &[("22:00", "02:00"), ("01:00", "03:00")]);
     let before = policy.schedule_at(at("2026-10-01T13:59:59Z")).unwrap();

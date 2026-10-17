@@ -225,6 +225,14 @@ impl Host {
         Ok(())
     }
 
+    pub async fn list(&self) -> Result<Vec<Value>> {
+        self.batch(
+            &self.rooms.numbers()?,
+            &HostOperation::Status { game: false },
+        )
+        .await
+    }
+
     pub async fn batch(&self, numbers: &[u16], operation: &HostOperation) -> Result<Vec<Value>> {
         self.validate_batch(numbers)?;
         operation.validate()?;
