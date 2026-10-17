@@ -849,7 +849,7 @@ mod tests {
         assert_eq!(status["policy"]["timezone"], "UTC");
         assert_eq!(status["schedule"]["open"], false);
         assert_eq!(status["maintenance"]["phase"]["state"], "idle");
-        assert_eq!(status["recovery"]["version"], 1);
+        assert_eq!(status["recovery"]["restarts_used"], 0);
         assert!(status["configuration_error"].is_null());
         assert!(host.wait_ready(1, Duration::from_secs(1)).await.is_ok());
     }

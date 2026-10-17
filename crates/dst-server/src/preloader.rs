@@ -1,6 +1,6 @@
 //! Native snapshot inspection and fixed-target recovery while the whole room is stopped.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +14,9 @@ use crate::configuration::{self, Cluster};
 use crate::driver::{Driver, DriverOptions, DriverState};
 use crate::files::RoomLock;
 use crate::model::{Error, ErrorCode, Result};
-use crate::recovery::{self, Catalog, Catalogs, Failure, FixedTarget, Snapshot, TargetPhase};
+use crate::recovery::{
+    self, Catalog, Catalogs, FailedLoad, Failure, FixedTarget, Snapshot, TargetPhase,
+};
 use crate::room::{Room, StoppedOperation};
 
 /// A cancelled caller stops waiting; native children are killed, reaped and drained
@@ -37,8 +39,7 @@ pub async fn catalog(room: Arc<Room>, duration: Duration) -> Result<Catalogs> {
         .map_err(|_| Error::new(ErrorCode::Internal, "native catalog worker stopped"))?
 }
 
-/// Every mutation uses the already-durable target; each verified native receipt
-/// is persisted before the next shard is allowed to change its snapshots.
+/// Every mutation uses the persisted target; interrupted preparation rechecks all shards.
 pub async fn apply(room: Arc<Room>, target: FixedTarget, duration: Duration) -> Result<()> {
     let stopped = room.while_stopped().await?;
     let deadline = deadline(duration)?;
@@ -145,17 +146,8 @@ async fn apply_stopped(
             )
             .with_details(json!({"shard":shard.name})));
         }
-        stopped.with_lock(|lock| {
-            recovery::mark_applied(
-                lock,
-                &shard.name,
-                &saved.session_id,
-                saved.snapshot_id,
-                &saved.world_file,
-            )
-        })?;
     }
-    Ok(())
+    stopped.with_lock(recovery::mark_prepared)
 }
 
 async fn native(
@@ -343,7 +335,7 @@ pub fn classify(states: &[DriverState]) -> Failure {
     {
         return Failure::Unknown;
     }
-    let mut load_failure = None;
+    let mut shards = BTreeMap::new();
     for state in states {
         let Some(record) = &state.load_failure else {
             continue;
@@ -378,24 +370,24 @@ pub fn classify(states: &[DriverState]) -> Failure {
         if native_path(&state.shard, session, file).is_err() {
             return Failure::Unknown;
         }
-        if load_failure.is_none() {
-            load_failure = Some(Failure::LoadFailure {
-                shard: state.shard.clone(),
+        shards.insert(
+            state.shard.clone(),
+            FailedLoad {
                 session_id: session.into(),
                 world_file: file.into(),
-            });
-        }
+            },
+        );
     }
-    load_failure.unwrap_or_else(|| {
-        if states
-            .iter()
-            .any(|state| state.native_ready && state.runtime.is_some())
-        {
-            Failure::Retryable
-        } else {
-            Failure::Unknown
-        }
-    })
+    if !shards.is_empty() {
+        Failure::LoadFailure { shards }
+    } else if states
+        .iter()
+        .any(|state| state.native_ready && state.runtime.is_some())
+    {
+        Failure::Retryable
+    } else {
+        Failure::Unknown
+    }
 }
 
 fn internal(error: impl std::fmt::Display) -> Error {
@@ -438,6 +430,7 @@ else:
     changed = not (directory / 'applied').exists()
     (directory / 'applied').write_text(str(request['snapshot_id']))
     record = dict(request, event='recovery_applied', changed=changed)
+    if scenario == 'wrong_receipt': record['snapshot_id'] += 1
 record.update(v=1, nonce=config['nonce'], generation=1)
 def emit(record): os.write(4, ('DST_CONTROL|' + json.dumps(record) + '\n').encode())
 emit(record)
@@ -519,7 +512,6 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
                         )
                     })
                     .collect(),
-                applied: BTreeSet::new(),
                 phase: TargetPhase::Preparing,
             };
             self.room
@@ -580,7 +572,7 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
     }
 
     #[tokio::test]
-    async fn persists_each_apply_receipt_and_replays_the_fixed_target() {
+    async fn interrupted_preparation_rechecks_the_fixed_target_before_starting() {
         let fixture = Fixture::new(&["Master", "Caves"]);
         let catalogs = catalog(fixture.room.clone(), Duration::from_secs(5))
             .await
@@ -594,12 +586,27 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
         );
         let state = fixture.room.with_lock(|lock| recovery::load(lock)).unwrap();
         let partial = state.target.unwrap();
-        assert_eq!(partial.applied, BTreeSet::from(["Master".into()]));
+        assert_eq!(partial.phase, TargetPhase::Preparing);
         assert_eq!(partial.shards, target.shards);
+        fixture.scenario("Caves", "wrong_receipt");
         assert!(
-            apply(fixture.room.clone(), target, Duration::from_secs(5))
-                .await
-                .is_err()
+            apply(
+                fixture.room.clone(),
+                partial.clone(),
+                Duration::from_secs(5)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            fixture
+                .room
+                .with_lock(|lock| recovery::load(lock))
+                .unwrap()
+                .target
+                .unwrap()
+                .phase,
+            TargetPhase::Preparing
         );
         fixture.scenario("Caves", "ok");
         apply(
@@ -615,17 +622,17 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
             .unwrap()
             .target
             .unwrap();
-        assert_eq!(completed.applied.len(), 2);
+        assert_eq!(completed.phase, TargetPhase::Starting);
         assert_eq!(completed.shards, partial.shards);
         assert_eq!(
             fs::read_to_string(fixture.root.join("Master/calls")).unwrap(),
-            "catalog\napply\napply\n"
+            "catalog\napply\napply\napply\n"
         );
         fixture
             .room
             .with_lock(|lock| {
                 assert_eq!(lock.read_state()?["policy_fixture"]["retained"], true);
-                recovery::begin_recovered_room(lock)
+                Ok(())
             })
             .unwrap();
     }
@@ -705,8 +712,19 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
             recent_request: None,
         };
         assert!(
-            matches!(classify(std::slice::from_ref(&state)), Failure::LoadFailure {world_file, ..} if world_file == "session/SESSION/0000000002")
+            matches!(classify(std::slice::from_ref(&state)), Failure::LoadFailure {shards} if shards["Master"].world_file == "session/SESSION/0000000002")
         );
+        let mut caves = state.clone();
+        caves.shard = "Caves".into();
+        caves.load_failure.as_mut().unwrap()["world_file"] = json!("session/SESSION/0000000001");
+        for states in [[state.clone(), caves.clone()], [caves, state.clone()]] {
+            let Failure::LoadFailure { shards } = classify(&states) else {
+                panic!("expected both failed world files");
+            };
+            assert_eq!(shards.len(), 2);
+            assert_eq!(shards["Master"].world_file, "session/SESSION/0000000002");
+            assert_eq!(shards["Caves"].world_file, "session/SESSION/0000000001");
+        }
         for (field, value) in BTreeMap::from([
             ("phase", json!("read")),
             ("read_succeeded", json!(false)),

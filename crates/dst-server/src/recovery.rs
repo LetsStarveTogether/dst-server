@@ -38,6 +38,13 @@ pub struct SavedShard {
 
 pub type SavedRoom = BTreeMap<String, SavedShard>;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailedLoad {
+    pub session_id: String,
+    pub world_file: String,
+}
+
 /// Only construct LoadFailure after identifying the native loader's failed file
 /// and excluding disk, permission, configuration and Mod failures.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -45,9 +52,7 @@ pub type SavedRoom = BTreeMap<String, SavedShard>;
 pub enum Failure {
     Retryable,
     LoadFailure {
-        shard: String,
-        session_id: String,
-        world_file: String,
+        shards: BTreeMap<String, FailedLoad>,
     },
     Disk,
     Permission,
@@ -90,7 +95,6 @@ pub enum TargetPhase {
 pub struct FixedTarget {
     pub snapshot_id: u64,
     pub shards: SavedRoom,
-    pub applied: BTreeSet<String>,
     pub phase: TargetPhase,
 }
 
@@ -98,32 +102,21 @@ pub struct FixedTarget {
 pub struct CurrentRetry {
     pub not_before_ms: u64,
     pub started: bool,
+    pub shards: SavedRoom,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct RecoveryState {
-    pub version: u8,
     pub restarts_used: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_open_window_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub closed: Option<ClosedReason>,
-    pub latest: Option<SavedRoom>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub retry: Option<CurrentRetry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<FixedTarget>,
-}
-
-impl Default for RecoveryState {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            restarts_used: 0,
-            last_open_window_ms: None,
-            closed: None,
-            latest: None,
-            retry: None,
-            target: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -166,20 +159,17 @@ fn verify_saved(saved: &SavedShard) -> Result<()> {
 impl RecoveryState {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 1 && self.restarts_used <= CURRENT_RESTARTS,
+            self.restarts_used <= CURRENT_RESTARTS,
             "invalid recovery state"
         );
-        if let Some(latest) = &self.latest {
-            ensure!(!latest.is_empty(), "empty saved room");
-            for saved in latest.values() {
-                verify_saved(saved)?;
-            }
-        }
-        if self.retry.is_some() {
+        if let Some(retry) = &self.retry {
             ensure!(
-                self.restarts_used > 0 && self.latest.is_some() && self.closed.is_none(),
+                self.restarts_used > 0 && !retry.shards.is_empty() && self.closed.is_none(),
                 "invalid pending retry"
             );
+            for saved in retry.shards.values() {
+                verify_saved(saved)?;
+            }
         }
         if let Some(target) = &self.target {
             ensure!(!target.shards.is_empty(), "empty recovery target");
@@ -188,19 +178,6 @@ impl RecoveryState {
                 ensure!(
                     saved.snapshot_id == target.snapshot_id,
                     "inconsistent recovery target"
-                );
-            }
-            ensure!(
-                target
-                    .applied
-                    .iter()
-                    .all(|shard| target.shards.contains_key(shard)),
-                "unknown applied shard"
-            );
-            if matches!(target.phase, TargetPhase::Starting | TargetPhase::Ready) {
-                ensure!(
-                    target.applied.len() == target.shards.len(),
-                    "recovery target is not applied everywhere"
                 );
             }
         }
@@ -221,7 +198,6 @@ impl RecoveryState {
     fn reset(&mut self) {
         self.restarts_used = 0;
         self.closed = None;
-        self.latest = None;
         self.retry = None;
         if self
             .target
@@ -230,7 +206,7 @@ impl RecoveryState {
         {
             self.target = None;
         } else if let Some(target) = &mut self.target {
-            // An interrupted truncate may have happened before its receipt was persisted.
+            // Truncation may have happened before preparation was marked complete.
             // Even a fresh budget must finish this same target instead of selecting an older one.
             target.phase = TargetPhase::Preparing;
         }
@@ -242,10 +218,21 @@ pub fn load(room: &RoomLock) -> Result<RecoveryState> {
 }
 
 fn decode(document: &serde_json::Map<String, serde_json::Value>) -> Result<RecoveryState> {
-    let state: RecoveryState = match document.get("recovery") {
-        Some(value) => serde_json::from_value(value.clone()).context("read recovery state")?,
-        None => RecoveryState::default(),
-    };
+    let mut value = document
+        .get("recovery")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    // Fold the previous layout into the pending retry; the next write drops old fields.
+    let latest = value.get("latest").cloned();
+    if let Some(retry) = value
+        .get_mut("retry")
+        .and_then(serde_json::Value::as_object_mut)
+        && !retry.contains_key("shards")
+        && let Some(latest) = latest
+    {
+        retry.insert("shards".into(), latest);
+    }
+    let state: RecoveryState = serde_json::from_value(value).context("read recovery state")?;
     state.validate()?;
     Ok(state)
 }
@@ -354,7 +341,6 @@ fn previous_target(
     Ok(FixedTarget {
         snapshot_id: selected,
         shards,
-        applied: BTreeSet::new(),
         phase: TargetPhase::Preparing,
     })
 }
@@ -419,27 +405,29 @@ fn decide(
     let Ok(latest) = latest_room(required, catalogs) else {
         return Ok(state.close(ClosedReason::UnprovenSnapshots));
     };
-    if let Some(previous) = &state.latest
-        && (previous.keys().ne(latest.keys())
+    if let Some(previous) = &state.retry
+        && (previous.shards.keys().ne(latest.keys())
             || previous
+                .shards
                 .iter()
                 .any(|(name, saved)| saved.session_id != latest[name].session_id))
     {
         return Ok(state.close(ClosedReason::SessionChanged));
     }
-    let failed_snapshot_id = if let Failure::LoadFailure {
-        shard,
-        session_id,
-        world_file,
-    } = failure
-    {
-        let Some(failed) = latest
-            .get(shard)
-            .filter(|saved| &saved.session_id == session_id && &saved.world_file == world_file)
-        else {
+    let failed_snapshot_id = if let Failure::LoadFailure { shards } = failure {
+        if shards.is_empty() {
             return Ok(state.close(ClosedReason::UnprovenLoadFailure));
-        };
-        Some(failed.snapshot_id)
+        }
+        let mut earliest = u64::MAX;
+        for (name, failure) in shards {
+            let Some(failed) = latest.get(name).filter(|saved| {
+                saved.session_id == failure.session_id && saved.world_file == failure.world_file
+            }) else {
+                return Ok(state.close(ClosedReason::UnprovenLoadFailure));
+            };
+            earliest = earliest.min(failed.snapshot_id);
+        }
+        Some(earliest)
     } else {
         None
     };
@@ -456,7 +444,6 @@ fn decide(
     if newest - oldest > MAX_SNAPSHOT_GAP {
         return Ok(state.close(ClosedReason::SnapshotGapExceeded));
     }
-    state.latest = Some(latest.clone());
     if state.restarts_used < CURRENT_RESTARTS {
         state.restarts_used += 1;
         let not_before_ms = now_ms
@@ -465,6 +452,7 @@ fn decide(
         state.retry = Some(CurrentRetry {
             not_before_ms,
             started: false,
+            shards: latest.clone(),
         });
         return Ok(Decision::RetryCurrent {
             attempt: state.restarts_used,
@@ -533,13 +521,13 @@ pub fn resume_pending(
             if retry.started {
                 return decide(state, &Failure::Retryable, required, catalogs, now_ms).map(Some);
             }
-            if latest_room(required, catalogs).ok().as_ref() != state.latest.as_ref() {
+            if latest_room(required, catalogs).ok().as_ref() != Some(&retry.shards) {
                 return Ok(Some(state.close(ClosedReason::CurrentSaveChanged)));
             }
             return Ok(Some(Decision::RetryCurrent {
                 attempt: state.restarts_used,
                 not_before_ms: retry.not_before_ms,
-                shards: state.latest.clone().context("retry lost its saved room")?,
+                shards: retry.shards.clone(),
             }));
         }
         Ok(None)
@@ -562,39 +550,13 @@ pub fn begin_current_retry(room: &mut RoomLock, now_ms: u64) -> Result<()> {
     })
 }
 
-pub fn mark_applied(
-    room: &mut RoomLock,
-    shard: &str,
-    session_id: &str,
-    snapshot_id: u64,
-    world_file: &str,
-) -> Result<()> {
+pub(crate) fn mark_prepared(room: &mut RoomLock) -> Result<()> {
     update(room, |state| {
         ensure!(state.closed.is_none(), "room is closed after failure");
         let target = state.target.as_mut().context("no recovery target")?;
         ensure!(
             target.phase == TargetPhase::Preparing,
             "recovery is not preparing"
-        );
-        let expected = target.shards.get(shard).context("unknown recovery shard")?;
-        ensure!(
-            expected.session_id == session_id
-                && expected.snapshot_id == snapshot_id
-                && expected.world_file == world_file,
-            "native recovery receipt differs from fixed target"
-        );
-        target.applied.insert(shard.to_owned());
-        Ok(())
-    })
-}
-
-pub fn begin_recovered_room(room: &mut RoomLock) -> Result<()> {
-    update(room, |state| {
-        ensure!(state.closed.is_none(), "room is closed after failure");
-        let target = state.target.as_mut().context("no recovery target")?;
-        ensure!(
-            target.phase == TargetPhase::Preparing && target.applied.len() == target.shards.len(),
-            "recovery is not applied on every shard"
         );
         target.phase = TargetPhase::Starting;
         Ok(())
@@ -616,7 +578,6 @@ pub fn mark_ready(room: &mut RoomLock) -> Result<()> {
             );
             target.phase = TargetPhase::Ready;
         }
-        state.latest = None;
         state.retry = None;
         Ok(())
     })
@@ -630,7 +591,7 @@ pub fn reset_after_stable(room: &mut RoomLock, continuous_ready: Duration) -> Re
     }
     update(room, |state| {
         ensure!(
-            state.closed.is_none() && state.latest.is_none() && state.retry.is_none(),
+            state.closed.is_none() && state.retry.is_none(),
             "room is not continuously ready"
         );
         ensure!(
@@ -707,10 +668,53 @@ mod tests {
 
     fn load_failure(catalogs: &Catalogs) -> Failure {
         Failure::LoadFailure {
-            shard: "Master".into(),
-            session_id: catalogs["Master"].session_id.clone(),
-            world_file: catalogs["Master"].latest_world_file.clone(),
+            shards: BTreeMap::from([(
+                "Master".into(),
+                FailedLoad {
+                    session_id: catalogs["Master"].session_id.clone(),
+                    world_file: catalogs["Master"].latest_world_file.clone(),
+                },
+            )]),
         }
+    }
+
+    #[test]
+    fn previous_layout_keeps_its_retry_budget_when_compacted() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut room = RoomLock::try_acquire(directory.path()).unwrap();
+        let (required, catalogs) = catalogs();
+        room.update_state(|control| {
+            control.insert(
+                "recovery".into(),
+                json!({
+                    "version": 1, "restarts_used": 1, "last_open_window_ms": null,
+                    "closed": null, "latest": latest_room(&required, &catalogs)?,
+                    "retry": {"not_before_ms": 30_000, "started": true}, "target": null
+                }),
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert!(matches!(
+            resume_pending(&mut room, &required, &catalogs, 31_000).unwrap(),
+            Some(Decision::RetryCurrent { attempt: 2, .. })
+        ));
+        let stored = room.read_state().unwrap()["recovery"].clone();
+        assert_eq!(stored.as_object().unwrap().len(), 2);
+        assert_eq!(stored["restarts_used"], 2);
+        assert_eq!(
+            stored["retry"]["shards"],
+            json!(latest_room(&required, &catalogs).unwrap())
+        );
+        begin_current_retry(&mut room, 61_000).unwrap();
+        drop(room);
+        let mut room = RoomLock::try_acquire(directory.path()).unwrap();
+        assert!(matches!(
+            resume_pending(&mut room, &required, &catalogs, 62_000).unwrap(),
+            Some(Decision::StayClosed {
+                reason: ClosedReason::CurrentRetriesExhausted
+            })
+        ));
     }
 
     #[test]
@@ -860,20 +864,10 @@ mod tests {
         let stored = room.read_state().unwrap();
         assert_eq!(stored["recovery"]["target"]["snapshot_id"], 11);
         assert_eq!(stored["policy"], json!({"paused": false}));
-        assert!(begin_recovered_room(&mut room).is_err());
-        let master = &target.shards["Master"];
-        mark_applied(
-            &mut room,
-            "Master",
-            &master.session_id,
-            11,
-            &master.world_file,
-        )
-        .unwrap();
         for catalog in catalogs.values_mut() {
             catalog.latest_world_file = path(&catalog.session_id, 11);
         }
-        // Caves was also truncated, but the Agent died before persisting its receipt.
+        // Both shards were truncated, but the Agent died before marking preparation complete.
         drop(room);
         let mut room = RoomLock::try_acquire(directory.path()).unwrap();
         let Decision::Restore {
@@ -886,13 +880,8 @@ mod tests {
             panic!("expected exact target replay")
         };
         assert_eq!(resumed.snapshot_id, 11);
-        assert_eq!(resumed.applied, BTreeSet::from(["Master".into()]));
-        let caves = &resumed.shards["Caves"];
-        assert!(
-            mark_applied(&mut room, "Caves", &caves.session_id, 10, &caves.world_file).is_err()
-        );
-        mark_applied(&mut room, "Caves", &caves.session_id, 11, &caves.world_file).unwrap();
-        begin_recovered_room(&mut room).unwrap();
+        assert_eq!(resumed.phase, TargetPhase::Preparing);
+        mark_prepared(&mut room).unwrap();
         let failure = on_failure(
             &mut room,
             load_failure(&catalogs),
@@ -950,6 +939,95 @@ mod tests {
                 reason: ClosedReason::CurrentSaveChanged
             }
         ));
+    }
+
+    #[test]
+    fn rollback_precedes_every_verified_failed_world() {
+        for lagging in ["Master", "Caves"] {
+            let (required, mut catalogs) = catalogs();
+            let catalog = catalogs.get_mut(lagging).unwrap();
+            catalog.latest_world_file = path(&catalog.session_id, 11);
+            let shards: BTreeMap<_, _> = catalogs
+                .iter()
+                .map(|(name, catalog)| {
+                    (
+                        name.clone(),
+                        FailedLoad {
+                            session_id: catalog.session_id.clone(),
+                            world_file: catalog.latest_world_file.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let directory = tempfile::tempdir().unwrap();
+            let mut room = RoomLock::try_acquire(directory.path()).unwrap();
+            for now in [0, 30_000] {
+                let decision = on_failure(
+                    &mut room,
+                    Failure::LoadFailure {
+                        shards: shards.clone(),
+                    },
+                    &required,
+                    &catalogs,
+                    now,
+                )
+                .unwrap();
+                assert!(matches!(decision, Decision::RetryCurrent { .. }));
+                begin_current_retry(&mut room, now + 30_000).unwrap();
+            }
+            let Decision::Restore { target, .. } = on_failure(
+                &mut room,
+                Failure::LoadFailure { shards },
+                &required,
+                &catalogs,
+                60_001,
+            )
+            .unwrap() else {
+                panic!("expected a shared snapshot before both failed worlds");
+            };
+            assert_eq!(target.snapshot_id, 10);
+        }
+    }
+
+    #[test]
+    fn every_reported_load_failure_must_match_the_native_catalog() {
+        let (required, catalogs) = catalogs();
+        for shards in [
+            BTreeMap::new(),
+            BTreeMap::from([
+                (
+                    "Master".into(),
+                    FailedLoad {
+                        session_id: catalogs["Master"].session_id.clone(),
+                        world_file: catalogs["Master"].latest_world_file.clone(),
+                    },
+                ),
+                (
+                    "Caves".into(),
+                    FailedLoad {
+                        session_id: "old_session".into(),
+                        world_file: catalogs["Caves"].latest_world_file.clone(),
+                    },
+                ),
+            ]),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut room = RoomLock::try_acquire(directory.path()).unwrap();
+            assert!(matches!(
+                on_failure(
+                    &mut room,
+                    Failure::LoadFailure { shards },
+                    &required,
+                    &catalogs,
+                    0
+                )
+                .unwrap(),
+                Decision::StayClosed {
+                    reason: ClosedReason::UnprovenLoadFailure
+                }
+            ));
+            assert_eq!(load(&room).unwrap().restarts_used, 0);
+        }
     }
 
     #[test]
