@@ -1,4 +1,4 @@
-//! Exercise all 120 real configurations with mock systemd and real SDK sockets.
+//! Exercise the complete fleet with mock systemd and real SDK sockets.
 
 use std::{
     collections::BTreeSet,
@@ -108,7 +108,7 @@ async fn settled(baseline: Resources, calls: &Calls) -> Resources {
 }
 
 fn ordered_outcomes(outcomes: &[Value], numbers: &[u16], systemd_status: bool) {
-    assert_eq!(outcomes.len(), 120);
+    assert_eq!(outcomes.len(), numbers.len());
     for (outcome, number) in outcomes.iter().zip(numbers) {
         assert_eq!(outcome["number"], *number);
         let result = &outcome["result"];
@@ -132,7 +132,7 @@ fn ordered_outcomes(outcomes: &[Value], numbers: &[u16], systemd_status: bool) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn all_120_rooms_keep_bounded_batches_and_resources_after_cancellation() {
+async fn all_fleet_rooms_keep_bounded_batches_and_resources_after_cancellation() {
     LocalSet::new()
         .run_until(async {
             let started = Instant::now();
@@ -147,10 +147,25 @@ async fn all_120_rooms_keep_bounded_batches_and_resources_after_cancellation() {
                 r#"{"active":0,"peak":0,"started":0,"finished":0}"#).unwrap();
 
             let numbers = rooms::room_numbers();
-            assert_eq!(numbers.len(), 120);
-            let definitions: Vec<_> = numbers.iter().map(|number| {
+            assert_eq!(numbers.len(), 121);
+            let mut definitions: Vec<_> = numbers.iter().map(|number| {
                 rooms::fleet_room(*number, "fleet-fixture-token", Some("fleet-fixture-key")).unwrap()
             }).collect();
+            for definition in &mut definitions {
+                for mapping in &definition.deployment.ports {
+                    let offset = match mapping.container {
+                        10999 => 0,
+                        27016 => 1,
+                        11000 => 2,
+                        27017 => 3,
+                        port => panic!("unexpected fleet container port {port}"),
+                    };
+                    assert_eq!(mapping.host, 30000 + definition.number * 10 + offset,
+                        "room {} published UDP port does not match its number", definition.number);
+                }
+                // Live rooms may occupy the fleet defaults on this test host.
+                definition.deployment.ports.clear();
+            }
             let provisioned = host.provision(&definitions).await.unwrap();
             let mut ports = BTreeSet::new();
             let mut families = BTreeSet::new();
@@ -178,8 +193,8 @@ async fn all_120_rooms_keep_bounded_batches_and_resources_after_cancellation() {
             }
             assert_eq!(host.rooms.numbers().unwrap(), numbers);
             assert_eq!(families.len(), 12);
-            assert_eq!(shard_count, 227);
-            assert_eq!(ports.len(), 454);
+            assert_eq!(shard_count, 229);
+            assert_eq!(ports.len(), 458);
             assert!(!serde_json::to_string(&provisioned).unwrap().contains("fleet-fixture-token"));
             drop(provisioned);
             drop(definitions);
@@ -212,7 +227,7 @@ async fn all_120_rooms_keep_bounded_batches_and_resources_after_cancellation() {
             host.call(numbers[0], Request::Status {}).await.unwrap();
             sleep(Duration::from_millis(20)).await;
             let baseline = resources();
-            assert!(baseline.descriptors >= before_sockets.descriptors + 120);
+            assert!(baseline.descriptors >= before_sockets.descriptors + numbers.len());
             assert!(baseline.threads <= before_sockets.threads + 1);
 
             let peak = Arc::new(Mutex::new(baseline));
@@ -277,7 +292,7 @@ async fn all_120_rooms_keep_bounded_batches_and_resources_after_cancellation() {
             assert!(sockets.iter().all(|path| !path.exists()));
             let final_resources = settled(
                 Resources {
-                    descriptors: baseline.descriptors - 120,
+                    descriptors: baseline.descriptors - numbers.len(),
                     ..baseline
                 },
                 &calls,
@@ -287,17 +302,17 @@ async fn all_120_rooms_keep_bounded_batches_and_resources_after_cancellation() {
             assert_eq!(systemd["active"], 0);
             assert_eq!(systemd["started"], systemd["finished"]);
             assert!((2..=8).contains(&systemd["peak"].as_u64().unwrap()));
-            assert_eq!(systemd["started"], 840);
+            assert_eq!(systemd["started"], numbers.len() * 7);
             let report = json!({
-                "rooms": 120, "shards": shard_count, "families": families,
+                "rooms": numbers.len(), "shards": shard_count, "families": families,
                 "published_udp_ports": ports.len(), "mock_systemd": systemd,
-                "rounds": 5, "ordered_batch_results": 1320, "injected_rpc_failures": 11,
+                "rounds": 5, "ordered_batch_results": numbers.len() * 11, "injected_rpc_failures": 11,
                 "accepted_cancelled_saves": 8, "completed_cancelled_saves": 8,
                 "peak_rpc_in_flight": calls.peak.load(Ordering::SeqCst),
                 "before_sockets": before_sockets, "baseline": baseline, "peak": peak,
                 "checkpoints": checkpoints, "after_socket_shutdown": final_resources,
                 "elapsed_ms": started.elapsed().as_millis(),
-                "scope": "120 full configurations, mock systemd, real SDK sockets; no game processes"
+                "scope": "complete fleet configurations, mock systemd, real SDK sockets; no game processes"
             });
             if let Some(path) = std::env::var_os("DST_FLEET_REPORT") {
                 fs::write(Path::new(&path), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
