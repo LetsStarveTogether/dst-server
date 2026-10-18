@@ -8,28 +8,11 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use full_moon::{
-    LuaVersion,
     ast::{self, BinOp, Expression, FunctionBody, Index, Parameter, Prefix, Suffix, Var},
     node::Node,
     tokenizer::{Symbol, TokenReference, TokenType},
     visitors::{Visit, Visitor},
 };
-
-fn parse(content: &str) -> Result<ast::Ast> {
-    ensure!(
-        content.len() <= crate::lua::MAX_SOURCE_BYTES,
-        "Lua source exceeds the byte limit"
-    );
-    let source = crate::lua::normalize_line_endings(content);
-    let ast = full_moon::parse_fallible(&source, LuaVersion::lua51())
-        .into_result()
-        .map_err(|errors| anyhow::anyhow!("invalid Lua syntax: {errors:?}"))?;
-    ensure!(
-        ast.to_string() == source,
-        "Lua parser did not consume the complete source"
-    );
-    Ok(ast)
-}
 
 fn identifier(token: &TokenReference) -> &str {
     match token.token_type() {
@@ -279,7 +262,7 @@ pub fn parse_component(
     folder_name: &str,
 ) -> Result<(Vec<String>, Vec<String>)> {
     let mut visitor = Definitions::new(class_name, format!("{folder_name}/{filename}"), true);
-    visitor.visit_ast(&parse(content)?);
+    visitor.visit_ast(&crate::lua::parse_script(content)?);
     Ok((
         visitor
             .fields
@@ -292,7 +275,7 @@ pub fn parse_component(
 
 pub fn parse_modutil(content: &str, filename: &str) -> Result<Vec<String>> {
     let mut visitor = Definitions::new("env", filename.into(), false);
-    visitor.visit_ast(&parse(content)?);
+    visitor.visit_ast(&crate::lua::parse_script(content)?);
     Ok(visitor.functions)
 }
 
