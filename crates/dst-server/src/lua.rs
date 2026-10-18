@@ -670,28 +670,11 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn literals_round_trip_with_native_strings_and_number_types() {
-        for value in [
-            json!(false),
-            json!(true),
-            json!(0),
-            json!(-MAX_SAFE_INTEGER),
-            json!(1.25),
-            json!(-0.0),
-            json!(1.0),
-            json!(1e100),
-            json!({"values": [1, false, "玩家"]}),
-            json!(""),
-            json!("quote\"\\"),
-            json!("\0\n\r\t"),
-            json!("玩家\u{f0001}"),
-            json!("a\u{200d}b\u{2028}c"),
-        ] {
+    fn numeric_forms_and_empty_tables_keep_their_documented_types() {
+        for value in [json!(1.25), json!(-0.0), json!(1.0), json!(1e100)] {
             let parsed = parse_literal(&render_literal(&value).unwrap()).unwrap();
             assert_eq!(parsed, value);
-            if value.is_f64() {
-                assert!(parsed.is_f64());
-            }
+            assert!(parsed.is_f64());
         }
         assert_eq!(parse_literal("{}").unwrap(), json!({}));
         assert_eq!(

@@ -211,6 +211,12 @@ jobs:
         id: source
         run: printf 'revision=%s\n' "$(git -C dst-scripts/scripts rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Setup uv and Python
+        if: ${{ matrix.build }}
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: '3.14'
+
       - name: Build image
         if: ${{ matrix.build }}
         id: build
@@ -260,7 +266,7 @@ jobs:
           podman cp "$native_container:/usr/local/share/dst-server/build-manifest.json" "$native_dir/build-manifest.json"
           "$native_dir/dst-server" scripts verify "$native_dir/scripts.zip"
           python3 -m zipfile -e "$native_dir/scripts.zip" "$native_dir/source"
-          python3 tests/rust/check_lua.py --scripts "$native_dir/source/scripts"
+          uv run --locked --only-group dev pytest tests/lua --scripts "$native_dir/source/scripts"
           podman run --rm --entrypoint /usr/local/bin/dst-server "$DST_SERVER_IMAGE" --version
 
       - name: Test built image with the real game

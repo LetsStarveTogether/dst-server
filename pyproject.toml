@@ -18,6 +18,7 @@ dev = [
     "rumdl>=0.2.73",
     "ty>=0.0.81",
     "maturin>=1.9,<2",
+    "pytest>=9.1.1",
 ]
 
 [build-system]
@@ -83,6 +84,10 @@ python-platform = "linux"
 
 [tool.ty.src]
 include = ["python"]
+
+[tool.pytest]
+testpaths = ["tests/lua"]
+addopts = ["--strict-config", "--strict-markers", "-ra"]
 
 [tool.rumdl]
 enable = ['ALL']
