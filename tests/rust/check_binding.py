@@ -21,7 +21,21 @@ async def check(socket: str) -> None:
         client = await Client.connect(socket)
         value = await client.call("status")
         assert value["exact"] == 9_007_199_254_740_993
+        assert value["unsigned"] == 2**64 - 1
+        assert value["huge"] == 2**100
         assert value["nested"] == [None, False, 0, "", {"float": 0.25}]
+        arguments = {
+            "configuration": {"number": 2**100, "empty": [None, {}, []]},
+            "replace_permissions": True,
+        }
+        echoed = await client.call("configure", arguments)
+        assert echoed["request"]["request"]["arguments"] == arguments
+        for require_empty in (None, False, True):
+            echoed = await client.call("regenerate", {"require_empty": require_empty})
+            assert (
+                echoed["request"]["request"]["arguments"]["require_empty"]
+                is require_empty
+            )
         operation = asyncio.create_task(client.call("save"))
         while (state := await client.call("status"))["accepted"] == value["accepted"]:
             await asyncio.sleep(0.01)
@@ -43,7 +57,11 @@ async def check(socket: str) -> None:
         waiting = asyncio.create_task(stream.next())
         await asyncio.sleep(0)
         await stream.close()
-        assert (await waiting)["closed"]
+        try:
+            assert (await waiting)["closed"]
+        except DstError as error:
+            # Rust may accept close before the new Python task submits its read.
+            assert error.code == "transport"
         try:
             await client.call(
                 "give", {"userid": "KU_test", "item": "goldnugget", "count": 65}

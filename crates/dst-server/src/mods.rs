@@ -386,7 +386,7 @@ async fn observe(process: &GameProcess, proxy: Option<&str>, events: &EventHub) 
                 "severity_text": "INFO", "observed_timestamp_ns": timestamp(),
                 "attributes": {"stream": if event.stream == StreamKind::Stderr {"stderr"} else {"stdout"}},
             });
-            events.publish("logs", serde_json::to_vec(&record).unwrap().into());
+            events.publish("logs", &record);
             let message = line
                 .split_once("]: ")
                 .map_or(line.as_str(), |(_, message)| message)

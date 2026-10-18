@@ -41,7 +41,10 @@ async fn main() -> anyhow::Result<()> {
                             "accepted": accepted.load(Ordering::SeqCst),
                             "completed": completed.load(Ordering::SeqCst),
                             "exact": 9_007_199_254_740_993_u64,
+                            "unsigned": u64::MAX,
+                            "huge": "1267650600228229401496703205376".parse::<serde_json::Number>().unwrap(),
                             "nested": [null, false, 0, "", {"float": 0.25}],
+                            "request": call.request,
                         })));
                     });
                 }
