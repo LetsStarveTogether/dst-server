@@ -18,4 +18,3 @@ pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 serde_json.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
-tempfile.workspace = true

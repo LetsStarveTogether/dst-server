@@ -669,6 +669,41 @@ impl LevelDataOverride {
 }
 
 impl ClusterConfig {
+    pub(crate) fn from_files(files: &BTreeMap<PathBuf, Vec<u8>>) -> Result<Self> {
+        let read_bytes = |path: &Path| {
+            files
+                .get(path)
+                .map(|bytes| {
+                    ensure!(
+                        bytes.len() <= files::MAX_FILE_BYTES,
+                        "configuration file exceeds the byte limit"
+                    );
+                    Ok(bytes.clone())
+                })
+                .transpose()
+        };
+        let directories = files
+            .keys()
+            .filter(|path| {
+                path.components().count() == 2
+                    && path.file_name().is_some_and(|name| name == "server.ini")
+            })
+            .map(|path| path.iter().next().unwrap().to_string_lossy().into_owned())
+            .collect();
+        load_cluster(
+            &|path| {
+                read_bytes(path)?
+                    .map(String::from_utf8)
+                    .transpose()
+                    .context("read UTF-8 configuration text")
+            },
+            &read_bytes,
+            directories,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+    }
+
     pub fn load(room: &files::RoomReader) -> Result<Self> {
         Self::load_with_kinds(room, &BTreeMap::new(), &BTreeMap::new())
     }
@@ -683,15 +718,6 @@ impl ClusterConfig {
             room.shard_directories()?,
             world_kinds,
             level_kinds,
-        )
-    }
-    pub fn load_stopped(room: &StoppedRoom<'_>) -> Result<Self> {
-        load_cluster(
-            &|path| room.read_optional_text(path),
-            &|path| room.read_optional_bytes(path),
-            room.shard_directories()?,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
         )
     }
     pub fn files(&self) -> Result<FileChanges> {
@@ -884,7 +910,7 @@ fn native_key(path: &str, source: &str) -> Result<Option<String>> {
         .cloned())
 }
 
-fn new_cluster_key() -> Result<String> {
+pub(crate) fn new_cluster_key() -> Result<String> {
     use std::io::Read;
     let mut bytes = [0_u8; 32];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;

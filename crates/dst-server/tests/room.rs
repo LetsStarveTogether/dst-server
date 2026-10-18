@@ -881,58 +881,44 @@ async fn priority_shutdown_interrupts_pending_work_and_reaps_cleanly() {
 }
 
 #[tokio::test]
-async fn archive_publication_survives_kill_and_release_bypasses_other_operations() {
+async fn archive_export_does_not_stop_or_mutate_a_running_room() {
     let (temp, room) = room();
     invoke(&room, Request::Start {}).await.unwrap();
-    room.shutdown().await.unwrap();
-    let mut status = room.watch();
-    let exporting = room.clone();
-    let export = tokio::spawn(async move {
-        invoke(
-            &exporting,
-            Request::ExportArchive {
-                options: json!({"encode_user_path":false}),
-                compression_level: 3,
-            },
-        )
-        .await
-    });
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if status
-                .borrow_and_update()
-                .operations
-                .current
-                .as_ref()
-                .is_some_and(|operation| operation.method == "export_archive")
-            {
-                break;
-            }
-            status.changed().await.unwrap();
-        }
-    })
-    .await
+    let before = room.status();
+    let prepared = dst_server::archive::prepare(
+        &dst_server::files::RoomReader::open(temp.path().join("cluster")).unwrap(),
+        1,
+        &dst_server::archive::ExportOptions {
+            room_id: Some("fixture".into()),
+            ..Default::default()
+        },
+    )
     .unwrap();
-    room.kill().await.unwrap();
-    let receipt: dst_server::archive::Artifact =
-        serde_json::from_value(export.await.unwrap().unwrap()).unwrap();
-    assert!(receipt.size > 0);
-    let mut archive =
-        dst_server::archive::read_artifact(&temp.path().join("cluster"), &receipt).unwrap();
+    let mut archive = prepared
+        .compress(dst_server::archive::DEFAULT_COMPRESSION_LEVEL)
+        .await
+        .unwrap();
     use std::io::Read;
     let mut signature = [0; 6];
     archive.file_mut().read_exact(&mut signature).unwrap();
     assert_eq!(&signature, b"7z\xbc\xaf\x27\x1c");
-    let _guard = room.while_stopped().await.unwrap();
+    let after = room.status();
+    assert_eq!(after.phase, Phase::Running);
     assert_eq!(
-        invoke(
-            &room,
-            Request::ReleaseArchive {
-                artifact_id: receipt.artifact_id
-            }
-        )
-        .await
-        .unwrap(),
-        true
+        after
+            .shards
+            .iter()
+            .map(|shard| shard.pid)
+            .collect::<Vec<_>>(),
+        before
+            .shards
+            .iter()
+            .map(|shard| shard.pid)
+            .collect::<Vec<_>>()
     );
+    assert_eq!(
+        serde_json::to_value(&after.operations).unwrap(),
+        serde_json::to_value(&before.operations).unwrap()
+    );
+    room.shutdown().await.unwrap();
 }

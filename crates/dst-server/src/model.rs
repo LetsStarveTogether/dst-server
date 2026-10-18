@@ -140,9 +140,6 @@ fn one() -> u64 {
 fn hundred() -> u64 {
     100
 }
-fn compression_level() -> u64 {
-    3
-}
 fn yes() -> bool {
     true
 }
@@ -333,11 +330,6 @@ requests! {
     Configure { configuration: Value, #[serde(default)] replace_permissions: bool }
         => ("configure", true, ROOM, COMMAND_TIMEOUT),
     SetPolicy { policy: Value } => ("set_policy", true, ROOM, COMMAND_TIMEOUT),
-    ExportArchive {
-        #[serde(default = "empty_arguments")] options: Value,
-        #[serde(default = "compression_level")] compression_level: u64,
-    } => ("export_archive", true, ROOM, 7200.0),
-    ReleaseArchive { artifact_id: String } => ("release_archive", true, ROOM, COMMAND_TIMEOUT),
     Execute { source: String } => ("execute", true, SHARD, COMMAND_TIMEOUT),
     ExecuteJson { source: String } => ("execute_json", true, SHARD, COMMAND_TIMEOUT),
     Evaluate { source: String } => ("evaluate", true, SHARD, COMMAND_TIMEOUT),
@@ -471,19 +463,6 @@ impl Request {
             identifier("userid", userid)?;
         }
         match self {
-            Self::ExportArchive {
-                options,
-                compression_level,
-            } => {
-                if !options.is_object() {
-                    return Err(Error::invalid(
-                        "options",
-                        "archive options must be an object",
-                    ));
-                }
-                integer("compression_level", *compression_level, 1, 22)?;
-            }
-            Self::ReleaseArchive { artifact_id } => validate_artifact_id(artifact_id)?,
             Self::Configure { configuration, .. } => {
                 if !configuration.is_object() {
                     return Err(Error::invalid(
@@ -659,7 +638,6 @@ fn argument_schema(method: &str, name: &str, kind: &str) -> Value {
     } else if kind.contains("u64") {
         let maximum = match name {
             "limit" => 100,
-            "compression_level" => 22,
             "count" if method == "give" => 64,
             _ => MAX_SAFE_INTEGER,
         };
@@ -683,7 +661,6 @@ fn argument_schema(method: &str, name: &str, kind: &str) -> Value {
     match name {
         "count" | "portal_id" => schema["default"] = json!(1),
         "limit" => schema["default"] = json!(100),
-        "compression_level" => schema["default"] = json!(3),
         "options" => schema["default"] = json!({}),
         "interval" => schema["default"] = json!(30),
         "preserve_settings" => schema["default"] = json!(true),
@@ -929,22 +906,6 @@ fn identifier(field: &str, value: &str) -> Result<()> {
         return Err(Error::invalid(
             field,
             "identifier must contain 1 to 128 characters without control characters",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_artifact_id(value: &str) -> Result<()> {
-    if value.len() != 26
-        || value.as_bytes()[0] > b'7'
-        || !value
-            .bytes()
-            .all(|byte| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&byte))
-        || value.bytes().all(|byte| byte == b'0')
-    {
-        return Err(Error::invalid(
-            "artifact_id",
-            "archive artifact ID must be a canonical nonzero ULID",
         ));
     }
     Ok(())

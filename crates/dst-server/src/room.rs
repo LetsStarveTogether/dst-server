@@ -80,7 +80,6 @@ impl Room {
         events: EventHub,
     ) -> Result<Arc<Self>> {
         let lock = RoomLock::try_acquire(directory.as_ref()).map_err(internal)?;
-        crate::archive::clear_artifacts(directory.as_ref(), true).map_err(internal)?;
         let cluster = configuration::discover(directory.as_ref()).map_err(internal)?;
         let initial = RoomStatus {
             phase: Phase::Stopped,
@@ -428,9 +427,6 @@ impl Room {
         }
         let wait = envelope.timeout()?;
         let deadline = envelope.request.completion_timeout()?;
-        if matches!(envelope.request, Request::ReleaseArchive { .. }) {
-            return self.dispatch(&envelope.target, &envelope.request).await;
-        }
         if self.shutdown_pending.load(Ordering::Acquire) > 0
             && envelope.request.mutating()
             && !matches!(envelope.request, Request::Kill {})
@@ -513,8 +509,6 @@ impl Room {
             let mut result = if let Request::UpdateMods { notice, restart } = &envelope.request {
                 room.update_mods(notice, *restart, interrupted.clone())
                     .await
-            } else if matches!(envelope.request, Request::ExportArchive { .. }) {
-                room.dispatch(&envelope.target, &envelope.request).await
             } else {
                 tokio::select! {
                     result=timeout(deadline,room.dispatch(&envelope.target,&envelope.request))=>result.unwrap_or_else(|_|Err(Error::new(ErrorCode::Unknown,"operation deadline expired; the world outcome may be unknown"))),
@@ -1616,8 +1610,6 @@ impl Room {
                     | Request::Configure { .. }
                     | Request::SetPolicy { .. }
                     | Request::SetAdmin { .. }
-                    | Request::ExportArchive { .. }
-                    | Request::ReleaseArchive { .. }
             )
         {
             self.require_ready()?;
@@ -1700,15 +1692,6 @@ impl Room {
                 self.drivers.lock().unwrap().clear();
                 Ok(json!({"changed":changed}))
             }
-            Request::ExportArchive { options,compression_level } => {
-                self.require_stopped()?;
-                let options:crate::archive::ExportOptions=serde_json::from_value(options.clone()).map_err(internal)?;
-                let room=self.clone();
-                let prepared=tokio::task::spawn_blocking(move||room.with_lock(|lock|crate::archive::prepare(&mut lock.while_stopped(),&options))).await.map_err(internal)??;
-                let compressed=prepared.compress(*compression_level as u32).await.map_err(internal)?;
-                value(crate::archive::publish_artifact(&self.directory,compressed).await.map_err(internal)?)
-            }
-            Request::ReleaseArchive { artifact_id } => value(crate::archive::release_artifact(&self.directory,artifact_id).map_err(internal)?),
             Request::SetPolicy { policy } => {
                 let policy:crate::policy::Policy=serde_json::from_value(policy.clone()).map_err(internal)?;
                 self.with_lock(|lock| { policy.save(lock)?; Ok(json!(policy)) })

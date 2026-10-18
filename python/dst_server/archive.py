@@ -1,10 +1,5 @@
 # ruff: file-ignore[private-member-access]
-"""Consistent native room exports and cancellable S3 uploads.
-
-Export requires the game to be stopped.
-An online Agent retains room ownership while preparing the archive.
-Transfer artifacts expire after thirty minutes if a caller disappears.
-"""
+"""Native room imports, exports in memory and cancellable S3 uploads."""
 
 from asyncio import CancelledError, shield
 from collections.abc import AsyncGenerator
@@ -15,6 +10,7 @@ from typing import Any, BinaryIO, Protocol, Self, cast
 
 from ._native import ClusterArchive as _Archive
 from ._native import export_archive as _export_archive
+from ._native import import_archive as _import_archive
 from .host import Host
 from .settings import Configuration
 
@@ -107,10 +103,10 @@ async def export_cluster(
     *,
     configuration: Configuration | dict[str, Any] | None = None,
     room_id: str | None = None,
-    encode_user_path: bool = True,
-    compression_level: int = 3,
+    client_compatible: bool = False,
+    compression_level: int = 22,
 ) -> AsyncGenerator[ClusterArchive]:
-    """Snapshot a stopped room through its Agent or an exclusive offline lock."""
+    """Return an archive in RAM; optionally adapt two shards for a client save slot."""
     with ClusterArchive._from_native(
         await _export_archive(
             host._host,
@@ -118,7 +114,7 @@ async def export_cluster(
             options={
                 "configuration": configuration,
                 "room_id": room_id,
-                "encode_user_path": encode_user_path,
+                "client_compatible": client_compatible,
             },
             compression_level=compression_level,
         )
@@ -126,4 +122,24 @@ async def export_cluster(
         yield archive
 
 
-__all__ = ["ArchiveUploadResult", "ClusterArchive", "SecretValue", "export_cluster"]
+async def import_cluster(
+    source: str | PathLike[str] | ClusterArchive,
+    destination: str | PathLike[str],
+    *,
+    from_client: bool = False,
+) -> Configuration:
+    """Import a directory or archive into a new native save directory."""
+    return await _import_archive(
+        source._archive if isinstance(source, ClusterArchive) else source,
+        destination,
+        options={"from_client": from_client},
+    )
+
+
+__all__ = [
+    "ArchiveUploadResult",
+    "ClusterArchive",
+    "SecretValue",
+    "export_cluster",
+    "import_cluster",
+]

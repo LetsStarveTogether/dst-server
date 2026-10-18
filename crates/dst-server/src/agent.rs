@@ -278,9 +278,7 @@ impl Controller {
         if matches!(envelope.request, Request::Status {}) && envelope.target == Target::Room {
             return self.status();
         }
-        if !envelope.request.mutating()
-            || matches!(envelope.request, Request::ReleaseArchive { .. })
-        {
+        if !envelope.request.mutating() {
             return self.room.invoke_until_complete(envelope).await;
         }
         if self.closing.load(Ordering::Acquire) || !self.initialized.load(Ordering::Acquire) {
