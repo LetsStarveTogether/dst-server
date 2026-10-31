@@ -1,6 +1,6 @@
 # `0x82020000` Component Catalog
 
-The Component directory contains 831 Lua files.
+The Component directory contains 835 Lua files.
 
 ## `0x82021111` Component Files
 
@@ -358,6 +358,7 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/inventoryitemtemperature.lua`
 - `scripts/components/itemaffinity.lua`
 - `scripts/components/itemmimic.lua`
+- `scripts/components/itemmimicconfig.lua`
 - `scripts/components/itemstore.lua`
 - `scripts/components/itemweigher.lua`
 - `scripts/components/joustsource.lua`
@@ -377,6 +378,7 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/lavaarenamusic.lua`
 - `scripts/components/leader.lua`
 - `scripts/components/leaderrollcall.lua`
+- `scripts/components/leafpilemanager.lua`
 - `scripts/components/lighter.lua`
 - `scripts/components/lightningblocker.lua`
 - `scripts/components/lightpostpartner.lua`
@@ -705,6 +707,8 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/stunnable.lua`
 - `scripts/components/submersible.lua`
 - `scripts/components/summoningitem.lua`
+- `scripts/components/sweepable.lua`
+- `scripts/components/sweeper.lua`
 - `scripts/components/symbolswapdata.lua`
 - `scripts/components/tackler.lua`
 - `scripts/components/tacklesketch.lua`

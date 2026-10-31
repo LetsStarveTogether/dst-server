@@ -15,6 +15,8 @@ Trace a visible or audible result back to `AnimState`, `SoundEmitter`, an FX pre
 | `scripts/fx.lua` | `local fx` / `return fx` | FX definitions |
 | `scripts/prefabs/fx.lua` | `MakeFx` | Converts definitions into prefabs |
 | `scripts/prefabs/fx.lua` | `startfx` | Creates the visible client entity |
+| `scripts/prefabs/cane_chess_fx.lua` | `MakeChessFX` / `PlayChessAnim` | Networked chess trails with local animation |
+| `scripts/prefabskin.lua` | `cane_do_trail` | Spawns trails and supplies owner affinity |
 | `scripts/debugsounds.lua` | `SoundEmitter.SoundDebug` | Wraps audio calls for debugging |
 | `scripts/consolecommands.lua` | `c_sounddebug` / `c_sounddebugui` | Loads sound debugging |
 | `scripts/mainfunctions.lua` | `require("debugsounds")` | Debug audio startup path |
@@ -89,9 +91,21 @@ It observes behaviour without changing gameplay authority.
 Charlie and Shrouden publish `triggeredevent` on the local player with their current music level.
 `DynamicMusic` maps those names and levels to battle tracks or silence.
 Their Prefabs also push or pop `gateway_dimension_battle`, which lowers ambience and mutes the cloud channel.
-Charlie's standby loop is managed by its Prefab so distance can control its sound parameter.
+Charlie and Shrouden manage standby loops in their Prefabs so distance can control sound parameters.
+Shrouden's levels are 1 for standby, 2 for silence with the arena mix, 3 for combat, and 4 for silence without that mix.
+At level 3, its replicated `lowhp` flag enables an additional loop when health is below ten percent.
+`OnHealthDelta` and `OnLoad` refresh that flag; `TryReset` clears it.
 `ShroudenOver` attaches to `TheFrontEnd.overlayroot` during its transition animation to remain above screen fades.
 It removes itself from that root on `animqueueover`; it has no per-frame `OnUpdate` loop in this snapshot.
+
+### `0x72033611` Chess Cane Trails
+
+`cane_do_trail` checks both `shadowtrail` and `canetrail` tags to space nearby effects.
+After spawning an effect, it calls optional `SetOwnerAffinity` and `TrackOwnerAndCane` methods.
+`cane_chess_fx.lua` chooses a white chesspiece for lunar affinity and a black one for shadow affinity.
+It replicates the shape and flip flag; non-dedicated peers create the local animation through `PlayChessAnim`.
+Tracking keeps a trail alive near its visible owner while the cane remains equipped.
+`FadeOut` observes a minimum lifetime, then sends a `net_event` to play the ending animation and schedules proxy removal.
 
 ## `0x72034111` Trace Boundary
 
@@ -121,8 +135,11 @@ rg -n "c_sounddebug|c_sounddebugui|SoundEmitter.SoundDebug|require\\(\"debugsoun
   scripts/debugsounds.lua \
   scripts/mainfunctions.lua
 
-rg -n "StartTriggeredDanger|triggeredevent|gateway_dimension_battle|EnableStandbyLoop" \
+rg -n "StartTriggeredDanger|triggeredevent|gateway_dimension_battle|EnableStandbyLoop|EnableLowHPLoop|SetLowHPMusic" \
   scripts/components/dynamicmusic.lua scripts/mixes.lua scripts/prefabs/charlie_boss.lua scripts/prefabs/shrouden.lua
+
+rg -n "cane_do_trail|TRAIL_FLAGS|SetOwnerAffinity|TrackOwnerAndCane|PlayChessAnim|fadeoutevent" \
+  scripts/prefabskin.lua scripts/prefabs/cane_chess_fx.lua
 
 rg -n "TriggerShrouden|overlayroot|animqueueover" scripts/widgets/shroudenover.lua
 ~~~

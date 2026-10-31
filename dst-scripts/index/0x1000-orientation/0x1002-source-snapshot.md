@@ -1,10 +1,10 @@
 # `0x10020000` Source Snapshot
 
-The tracked `scripts` tree contains 4,099 files, including 4,084 Lua files.
+The tracked `scripts` tree contains 4,110 files, including 4,095 Lua files.
 
-The `scripts` submodule is at commit `74530e2ebcfe4e558307ddfd4cf177a93d1d1106`.
+The `scripts` submodule is at commit `fc1c3e866aebabfe7b528dac68d279368410d34c`.
 
-Its commit records build `757748`, authored 2026-10-10.
+Its commit records build `761239`, authored 2026-10-30.
 
 ## `0x10021111` Purpose
 
@@ -41,11 +41,11 @@ Count tracked files first, use directory totals to choose a runtime topic, and l
 
 | Scope | Lua files | Reading focus |
 | --- | ---: | --- |
-| `scripts/` root | 223 | Startup, global services, and data entry points |
-| `scripts/prefabs/` | 1,617 | The largest entity-assembly area |
-| `scripts/components/` | 831 | Entity behaviour and authoritative state |
-| `scripts/stategraphs/` | 265 | Action presentation and animation state machines |
-| `scripts/brains/` | 196 | AI decision entry points |
+| `scripts/` root | 224 | Startup, global services, and data entry points |
+| `scripts/prefabs/` | 1,621 | The largest entity-assembly area |
+| `scripts/components/` | 835 | Entity behaviour and authoritative state |
+| `scripts/stategraphs/` | 264 | Action presentation and animation state machines |
+| `scripts/brains/` | 199 | AI decision entry points |
 | `scripts/behaviours/` | 29 | Behaviour-tree nodes |
 | `scripts/map/` | 447 | World generation, layouts, and world definitions |
 | `scripts/widgets/` | 274 | HUD and UI components |
@@ -59,17 +59,17 @@ Count tracked files first, use directory totals to choose a runtime topic, and l
 
 ## `0x10024211` Focus Areas
 
-- Virtual rooms use `virtualroommanager`, `virtualroomset`, and `virtualroomteleporter`.
-- `world.lua` installs the shared virtual-room manager and `worldstaticlayouts`; `cave.lua` registers the Vault layout.
-- Prefabs, Brains, and StateGraphs implement Charlie, bat, and rocky bosses and the Atrium ritual.
-- Shrouden now has its own Prefab, Brain, and StateGraph alongside the Charlie arena.
-- King Cane uses `corruption.lua` and shares gem-staff behavior with `staff.lua` through `staff_common.lua`.
-- Three bat-boss cave layouts provide world-generation data.
-- `aoeutil.lua` provides shared area-attack and work helpers.
-- `feedback.lua`, the feedback screen, and screenshot utilities handle player feedback.
-- `poc_feedback_stack.lua` is a manually invoked diagnostic outside the normal feedback startup path.
-- Native Lua contract checks cover entity, combat, customization, and world-settings behavior.
-- `Combat:GetAttacked` delegates to `GetAttacked_Internal` and discards its return value.
+- `leafpilemanager`, `leafpile`, `sweepable`, and `sweeper` connect Hallowed Nights spawning to the `SWEEP` action.
+- `witchbroom` and `pumpkin_bomb` add item paths through action handling, durability, and explosive knockback.
+- Frankenswine, Mermummy, and Vamphare have new Brains and reuse the pig, merm, and bunnyman StateGraphs.
+- `commonstates.lua` centralizes creature knockback; `SGwilson` adds sweeping and enchanted broom movement states.
+- Charlie's death sequence branches on prior loot state and transfers arena attack filters to Shrouden.
+- Shrouden persists arena transitions and controls standby, combat, and low-health music separately.
+- Virtual-room placement checks collision bounds and provides recovery points for caught items or players.
+- `itemmimicconfig` lets an item force a mimic reveal for selected actions.
+- Runtime world settings use `rare` / `often` for population overrides and add four resource handlers.
+- `versioning_prefabs.lua` adds the Prefab subversion to the game-and-skin display version.
+- Skin groups 186 and 187 add chess trails and ritual-reward skins; Scrapbook exports need comparison with current Prefabs.
 
 ## `0x10025100` Verification
 

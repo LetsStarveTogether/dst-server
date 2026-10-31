@@ -63,6 +63,10 @@ flowchart TD
 - `HasOneOfTags` is equivalent to `HasAnyTag`.
 - Tags commonly drive action collection, target filtering, collision rules, and SG conditions.
 
+In the `dev` branch, `HasTag` asserts that it received exactly one non-table argument.
+`HasTags` and `HasOneOfTags` require multiple arguments or a table; their aliases use the same checks.
+Use the singular API for one tag and the plural APIs for a group when tracing filters across builds.
+
 ## `0x31034121` SG and Brain Dispatch
 
 - `PushEvent` calls `PushEvent_Internal(event, data, false)`.

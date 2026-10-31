@@ -39,6 +39,9 @@ Surface `forest.lua` adds `WaveComponent`, `wavemanager`, and `oceanicemanager`.
 | `scripts/components/dockmanager.lua` | `DestroyDockAtPoint` | Fixes objects displaced by dock removal |
 | `scripts/components/walkableplatform.lua` | `DestroyObjectsOnPlatform` | Cleans up objects when a platform is destroyed |
 | `scripts/components/virtualroomset.lua` | `_GetEntUnloadAction` / `TryStartTeleportSequence` | Preserves room entities and coordinates room transitions |
+| `scripts/components/virtualroommanager.lua` | `WillBoundingBoxCollideAt` | Checks proposed room bounds against registered room sets |
+| `scripts/maputil.lua` | `StaticLayoutPlacer.CreateVRSPositionFilter` | Rejects layout positions that overlap virtual rooms |
+| `scripts/componentutil.lua` | `IsPointInWalledOffVRS` | Defines the room-boundary check used by knockback and shore searches |
 | `scripts/prefabs/atrium_markers.lua` | `centerfn` / `OnShowRoom` | Configures the Atrium room set and resets it on return to the lobby |
 | `scripts/prefabs/charliearena_teleporter.lua` | `OnDepart` | Flags the Atrium for reset when players use its exit |
 | `scripts/prefabs/vault_markers.lua` | `resetvault` listener | Flags the Vault room set for reset |
@@ -182,7 +185,9 @@ Ocean-ice logic adjusts floaters, fishable objects, and objects on platforms, so
 
 Search `ruinsrespawner.lua` for `resetruins`, `objectspawner`, and `onprefabswaped`.
 
-`OnDestabilizeExplode` in `atrium_gate.lua` pushes both `resetruins` and `resetvault`.
+`OnDestabilizeExplode` in `atrium_gate.lua` always pushes `resetruins`.
+
+It pushes `resetvault` only when `TheWorld.components.charlie_tracker:IsCharlieDefeated()` is true.
 
 The respawner recreates its owned ruins objects at runtime.
 
@@ -268,6 +273,20 @@ Five displacement and destruction paths across four files include parented `chil
 
 The other three are `DestroyDockAtPoint`, `DestroyIceAtPoint`, and `DestroyObjectsOnPlatform`.
 
+## `0x52024511` Virtual Room Placement and Boundaries
+
+`CreateLayout_Vault` in `cave.lua` passes a `StaticLayoutPlacer.CreateVRSPositionFilter` for each Vault layout.
+The spiral placement scan checks terrain first.
+It then rejects positions where `VirtualRoomManager:WillBoundingBoxCollideAt` finds overlapping room bounds.
+`VirtualRoomSet:ApplyFloorTileBatch` temporarily disables instant physics rebuilding.
+It restores the previous setting after applying the batch.
+`OnPlayerTick` updates drowning recovery points only on visual ground.
+
+`Map:GetVirtualRoomSetNameAtPoint` resolves the engine's room hash through `VIRTUALROOMSETHASHTONAME` in `constants.lua`.
+`IsPointInWalledOffVRS` treats the Atrium lobby as open and other named room sets as enclosed.
+`FindRandomPointOnShoreFromOcean` rejects enclosed room positions, and shared knockback keeps their limit collisions active.
+`IsTeleportLinkingPermittedFromPoint` uses `Map:IsPointInVaultRoom` for its Vault exclusion.
+
 ## `0x52025100` Verification
 
 ~~~bash
@@ -308,6 +327,12 @@ rg -n \
 rg -n "_GetEntUnloadAction|keepinventoryitemsthroughreset|OnDepart|GetTeleportFXPrefab|fxprefab" \
   scripts/components/virtualroomset.lua \
   scripts/components/virtualroomteleporter.lua
+
+rg -n "CreateVRSPositionFilter|WillBoundingBoxCollideAt|positionfilterfn|GetInstantPhysicsRebuild|OnPlayerTick" \
+  scripts/maputil.lua scripts/prefabs/cave.lua scripts/components/virtualroommanager.lua scripts/components/virtualroomset.lua
+
+rg -n "VIRTUALROOMSETHASHTONAME|GetVirtualRoomSetNameAtPoint|IsPointInWalledOffVRS|IsPointInVaultRoom" \
+  scripts/constants.lua scripts/components/map.lua scripts/componentutil.lua scripts/ocean_util.lua scripts/stategraphs/commonstates.lua
 
 rg -n \
   -e "Vault|migrationpetowner|ATRIUM_KEY_FOUND|childdeployblocker" \

@@ -31,6 +31,8 @@ It presents status and coordinates map, chat, crafting, wardrobe, and Scrapbook 
 | `scripts/screens/mapscreen.lua` | `ProcessRMBDecorations_TOSS_MAP` | Draws previews for the selected map action |
 | `scripts/screens/redux/optionsscreen.lua` | `_BuildSettings` / `_BuildAdvancedSettings` | Platform-dependent settings |
 | `scripts/widgets/redux/modstab.lua` | `ModsTab` / `DoFocusHookups` | Mod buttons and controller focus |
+| `scripts/screens/redux/mainscreen.lua` | `MainScreen:Quit` | Selects the quit prompt from account state |
+| `scripts/screens/redux/multiplayermainscreen.lua` | `MakeBanner` / `MultiplayerMainScreen:Quit` | Event banner and quit prompt |
 
 ### `0x71022111` Widget Anchor
 
@@ -116,6 +118,14 @@ That helper delegates to the engine when available and defaults to true if the e
 Controller focus points to the first available item in `allmodsmenu`.
 Both quick-join screens pass the selected server's `row` with its GUID to `TheNet:JoinServerResponse`.
 
+## `0x71024611` Main Menu State
+
+Both main screens select `ASKQUITDESC_NOCHARLIE` when `TheGenericKV:GetKV("charlie_defeated")` is `"1"`.
+`shard_charlieinfo` sends `CLIENT_RPC.UpdateAccomplishment` when Charlie's defeated state becomes true.
+The handler in `networkclientrpc.lua` writes the generic key consumed by these screens.
+`MultiplayerMainScreen` treats `BRANCH == "staging"` as beta.
+Its Hallowed Nights banner uses `dst_menu_rift8`; the ordinary Rift 8 banner hides that build's `halloween` symbol.
+
 ## `0x71025100` Verification
 
 ~~~bash
@@ -144,6 +154,10 @@ rg -n "show_crashreports|GetCrashReportsEnabled|SetCrashReportsEnabled|CanDownlo
   scripts/screens/redux/optionsscreen.lua scripts/widgets/redux/modstab.lua scripts/modindex.lua
 
 rg -n "JoinServerResponse" scripts/screens/quickjoinscreen.lua scripts/screens/redux/quickjoinscreen.lua
+
+rg -n "charlie_defeated|UpdateAccomplishment|ASKQUITDESC_NOCHARLIE|IS_BETA|MakeHallowedNightsBanner|dst_menu_rift8" \
+  scripts/screens/redux/mainscreen.lua scripts/screens/redux/multiplayermainscreen.lua \
+  scripts/components/shard_charlieinfo.lua scripts/networkclientrpc.lua scripts/skins_defs_data.lua scripts/strings.lua
 ~~~
 
 ### `0x71025111` Minimal Trace

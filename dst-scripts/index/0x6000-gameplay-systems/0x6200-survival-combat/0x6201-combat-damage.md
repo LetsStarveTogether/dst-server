@@ -41,6 +41,8 @@ When health reaches zero, `Health:SetVal` pushes `entity_death` and `death`.
 | `scripts/components/propagator.lua` | `Health:DoFireDamage` call | Applies fire-spread damage |
 | `scripts/stategraphs/SGknight.lua` | `DoJoustAoe` | Tracks joust AOE targets and mounts |
 | `scripts/prefabs/ruinsnightmare_horn_attack.lua` | `OnUpdate` | Tracks horn attack AOE targets |
+| `scripts/prefabs/pumpkin_bomb.lua` | `ConfigureExplosive` | Configures damage and forced knockback for a thrown bomb |
+| `scripts/components/explosive.lua` | `SetKnockbackData` / `OnBurnt` | Applies explosion effects and dispatches immediate knockback |
 
 ### `0x62012110` `scripts/actions.lua`
 
@@ -167,6 +169,15 @@ Some AOE attacks store hit entities in a `targets` table to prevent duplicate hi
 The joust AOE in `SGknight.lua` and `ruinsnightmare_horn_attack.lua` also track mounted targets.
 Check both rider and ordinary target branches to confirm whether the table stores the hit entity or its mount.
 
+### `0x62013510` Explosions and Knockback
+
+`pumpkin_bomb.lua` calls `ConfigureExplosive` on impact, then `Explosive:OnBurnt` resolves the explosion.
+Its knockback data includes `forcepvp = true`.
+In `ExplodeEnt`, that flag can admit another player for knockback even when the `pvpattacker` filter excludes combat damage.
+`Combat:GetAttacked` remains inside the `notpvp` branch.
+The separate `PushEventImmediate("knockback", ...)` carries the knocker, radius, strength, and landed-state preference.
+The target's StateGraph decides how to respond, including the shared handler and states in [CommonStates](../../0x4000-ai-animation/0x4100-stategraph/0x4102-commonstates.md).
+
 ## `0x62014110` Weapon Damage
 
 `weapon.lua` uses `Weapon:SetDamage` to store base damage.
@@ -233,6 +244,9 @@ rg -n "ClearChanceLoot|bonetype" \
 rg -n "DoJoustAoe|ruinsnightmare_horn_attack|components\\.rider|targets\\[" \
   scripts/stategraphs/SGknight.lua \
   scripts/prefabs/ruinsnightmare_horn_attack.lua
+
+rg -n "ConfigureExplosive|SetKnockbackData|forcepvp|notpvp|PushEventImmediate|GetAttacked" \
+  scripts/prefabs/pumpkin_bomb.lua scripts/components/explosive.lua
 ~~~
 
 ### `0x62015110` Reading Order

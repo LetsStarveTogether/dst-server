@@ -106,6 +106,25 @@ The `vault_teleport` event forwards `fxprefab` to its destination state; the `va
 Check `SGwilsonghost.lua` separately for the ghost arena teleport.
 Its readiness callback remains, but that state does not call `ScreenFade`.
 
+## `0x41034611` Sweep Action
+
+Both player graphs map `ACTIONS.SWEEP` to `doswipeaction`.
+The server stores the buffered action, faces the target, and performs the action at frame 7.
+The client calls `PerformPreviewBufferedAction` on entry and waits for `server_states = { "doswipeaction" }`.
+Its timeout clears the buffered action and returns to `idle`.
+Follow the resulting `sweepable:Sweep` call through [ComponentActions](../../0x3000-entity-action/0x3200-action-pipeline/0x3201-component-actions.md).
+
+## `0x41034711` Living Broom Movement
+
+`ConfigureRunState` selects the `normalflyingbroom` branch when the equipped item has `flyingbroom`.
+Both graphs enter `run_flyingbroom_start`, then `run_flyingbroom`, with the `flyingonbroom` state tag.
+`ConfigureWitchBroomFlying` disables ground-speed multipliers in both graphs.
+On the server it also sets `notraptrigger`, disables `carefulwalker`, and adds a `nonslipgrituser` source.
+This movement mode does not add the entity's generic `flying` tag.
+The looping state's `onexit` restores these effects unless it is continuing the same loop.
+Storm, miasma, and careful-walking events can return it to ordinary running; the server also handles hand-slot unequipping.
+The equipped item's movement wear remains in [Items and Crafting](../../0x6000-gameplay-systems/0x6300-items-crafting-events/0x6301-items-crafting.md).
+
 ## `0x41035100` Verification
 
 ~~~bash
@@ -122,6 +141,12 @@ rg -n "CORRUPTNIGHTMARE|OnTargetCorruptable|OnUntargetCorruptable|charliearena_t
   scripts/stategraphs/SGwilson_client.lua \
   scripts/stategraphs/SGwilsonghost.lua \
   scripts/components/corruption.lua
+
+rg -n "ACTIONS.SWEEP|doswipeaction|PerformPreviewBufferedAction" \
+  scripts/stategraphs/SGwilson.lua scripts/stategraphs/SGwilson_client.lua
+
+rg -n "ConfigureWitchBroomFlying|normalflyingbroom|run_flyingbroom|notraptrigger|function CarefulWalker:Enable" \
+  scripts/stategraphs/SGwilson.lua scripts/stategraphs/SGwilson_client.lua scripts/components/carefulwalker.lua
 ~~~
 
 ### `0x41035111` Minimum Trace

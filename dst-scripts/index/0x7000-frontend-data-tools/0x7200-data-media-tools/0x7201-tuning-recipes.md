@@ -105,6 +105,9 @@ Official recipes use incrementing IDs, while mod recipes call `SetModRPCID()` th
 It also defines character restrictions and event recipes before registering them with `Recipe2`.
 Use `recipes_filter.lua` and crafting UI consumers to verify display categories.
 Carnival golf cutout items share `CUTOUT_SMART_RADIUS` instead of separate radius tables.
+`witchbroom` and `pumpkinhat` use `TECH.HALLOWED_NIGHTS` with the `NEEDSHALLOWED_NIGHTS` hint.
+Both appear under `SPECIAL_EVENT`; the broom also appears under `TOOLS`.
+Five ritual-boss chesspiece builders use `TECH.LOST`, sculpting ingredients, and the `CRAFTING_STATION` filter.
 
 ## `0x72014411` Desiccant and Fumarole Tuning
 
@@ -123,7 +126,19 @@ Carnival golf cutout items share `CUTOUT_SMART_RADIUS` instead of separate radiu
 The cane also reads corruption thresholds to select its effects, shadow-item tag, and sanity drain.
 `QUEEN_TORCH_RADIUS_SQ` bounds `FindClosestQueenTorchAtXZ` when it searches registered torch lights.
 `WORM_BOSS_RITUAL_WAVE_TIME_MULT` reaches the hound scheduler through `atriumritualorgantracker`.
+`prefabs/atrium_gate.lua:GetRitualTime` selects `SHROUDEN_RITUAL_TIME` (14 seconds) before Charlie's defeat.
+After `charlie_tracker:IsCharlieDefeated()` becomes true, it selects `SHROUDEN_RITUAL_NOCHARLIE_TIME` (6 seconds).
+Both the target update and summon task read this selection.
 Trace these tables to their consumers before treating a numeric change as an isolated balance change.
+
+## `0x72014611` Hallowed Nights Tuning
+
+`LEAFPILEMANAGER_*` controls placement density and timing; `LEAFPILE_*` controls growth and sweep outcomes.
+`WITCHBROOM_USES` and its wear keys feed the broom's `finiteuses`, including sweep, attack, and enchanted movement costs.
+`PUMPKIN_BOMB_*` supplies explosion range, damage, drops, and king-trade probabilities.
+`HN_MONSTER_*` is shared by the Frankenswine, Mermummy, and Vamphare implementations in their base creature Prefabs.
+Follow these consumers through [Items and Crafting](../../0x6000-gameplay-systems/0x6300-items-crafting-events/0x6301-items-crafting.md)
+and [Creatures and Bosses](../../0x6000-gameplay-systems/0x6100-characters-creatures/0x6102-creatures-bosses.md).
 
 ## `0x72015100` Verification
 
@@ -163,6 +178,19 @@ rg -n "SHROUDEN_ATTACK_PERIOD|SHROUDEN_PORTAL_CD|KING_CANE_CORRUPTION|QUEEN_TORC
 
 rg -n "WORM_BOSS_RITUAL_WAVE_TIME_MULT|hounded_forceplannewattack|multtimetoattack" \
   scripts/tuning.lua scripts/components/atriumritualorgantracker.lua scripts/components/hounded.lua
+
+rg -n "GetRitualTime|SHROUDEN_RITUAL_(NOCHARLIE_)?TIME|IsCharlieDefeated" \
+  scripts/tuning.lua scripts/prefabs/atrium_gate.lua
+
+rg -n -e "witchbroom|pumpkinhat" \
+  -e "chesspiece_(batboss_shadow|rockyboss_shadow|wormboss_shadow|charlie_boss|shrouden)_builder" \
+  scripts/recipes.lua scripts/recipes_filter.lua
+
+rg -n "LEAFPILE|WITCHBROOM|PUMPKIN_BOMB|HN_MONSTER" \
+  scripts/tuning.lua scripts/components/leafpilemanager.lua scripts/prefabs/leafpile.lua \
+  scripts/prefabs/witchbroom.lua scripts/prefabs/pumpkin_bomb.lua \
+  scripts/prefabs/pigking.lua scripts/prefabs/mermking.lua \
+  scripts/prefabs/pigman.lua scripts/prefabs/merm.lua scripts/prefabs/bunnyman.lua
 ~~~
 
 ### `0x72015111` Minimal Trace

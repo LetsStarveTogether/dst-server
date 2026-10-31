@@ -61,6 +61,11 @@ Read the `netvar:set` and `netvar:value` comments in `scripts/netvars.lua`.
 
 Server and client must declare matching netvars on an entity or deserialization fails.
 
+`net_event(guid, event)` uses the same string for the underlying `net_bool` name and dirty event.
+Its `push()` calls `set_local(true)` before `set(true)` so repeated pushes can notify listeners.
+The `dev` branch asserts that a third argument is nil.
+This wrapper accepts two arguments, unlike ordinary netvar constructors.
+
 ## `0x22033000` Replica Flow
 
 ~~~mermaid
@@ -173,6 +178,7 @@ rg -n "actionreplica|player_classified|SerializeUserSession" \
   scripts/netvars.lua \
   scripts/mainfunctions.lua \
   scripts/networking.lua
+rg -n "net_event|NOT_USED|set_local" scripts/netvars.lua
 rg -n \
   -e "SerializeWorldSession" \
   -e "JoinServerResponse" \

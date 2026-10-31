@@ -40,6 +40,8 @@ Its entry presentation data comes from `screens/redux/scrapbookdata.lua`.
 | `scripts/prefabskin.lua` | `basic_init_fn` / `AddSkinSounds` | Applies prefab appearance and sounds |
 | `scripts/skinsutils.lua` | skin helpers | Skin lookup and display helpers |
 | `scripts/versioning_skins.lua` | `VERSION` | Current account-item release group |
+| `scripts/versioning_prefabs.lua` | `VERSION` / `LAST_BETA` | Prefab subversion and its beta baseline |
+| `scripts/versioning.lua` | `CURRENTVERSION` | Combines game, Prefab, and skin versions |
 | `scripts/networking.lua` | `ValidateRecipeSkinRequest` | Validates ownership, base-prefab membership, and event locks |
 | `scripts/skins_defs_data.lua` | `TheInventory:AddRestrictedBuildFromLua` | Registers restricted inventory builds |
 | `scripts/prefabs/waterprojectiles.lua` | `onequip` / `onunequip` | Applies held waterballoon symbols and events |
@@ -108,13 +110,21 @@ The unskinned path and projectile behaviour remain unchanged.
 It classifies `mysterybox_beach` as `DEFAULT`.
 `body_wathgrithr_ancient` now overrides its character-specific `arm_upper_skin` symbol instead of hiding it.
 Release group 185 adds the Loyal `wagdrone_rolling_fire` skin, displayed as "Alit Terramite".
-`versioning_skins.lua` returns a table containing `VERSION = 185`.
-`versioning.lua` reads `.VERSION` when constructing `CURRENTVERSION`.
+Release group 186 adds chess and shadow skins, including `cane_chess`, `thurible_chess`, and `armor_voidcloth_ribbon`.
+Group 187 includes `armor_rocky_spikey`, `hatbat_bosscorpse_vampire`, `king_cane_scorpion`, and `queen_torch_lotus`.
+`versioning_skins.lua` returns `VERSION = 187`.
+`versioning_prefabs.lua` records `LAST_BETA = "43"` and `VERSION = 9`.
+`versioning.lua` combines game ID `43`, the optional Prefab subversion, and the skin version into `43.9_187`.
+This display version is separate from source build `761239` recorded in [Source Snapshot](../../0x1000-orientation/0x1002-source-snapshot.md).
 `SetSkinsOnAnim` supports `old_skin` and `young_skin` clothing overrides.
 Mode-specific mappings take priority over character-specific or default alternate mappings.
 `thurible_init_fn` updates both the thurible and its dangling `_body`.
 Voidcloth armor and hat effects publish a `skinbuildhash` for local effects to consume through `skinhashdirty`.
-These presentation hooks do not imply that a skin for each item is registered in the current account-item tables.
+The current account-item tables register the corresponding ribbon, spooky, chess, and shadow skins.
+`king_cane_init_fn` updates the attached FX symbols and selects an inventory image using the current gem suffix.
+`prefabs/king_cane.lua` preserves that skin prefix when a new gem is inserted.
+Queen's Torch passes its skin build and ID to the equipped `queen_torch_fx` Prefab.
+For `cane_chess` trails, continue through `cane_do_trail` to [Media, FX, and Audio](0x7203-media-fx-audio.md).
 
 ### `0x72023311` Scrapbook Snapshot
 
@@ -128,6 +138,10 @@ The allowlist and generated snapshot now include the ritual bosses, organs, and 
 Examples include `worm_boss_shadow`, `king_cane`, `queen_torch`, and `shrouden`.
 Their seen, viewed, and inspected keys are registered separately in `skins_defs_data.lua`.
 The snapshot also classifies `shadowhand` as a thing and records the revised Worm Boss damage.
+It adds five ritual-boss chesspieces, `mask_charlie_bosshat`, `pumpkin_bomb`, `leafpile`, and `witchbroom`.
+All nine are also present in `scrapbook_prefabs.lua`.
+The `witchbroom` entry still records `fueledmax = 2880`, while its current Prefab uses `finiteuses` and `WITCHBROOM_USES`.
+This is a concrete snapshot mismatch; use the Prefab and `tuning.lua` to determine current durability behaviour.
 Compare generation inputs with the snapshot before attributing a displayed change to runtime behaviour.
 
 ### `0x72023411` Character Speech Keys
@@ -143,16 +157,20 @@ Follow these full table paths into `languages/strings.pot`; the older scalar `DE
 
 `strings.lua` defines store-login, online/offline world-conversion, and premium-online membership text.
 `STORE_DISABLE` is consumed by the main menu and purchase screen.
-`OFFLINE_MODE_BODY_PROMPT` and the `CONVERT_OFFLINE_TO_ONLINE` / `CONVERT_ONLINE_TO_OFFLINE` groups have no direct consumers.
-The same applies to `PREMIUM_ONLINE` elsewhere in the tracked Lua source.
+World-mode prompts use `CHANGE_MODE_TITLE`, `CHANGE_MODE_TO_ONLINE`, and `CHANGE_MODE_TO_OFFLINE`.
+These replace the older `CONVERT_OFFLINE_TO_ONLINE` and `CONVERT_ONLINE_TO_OFFLINE` keys.
+`SIGNIN_REQUIRED_TITLE` / `SIGNIN_REQUIRED_BODY` describe the online login requirement.
+`PREMIUM_ONLINE` uses `PLAYSTATION` and `NINTENDO`, plus `MEMBERSHIP_REQUIRED_TITLE` / `MEMBERSHIP_REQUIRED_BODY`.
+These world-mode, sign-in, and premium-online keys have no direct consumers elsewhere in this Lua tree.
+The same applies to `OFFLINE_MODE_BODY_PROMPT`.
 
 ### `0x72023611` Crash Reporter Text
 
 `STRINGS.EXTERNAL.CRASHREPORTER` defines translated text for export to external tools.
 The in-game `OptionsScreen` consumes the separate `STRINGS.UI.OPTIONS.CRASHREPORTS` label and tooltip.
-The POT contains eleven external reporter keys.
-The current Chinese PO files contain nine, omitting `IDS_DLG_FILES` and `IDS_DLG_INSTRUCTIONS`.
-Template coverage therefore does not establish that every locale has the same translated keys.
+The POT and both Chinese PO files contain all eleven external reporter keys.
+The Chinese entries include nonempty translations for `IDS_DLG_FILES` and `IDS_DLG_INSTRUCTIONS`.
+Check each locale's keys and translated values independently when this source snapshot advances.
 
 ## `0x72024111` Translation Keys
 
@@ -215,18 +233,22 @@ rg -n "mysterybox_beach|playerportrait_bg_waterballoon_insect|profileflair_water
 
 rg -n \
   -e "STORE_DISABLE|OFFLINE_MODE_BODY_PROMPT|PREMIUM_ONLINE" \
-  -e "CONVERT_OFFLINE_TO_ONLINE|CONVERT_ONLINE_TO_OFFLINE" \
+  -e "CHANGE_MODE_|SIGNIN_REQUIRED_|MEMBERSHIP_REQUIRED_" \
   scripts/strings.lua \
   scripts/languages/strings.pot
 
 rg -n "STORE_DISABLE" scripts/screens/redux/multiplayermainscreen.lua scripts/screens/redux/purchasepackscreen.lua
 
-rg -n "wagdrone_rolling_fire|versioning_skins|VERSION =|GetPrefabSkinsForReleaseGroup" \
+rg -n "release_group = 18[567]|versioning_(skins|prefabs)|VERSION =|LAST_BETA|GetPrefabSkinsForReleaseGroup" \
   scripts/prefabs/skinprefabs.lua scripts/prefabskins.lua scripts/skin_assets.lua scripts/skin_strings.lua \
-  scripts/skins_defs_data.lua scripts/versioning_skins.lua scripts/versioning.lua scripts/skinsutils.lua
+  scripts/skins_defs_data.lua scripts/versioning_skins.lua scripts/versioning_prefabs.lua \
+  scripts/versioning.lua scripts/skinsutils.lua
 
 rg -n "symbol_overrides_young|src_priority_over_alt|thurible_init_fn|skinbuildhash|skinhashdirty" \
   scripts/components/skinner.lua scripts/prefabskin.lua scripts/prefabs/armor_voidcloth.lua scripts/prefabs/hats.lua
+
+rg -n "king_cane_init_fn|ChangeImageName|queen_torch_fx|cane_chess|cane_do_trail" \
+  scripts/prefabskin.lua scripts/prefabs/skinprefabs.lua scripts/prefabs/king_cane.lua scripts/prefabs/queen_torch.lua
 
 rg -n "SHROUDEN|KING_CANE|CRASHREPORTER|CRASHREPORTS" \
   scripts/speech_wilson.lua scripts/strings.lua scripts/languages/strings.pot \
@@ -234,6 +256,12 @@ rg -n "SHROUDEN|KING_CANE|CRASHREPORTER|CRASHREPORTS" \
 
 rg -n "worm_boss_shadow|king_cane|queen_torch|shrouden|AddScrapbook" \
   scripts/scrapbook_prefabs.lua scripts/screens/redux/scrapbookdata.lua scripts/skins_defs_data.lua
+
+rg -n "chesspiece_(batboss_shadow|rockyboss_shadow|wormboss_shadow|charlie_boss|shrouden)|mask_charlie_bosshat" \
+  scripts/scrapbook_prefabs.lua scripts/screens/redux/scrapbookdata.lua
+
+rg -n "witchbroom|leafpile|pumpkin_bomb|WITCHBROOM_USES|finiteuses" \
+  scripts/scrapbook_prefabs.lua scripts/screens/redux/scrapbookdata.lua scripts/prefabs/witchbroom.lua scripts/tuning.lua
 
 rg -n "ValidateRecipeSkinRequest|CheckClientOwnership|PREFAB_SKINS|SKINS_EVENTLOCK" \
   scripts/networking.lua \

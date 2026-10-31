@@ -29,10 +29,15 @@ For entity or networking pages, inspect `GetPersistData`, `ReplicateEntity`, or 
 
 ## `0x10053000` Documentation Workflow
 
-1. Locate each claimed path and symbol in the current `scripts` snapshot.
-2. Trace enough callers and callees to establish the execution boundary.
-3. Edit only the smallest relevant topic or reference page.
-4. Run scoped Markdown, path, source-query, and diff checks.
+1. Record the commit in [Source Snapshot](0x1002-source-snapshot.md) and compare it with the current `scripts` HEAD.
+2. Review added, deleted, and changed files, then locate the affected claims and source anchors in the index.
+3. Trace callers and callees to establish the execution boundary.
+   Check that matches are executable code rather than commented examples.
+4. Update the affected topics, complete inventory, directory catalogs, and snapshot counts together.
+5. Run scoped Markdown, path, source-query, and diff checks before recording the new snapshot commit.
+
+An automatic submodule update advances the source revision without updating this manually maintained index.
+Use the snapshot commit as the comparison baseline even when several source updates have accumulated.
 
 ### `0x10053111` Content Boundaries
 
