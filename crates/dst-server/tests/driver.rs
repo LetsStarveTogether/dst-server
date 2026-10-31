@@ -1,5 +1,5 @@
 //! Protocol fixtures exercise the real Rust process and persistent driver together.
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use dst_server::{
     driver::{Driver, DriverErrorCode, DriverEventKind, DriverState},
@@ -8,13 +8,14 @@ use dst_server::{
 };
 use serde_json::json;
 use tokio::{
-    task::JoinSet,
+    io::AsyncWriteExt,
+    net::UnixListener,
     time::{sleep, timeout},
 };
 
 const NONCE: &str = "01J00000000000000000000000";
 const FIXTURE: &str = r#"
-import json, os, resource, sys, time
+import json, os, resource, socket, sys, time
 nonce = sys.argv[1]
 mode = sys.argv[2]
 generation = 1
@@ -31,9 +32,13 @@ def ready():
 def control(shutdown=False):
     emit(4, b'DST_CONTROL|', {'v': 1, 'nonce': nonce, 'generation': generation,
         'event': 'world_load_decoded', 'session_id': f'S{generation}', 'shutdown': shutdown})
+def checkpoint():
+    with socket.socket(socket.AF_UNIX) as peer:
+        peer.connect('control.sock')
+        assert peer.recv(1) == b'G'
 if mode == 'delay_ready':
     bootstrap()
-    time.sleep(0.15)
+    checkpoint()
     ready()
 else:
     ready()
@@ -69,7 +74,7 @@ while True:
         time.sleep(60)
     if method == 'slow':
         count += 1
-        time.sleep(0.15)
+        checkpoint()
     if method == 'block':
         time.sleep(60)
     if method == 'reload':
@@ -99,6 +104,10 @@ fn fixture(mode: &str) -> Driver {
 }
 
 fn fixture_on_shard(mode: &str, shard: &str) -> Driver {
+    fixture_in(mode, shard, std::env::temp_dir())
+}
+
+fn fixture_in(mode: &str, shard: &str, directory: PathBuf) -> Driver {
     Driver::attach(
         ProcessSpec {
             program: "python3".into(),
@@ -109,7 +118,7 @@ fn fixture_on_shard(mode: &str, shard: &str) -> Driver {
                 NONCE.into(),
                 mode.into(),
             ],
-            cwd: std::env::temp_dir(),
+            cwd: directory,
         },
         NONCE.into(),
         shard.into(),
@@ -252,7 +261,9 @@ async fn presence_ulid_tracks_observation_epochs_and_world_reloads() {
 
 #[tokio::test]
 async fn readiness_needs_native_evidence_but_optional_telemetry_can_fail() {
-    let driver = fixture("delay_ready");
+    let directory = tempfile::tempdir().unwrap();
+    let control = UnixListener::bind(directory.path().join("control.sock")).unwrap();
+    let driver = fixture_in("delay_ready", "World", directory.path().to_owned());
     let snapshot = until(&driver, |state| state.health.is_some()).await;
     assert!(!snapshot.ready);
     assert_eq!(
@@ -263,6 +274,11 @@ async fn readiness_needs_native_evidence_but_optional_telemetry_can_fail() {
             .code,
         DriverErrorCode::NotReady
     );
+    let (mut ready, _) = timeout(Duration::from_secs(3), control.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    ready.write_all(b"G").await.unwrap();
     driver.wait_ready(Duration::from_secs(3)).await.unwrap();
     let runtime = driver
         .request("runtime", json!({}), Duration::from_secs(1))
@@ -275,16 +291,25 @@ async fn readiness_needs_native_evidence_but_optional_telemetry_can_fail() {
 
 #[tokio::test]
 async fn cancellation_leaves_one_accepted_mutation_running() {
-    let driver = fixture("normal");
+    let directory = tempfile::tempdir().unwrap();
+    let control = UnixListener::bind(directory.path().join("control.sock")).unwrap();
+    let driver = fixture_in("normal", "World", directory.path().to_owned());
     driver.wait_ready(Duration::from_secs(3)).await.unwrap();
-    assert!(
-        timeout(
-            Duration::from_millis(20),
-            driver.request("slow", json!({}), Duration::from_secs(2))
-        )
+    let mut pending = Box::pin(driver.request("slow", json!({}), Duration::from_secs(5)));
+    assert!(futures::poll!(&mut pending).is_pending());
+    let (mut accepted, _) = timeout(Duration::from_secs(3), control.accept())
         .await
-        .is_err()
-    );
+        .unwrap()
+        .unwrap();
+    until(&driver, |state| {
+        state
+            .recent_request
+            .as_ref()
+            .is_some_and(|request| request.accepted)
+    })
+    .await;
+    drop(pending);
+    accepted.write_all(b"G").await.unwrap();
     let snapshot = until(&driver, |state| {
         state
             .recent_request
@@ -476,16 +501,12 @@ async fn shard_limits_pending_requests_and_rejects_oversized_input_before_dispat
             .code,
         DriverErrorCode::InvalidRequest
     );
-    let mut tasks = JoinSet::new();
+    let mut requests = Vec::new();
     for _ in 0..64 {
-        let driver = driver.clone();
-        tasks.spawn(async move {
-            driver
-                .request("block", json!({}), Duration::from_secs(5))
-                .await
-        });
+        let mut request = Box::pin(driver.request("block", json!({}), Duration::from_secs(5)));
+        assert!(futures::poll!(&mut request).is_pending());
+        requests.push(request);
     }
-    sleep(Duration::from_millis(20)).await;
     assert_eq!(
         driver
             .request("counter", json!({}), Duration::from_secs(1))
@@ -496,8 +517,8 @@ async fn shard_limits_pending_requests_and_rejects_oversized_input_before_dispat
     );
     driver.kill().await.unwrap();
     timeout(Duration::from_secs(2), async {
-        while let Some(result) = tasks.join_next().await {
-            assert!(result.unwrap().is_err());
+        for request in requests {
+            assert!(request.await.is_err());
         }
     })
     .await

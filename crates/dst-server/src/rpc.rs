@@ -838,13 +838,14 @@ mod tests {
         use std::rc::Rc;
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
-        struct SilentSubscription;
+        struct SilentSubscription(Arc<Notify>);
         impl subscription::Server for SilentSubscription {
             async fn next(
                 self: Rc<Self>,
                 _: subscription::NextParams,
                 _: subscription::NextResults,
             ) -> capnp::Result<()> {
+                self.0.notify_one();
                 std::future::pending().await
             }
             async fn close(
@@ -855,7 +856,7 @@ mod tests {
                 std::future::pending().await
             }
         }
-        struct SilentRoom;
+        struct SilentRoom(Arc<Notify>);
         impl room::Server for SilentRoom {
             async fn subscribe(
                 self: Rc<Self>,
@@ -864,7 +865,7 @@ mod tests {
             ) -> capnp::Result<()> {
                 results
                     .get()
-                    .set_subscription(capnp_rpc::new_client(SilentSubscription));
+                    .set_subscription(capnp_rpc::new_client(SilentSubscription(self.0.clone())));
                 Ok(())
             }
         }
@@ -873,6 +874,8 @@ mod tests {
                 let directory = tempfile::tempdir().unwrap();
                 let path = directory.path().join("silent-subscription.sock");
                 let listener = tokio::net::UnixListener::bind(&path).unwrap();
+                let started = Arc::new(Notify::new());
+                let accepted = started.clone();
                 let server = tokio::task::spawn_local(async move {
                     let (peer, _) = listener.accept().await.unwrap();
                     let (reader, writer) = peer.compat().split();
@@ -882,14 +885,16 @@ mod tests {
                         rpc_twoparty_capnp::Side::Server,
                         Default::default(),
                     );
-                    let endpoint: room::Client = capnp_rpc::new_client(SilentRoom);
+                    let endpoint: room::Client = capnp_rpc::new_client(SilentRoom(accepted));
                     RpcSystem::new(Box::new(network), Some(endpoint.client)).await
                 });
                 let client = Client::connect(&path).await.unwrap();
                 let stream = client.subscribe("events").await.unwrap();
                 let reader = stream.clone();
                 let pending = tokio::spawn(async move { reader.next(1).await });
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::timeout(Duration::from_secs(1), started.notified())
+                    .await
+                    .unwrap();
                 let error = tokio::time::timeout(Duration::from_secs(4), stream.close())
                     .await
                     .unwrap()

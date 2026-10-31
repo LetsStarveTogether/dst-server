@@ -278,13 +278,11 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
             stream.close().await.unwrap();
 
             let oversized = client.subscribe("events").await.unwrap();
-            let reader = oversized.clone();
-            let waiting = tokio::spawn(async move { reader.next(1).await });
-            tokio::task::yield_now().await;
+            let mut waiting = Box::pin(oversized.next(1));
+            assert!(futures::poll!(&mut waiting).is_pending());
             hub.publish("events", &json!("x".repeat(64 * 1024 + 1)));
             let batch = tokio::time::timeout(Duration::from_secs(1), waiting)
                 .await
-                .unwrap()
                 .unwrap()
                 .unwrap();
             assert!(batch.records.is_empty());
@@ -293,24 +291,20 @@ async fn native_socket_calls_survive_client_cancellation_and_streams_report_loss
             oversized.close().await.unwrap();
 
             let pending = client.subscribe("lifecycle").await.unwrap();
-            assert!(
-                tokio::time::timeout(Duration::from_millis(10), pending.next(1))
-                    .await
-                    .is_err()
-            );
+            let mut reading = Box::pin(pending.next(1));
+            assert!(futures::poll!(&mut reading).is_pending());
+            drop(reading);
             tokio::time::timeout(Duration::from_secs(1), pending.close())
                 .await
                 .unwrap()
                 .unwrap();
             let active = client.subscribe("events").await.unwrap();
-            let reader = active.clone();
-            let waiting = tokio::spawn(async move { reader.next(1).await });
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let mut waiting = Box::pin(active.next(1));
+            assert!(futures::poll!(&mut waiting).is_pending());
             active.close().await.unwrap();
             assert!(
                 tokio::time::timeout(Duration::from_secs(1), waiting)
                     .await
-                    .unwrap()
                     .unwrap()
                     .unwrap()
                     .closed

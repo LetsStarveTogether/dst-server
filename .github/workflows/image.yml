@@ -266,7 +266,7 @@ jobs:
           podman cp "$native_container:/usr/local/share/dst-server/build-manifest.json" "$native_dir/build-manifest.json"
           "$native_dir/dst-server" scripts verify "$native_dir/scripts.zip"
           python3 -m zipfile -e "$native_dir/scripts.zip" "$native_dir/source"
-          uv run --locked --only-group dev pytest tests/lua --scripts "$native_dir/source/scripts"
+          uv run --locked --only-group dev pytest tests/lua --scripts "$native_dir/source/scripts" --binary "$native_dir/dst-server"
           podman run --rm --entrypoint /usr/local/bin/dst-server "$DST_SERVER_IMAGE" --version
 
       - name: Test built image with the real game

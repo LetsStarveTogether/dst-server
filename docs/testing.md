@@ -98,6 +98,9 @@ Proptest [shrinks failures][proptest] and [persists replay seeds][persistence]; 
 Keep an explicit regression example when its exact input matters across later changes to the generator.
 
 Synchronize asynchronous tests with acknowledgements, channels or observable state.
+Poll the Rust future or eagerly start the Python task before cancellation.
+Wait for an acknowledgement if the test requires a later stage of the operation.
+Publish fixture files containing state by writing a temporary file and renaming it after the contents are complete.
 For logic driven entirely by Tokio timers, its [paused clock][tokio-tests] can avoid real waiting.
 Tests involving native processes, file descriptors or external clocks still need real time and bounded deadlines.
 A timeout should produce enough context to identify the operation that did not finish.

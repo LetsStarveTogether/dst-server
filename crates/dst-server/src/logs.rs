@@ -108,28 +108,38 @@ impl LogOutput {
         let captured = diagnostics.clone();
         let task = tokio::spawn(async move {
             let _permit = permit;
+            let mut exit_status = None;
             let (outcome, interrupted) = tokio::select! {
                 biased;
                 _ = &mut stopped => (Ok(()), true),
                 result = async {
-                    let (_, _, status) = tokio::try_join!(
+                    tokio::try_join!(
                         read_lines(&mut stdout, &sender, max_record, max_output),
                         read_diagnostics(&mut stderr, &captured),
-                        async { child.wait().await.map_err(anyhow::Error::from) },
+                        async {
+                            exit_status = Some(reap(&mut child, pid).await?);
+                            Ok::<_, anyhow::Error>(())
+                        },
                     )?;
-                    check_status(status, command, &captured)
+                    Ok::<_, anyhow::Error>(())
                 } => (result, false),
             };
-            // Cleanup is owned by this task, so cancellation of a consumer cannot
-            // interrupt child reaping or leave a reader blocked on its pipes.
-            if interrupted || outcome.is_err() {
+            // Only this supervisor owns cleanup; cancelling a waiter cannot stop it.
+            let (status, terminated) = if interrupted || outcome.is_err() {
                 let cleanup =
                     terminate_and_reap(&mut child, pid, &mut stdout, &mut stderr, &captured).await;
-                if outcome.is_ok() {
-                    cleanup?;
-                }
+                outcome?;
+                cleanup?
+            } else {
+                (
+                    exit_status.expect("completed reader reaped its child"),
+                    false,
+                )
+            };
+            if terminated && matches!(status.signal(), Some(libc::SIGTERM | libc::SIGKILL)) {
+                return Ok(());
             }
-            outcome
+            check_status(status, command, &captured)
         });
         Ok(Self {
             pid,
@@ -260,40 +270,46 @@ fn signal_group(pid: u32, signal: i32) {
     }
 }
 
+async fn reap(child: &mut Child, pid: u32) -> Result<ExitStatus> {
+    let status = child.wait().await;
+    // Descendants must not survive the leader or keep its output pipes open.
+    signal_group(pid, libc::SIGKILL);
+    Ok(status?)
+}
+
 async fn terminate_and_reap<R: AsyncRead + Unpin, E: AsyncRead + Unpin>(
     child: &mut Child,
     pid: u32,
     stdout: &mut R,
     stderr: &mut E,
     diagnostics: &Mutex<Diagnostics>,
-) -> Result<()> {
-    signal_group(pid, libc::SIGTERM);
-    let drained = timeout(CLOSE_TIMEOUT, async {
+) -> Result<(ExitStatus, bool)> {
+    let terminated = child.try_wait()?.is_none();
+    if terminated {
+        signal_group(pid, libc::SIGTERM);
+    }
+    let reaped = async {
+        match timeout(CLOSE_TIMEOUT, reap(child, pid)).await {
+            Ok(result) => result,
+            Err(_) => {
+                signal_group(pid, libc::SIGKILL);
+                reap(child, pid).await
+            }
+        }
+    };
+    let drained = timeout(CLOSE_TIMEOUT + Duration::from_millis(100), async {
         let mut sink = tokio::io::sink();
-        let (status, output, errors) = tokio::join!(
-            child.wait(),
+        let (output, errors) = tokio::join!(
             tokio::io::copy(stdout, &mut sink),
             read_diagnostics(stderr, diagnostics),
         );
-        status?;
         output?;
         errors
-    })
-    .await;
-    match drained {
-        Ok(result) => result,
-        Err(_) => {
-            signal_group(pid, libc::SIGKILL);
-            child.wait().await?;
-            // Escaped descendants cannot hold the owned pipes open indefinitely.
-            let _ = timeout(
-                Duration::from_millis(100),
-                read_diagnostics(stderr, diagnostics),
-            )
-            .await;
-            Ok(())
-        }
-    }
+    });
+    let (status, drained) = tokio::join!(reaped, drained);
+    let status = status?;
+    drained.context("log reader output did not close after termination")??;
+    Ok((status, terminated))
 }
 
 fn check_status(
@@ -680,6 +696,8 @@ impl JournalLogs {
 
 /// Dropping the stream requests cleanup; `close().await` confirms reaping.
 /// Cancelling `next_record` preserves any pending cursor anchor validation.
+/// Diagnostics are a live snapshot until the stream finishes or closes.
+/// Closing retains an already observed process failure and reports incomplete drainage.
 pub struct JournalStream {
     output: LogOutput,
     cursor: Option<String>,
@@ -1126,4 +1144,104 @@ fn matched_count(
         return Ok(None);
     }
     bail!("Netdata did not return a valid query summary")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::Cell, pin::Pin, task::Poll};
+    use tokio::io::{AsyncWriteExt, ReadBuf};
+
+    #[tokio::test]
+    async fn cleanup_reports_a_pipe_that_does_not_close() -> Result<()> {
+        let mut child = Command::new("true").process_group(0).spawn()?;
+        let pid = child.id().unwrap();
+        timeout(Duration::from_secs(5), child.wait()).await??;
+        let (mut writer, mut stderr) = tokio::io::duplex(64);
+        writer.write_all(b"last warning").await?;
+        let diagnostics = Mutex::new(Diagnostics::default());
+        // The real child is reaped; only the simulated pipe's drain timer remains.
+        tokio::time::pause();
+        let error = terminate_and_reap(
+            &mut child,
+            pid,
+            &mut tokio::io::empty(),
+            &mut stderr,
+            &diagnostics,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("output did not close"));
+        assert_eq!(diagnostics.lock().unwrap().text(), "last warning");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_read_after_anchor_does_not_validate_it_twice() -> Result<()> {
+        let (sender, lines) = mpsc::channel(1);
+        let mut stream = JournalStream {
+            output: LogOutput {
+                pid: 0,
+                lines,
+                stop: None,
+                task: None,
+                diagnostics: Arc::default(),
+            },
+            cursor: Some("anchor".into()),
+            grep: false,
+        };
+        sender
+            .send(br#"{"__CURSOR":"anchor","__REALTIME_TIMESTAMP":"1"}"#.to_vec())
+            .await?;
+        let mut pending = Box::pin(stream.next_record());
+        assert!(futures::poll!(&mut pending).is_pending());
+        drop(pending);
+        sender
+            .send(br#"{"__CURSOR":"next","__REALTIME_TIMESTAMP":"2"}"#.to_vec())
+            .await?;
+        assert_eq!(stream.next_record().await?.unwrap().cursor(), "next");
+        drop(sender);
+        assert!(stream.next_record().await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blocked_consumer_bounds_reading_and_resumes_without_losing_lines() -> Result<()> {
+        struct Measured<'a> {
+            remaining: &'a [u8],
+            read: &'a Cell<usize>,
+        }
+        impl AsyncRead for Measured<'_> {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buffer: &mut ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                let size = self.remaining.len().min(buffer.remaining());
+                buffer.put_slice(&self.remaining[..size]);
+                self.remaining = &self.remaining[size..];
+                self.read.set(self.read.get() + size);
+                Poll::Ready(Ok(()))
+            }
+        }
+        let read = Cell::new(0);
+        let mut reader = BufReader::with_capacity(
+            1,
+            Measured {
+                remaining: b"one\ntwo\nthree\n",
+                read: &read,
+            },
+        );
+        let (sender, mut lines) = mpsc::channel(1);
+        let mut pending = Box::pin(read_lines(&mut reader, &sender, 16, None));
+        assert!(futures::poll!(&mut pending).is_pending());
+        assert_eq!(read.get(), b"one\ntwo\n".len());
+        assert_eq!(lines.try_recv()?, b"one\n");
+        assert!(futures::poll!(&mut pending).is_pending());
+        assert_eq!(lines.try_recv()?, b"two\n");
+        pending.await?;
+        assert_eq!(lines.try_recv()?, b"three\n");
+        assert!(lines.try_recv().is_err());
+        Ok(())
+    }
 }

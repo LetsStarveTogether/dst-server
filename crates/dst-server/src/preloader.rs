@@ -417,7 +417,8 @@ directory = root / shard
 config = json.loads((root / '.dst-server.json').read_text())['driver']
 request = config['control']['recovery']
 scenario = (directory / 'scenario').read_text()
-(directory / 'pid').write_text(str(os.getpid()))
+(directory / 'pid.tmp').write_text(str(os.getpid()))
+(directory / 'pid.tmp').replace(directory / 'pid')
 with (directory / 'calls').open('a') as output: output.write(request['mode'] + '\n')
 if scenario == 'sleep':
     time.sleep(30)
@@ -668,12 +669,15 @@ if scenario == 'ready': os.write(5, b'DST_Master_Ready\n')
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        fs::remove_file(&pid_path).unwrap();
         let error = catalog(fixture.room.clone(), Duration::from_millis(100))
             .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Timeout);
-        let pid: u32 = fs::read_to_string(pid_path).unwrap().parse().unwrap();
-        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        if pid_path.exists() {
+            let pid: u32 = fs::read_to_string(pid_path).unwrap().parse().unwrap();
+            assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        }
         fixture.room.while_stopped().await.unwrap();
     }
 
