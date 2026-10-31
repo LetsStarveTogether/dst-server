@@ -104,7 +104,7 @@ async def export_cluster(
     configuration: Configuration | dict[str, Any] | None = None,
     room_id: str | None = None,
     client_compatible: bool = False,
-    compression_level: int = 22,
+    compression_level: int = 9,
 ) -> AsyncGenerator[ClusterArchive]:
     """Return an archive in RAM; optionally adapt two shards for a client save slot."""
     with ClusterArchive._from_native(

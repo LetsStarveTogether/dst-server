@@ -85,7 +85,7 @@ async def check_export(directory: Path) -> None:
         else:
             message = "client export accepted a custom root directory"
             raise AssertionError(message)
-        for number, level in ((True, 3), (3, True), (3, 0), (3, 23)):
+        for number, level in ((True, 3), (3, True), (3, 0), (3, 10)):
             try:
                 async with export_cluster(host, number, compression_level=level):
                     pass

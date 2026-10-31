@@ -12,7 +12,7 @@ use anyhow::{Context, Result, ensure};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{Attribute, Attributes, ObjectStore, PutMultipartOptions};
 use serde::{Deserialize, Serialize};
-use sevenz_rust2::encoder_options::ZstandardOptions;
+use sevenz_rust2::encoder_options::Lzma2Options;
 use sevenz_rust2::{ArchiveEntry, ArchiveWriter};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Semaphore, oneshot};
@@ -28,7 +28,7 @@ pub use importing::{ImportOptions, ImportSource, import_cluster};
 pub use native::encode_klei_id;
 use native::validate_path;
 
-pub const DEFAULT_COMPRESSION_LEVEL: u32 = 22;
+pub const DEFAULT_COMPRESSION_LEVEL: u32 = 9;
 const PART_BYTES: usize = 8 * 1024 * 1024;
 static COMPRESSION: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
@@ -145,8 +145,8 @@ pub async fn export_host(
     level: u32,
 ) -> Result<ClusterArchive> {
     ensure!(
-        (1..=22).contains(&level),
-        "Zstandard compression level must be between 1 and 22"
+        (1..=9).contains(&level),
+        "LZMA2 compression level must be between 1 and 9"
     );
     let directory = host.rooms.path(number)?;
     compression_worker(move || {
@@ -393,11 +393,11 @@ impl PreparedArchive {
 
     fn compress_sync(self, level: u32) -> Result<ClusterArchive> {
         ensure!(
-            (1..=22).contains(&level),
-            "Zstandard compression level must be between 1 and 22"
+            (1..=9).contains(&level),
+            "LZMA2 compression level must be between 1 and 9"
         );
         let mut writer = ArchiveWriter::new(memory_file()?)?;
-        writer.set_content_methods(vec![ZstandardOptions::from_level(level).into()]);
+        writer.set_content_methods(vec![Lzma2Options::from_level(level).into()]);
         for (path, bytes) in self.entries {
             let name = format!(
                 "{}/{}",
