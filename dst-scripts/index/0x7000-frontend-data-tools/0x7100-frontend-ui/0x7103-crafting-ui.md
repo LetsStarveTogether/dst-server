@@ -76,7 +76,7 @@ The destination is `valid_recipes[recipe.name].meta`.
 `meta.build_state` includes `buffered`, `freecrafting`, `has_ingredients`, and `no_ingredients`.
 It also includes `prototype`, `hint`, and `hide`.
 `CraftingMenuWidget:OnUpdate` validates at most 30 uncached recipes per search update.
-This avoids scanning the full table at once.
+Cached recipes do not count toward that limit, so a single update can still traverse the remaining cached entries.
 
 ### `0x71033311` Crafting Execution
 

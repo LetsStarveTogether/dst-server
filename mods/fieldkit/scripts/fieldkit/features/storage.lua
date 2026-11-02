@@ -21,10 +21,11 @@ function M.new(ctx)
         if item then count = Inventory.stack_size(item) end
         if count ~= nil then return item, count end
     end
-    local function step(kind, owner, slot, count)
-        return { kind = kind, owner = owner, slot = slot, count = count }
+    local function step(kind, owner, slot, count, item)
+        return { kind = kind, owner = owner, slot = slot, count = count, item = item }
     end
-    local function scroll_plan(owner, slot, direction, count)
+    local function scroll_plan(intent)
+        local owner, slot, direction, count = intent.owner, intent.slot, intent.direction, intent.count
         local entry, why = usable(owner, slot)
         if not entry then return nil, why end
         local active, size = cursor()
@@ -40,13 +41,15 @@ function M.new(ctx)
             else for _ = 1, count do plan[#plan + 1] = step("put", owner, slot, 1) end end
             return plan
         end
-        if not entry.item or active and not Inventory.stackable(entry.item, active) then return unavailable() end
+        if not entry.item or intent.item and entry.item ~= intent.item
+            or active and not Inventory.stackable(entry.item, active) then return unavailable() end
+        intent.item = entry.item
         count = math.min(count, entry.count, stack_limit(entry.item) - size)
         if count <= 0 then return nil, text("鼠标堆栈已满", "The cursor stack is full") end
-        if not active then return { step("take", owner, slot, count) } end
+        if not active then return { step("take", owner, slot, count, entry.item) } end
         if owner:AcceptsStacks() and size + entry.count <= stack_limit(entry.item)
             and owner:CanTakeItemInSlot(active, slot) then
-            return { step("put", owner, slot, size), step("take", owner, slot, size + count) }
+            return { step("put", owner, slot, size), step("take", owner, slot, size + count, entry.item) }
         end
         local owners = { inv }
         local overflow = inv:GetOverflowContainer()
@@ -55,8 +58,8 @@ function M.new(ctx)
             if Inventory.readable(ctx, temporary) and not Inventory.busy(ctx, temporary) and temporary:AcceptsStacks() then
                 for index = 1, temporary:GetNumSlots() do
                     if not temporary:GetItemInSlot(index) and temporary:CanTakeItemInSlot(active, index) then
-                        return { step("put", temporary, index, size), step("take", owner, slot, count),
-                            step("put", temporary, index, count), step("take", temporary, index, size + count) }
+                        return { step("put", temporary, index, size), step("take", owner, slot, count, entry.item),
+                            step("put", temporary, index, count), step("take", temporary, index, size + count, active) }
                     end
                 end
             end
@@ -114,7 +117,7 @@ function M.new(ctx)
     end
     local function plan(intent)
         if intent.kind == "return" then return return_plan() end
-        if intent.kind == "scroll" then return scroll_plan(intent.owner, intent.slot, intent.direction, intent.count) end
+        if intent.kind == "scroll" then return scroll_plan(intent) end
         local entry, why = usable(intent.owner, intent.slot)
         if not entry or not entry.item then return nil, why or text("槽位已空", "The slot is empty") end
         local target = destination(intent.owner, entry.item)
@@ -124,7 +127,7 @@ function M.new(ctx)
         local count = math.min(intent.count or entry.count, entry.count, space, stack_limit(entry.item))
         if count <= 0 then return unavailable() end
         local operation = step("move", intent.owner, intent.slot, count)
-        operation.destination = target
+        operation.entry, operation.destination = entry, target
         return { operation }
     end
     local function enqueue(intents)
@@ -140,20 +143,23 @@ function M.new(ctx)
             if #current.intents - current.index + #intents > 32 then
                 return false, text("库存操作队列已满", "Inventory operation queue is full")
             end
-            for _, intent in ipairs(intents) do current.intents[#current.intents + 1] = intent end
+            incoming.item = previous.item
+            current.intents[#current.intents + 1] = incoming
             return true
         end
         local steps, reason = plan(intents[1])
         if not steps then return false, reason end
-        local job = { storage = self, intents = intents, index = 1, input = { mode = "inventory", cursor = true, placement = true },
+        local job = { storage = self, intents = intents, index = 1, completed = 0, input = { mode = "inventory", cursor = true, placement = true },
             name = text("库存操作", "Inventory operation"), timeout = 120,
             error_message = text("库存操作失败，已停止", "Inventory operation failed; stopped"),
             timeout_message = text("库存同步超时，已停止", "Inventory synchronization timed out; stopped") }
+        function job:remaining() return #self.intents - self.index + 1 end
         local at, pending, deadline = 1
+        local changed = text("库存已改变，操作停止", "Inventory changed; operation stopped")
         function job:step(now)
             if pending then
                 local state = pending:state()
-                if state == "changed" then return "failed", text("库存已改变，操作停止", "Inventory changed; operation stopped") end
+                if state == "changed" then return "failed", changed end
                 if state ~= "done" then
                     if now >= deadline then return "failed", self.timeout_message end
                     return "running"
@@ -161,6 +167,7 @@ function M.new(ctx)
                 pending, at = nil, at + 1
             end
             if at > #steps then
+                self.completed = self.completed + 1
                 self.index = self.index + 1
                 if self.index > #self.intents then
                     return "done", self.intents[1].kind == "return" and inv:GetActiveItem()
@@ -170,10 +177,18 @@ function M.new(ctx)
                 if not steps then return "failed", reason end
                 at = 1
             end
+            local intent = self.intents[self.index]
+            if at == 1 and intent.kind == "scroll" and intent.direction > 0 then
+                local entry = Inventory.slot(ctx, intent.owner, intent.slot)
+                if not entry or entry.item ~= intent.item then return "failed", changed end
+            end
             local operation = steps[at]
             if operation.kind == "move" then
+                pending, reason = Inventory.move(ctx, operation.entry, operation.destination, operation.count)
+            elseif operation.kind == "take" then
                 local entry = Inventory.slot(ctx, operation.owner, operation.slot)
-                pending, reason = Inventory.move(ctx, entry or {}, operation.destination, operation.count)
+                if not entry or entry.item ~= operation.item then return "failed", changed end
+                pending, reason = Inventory.take(ctx, operation.owner, operation.slot, operation.count)
             else pending, reason = Inventory[operation.kind](ctx, operation.owner, operation.slot, operation.count) end
             if not pending then return "failed", text("库存操作已不可执行", "The inventory operation is no longer available") end
             deadline = now + 6
@@ -204,7 +219,8 @@ function M.new(ctx)
             local source = usable(owner, index)
             if remaining > 0 and source and source.item and (source.item == entry.item or Inventory.stackable(entry.item, source.item)) then
                 local count = math.min(source.count, remaining)
-                intents[#intents + 1] = { kind = "scroll", owner = owner, slot = index, direction = 1, count = count }
+                intents[#intents + 1] = { kind = "scroll", owner = owner, slot = index, direction = 1, count = count,
+                    item = source.item }
                 remaining = remaining - count
             end
         end

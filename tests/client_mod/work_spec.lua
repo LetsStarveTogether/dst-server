@@ -26,7 +26,8 @@ local function context(remote)
     function ctx:ready() return true end
     ctx.G = { ACTIONS = { WALKTO = { id = "WALKTO" }, EQUIP = { id = "EQUIP" }, UNEQUIP = { id = "UNEQUIP" } }, EQUIPSLOTS = { HANDS = "hands" },
         GetTime = function() return ctx.now end,
-        RPC = { LeftClick = 1, RightClick = 2, UseItemFromInvTile = 3 }, CanEntitySeeTarget = function() return true end,
+        RPC = { LeftClick = 1, RightClick = 2, UseItemFromInvTile = 3, ControllerUseItemOnSelfFromInvTile = 4 },
+        CanEntitySeeTarget = function() return true end,
         GetValidRecipe = function(name) return ctx.recipes[name] end }
     for id in pairs(Rules.policies) do ctx.G.ACTIONS[id] = { id = id, code = id } end
     ctx.G.ACTIONS.CHOP.distance, ctx.G.ACTIONS.PICK.rangecheckfn = 1.75, pick_range
@@ -82,6 +83,9 @@ local function context(remote)
     ctx.G.SendRPCToServer = function(rpc, _, item, modifiers)
         ctx.rpc_count = (ctx.rpc_count or 0) + 1
         if rpc == ctx.G.RPC.UseItemFromInvTile then assert(modifiers == 0); inv:UseItemFromInvTile(item) end
+        if rpc == ctx.G.RPC.ControllerUseItemOnSelfFromInvTile then
+            ctx.self_request = { id = _, item = item }
+        end
     end
     function ctx:item(name, id, equip)
         local item = T.entity({ GUID = 1000 + #self.items, prefab = name, id = id, count = 1, usage = 1 })
@@ -115,8 +119,8 @@ local function context(remote)
     end
     local function action(target, id, item)
         local a = { doer = player, target = target, action = ctx.G.ACTIONS[id], invobject = item, rotation = 0 }
-        function a:IsValid() return target:IsValid() end
-        function a:GetActionPoint() return target:GetPosition() end
+        function a:IsValid() return not target or target:IsValid() end
+        function a:GetActionPoint() return target and target:GetPosition() end
         function a:AddSuccessAction(fn) self.success = fn end
         function a:AddFailAction(fn) self.failure = fn end
         return a
@@ -149,6 +153,7 @@ local function context(remote)
     if controller.locomotor then
         function controller.locomotor:Stop() ctx.stops = (ctx.stops or 0)+1 end
         function controller.locomotor:Clear() self.bufferedaction = nil end
+        function controller.locomotor:PushAction(action) controller:DoAction(action) end
     end
     function controller:DoAction(a)
         player.bufferedaction, ctx.pending = a, a
@@ -184,7 +189,7 @@ local function context(remote)
 end
 
 -- Use the actual action registry, component collectors and picker for updated game interactions.
-local function native_picker(c)
+local function native_picker(c, inventory_actions)
     local env = { Class = T.Class, EntityScript = {}, require = function() end,
         global = function() end, orderedPairs = pairs, EQUIPSLOTS = c.G.EQUIPSLOTS,
         TheWorld = { Map = {} }, ThePlayer = c.player, HIGH_ACTION_PRIORITY = 10,
@@ -214,10 +219,206 @@ local function native_picker(c)
     end
     local picker = T.native("components/playeractionpicker", env)(c.player)
     -- Equipment admission remains the fixture's inventory transport; world action choice is native.
-    picker.GetInventoryActions = c.player.components.playeractionpicker.GetInventoryActions
+    if not inventory_actions then picker.GetInventoryActions = c.player.components.playeractionpicker.GetInventoryActions end
     c.player.components.playeractionpicker = picker
     return register, env
 end
+
+T.each("native self inventory actions", { false, true }, function(remote)
+    T.each("intent", {
+        { id = "HEAL", prefab = "healingsalve", component = "healer" },
+        { id = "READ", prefab = "book_silviculture", component = "book" },
+        { id = "TEACH", prefab = "mapspotrevealer", component = "mapspotrevealer" },
+        { id = "EAT", prefab = "berries", component = "edible" },
+    }, function(row)
+        local c, inv = context(remote)
+        local register, env = native_picker(c, true)
+        env.FOODGROUP, env.FOODTYPE = {}, { VEGGIE = "VEGGIE" }
+        c.player:AddTag("player"); c.player:AddTag("reader"); c.player:AddTag("VEGGIE_eater")
+        c.player.replica.health = { CanHeal = function() return true end }
+        local item = register(c:item(row.prefab, "unused"), row.component)
+        item:AddTag("edible_VEGGIE")
+        item.count, inv.active = 3, item
+        local offered = c.work:preview(c.player, "left")
+        assert(offered and offered.action.id == row.id and offered.target == nil)
+        assert(c.work:start(c.player))
+        local job = c.executor.current
+        assert(#job.entries == 1, "self use cannot expand to other players")
+        c:tick()
+        if remote then
+            assert(c.self_request and c.self_request.id == row.id and c.self_request.item == item)
+            c:emit("performaction")
+            item.count, item.usage = 2, .5
+        else
+            assert(c.pending and c.pending.target == nil and c.pending.invobject == item)
+            c:succeed()
+        end
+        c:tick(); c:tick()
+        assert(job.completed == 1 and not c.executor.current, row.id .. " needs a result receipt")
+    end)
+end)
+
+T.each("native spell casts once per selected target", { false, true }, function(remote)
+    local c, inv = context(remote)
+    local register, env = native_picker(c)
+    env.SPELLTYPES = {}
+    local target = register(c:entity("unused", "right"))
+    local staff = register(c:item("custom_staff", "unused"), "spellcaster")
+    staff:AddTag("castontargets")
+    inv.active, c.params.repeat_count = staff, 20
+    assert(c.work:enqueue({ { target = target, button = "right" } }))
+    local job = c.executor.current
+    c:tick()
+    assert(c.pending.action.id == "CASTSPELL")
+    if remote then c:emit("performaction"); staff.usage = .8 else c:succeed() end
+    c:tick(); c:tick()
+    assert(#c.calls == 1 and job.completed == 1 and not c.executor.current)
+end)
+
+T.each("native activation and ghost availability", { false, true }, function(remote)
+    local c = context(remote)
+    local register = native_picker(c)
+    local target = register(c:entity("unused", "left", false, "dirtpile"), "activatable")
+    target:AddTag("inactive")
+    assert(c.work:start(target)); local job = c.executor.current
+    c:tick()
+    assert(c.pending.action.id == "ACTIVATE")
+    c.player.x = target.x
+    c:succeed(); target:RemoveTag("inactive")
+    c:tick(); c:tick()
+    assert(job.completed == 1 and not c.executor.current)
+    local ghost_target = register(c:entity("unused", "left"), "hauntable")
+    assert(not c.work:preview(ghost_target, "left"))
+    c.player:AddTag("playerghost")
+    assert(c.work:start(ghost_target)); job = c.executor.current
+    assert(job.input.actor == "ghost")
+    c:tick()
+    assert(c.pending.action.id == "HAUNT")
+    c.player.x = ghost_target.x
+    c:succeed(); ghost_target:AddTag("haunted")
+    c:tick(); c:tick()
+    assert(job.completed == 1 and not c.executor.current)
+end)
+
+T.each("native player feeding keeps its selected player and count", { false, true }, function(remote)
+    local c, inv = context(remote)
+    local register, env = native_picker(c)
+    env.FOODGROUP, env.FOODTYPE = {}, { VEGGIE = "VEGGIE" }
+    env.TheNet = { GetPVPEnabled = function() return false end }
+    local target = register(c:entity("unused", "right"))
+    target:AddTag("player"); target:AddTag("VEGGIE_eater")
+    local food = register(c:item("berries", "unused"), "edible")
+    food:AddTag("edible_VEGGIE")
+    food.count, inv.active, c.params.repeat_count = 3, food, 2
+    assert(c.work:enqueue({ { target = target, button = "right" } }))
+    local job = c.executor.current
+    for use = 1, 2 do
+        c:tick(); assert(c.pending.action.id == "FEEDPLAYER" and c.pending.target == target)
+        c.player.x = target.x
+        c:succeed(); food.count = food.count - 1
+        c:tick()
+    end
+    c:tick()
+    assert(job.completed == 1 and job.applied == 2 and #c.calls == 2 and not c.executor.current)
+end)
+
+T.each("native sail lowering waits for completion and boost windows", { false, true }, function(remote)
+    local c = context(remote)
+    local register = native_picker(c)
+    local mast = register(c:entity("unused", "left"), "mast")
+    mast:AddTag("sailraised")
+    assert(c.work:start(mast)); local job = c.executor.current
+    c:tick(); assert(c.pending.action.id == "LOWER_SAIL_BOOST")
+    c.player.x = mast.x
+    c:succeed(); c.player:AddTag("is_furling"); c.player:RemoveTag("idle")
+    local animation = "pull_big_loop"
+    c.player.AnimState = { IsCurrentAnimation = function(_, name) return animation == name end }
+    c:tick(); c:tick()
+    assert(#c.calls == 1 and job.completed == 0, "never dispatch LOWER_SAIL_FAIL")
+    animation = "pull_small_loop"
+    c:tick(); assert(#c.calls == 2 and c.pending.action.id == "LOWER_SAIL_BOOST")
+    c:succeed(); c:tick()
+    mast:RemoveTag("sailraised"); mast:AddTag("saillowered")
+    c:tick(); c:tick()
+    assert(job.completed == 1 and not c.executor.current)
+    for _, action in ipairs(c.calls) do assert(action.action.id == "LOWER_SAIL_BOOST") end
+    c.player:RemoveTag("is_furling"); c.player:AddTag("idle")
+    assert(c.work:start(mast)); job = c.executor.current
+    c:tick(); assert(c.pending.action.id == "RAISE_SAIL")
+    c:succeed(); mast:RemoveTag("saillowered"); mast:AddTag("sailraised")
+    c:tick(); c:tick()
+    assert(job.completed == 1 and not c.executor.current)
+end)
+
+T.each("native push completion needs movement on remote clients", { false, true }, function(remote)
+    local c = context(remote)
+    local register = native_picker(c)
+    local target = register(c:entity("unused", "right"), "pushable")
+    assert(c.work:enqueue({ { target = target, button = "right" } })); local job = c.executor.current
+    c:tick(); assert(c.pending.action.id == "START_PUSHING")
+    c.player.x = target.x
+    c:succeed(); c:tick(.1)
+    if remote then assert(job.completed == 0, "the attempt is not evidence of a push") end
+    target.x = target.x + .3
+    c:tick(); c:tick()
+    assert(job.completed == 1 and not c.executor.current)
+end)
+
+T.each("native deck draw result", { false, true }, function(remote)
+    T.each("inventory capacity", { false, true }, function(full)
+        local c, inv = context(remote)
+        local register, env = native_picker(c)
+        local deck = register(c:entity("unused", "right", false, "deck_of_cards"), "deckcontainer")
+        local card
+        deck.components.deckcontainer = { RemoveCard = function() return 7 end }
+        env.TheWorld.components = { playingcardsmanager = { MakePlayingCard = function(_, id)
+            assert(id == 7)
+            card = c:entity("PICKUP", "left", false, "playing_card")
+            card.replica.inventoryitem = { IsLockedInSlot = function() return false end }
+            card.components.inventoryitem = { DoDropPhysics = function() card.ground = true end }
+            return card
+        end } }
+        c.player.components.inventory = {
+            GiveItem = function(_, item) if full then return false end; inv.slots[1] = item; return true end,
+            GetActiveItem = function() return nil end,
+        }
+        local draw = T.eval(assert(T.source("actions"):match("ACTIONS.DRAW_FROM_DECK.fn = function%b().-\nend"))
+            .. "\nreturn ACTIONS.DRAW_FROM_DECK.fn", env)
+        assert(c.work:enqueue({ { target = deck, button = "right" } })); local job = c.executor.current
+        c:tick(); assert(c.pending.action.id == "DRAW_FROM_DECK")
+        c.player.x = deck.x
+        c:succeed()
+        if remote then c:tick(.1); assert(job.completed == 0) end
+        assert(draw(c.pending))
+        c:tick(); c:tick()
+        assert(job.completed == 1 and not c.executor.current)
+        assert(full and card.ground or not full and inv.slots[1] == card)
+    end)
+end)
+
+T.case("target scopes and registered policies", function()
+    local c = context()
+    local wall = c:entity("ATTACK", "left")
+    assert(not c.work:start(wall))
+    wall:AddTag("wall")
+    assert(c.work:start(wall))
+    c.executor:cancel("manual")
+    local other = c:entity("FEEDPLAYER", "right")
+    other:AddTag("player")
+    assert(c.work:enqueue({ { target = other, button = "right" } }))
+    c.executor:cancel("manual")
+    assert(not Rules.expand("FEEDPLAYER", other, c.player))
+    c.player:AddTag("playerghost")
+    assert(not c.work:start(wall), "living actions stay unavailable to ghosts")
+    Rules.register("MOD_WORK", { mode = "once", targets = { entity = true } })
+    c.player:RemoveTag("playerghost")
+    local action = { action = { id = "MOD_WORK" }, target = wall }
+    assert(Rules.accept(action, c.player))
+    Rules.register("MOD_WORK", { mode = "once", accept = function() error("broken extension") end })
+    assert(not Rules.accept(action, c.player))
+    Rules.policies.MOD_WORK = nil
+    assert(not pcall(Rules.register, "BAD", { mode = "forever" }))
+end)
 
 T.each("native lunar buildup work", { false, true }, function(remote)
     local c, inv = context(remote)
@@ -382,6 +583,128 @@ T.each("native new scene and item actions", {
     assert(job.completed == 1 and #c.calls == 1 and not c.executor.current)
 end)
 
+T.each("native golf removal receipt", {
+    { name = "echo before removal", x = 4, z = 0, completed = true },
+    { name = "removal before echo", x = 4, z = 0, late = true, completed = true },
+    { name = "long boundary", x = 8, z = 0, completed = true },
+    { name = "short boundary", x = 0, z = 6, completed = true },
+    { name = "outside long boundary", x = 8.1, z = 0, outside = true },
+    { name = "outside short boundary", x = 0, z = 6.1, outside = true },
+    { name = "no echo", x = 4, z = 0, no_echo = true },
+    { name = "no kit", x = 4, z = 0, no_kit = true },
+    { name = "leave rectangle before late echo", x = 8, z = 0, late = true, move = true },
+}, function(row)
+    local c, inv = context(true)
+    local register = native_picker(c)
+    c.config.queue_collect = true
+    local target = register(c:entity("TERRAFORM_REMOVE", "right", true, "carnivalgame_golfgame"))
+    target.tags.terraformerremoveable, target.Physics = true, nil
+    target.Transform.GetRotation = function() return 0 end
+    local source = T.source("prefabs/carnivalgame_golfgame"):gsub("\r", "")
+    local functions = assert(source:match("local BOUNDARY_MINX.-\n\n"))
+        .. assert(T.source("vecutil"):gsub("\r", ""):match("function VecUtil_RotateDir%b().-\nend")) .. "\n"
+    for _, name in ipairs({ "GetGolfBoundaries", "IsInGolfArea", "IsWorldCoordsInGolfArea" }) do
+        functions = functions .. assert(source:match("local function " .. name .. "%b().-\nend")) .. "\n"
+    end
+    target.IsInGolfArea = T.eval(functions .. "return IsWorldCoordsInGolfArea", { DEGREES = math.pi / 180 })
+    local fork = register(c:item("goldenpitchfork", "TERRAFORM_REMOVE", true), "terraformer")
+    fork.components = {}
+    fork.replica.inventoryitem.classified = { percentused = { value = function() return 100 end } }
+    inv.hands = fork
+    c.player.x, c.player.z = target.x + row.x, target.z + row.z
+    assert(c.work:enqueue({ { target = target, button = "right" } }))
+    local job = c.executor.current
+    c:tick(); c:tick(.1)
+    assert(c.pending.action.customarrivecheck(c.player, {}, c.pending) == not row.outside)
+    if row.move then c.player.x, c.player.z = target.x, target.z + 8 end
+    if not row.late and not row.no_echo then c:succeed(); c:tick(.1) end
+    target:Remove()
+    local kit
+    if not row.no_kit then
+        kit = register(c:entity("PICKUP", "left", false, "carnivalgame_golfgame_kit_easy"), "inventoryitem")
+        kit.x, kit.ground = target.x, true
+        kit.replica.inventoryitem = { CanBePickedUp = function() return true end }
+    end
+    if row.late then
+        c:tick(.1); assert(job.completed == 0, "the native arrival observation alone cannot identify removal")
+        c:succeed()
+    end
+    c:tick(.1); c:tick(1.1)
+    assert(job.completed == (row.completed and 1 or 0) and job.skipped == (row.completed and 0 or 1))
+    assert((job.entries[1] and job.entries[1].target == kit or false) == (row.completed == true),
+        "only the confirmed removal can enqueue the dropped kit")
+    c.executor:cancel("manual")
+end)
+
+T.each("native nab pickup receipt", {
+    { name = "main inventory", where = "main" },
+    { name = "backpack", where = "overflow" },
+    { name = "cursor", where = "cursor" },
+    { name = "existing stack", where = "merge" },
+    { name = "one extra pickup rounded away", where = "main", extra = 1 },
+    { name = "two extra pickups with visible wear", where = "main", extra = 2 },
+    { name = "another player took target", foreign = true },
+    { name = "host callback", where = "main", host = true },
+}, function(row)
+    local c, inv = context(not row.host)
+    local register = native_picker(c)
+    function c.player:IsNear(target, distance) return self:GetDistanceSqToInst(target) <= distance * distance end
+    local target = register(c:item("twigs"), "inventoryitem")
+    target.x = 1
+    target.replica.inventoryitem.CanBePickedUp = function() return not target:HasTag("INLIMBO") end
+    local bag = register(c:item("wortox_nabbag", "NABBAG", true), "nabbag")
+    local encoded = 100
+    bag.components = {}
+    bag.replica.inventoryitem.classified = { percentused = { value = function() return encoded end } }
+    inv.hands = bag
+    local existing = row.where == "merge" and c:item("twigs")
+    if existing then existing.count, inv.slots[1] = 5, existing end
+    assert(c.work:enqueue({ { target = target, button = "right" } }))
+    local job = c.executor.current
+    c:tick(); assert(c.pending.action.id == "NABBAG")
+    local server_bag, server_player, extras = T.entity(), T.entity(), {}
+    server_player.components.inventory = { GetActiveItem = function() end }
+    function server_player:IsEntityInFrontConeSlice() return true end
+    local FiniteUses = T.native("components/finiteuses", { Class = T.Class, ACTIONS = c.G.ACTIONS })
+    local uses = FiniteUses(server_bag)
+    server_bag.components.finiteuses = uses
+    uses:SetMaxUses(200); uses:SetUses(200); uses:SetConsumption(c.G.ACTIONS.NET, 10)
+    for _ = 1, row.extra or 0 do
+        extras[#extras + 1] = T.entity({ replica = { inventoryitem = { CanBePickedUp = function() return true end } } })
+    end
+    local Nabbag = T.native("components/nabbag", { Class = T.Class,
+        ACTIONS = { PICKUP = { fn = function(action)
+            if action.target == target then target:AddTag("INLIMBO") end
+            return true
+        end } },
+        TUNING = { SKILLS = { WORTOX = { NABBAG_CONEANGLE = 150, NABBAG_MAX_RADIUS = 3,
+            NABBAG_CIRCLE_RADIUS = 1.25, NABBAG_MAX_USES_PER_NAB_PERCENT = .25, NABBAG_MAX_ITEMS_PER_NAB = 400 } } },
+        TheSim = { FindEntities = function() return extras end },
+    })
+    if not row.foreign then
+        assert(Nabbag(server_bag):DoNabFromAct({ doer = server_player, target = target, invobject = server_bag }))
+        uses:OnUsedAsItem(c.G.ACTIONS.NABBAG, server_player, target)
+        assert(uses:GetUses() == 200 - (row.extra or 0), "native first-target pickup and its item-use hook are free")
+    else target:AddTag("INLIMBO") end
+    local serialize = T.eval(assert(T.source("prefabs/inventoryitem_classified")
+        :match("local function SerializePercentUsed%b().-\nend")) .. "\nreturn SerializePercentUsed", {
+        math = setmetatable({ clamp = function(n, low, high) return math.max(low, math.min(high, n)) end }, { __index = math }),
+    })
+    serialize({ percentused = { set = function(_, value) encoded = value end } }, uses:GetPercent())
+    assert(encoded == (row.extra == 2 and 99 or 100))
+    if row.where == "main" then inv.slots[1] = target
+    elseif row.where == "overflow" then
+        inv.GetOverflowContainer = function()
+            return { GetNumSlots = function() return 1 end, GetItemInSlot = function() return target end }
+        end
+    elseif row.where == "cursor" then inv.active = target
+    elseif row.where == "merge" then existing.count = existing.count + 1; target:Remove() end
+    c:succeed(); c:tick(.1)
+    assert(job.completed == (row.foreign and 0 or 1), "native pickup must finish when the owner's acquired item replicates")
+    if row.foreign then c:tick(1.1); assert(job.skipped == 1, "a disappearing target is not an owned pickup") end
+    c:tick(); assert(not c.executor.current and c:listener_count() == 0)
+end)
+
 T.case("satisfied target finishes a bounded application intent", function()
     local c, inv = context(true)
     c.params.repeat_count = 5
@@ -407,6 +730,33 @@ T.each("consuming an application target", { "immediate", "late removal" }, funct
     c:tick(); c:tick()
     assert(job.applied == 1 and job.completed == 1 and job.skipped == 0 and #c.calls == 1 and not c.executor.current,
         "replacement of a consumed target finishes at its confirmed count without seeking a new target")
+end)
+
+T.case("shared state selection and queued state changes", function()
+    local c = context()
+    local a = c:entity("MINE", "left", false, "marbleshrub")
+    local b = c:entity("MINE", "left", false, "marbleshrub")
+    for i, target in ipairs({ a, b }) do
+        target.phase = i == 1 and "idle_tall" or "idle_short"
+        target.AnimState = { GetBuild = function() return "marbleshrub" end,
+            IsCurrentAnimation = function(_, name) return target.phase == name end }
+    end
+    assert(c.work:start(a))
+    assert(#c.executor.current.entries == 1, "nearby work shares the double-click phase matcher")
+    c.executor:cancel("manual")
+    assert(c.work:enqueue({ { target = a }, { target = b } }))
+    local job = c.executor.current
+    assert(#job.entries == 2, "explicit mixed selections keep their separate phases")
+    a.phase = "idle_short"
+    c:tick()
+    assert(job.skipped == 1 and #c.calls == 0, "a changed queued target is skipped before tool use")
+    c:tick()
+    assert(#c.calls == 1 and c.pending.target == b)
+    c:succeed()
+    b.phase = "hit_tall"
+    c:tick()
+    assert(job.skipped == 1, "a started action keeps its own completion policy")
+    c.executor:cancel("manual")
 end)
 
 T.case("mixed_buttons", function()
@@ -569,6 +919,32 @@ T.case("transient_picker_outage", function()
     c:tick();assert(not c.forgotten[target])
     picker.GetLeftClickActions=left;c:tick();assert(#c.calls==2)
     c:finish_target(target)
+end)
+
+T.case("beaver continues after the native gnaw guard releases", function()
+    local c = context()
+    local target, tags = c:entity("CHOP"), { idle = true }
+    c.player.tags.beaver = true
+    local source = T.source("stategraphs/SGwilson")
+    local start = assert(source:find("ActionHandler(ACTIONS.CHOP,", 1, true))
+    local handler = T.eval("return ActionHandler" .. assert(source:sub(start):match("^ActionHandler(%b())")), {
+        ACTIONS = c.G.ACTIONS, ActionHandler = function(_, fn) return { deststate = fn } end,
+    })
+    c.player.sg = { HasStateTag = function(_, tag) return tags[tag] end,
+        RemoveStateTag = function(_, tag) tags[tag] = nil end, IsListeningForEvent = function() return false end,
+        sg = { actionhandlers = { [c.G.ACTIONS.CHOP] = handler } } }
+    assert(c.work:start(target)); c:tick()
+    tags.idle, tags.working, tags.gnawing = nil, true, true
+    c:succeed(); c:tick(.2)
+    assert(#c.calls == 1, "success before guard release does not interrupt gnawing")
+    local gnaw = assert(source:match('State%s*(%b{})', assert(source:find('name = "gnaw"', 1, true)) - 20))
+    local release = assert(gnaw:match("TimeEvent%(7 %* FRAMES, (function%b().-end)%)"))
+    T.eval("return " .. release)(c.player)
+    c:tick(1 / 30)
+    assert(#c.calls == 2, "released gnaw can continue before the former 0.3 second delay")
+    c:tick(.2)
+    assert(#c.calls == 2, "each continuation still requires its own completion evidence")
+    c.executor:cancel()
 end)
 
 T.case("full_queue_budget", function()
@@ -1000,7 +1376,8 @@ T.each("area_tool", { "SCYTHE", "NABBAG" }, function(id)
     assert(c.work:enqueue({ { target = target, button = "right" } }))
     c:tick(); c:tick(); assert(c.pending.action.id == id)
     c:finish_target(target); c:tick()
-    assert(#c.calls == 1 and not c.executor.current and not Rules.policies.ATTACK)
+    assert(#c.calls == 1 and not c.executor.current)
+    assert(not Rules.accept({ action = { id = "ATTACK" }, target = target }, c.player), "area tools do not enable combat")
 end)
 
 T.each("stump_cleanup_permission", { false, true }, function(enabled)
@@ -1358,6 +1735,108 @@ T.case("final catch releases capacity before queuing its fish", function()
     assert(job.entries[1].target == fish, "a finished pond gives its slot to the newly caught fish")
     c:tick(); assert(c.pending.target == fish)
     c.executor:cancel("manual")
+end)
+
+T.each("native spiderhole replacement", { false, true }, function(remote)
+    T.each("replacement evidence", { "immediate", "late", "existing", "ambiguous", "platform", "cancel", "no receipt" }, function(outcome)
+        local c, inv = context(remote)
+        local source = c:entity("MINE", "left", true, "spiderhole")
+        local existing = c:entity("MINE", "left", true, "spiderhole_rock")
+        existing.x = source.x
+        inv.hands = c:item("pickaxe", "MINE", true)
+        assert(c.work:start(source)); local job = c.executor.current
+        c:tick(); c.player.x = source.x
+        local fresh
+        local function spawn(prefab)
+            assert(prefab == "spiderhole_rock")
+            local rock = c:entity("MINE", "left", true, prefab)
+            rock.x = source.x
+            return rock
+        end
+        local finish = T.eval(assert(T.source("prefabs/spiderhole"):match("local function spawner_onfinish%b().-\nend"))
+            .. "\nreturn spawner_onfinish", { SpawnPrefab = function(prefab) fresh = spawn(prefab); return fresh end })
+        if outcome ~= "no receipt" then c:succeed(); inv.hands.usage = .9 end
+        finish(source, c.player)
+        if outcome == "late" or outcome == "existing" or outcome == "cancel" then fresh.visible = false
+        elseif outcome == "ambiguous" then spawn("spiderhole_rock")
+        elseif outcome == "platform" then fresh.platform = T.entity() end
+        c:tick()
+        if outcome == "late" then
+            c:tick(4); assert(#c.calls == 1 and c.executor.current)
+            fresh.visible = true
+            c:tick()
+        elseif outcome == "cancel" then
+            c.executor:cancel("manual"); fresh.visible = true; c:tick(9)
+        end
+        if outcome == "immediate" or outcome == "late" then
+            c:tick()
+            assert(c.pending.target == fresh and c.pending.action.id == "MINE")
+            c:finish_target(fresh); c:tick()
+            assert(job.completed == 2 and job.skipped == 0 and not c.executor.current)
+        else
+            c:tick(9); c:tick()
+            assert(#c.calls == 1 and not c.executor.current, "ambiguous or unobserved replacements cannot acquire work")
+            if outcome == "no receipt" then assert(job.completed == 0 and job.skipped == 1)
+            elseif outcome ~= "cancel" then assert(job.completed == 1 and job.followup_skipped == 1) end
+        end
+        for _, action in ipairs(c.calls) do assert(action.target ~= existing, "existing rocks are never successors") end
+    end)
+end)
+
+T.each("continuous consumption has explicit stops", { false, true }, function(remote)
+    T.each("stop", { "filled", "depleted", "rejected", "manual", "timeout" }, function(stop)
+        local c, inv = context(remote)
+        c.params.repeat_count = 0
+        local target = c:entity("ADDFUEL", "left", true)
+        inv.active = c:item("twigs", "ADDFUEL"); inv.active.count = 4
+        assert(c.work:start(target)); local job = c.executor.current
+        for use = 1, 2 do
+            c:tick(); assert(#c.calls == use)
+            c:succeed(); inv.active.count = inv.active.count - 1; c:tick()
+        end
+        assert(job.applied == 2 and c.executor.current)
+        if stop == "filled" then target.active = false
+        elseif stop == "depleted" then inv.active.removed, inv.active = true, nil
+        elseif stop == "manual" then c.executor:cancel("manual")
+        elseif stop == "timeout" then c:tick(600)
+        else
+            c:tick()
+            if remote then c:emit("actionfailed", nil, { action = c.pending }) else c.pending.failure() end
+        end
+        c:tick(); c:tick()
+        assert(not c.executor.current and #c.calls == (stop == "rejected" and 3 or 2) and job.applied == 2)
+        if stop == "filled" then assert(job.completed == 1) end
+    end)
+end)
+
+T.each("state changes during approach cancel the old request", { false, true }, function(remote)
+    local c, inv = context(remote)
+    local tree = c:entity("CHOP", "left", true, "evergreen")
+    tree.x, tree.phase = 20, "idle_tall"
+    tree.AnimState = { GetBuild = function() return "evergreen_new" end,
+        IsCurrentAnimation = function(_, name) return tree.phase == name end }
+    inv.hands = c:item("axe", "CHOP", true)
+    assert(c.work:start(tree)); local job = c.executor.current
+    c:tick(); assert(#c.calls == 1)
+    tree.phase = "idle_short"
+    c:tick(); c:tick()
+    assert(job.completed == 0 and job.skipped == 1 and not c.executor.current and not c.player:GetBufferedAction())
+    assert(c.executor.last_result.reasons.changed == 1 and c.executor.last_result.remaining == 0)
+end)
+
+T.case("ambiguous replacement stays skipped during loot collection", function()
+    local c, inv = context(true)
+    c.config.queue_collect = true
+    local source = c:entity("MINE", "left", true, "spiderhole")
+    inv.hands = c:item("pickaxe", "MINE", true)
+    assert(c.work:start(source)); local job = c.executor.current
+    c:tick(); c.player.x = source.x
+    c:succeed(); inv.hands.usage = .9; source:Remove()
+    local a, b = c:entity("MINE", "left", true, "spiderhole_rock"), c:entity("MINE", "left", true, "spiderhole_rock")
+    a.x, b.x = source.x, source.x
+    c:tick(.1); b:Remove()
+    c:tick(1.1); c:tick()
+    assert(not c.executor.current and #c.calls == 1 and job.completed == 1 and job.followup_skipped == 1)
 end)
 
 T.done()

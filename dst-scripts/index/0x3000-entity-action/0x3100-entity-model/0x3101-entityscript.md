@@ -18,6 +18,7 @@ Gameplay rules usually live in components, prefab initialization functions, Stat
 | `scripts/entityscript.lua` | `SetStateGraph` | Load `stategraphs/<name>` and create a `StateGraphInstance`. |
 | `scripts/entityscript.lua` | `SetBrain` | Store `brainfn` and start it when sleep state allows. |
 | `scripts/entityscript.lua` | `GetPersistData` | Gather component and entity persistence data. |
+| `scripts/entityscript.lua` | `GetWetMultiplier`, `GetIsWet` | Check entity validity before reading wetness. |
 
 ### `0x31012111` Primary Anchor
 
@@ -48,12 +49,12 @@ flowchart TD
 
 ## `0x31014111` Runtime Containers
 
-- `components` stores server component instances.
+- `components` stores local component instances, including client components such as `playercontroller`.
 - `replica._` stores replica components, while the outer `replica` table uses a metatable to validate access.
 - `event_listeners` records listeners of this entity.
 - `event_listening` records sources this entity listens to.
 - `worldstatewatching` records world state subscriptions whose actual registry is `TheWorld.components.worldstate`.
-- `pendingtasks` belongs to the entity GUID and is cleared by `CancelAllPendingTasks` during `Remove`.
+- `pendingtasks` stores the entity's scheduled task handles and is cleared by `CancelAllPendingTasks` during `Remove`.
 
 ## `0x31014121` StateGraph and Brain
 
@@ -70,12 +71,21 @@ flowchart TD
 - Component `OnLoad` methods run before the entity `OnLoad`.
 - `LoadPostPass` is a separate second phase outside the main `SetPersistData` loop.
 
+## `0x31014141` Wetness and Entity Validity
+
+`GetWetMultiplier` returns `0` for an invalid entity before reading tags, components, or world state.
+It remains a server-only helper because its later branches read authoritative components.
+`GetIsWet` returns `false` for an invalid entity and supports clients through replica state.
+These guards do not make other entity methods safe after removal.
+
 ## `0x31015100` Verification
 
 ~~~bash
 rg -n "function CreateEntity|EntityScript = Class|SetStateGraph|SetBrain|GetPersistData|SetPersistData" \
   scripts/entityscript.lua \
   scripts/mainfunctions.lua
+rg -n "GetWetMultiplier|GetIsWet|IsValid" scripts/entityscript.lua
+rg -n 'AddComponent\("playercontroller"\)' scripts/prefabs/player_common.lua
 ~~~
 
 ### `0x31015111` Minimal Trace

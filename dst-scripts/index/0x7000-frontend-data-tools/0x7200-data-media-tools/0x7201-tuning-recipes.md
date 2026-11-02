@@ -44,7 +44,7 @@ Verify storage in `AllRecipes[name]` and the incrementing `rpc_id` assigned to o
 
 `TUNING`, `TUNING_MODIFIERS`, and `ORIGINAL_TUNING` are initialized near the top of `scripts/tuning.lua`.
 `Tune()` rebuilds `TUNING`, and the file installs a metatable at the end.
-A modifier participates through `__index` only after its key is set to nil.
+`AddTuningModifier` saves the base value and sets the key to nil so reads go through `__index`.
 
 ## `0x72013000` Data Flow
 
@@ -115,6 +115,16 @@ Carnival golf cutout items share `CUTOUT_SMART_RADIUS` instead of separate radiu
 `trap_fumarole.lua` uses that value to scale `TRAP_FUMAROLE_TEMP_MODIFIER` linearly.
 `standardcomponents.lua` applies the same mechanism separately to `FUMAROLETOOL_TEMP_MODIFIER`.
 
+## `0x72014511` Arena and Reward Tuning
+
+`SHROUDEN_ATTACK_PERIOD` and `SHROUDEN_PORTAL_CD` contain one value per threat level.
+`prefabs/shrouden.lua` selects the attack period, while `stategraphs/SGshrouden.lua` selects the portal cooldown.
+`KING_CANE_CORRUPTION` maps gem types to corruption increments consumed by `prefabs/king_cane.lua`.
+The cane also reads corruption thresholds to select its effects, shadow-item tag, and sanity drain.
+`QUEEN_TORCH_RADIUS_SQ` bounds `FindClosestQueenTorchAtXZ` when it searches registered torch lights.
+`WORM_BOSS_RITUAL_WAVE_TIME_MULT` reaches the hound scheduler through `atriumritualorgantracker`.
+Trace these tables to their consumers before treating a numeric change as an isolated balance change.
+
 ## `0x72015100` Verification
 
 ~~~bash
@@ -146,6 +156,13 @@ rg -n "MakeRecipeFromMenu|MakeRecipeAtPoint|BufferBuild|rpc_id" \
   scripts/components/builder_replica.lua \
   scripts/components/playercontroller.lua \
   scripts/networkclientrpc.lua
+
+rg -n "SHROUDEN_ATTACK_PERIOD|SHROUDEN_PORTAL_CD|KING_CANE_CORRUPTION|QUEEN_TORCH_RADIUS_SQ" \
+  scripts/tuning.lua scripts/prefabs/shrouden.lua scripts/stategraphs/SGshrouden.lua \
+  scripts/prefabs/king_cane.lua scripts/prefabs/queen_torch.lua
+
+rg -n "WORM_BOSS_RITUAL_WAVE_TIME_MULT|hounded_forceplannewattack|multtimetoattack" \
+  scripts/tuning.lua scripts/components/atriumritualorgantracker.lua scripts/components/hounded.lua
 ~~~
 
 ### `0x72015111` Minimal Trace

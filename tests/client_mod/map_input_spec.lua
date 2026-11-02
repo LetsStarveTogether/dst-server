@@ -96,7 +96,7 @@ T.case("native map input", function()
         local callback
         MapInput.install({ GLOBAL = G, AddClassPostConstruct = function(name, fn)
             assert(name == "screens/mapscreen"); callback = fn
-        end }, function() return state.gone and nil or ctx end)
+        end }, function() return state.gone and nil or ctx end, require("fieldkit/ui/map_overlay").new)
         function state:new_screen()
             local screen = setmetatable({ owner = player, shown = true, decorationdata = {}, hover = { Hide = function() end }, minimap = {
                 centerreticle = { Hide = function() end },

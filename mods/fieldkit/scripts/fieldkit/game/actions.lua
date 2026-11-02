@@ -108,6 +108,18 @@ function M.arrival(ctx, action)
     return math.max(arrival, definition.mindistance or 0)
 end
 
+function M.in_range(ctx, action)
+    local target, definition = action.target, action.action
+    if not target or not target:IsValid() then return end
+    if definition.customarrivecheck then
+        local destination = { GetPoint = function() return target.Transform:GetWorldPosition() end }
+        local arrived, invalid = definition.customarrivecheck(ctx.player, destination, action)
+        return arrived == true and not invalid
+    elseif definition.rangecheckfn then
+        return definition.rangecheckfn(ctx.player, target) == true
+    end
+end
+
 function M.query(ctx, fn, rotation)
     local previous = ctx._queue_query
     local controller = ctx.player.components.playercontroller
@@ -329,12 +341,11 @@ function M.dispatch(ctx, action, button)
             else return end
             local target = action.target
             local valid_target = target and target:IsValid()
+            local in_range = button == "self" or M.in_range(ctx, action)
             ticket.attempt = { at = G.GetTime(), position = player:GetPosition(), identified = data ~= nil,
                 target_position = valid_target and target:GetPosition() or nil,
-                arrival = valid_target and data == nil and not action.action.rangecheckfn and M.arrival(ctx, action) or nil }
-            if valid_target and action.action.rangecheckfn then
-                ticket.attempt.in_range = action.action.rangecheckfn(player, target) == true
-            end
+                in_range = in_range,
+                arrival = valid_target and data == nil and in_range == nil and M.arrival(ctx, action) or nil }
         end)
         local function send()
             if ticket.closed or ticket.sent then return end
@@ -342,6 +353,12 @@ function M.dispatch(ctx, action, button)
                 ticket.sent = true
                 G.SendRPCToServer(G.RPC.ControllerUseItemOnItemFromInvTile,
                     action.action.code, action.target, action.invobject, action.action.mod_name)
+                return
+            end
+            if button == "self" then
+                ticket.sent = true
+                G.SendRPCToServer(G.RPC.ControllerUseItemOnSelfFromInvTile,
+                    action.action.code, action.invobject, action.action.mod_name)
                 return
             end
             local point = action:GetActionPoint() or (action.target and action.target:GetPosition())
@@ -365,7 +382,7 @@ function M.dispatch(ctx, action, button)
         if action.action ~= G.ACTIONS.WALKTO then action.preview_cb = send end
     end
     local ok, err
-    if button == "inventory" then
+    if button == "inventory" or button == "self" then
         -- Match native inventory use without DoAction's automatic hand-equipment switching.
         ok, err = pcall(function()
             if controller.ismastersim then controller.locomotor:PushAction(action, true)

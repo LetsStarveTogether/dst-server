@@ -57,6 +57,180 @@ T.case("visual contracts", function()
         return state
     end
 
+    T.case("visual restoration transforms", function()
+        for _, userdata in ipairs({ false, true }) do
+            local state = fixture(userdata)
+            local G, player = state.G, state.player
+            local modifier, calls = nil, 0
+            local cube = { SetDistortionModifier = function(_, value) modifier = value end }
+            G.TheWorld.components.colourcube = cube
+            G.Profile = { GetDistortionModifier = function() return 0.8 end }
+            local config = { reduce_distortion = true, colour_filter = "neutral_all", snow_overlay = 0 }
+            local ctx = state:context(config)
+            Visual.new(ctx)
+            local pp, map = G.PostProcessor, G.TheWorld.Map
+            map:SetOverlayTexture(SNOW)
+            local lut, lerp, distortion = pp.SetColourCubeData, map.SetOverlayLerp, cube.SetDistortionModifier
+            local later_lut = function(object, index, source, destination, ...)
+                calls = calls + 1
+                return lut(object, index, source .. ":later", destination .. ":later", ...)
+            end
+            local later_lerp = function(object, value, ...)
+                calls = calls + 1
+                return lerp(object, value * 0.5, ...)
+            end
+            local later_distortion = function(object, value, ...)
+                calls = calls + 1
+                return distortion(object, value * 0.5, ...)
+            end
+            local pp_owner = userdata and getmetatable(pp).__index or pp
+            local map_owner = userdata and getmetatable(map).__index or map
+            pp_owner.SetColourCubeData, map_owner.SetOverlayLerp = later_lut, later_lerp
+            cube.SetDistortionModifier = later_distortion
+            local function write()
+                cube:SetDistortionModifier(0.8)
+                pp:SetColourCubeData(2, "source", "destination", "extension", nil)
+                map:SetOverlayLerp(2.4)
+            end
+            local function restored()
+                assert(modifier == 0.4, "restore must not repeat the later distortion transform")
+                assert(state.level == 1.2, "restore must not repeat the later snow transform")
+                assert(state.calls[2][1] == "source:later" and state.calls[2][2] == "destination:later",
+                    "restore must not repeat the later texture transform")
+                assert(state.calls[2].n == 2 and state.calls[2][3] == "extension")
+            end
+            write()
+            assert(modifier == 0.1 and state.level == 0 and state.calls[2][1] == IDENTITY)
+            local before = calls
+            ctx.scope:close()
+            restored()
+            assert(calls == before, "cached arguments already passed through the later wrappers")
+            assert(pp.SetColourCubeData == later_lut and map.SetOverlayLerp == later_lerp)
+            assert(cube.SetDistortionModifier == later_distortion)
+            write()
+            restored()
+            assert(calls == before + 3, "new requests still use the public wrapper chain")
+
+            -- A subsequent scope sees these wrappers before its own distortion wrapper.
+            ctx = state:context(config)
+            local old = Visual.new(ctx)
+            assert(modifier == 0.1 and state.level == 0 and state.calls[2][1] == IDENTITY)
+            player.HUD = {}
+            local nextctx = state:context(config)
+            local current = Visual.new(nextctx)
+            ctx.scope:close()
+            assert(old.scope.closed and not current.scope.closed)
+            assert(modifier == 0.1 and state.level == 0 and state.calls[2][1] == IDENTITY)
+            nextctx.scope:close()
+            restored()
+
+            ctx = state:context(config)
+            Visual.new(ctx)
+            local newworld = state:world()
+            newworld.Map:SetOverlayTexture(SNOW)
+            newworld.Map:SetOverlayLerp(2.4)
+            local expected = userdata and 1.2 or 2.4
+            assert(state.level == expected and state.calls[2][1] == "source2:later")
+            ctx.scope:close()
+            assert(state.level == expected and state.calls[2][1] == "source2:later")
+            nextctx = state:context(config)
+            Visual.new(nextctx)
+            assert(state.level == 0 and state.calls[2][1] == IDENTITY)
+            nextctx.scope:close()
+            assert(state.level == expected and state.calls[2][1] == "source2:later" and #state.reports == 0)
+        end
+    end)
+
+    T.case("native line distortion", function()
+        local calls, modifier = {}, 0.8
+        local pp = newproxy(true)
+        getmetatable(pp).__index = {
+            SetUniformVariable = function(_, name, ...) calls[name] = { ... } end,
+            EnablePostProcessEffect = function(_, name, enabled) calls[name] = enabled end,
+        }
+        local world, player = T.entity(), T.entity({ HUD = {} })
+        local G = setmetatable({
+            PostProcessor = pp, TheWorld = world, ThePlayer = player,
+            UniformVariables = { LINEDISTORT_LINE_CORRECTED_PARAMS = "line",
+                LINEDISTORT_LINE_DIR_PARAMS = "direction", LINEDISTORT_DISTORTION_PARAMS = "distortion" },
+            PostProcessorEffects = { ColourCube = "cube", ColourCubeLineDistort = "line_effect" },
+            Profile = { GetDistortionModifier = function() return modifier end },
+            TheNet = { IsDedicated = function() return false end },
+            hash = function(value) return value end,
+            require = function(name) assert(name == "easing"); return T.native(name) end,
+        }, { __index = _G })
+        T.native("postprocesseffects", G)
+        local native_push = G.PushLineDistortion
+        local function context(enabled)
+            local ctx = { G = G, player = player, hud = player.HUD, config = { reduce_distortion = enabled },
+                scope = Scope.new(player, error), report = function(_, err) error(err) end }
+            Visual.new(ctx)
+            return ctx
+        end
+        local guid = G.GetNextVisualEffectGUID()
+        local function push(id)
+            return G.PushLineDistortion(id or guid, 0.1, 0.2, 0.6, 0.7, 2, 0.2, 0.04)
+        end
+        local function amount(width, displacement)
+            assert(math.abs(calls.distortion[1] - width) < 0.000001,
+                "line width must follow the active Fieldkit setting")
+            assert(math.abs(calls.distortion[2] - displacement) < 0.000001,
+                "line displacement must follow the active Fieldkit setting")
+        end
+        local ctx = context(false)
+        assert(G.PushLineDistortion == native_push and push())
+        amount(0.16, 0.032)
+        ctx.scope:close()
+        ctx = context(true)
+        assert(push())
+        amount(0.04, 0.008)
+        assert(modifier == 0.8 and calls.line[1] == 0.2 and calls.line[2] == 0.2)
+        assert(calls.line[3] == 1.2 and calls.line[4] == 0.7 and calls.direction[3] == 2)
+        modifier = 0.6
+        assert(push())
+        amount(0.03, 0.006)
+        local previous = calls.distortion
+        assert(not push(guid - 1) and calls.distortion == previous)
+        G.ClearLineDistortion(guid - 1)
+        assert(calls.distortion == previous)
+        G.ClearLineDistortion(guid)
+        amount(0, 0)
+        assert(calls.cube and not calls.line_effect)
+        modifier = 0
+        assert(not push())
+        amount(0, 0)
+        assert(calls.cube and not calls.line_effect)
+        modifier = 0.6
+        G.ThePlayer = nil
+        assert(push())
+        amount(0.12, 0.024)
+        G.ThePlayer = player
+        player.HUD = {}
+        assert(push())
+        amount(0.12, 0.024)
+        player.HUD = ctx.hud
+        G.TheWorld = T.entity()
+        assert(push())
+        amount(0.12, 0.024)
+        G.TheWorld = world
+
+        local delegated, later_calls = G.PushLineDistortion, 0
+        local later = function(id, x1, y1, x2, y2, aspect, width, displacement, ...)
+            later_calls = later_calls + 1
+            return delegated(id, x1, y1, x2, y2, aspect, width * 0.5, displacement * 0.5, ...), nil, "later"
+        end
+        G.PushLineDistortion = later
+        local nextctx = context(true)
+        ctx.scope:close()
+        local ok, empty, extension = push()
+        assert(ok and empty == nil and extension == "later" and later_calls == 1)
+        amount(0.015, 0.003)
+        nextctx.scope:close()
+        assert(G.PushLineDistortion == later and push())
+        amount(0.06, 0.012)
+        assert(later_calls == 2 and modifier == 0.6)
+    end)
+
     local state = fixture()
     local G, world = state.G, state.G.TheWorld
     local ctx = state:context({ colour_filter = "neutral_effects", snow_overlay = 0.6 })
@@ -78,7 +252,7 @@ T.case("visual contracts", function()
     world.Map:SetOverlayTexture(SNOW)
     world.Map:SetOverlayLerp(2.7)
 
-    -- Later mods may delegate to our observer: restore through them, without losing their chain.
+    -- Restoration starts at our observer; later mods still receive new upstream requests.
     local lut, lerp = G.PostProcessor.SetColourCubeData, world.Map.SetOverlayLerp
     local later_calls = 0
     local later_lut = function(...) later_calls = later_calls + 1; return lut(...) end
@@ -86,8 +260,11 @@ T.case("visual contracts", function()
     G.PostProcessor.SetColourCubeData, world.Map.SetOverlayLerp = later_lut, later_lerp
     ctx.scope:close()
     assert(state.calls[2][1] == "new-source" and state.calls[2][2] == "new-dest")
-    assert(state.level == 2.7 and later_calls >= 4)
+    assert(state.level == 2.7 and later_calls == 0)
     assert(G.PostProcessor.SetColourCubeData == later_lut and world.Map.SetOverlayLerp == later_lerp)
+    G.PostProcessor:SetColourCubeData(2, "new-source", "new-dest")
+    world.Map:SetOverlayLerp(2.7)
+    assert(later_calls == 2)
 
     -- Replacing the active owner in the same world closes the old visual scope exactly once.
     ctx = state:context({ colour_filter = "neutral_all", snow_overlay = 0 })

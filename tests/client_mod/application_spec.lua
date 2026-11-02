@@ -20,6 +20,7 @@ T.case("application ownership", function()
         return { busy = function() return false end }
     end }
     package.loaded["fieldkit/ui/announcement_controls"] = { install = function() end, attach = function() end }
+    package.loaded["fieldkit/ui/indicators"] = { new = function() return {} end }
     package.loaded["fieldkit/ui/minimap"] = { new = function()
         return { handle_control = function() return false end, consumes_pointer = function() return false end }
     end }
@@ -42,7 +43,7 @@ T.case("application ownership", function()
     package.loaded["fieldkit/ui/panel"] = function(ctx, intent) return screen(ctx, intent) end
     package.loaded["fieldkit/ui/emote_wheel"] = function(ctx, hold_key) return screen(ctx, nil, hold_key) end
 
-    local function fixture()
+    local function fixture(cancel_key)
         local state = { now = 0, cancelled = {}, native_calls = 0, reports = {} }
         local player, handlers = T.entity(), T.handlers()
         function player:HasTag(tag) return tag == "playerghost" and state.ghost end
@@ -50,6 +51,7 @@ T.case("application ownership", function()
         function state:emit(source, ...) source:PushEvent(...) end
         local function handler(...) return handlers:add(...) end
         function state:input(...) handlers:dispatch(...) end
+        function state:press(key) self:input("keydown", key); self:input("key", key) end
         local hud = widget("HUD")
         player.HUD = hud
         local G = { ThePlayer = player, TheWorld = T.events({ Map = { GetPlatformAtPoint = function() return state.platform end } }),
@@ -75,6 +77,7 @@ T.case("application ownership", function()
             "CONTROL_CONTROLLER_ALTACTION", "CONTROL_CONTROLLER_ATTACK", "CONTROL_INVENTORY_USEONSELF",
             "CONTROL_INVENTORY_USEONSCENE", "CONTROL_INVENTORY_DROP" }) do G[name] = index end
         G.TheFrontEnd = { active = hud, GetActiveScreen = function(self) return self.active end,
+            GetFocusWidget = function() return state.focused_widget end,
             PushScreen = function(self, screen) self.active:OnBecomeInactive(); self.active = screen end }
         function hud:HasInputFocus() return G.TheFrontEnd.active ~= self end
         function hud:OnBecomeInactive()
@@ -103,9 +106,15 @@ T.case("application ownership", function()
         player.replica.inventory = { GetActiveItem = function() return state.cursor_item end,
             classified = { IsBusy = function() return false end } }
         state.original_control, state.original_inactive = controller.OnControl, hud.OnBecomeInactive
-        state.config = { language = "en", text_scale = 1, panel_key = 287, cancel_key = 288,
+        state.config = { language = "en", text_scale = 1, panel_key = 287, cancel_key = cancel_key or 288,
             gesture_key = 289, cooking_key = 291, gestures = true }
-        state.ctx = assert(require("fieldkit/application").attach(G, player, state.config, {}))
+        local schema = {}
+        setfenv(assert(loadfile("mods/fieldkit/modinfo.lua")), schema)()
+        local keys = require("fieldkit/core/config").read(schema.configuration_options, function(name) return state.config[name] end, "en")
+        state.config.key_defaults, state.config.key_options = keys.key_defaults, keys.key_options
+        local store = { ready = true, get = function() end, set = function() return true end,
+            on_ready = function(_, fn) fn(); return function() end end }
+        state.ctx = assert(require("fieldkit/application").attach(G, player, state.config, store))
         state.ctx.placement.context = function() return state.preview end
         state.G, state.player, state.controller, state.hud = G, player, controller, hud
         function state:start()
@@ -170,20 +179,20 @@ T.case("application ownership", function()
     state.target, state.point = {}, { x = 7, y = 3, z = 9 }
     local preview = { rotation = 37 }
     state.preview = preview
-    state:input("key", 287)
+    state:press(287)
     local screen = assert(state.ctx.screen)
     state.point.x = 99
     assert(screen.intent.target == state.target and screen.intent.position:GetPosition().x == 7
         and screen.intent.position:GetPosition().y == 0)
     assert(screen.intent.placement == preview and state.preview == nil,
         "capture placement before native focus loss destroys its preview")
-    state:input("key", 288)
+    state:press(288)
     assert(screen.closed and not state.ctx.screen)
     state.controller_attached = true
     state.controller_target = { GetPosition = function() return { x = 4, y = 0, z = 5 } end }
-    state:input("key", 287)
+    state:press(287)
     assert(state.ctx.screen.intent.position:GetPosition().x == 4, "controller intent uses its selected target, not stale mouse coordinates")
-    state:input("key", 288)
+    state:press(288)
 
     local boat = T.entity({ x = 100, z = 50, rotation = 90, entity = {} })
     function boat.entity:WorldToLocalSpace(x, _, z)
@@ -195,14 +204,14 @@ T.case("application ownership", function()
         return boat.x + x * c - z * s, 0, boat.z + x * s + z * c
     end
     state.platform, state.point, state.controller_attached = boat, T.Vector3(101, 0, 52), false
-    state:input("key", 287)
+    state:press(287)
     boat.x, boat.rotation = 110, 180
     local captured = state.ctx.screen.intent.position
     assert(math.abs(captured:GetPosition().x - 108) < 1e-8 and math.abs(captured:GetPosition().z - 51) < 1e-8,
         "native captured menu points follow platform translation and rotation")
     boat:Remove()
     assert(captured:GetPosition() == nil, "losing a platform invalidates its menu point")
-    state:input("key", 288)
+    state:press(288)
     state.platform = nil
 
     -- Hold-open belongs to key-down; native Screen owns the matching release.
@@ -215,25 +224,72 @@ T.case("application ownership", function()
     assert(wheel.hold_key == 289 and not wheel.intent and not state.ctx.executor:is_running())
     state:input("keydown", 289)
     assert(state.ctx.screen == wheel and not wheel.closed, "key repeat does not toggle or replace a held wheel")
-    state:input("key", 288)
+    state:press(288)
     assert(wheel.closed and not wheel.commit)
     assert(state.ctx:open_emotes() and state.ctx.screen.hold_key == nil, "menu entry opens a non-held wheel")
-    state:input("key", 288)
+    state:press(288)
     state.G.TheFrontEnd.textProcessorWidget = {}
     state:input("keydown", 289)
-    state:input("key", 287)
+    state:press(287)
     assert(not state.ctx.screen, "tool keys do not interrupt an active text editor")
     state.G.TheFrontEnd.textProcessorWidget = nil
+
+    T.each("native text editing blocks tool shortcuts", { 118, 288 }, function(cancel_key)
+        local editing_state = fixture(cancel_key)
+        local ctx, input = editing_state.ctx, editing_state.G.TheInput
+        input.EnableDebugToggle, input.IsPasteKey = function() end, function() return false end
+        local TextEdit = T.native("widgets/textedit", {
+            IsSteamDeck = function() return false end, TheInput = input,
+            require = function(name) return package.loaded[name] or {} end,
+        })
+        local editor = setmetatable({ editing = false, force_edit = false, validrawkeys = {},
+            IsEnabled = function() return true end,
+            inst = { TextWidget = { ShowEditCursor = function() end },
+                TextEditWidget = { OnKeyDown = function() end, OnKeyUp = function() end } },
+        }, { __index = TextEdit })
+        editing_state.focused_widget = editor
+        editor:SetEditing(true)
+        editing_state.hud.modfocus = { fieldkit = { ground = true } }
+        local released = 0
+        ctx.ground_dock = { release_focus = function()
+            released = released + 1
+            editor:SetEditing(false)
+        end }
+        local raw_key = T.eval("local Input = {}\n"
+            .. assert(T.source("input"):match("function Input:OnRawKey%b().-\nend"))
+            .. "\nreturn Input.OnRawKey")
+        input.onkey = { HandleEvent = function(_, _, key, down)
+            assert(editor:OnRawKey(key, down), "native TextEdit consumes the raw key")
+        end }
+        input.onkeydown = { HandleEvent = function(_, key) editing_state:input("keydown", key) end }
+        input.onkeyup = { HandleEvent = function(_, key) editing_state:input("key", key) end }
+        ctx.params.auto_repair = true
+        assert(editing_state.G.TheFrontEnd.textProcessorWidget == nil)
+        raw_key(input, cancel_key, true)
+        raw_key(input, cancel_key, false)
+        assert(editor.editing and released == 0 and ctx.params.auto_repair,
+            "a non-forced text editor must not trigger the stop binding after native key consumption")
+        raw_key(input, editing_state.config.gesture_key, true)
+        assert(not ctx.screen, "focused editing also blocks key-down shortcuts")
+        editor:SetEditing(false)
+        local panel = require("fieldkit/ui/panel")(ctx)
+        ctx.screen = panel
+        raw_key(input, cancel_key, true)
+        raw_key(input, cancel_key, false)
+        assert(panel.closed and not ctx.screen and released == 1 and not ctx.params.auto_repair,
+            "stop still closes a non-editing panel even when HUD modfocus is set")
+        ctx.scope:close()
+    end)
 
     local cooking_calls = 0
     state.ctx.cooking.shortcut = function()
         cooking_calls = cooking_calls + 1
         return false, "No open or selected pot"
     end
-    state:input("key", 291)
+    state:press(291)
     assert(cooking_calls == 1 and state.ctx.message == "No open or selected pot")
     state.G.TheFrontEnd.textProcessorWidget = {}
-    state:input("key", 291)
+    state:press(291)
     assert(cooking_calls == 1, "cooking shortcut must not interrupt a text editor")
     state.G.TheFrontEnd.textProcessorWidget = nil
 
@@ -320,7 +376,7 @@ T.case("application ownership", function()
         for _, success in ipairs({ true, false }) do
             local reason = success and "Recipe remembered" or "Cooking unavailable"
             state.ctx.cooking.shortcut = function() return success, reason end
-            state:input("key", state.config.cooking_key)
+            state:press(state.config.cooking_key)
             assert(#messages == (success and 1 or 2) and messages[#messages] == reason)
         end
         state.ctx.scope:close()

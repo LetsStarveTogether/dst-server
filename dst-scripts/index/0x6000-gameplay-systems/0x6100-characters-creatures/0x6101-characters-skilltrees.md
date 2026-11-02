@@ -128,7 +128,8 @@ Find calls to `skilltreeupdater:IsActivated` to see whether a component, action,
 
 ## `0x61014110` Authoritative Player Components
 
-The master branch adds `locomotor`, `combat`, `inventory`, `health`, `hunger`, `sanity`, `builder`, and `eater`.
+The master branch adds `locomotor`, `combat`, `inventory`, `health`, `hunger`, `sanity`, and `builder`.
+It adds `eater` when `GetGameModeProperty("no_eating")` is false.
 Together they provide the player's basic world capabilities.
 
 ### `0x61014111` Fields to Check
@@ -165,6 +166,12 @@ rg -n "BuildAllData|SKILLTREE_CHARACTERS|CreateSkillTreeFor|ActivateSkill|Valida
 rg -n "SetSkillActivatedState|SendFromSkillTreeBlob" \
   scripts/components/skilltreeupdater.lua \
   scripts/networkclientrpc.lua
+
+rg -n "wilson_torch_7|special_action_toss|AddTag\\(\"torch\"" \
+  scripts/prefabs/wilson.lua \
+  scripts/prefabs/skilltree_wilson.lua \
+  scripts/prefabs/torch.lua \
+  scripts/prefabs/queen_torch.lua
 ~~~
 
 ### `0x61015110` Reading Order
@@ -176,5 +183,7 @@ Finally trace a skill through `skilltree_defs.lua`, its character skill file, `s
 #### `0x61015111` Minimal Trace
 
 Use `wilson_torch_7` as the sample.
-In `wilson.lua`, `skilltreeupdater:IsActivated` makes it affect a special right-click action.
+In `wilson.lua`, `GetPointSpecialActions` checks `skilltreeupdater:IsActivated("wilson_torch_7")` for right-click toss actions.
+The item must have both `torch` and `special_action_toss` tags.
+This includes qualifying torch prefabs such as `queen_torch`; the code does not require `useitem.prefab == "torch"`.
 This trace covers the character hook, skill data, and player action system.

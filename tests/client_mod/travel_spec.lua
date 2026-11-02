@@ -1450,4 +1450,174 @@ T.case("default route preferences use observed dangers and native road speed", f
     ctx.job:cancel("manual")
 end)
 
+local function fast_context()
+    local ctx = context("host")
+    ctx.params = require("fieldkit/core/parameters").new()
+    ctx.G.TUNING, ctx.G.GROUND_ROADWAYS = { BISHOP_TARGET_DIST = 4 }, { [1] = true }
+    ctx.G.TheSim = { FindEntities = function() return ctx.hazards or {} end,
+        GetScreenPos = function(_, x, _, z) return x, z + 50 end, GetScreenSize = function() return 100, 100 end }
+    ctx.G.TheWorld.Map.GetTileAtPoint = function() return 0 end
+    local locomotor = ctx.player.components.playercontroller.locomotor
+    locomotor.FasterOnRoad = function() return true end
+    locomotor.FasterOnCreep = function() return false end
+    locomotor.IsFasterOnGroundTile = function() return false end
+    return ctx
+end
+
+T.each("default long route keeps a safe direct candidate", { "navigation", "preview" }, function(mode)
+    local ctx = fast_context()
+    local function known(_, x, _, z) return x >= -64 and x <= 364 and math.abs(z) <= 128 end
+    ctx.G.TheWorld.Map.IsPassableAtPoint, ctx.player.CanSeePointOnMiniMap = known, known
+    local travel = Travel.new(ctx)
+    if mode == "preview" then
+        assert(travel:add_waypoint({ x = 300, z = 0 }))
+        for _ = 1, 40 do travel:update_preview() end
+    else
+        ctx.scope, ctx.travel = { closed = false }, travel
+        assert(require("fieldkit/game/map_input").request(ctx, { x = 300, z = 0 }, false))
+        for step = 0, 39 do
+            assert(ctx:step(step * .1) == "running")
+            if ctx.player.bufferedaction then break end
+        end
+        assert(ctx.player.bufferedaction, "a safe long route must not wait for the full search budget")
+    end
+    local snapshot, previous = travel:route_snapshot(), { x = 0, z = 0 }
+    assert(not snapshot.reason and #snapshot.path == 13 and snapshot.path[13].x == 300)
+    for _, point in ipairs(snapshot.path) do
+        assert(math.abs(point.x - previous.x) <= 24 and point.z == 0 and known(nil, point.x, 0, point.z))
+        previous = point
+    end
+    if mode == "preview" then assert(not ctx.player.bufferedaction and not ctx.job)
+    else ctx.job:cancel("manual") end
+end)
+
+T.case("bounded optimization still prefers a faster road to a clear line", function()
+    local ctx = fast_context()
+    ctx.G.TheWorld.Map.GetTileAtPoint = function(_, _, _, z) return z >= 3 and z <= 5 and 1 or 0 end
+    local travel = Travel.new(ctx)
+    assert(travel:walk({ x = 60, z = 0 }))
+    for step = 0, 39 do
+        assert(ctx:step(step * .1) == "running")
+        if ctx.player.bufferedaction then break end
+    end
+    assert(ctx.player.bufferedaction)
+    local road = false
+    for _, point in ipairs(travel:route_snapshot().path) do road = road or point.z >= 3 and point.z <= 5 end
+    assert(road, "a safe direct candidate must not bypass normal road optimization")
+    ctx.job:cancel("manual")
+end)
+
+T.case("safe direct corridor survives a grid with no reachable neighbours", function()
+    local ctx = fast_context()
+    local c = math.cos(math.pi / 6)
+    ctx.G.TheWorld.Pathfinder.IsClear = function(_, ax, _, az, bx, _, bz)
+        return math.abs(az * c - ax * .5) <= .6 and math.abs(bz * c - bx * .5) <= .6
+    end
+    assert(Travel.new(ctx):walk({ x = 60 * c, z = 30 }))
+    assert(ctx:step(0) == "running" and not ctx.player.bufferedaction)
+    assert(ctx:step(.1) == "running" and ctx.player.bufferedaction,
+        "an early grid no_path must retain the verified direct corridor")
+    ctx.job:cancel("manual")
+end)
+
+T.case("an invalidated direct candidate continues the existing search", function()
+    local ctx = fast_context()
+    local travel, Search = Travel.new(ctx), require("fieldkit/rules/path_search")
+    local create, searches = Search.new, 0
+    Search.new = function(...)
+        searches = searches + 1
+        return create(...)
+    end
+    assert(travel:walk({ x = 100, z = 0 }))
+    assert(ctx:step(0) == "running" and not ctx.player.bufferedaction)
+    local enemy = target(50, 0)
+    enemy.prefab, ctx.hazards = "bishop", { enemy }
+    for step = 1, 150 do
+        assert(ctx:step(step * .1) == "running")
+        if ctx.player.bufferedaction then break end
+    end
+    Search.new = create
+    assert(ctx.player.bufferedaction and searches == 1, "continue the original bounded search after the candidate becomes unsafe")
+    local Planner, previous = require("fieldkit/game/route_planner"), { x = 0, z = 0 }
+    local hazards = Planner.hazards(ctx, ctx.job.movement)
+    for _, point in ipairs(travel:route_snapshot().path) do
+        assert(Planner.safe(previous, point, hazards), "the expired candidate must not cross the newly observed hazard")
+        previous = point
+    end
+    ctx.job:cancel("manual")
+end)
+
+local function narrow_route()
+    local ctx = fast_context()
+    local state = pathfinder(ctx, { steps = { { x = 0, z = 1 }, { x = 30, z = 1 } } })
+    ctx.G.TheWorld.Pathfinder.IsClear = function(_, x, _, z, gx, _, gz)
+        return x == gx and (x == 0 or x == 30) and math.min(z, gz) >= 0 and math.max(z, gz) <= 1
+            or z == 1 and gz == 1 and math.min(x, gx) >= 0 and math.max(x, gx) <= 30
+    end
+    return ctx, state
+end
+
+T.each("fast grid failure tries native once with all safety checks",
+    { "success", "fog", "danger", "blocked", "no_path", "timeout", "rejected", "cancel" }, function(kind)
+    local ctx, state = narrow_route()
+    if kind == "fog" then
+        ctx.player.CanSeePointOnMiniMap = function(_, x) return x < 8 or x > 12 end
+    elseif kind == "danger" then
+        local enemy = target(15, 1)
+        enemy.prefab, ctx.hazards = "bishop", { enemy }
+    elseif kind == "blocked" then state.result.steps[2].z = 2
+    elseif kind == "rejected" then state.reject = true end
+    assert(Travel.new(ctx):walk({ x = 30, z = 0 }))
+    assert(ctx:step(0) == "running")
+    local result = ctx:step(.1)
+    assert(state.submitted == 1 and not ctx.player.bufferedaction)
+    if kind == "cancel" then
+        assert(result == "running")
+        ctx.job:cancel("manual")
+        assert(state.killed == 1 and ctx:step(.2) == "failed")
+    else
+        state.status = kind == "no_path" and 2 or kind == "timeout" and 0 or 1
+        result = ctx:step(kind == "timeout" and 11 or .2)
+        if kind == "success" then
+            assert(result == "running" and ctx.player.bufferedaction)
+        else
+            assert(result == "failed" and not ctx.player.bufferedaction,
+                "unsafe or unavailable native results must stop without restarting the grid")
+            assert(ctx:step(12) == "failed" and ctx:step(13) == "failed")
+        end
+        assert(state.killed == (kind == "rejected" and 0 or 1))
+        ctx.job:cancel("manual")
+    end
+    assert(state.submitted == 1, "a failed fallback must not submit another native search")
+end)
+
+T.case("preview never starts a native fallback", function()
+    local ctx, state = narrow_route()
+    local travel = Travel.new(ctx)
+    assert(travel:add_waypoint({ x = 30, z = 0 }))
+    for _ = 1, 5 do travel:update_preview() end
+    assert(travel:route_snapshot().reason == "no_path" and state.submitted == 0 and not ctx.player.bufferedaction)
+end)
+
+T.case("without a safe candidate the full grid budget precedes native recovery", function()
+    local ctx = fast_context()
+    local state = pathfinder(ctx, { steps = { { x = 0, z = 1 }, { x = 300, z = 1 } } })
+    ctx.G.TheWorld.Pathfinder.IsClear = function(_, ax, _, az, bx, _, bz)
+        if bx == ax then return ax ~= 150 or math.abs(az - 1) <= .3 and math.abs(bz - 1) <= .3 end
+        local t = (150 - ax) / (bx - ax)
+        return t < 0 or t > 1 or math.abs(az + t * (bz - az) - 1) <= .3
+    end
+    assert(Travel.new(ctx):walk({ x = 300, z = 0 }))
+    local ticks = 0
+    while state.submitted == 0 and ticks < 600 do
+        assert(ctx:step(ticks * .1) == "running")
+        assert(not ctx.player.bufferedaction)
+        ticks = ticks + 1
+    end
+    assert(ticks > 40 and state.submitted == 1, "a blocked direct route retains the full search before native recovery")
+    state.status = 1
+    assert(ctx:step(ticks * .1) == "running" and ctx.player.bufferedaction and state.killed == 1)
+    ctx.job:cancel("manual")
+end)
+
 T.done()

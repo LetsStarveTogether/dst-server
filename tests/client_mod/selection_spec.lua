@@ -63,7 +63,10 @@ T.case("selection ownership", function()
     function ctx.work:preview(target, button)
         return Actions.query(ctx, function()
             assert(not controller:IsControlPressed(G.CONTROL_FORCE_INSPECT), "selection modifiers must not turn work into inspect")
-            if target.action_id then return { action = { id = target.action_id }, button = button } end
+            if target.action_id then
+                local result = { action = { id = target.action_id }, target = target, button = button }
+                if require("fieldkit/rules/work").accept(result, player) then return result end
+            end
         end)
     end
     function ctx.work:revise() return true end
@@ -117,6 +120,26 @@ T.case("selection ownership", function()
     keys[G.KEY_CTRL] = nil
     a.action_id = "CHOP"
     selection:clear()
+
+    do
+        a.prefab, b.prefab = "marbleshrub", "marbleshrub"
+        a.phase, b.phase = "idle_tall", "idle_short"
+        for _, target in ipairs({ a, b }) do
+            target.AnimState = { GetBuild = function() return "marbleshrub" end,
+                IsCurrentAnimation = function(_, name) return target.phase == name end }
+        end
+        assert(selection:select_same(a) and selection.selected[a] and not selection.selected[b])
+        b.phase = "hit_tall"
+        assert(selection:select_same(a) and selection.selected[b], "same growth state survives animation changes")
+        selection:clear()
+        a.prefab, b.prefab, a.AnimState, b.AnimState = "tree", "tree", nil, nil
+        ctx.params.target_filter = "stumps"
+        a:AddTag("stump")
+        assert(selection:toggle(a) and not selection:toggle(b))
+        selection:clear()
+        a:RemoveTag("stump")
+        ctx.params.target_filter = "all_targets"
+    end
 
     -- First drag works without any earlier mouse-move event; live preview has no gameplay effect.
     current_target = nil

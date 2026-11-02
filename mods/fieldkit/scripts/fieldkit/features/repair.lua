@@ -1,4 +1,5 @@
 local Actions = require("fieldkit/game/actions")
+local ActionState = require("fieldkit/game/action_state")
 local Inventory = require("fieldkit/game/inventory")
 local M = {}
 local allowed = { ADDFUEL = true, ADDWETFUEL = true, REPAIR = true, SEW = true }
@@ -138,6 +139,12 @@ function M.new(ctx)
         save()
         return true
     end
+    local function idle()
+        local controller = player.components.playercontroller
+        return ActionState.idle(ctx) and not player:GetBufferedAction() and not player:HasTag("moving")
+            and not controller:IsAnyOfControlsPressed(G.CONTROL_PRIMARY, G.CONTROL_SECONDARY, G.CONTROL_ACTION,
+                G.CONTROL_ATTACK, G.CONTROL_MOVE_UP, G.CONTROL_MOVE_DOWN, G.CONTROL_MOVE_LEFT, G.CONTROL_MOVE_RIGHT)
+    end
     local function start(target, material, selected)
         local before, amount, uses
         local ticket, pending
@@ -157,7 +164,7 @@ function M.new(ctx)
             if not target_owned or not material_owned then return "failed" end
             if Inventory.busy(ctx, inv) or Inventory.busy(ctx, target_owner) or Inventory.busy(ctx, material_owner)
                 or not ctx.equipment:ready(self) then return "running" end
-            if player.components.playercontroller:IsBusy() then return "running" end
+            if not idle() then return "running" end
             before, amount, uses = Inventory.usage(target), Inventory.stack_size(material), Inventory.usage(material)
             if not before then return "failed" end
             local rule = rules[target.prefab]
@@ -194,10 +201,7 @@ function M.new(ctx)
         if not ctx.params.auto_repair or ctx.config.work == false then enabled = false; return end
         if not enabled then blocked = setmetatable({}, { __mode = "k" }); enabled = true end
         if ctx.executor.current or not ctx:ready() or inv:GetActiveItem() or Inventory.busy(ctx, inv) then return end
-        local controller = player.components.playercontroller
-        if controller:IsBusy() or player:GetBufferedAction() or player:HasTag("moving")
-            or controller:IsAnyOfControlsPressed(G.CONTROL_PRIMARY, G.CONTROL_SECONDARY, G.CONTROL_ACTION,
-                G.CONTROL_ATTACK, G.CONTROL_MOVE_UP, G.CONTROL_MOVE_DOWN, G.CONTROL_MOVE_LEFT, G.CONTROL_MOVE_RIGHT) then return end
+        if not idle() then return end
         local all = items()
         for _, entry in ipairs(all) do
             local target, rule = entry.item, rules[entry.item.prefab]

@@ -85,7 +85,27 @@ T.each("executor_finish", { "replaced", "focus", "timeout", "failed", "done", "i
         assert(not runner:is_running() and state.called == 1)
     end
     assert(state.cancelled[1] == (outcome == "invalid_state" and "failed" or outcome))
+    assert(runner.last_result.state == state.cancelled[1] and runner.last_result.name == current.name)
     assert(#state.reports == ((outcome == "failed" or outcome == "invalid_state") and 1 or 0))
+end)
+
+T.case("finished progress survives cancellation cleanup", function()
+    local Progress = require("fieldkit/core/progress")
+    local _, runner, make = executor()
+    local job = make()
+    job.entries, job.completed = { {}, {} }, 3
+    function job:remaining() return #self.entries end
+    Progress.skip(job, "changed")
+    job.cancel = function(self) self.entries = {}; self.reasons.changed = 99 end
+    assert(runner:start(job))
+    assert(Progress.snapshot(job).remaining == 2)
+    job.entries[3] = {}
+    runner:cancel("manual")
+    local result = runner.last_result
+    assert(result.remaining == 3 and result.completed == 3 and result.skipped == 1 and result.reasons.changed == 1)
+    assert(result.state == "manual" and result.entries == nil and result.cancel == nil)
+    runner:cancel()
+    assert(runner.last_result == result, "a second stop cannot erase the result")
 end)
 T.each("invalid_timeout", { 0, -1, 601, math.huge, 0 / 0 }, function(timeout)
     local _, runner, job = executor()

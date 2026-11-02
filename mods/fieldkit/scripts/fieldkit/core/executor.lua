@@ -1,5 +1,6 @@
 -- Features own their completion evidence. This owns exclusivity, bounds and cancellation.
 local M = {}
+local Progress = require("fieldkit/core/progress")
 
 function M.new(clock, ready, notify, report)
     local self = { current = nil, generation = 0 }
@@ -15,6 +16,11 @@ function M.new(clock, ready, notify, report)
         self.generation = self.generation + 1
         local job = self.current
         if not job then return end
+        local ok, result = pcall(Progress.snapshot, job)
+        if ok then
+            result.state, result.message = reason, message
+            self.last_result = result
+        else report(result) end
         self.current = nil
         self.finishing = job
         if job.cancel then
@@ -41,6 +47,7 @@ function M.new(clock, ready, notify, report)
         local input = job.input or { mode = "world" }
         if type(input) ~= "table" or input.mode ~= "world" and input.mode ~= "inventory"
             or input.cursor ~= nil and input.cursor ~= true and type(input.cursor) ~= "string"
+            or input.actor ~= nil and input.actor ~= "alive" and input.actor ~= "ghost"
             or input.placement ~= nil and type(input.placement) ~= "boolean" then
             return false, "Invalid input policy"
         end

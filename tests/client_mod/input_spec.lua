@@ -107,6 +107,20 @@ T.case("readiness", function()
     ctx.scope:close()
 end)
 
+T.case("ghost work has an explicit actor policy", function()
+    local ctx = fixture()
+    local living = { input = { mode = "world", actor = "alive" } }
+    local haunting = { input = { mode = "world", actor = "ghost" } }
+    assert(Input.ready(ctx, nil, living) and not Input.ready(ctx, nil, haunting))
+    ctx.player:AddTag("playerghost")
+    ctx.player.replica.health = { IsDead = function() return true end }
+    assert(not Input.ready(ctx) and not Input.ready(ctx, "inventory") and not Input.ready(ctx, nil, living))
+    assert(Input.ready(ctx, "work") and Input.ready(ctx, "ui") and Input.ready(ctx, nil, haunting))
+    ctx.G.IsPaused = function() return true end
+    assert(not Input.ready(ctx, "work"))
+    ctx.scope:close()
+end)
+
 T.case("cancelled take blocks new jobs but allows its owner to wait", function()
     local ctx = fixture()
     local Inventory = require("fieldkit/game/inventory")

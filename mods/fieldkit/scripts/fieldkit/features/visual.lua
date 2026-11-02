@@ -31,7 +31,7 @@ local function selected(mode, index)
 end
 
 local function replay(state, fn)
-    -- Calling the current entry point keeps wrappers installed by later mods in the chain.
+    -- Replay at our observer layer; later wrappers already transformed the cached arguments.
     -- Replays must not replace the latest upstream request with our transformed values.
     state.replaying = true
     local ok, err = pcall(fn)
@@ -45,7 +45,7 @@ local function observe_luts(state)
     if pp == state.pp or not owner or not pp.SetColourCubeData then return end
     state.pp = pp
     local original = pp.SetColourCubeData
-    owner.SetColourCubeData = function(object, index, source, destination, ...)
+    state.lut_observer = function(object, index, source, destination, ...)
         if object == state.pp then
             if not state.replaying then
                 if state.lut_world ~= state.G.TheWorld then
@@ -62,6 +62,7 @@ local function observe_luts(state)
         end
         return original(object, index, source, destination, ...)
     end
+    owner.SetColourCubeData = state.lut_observer
 end
 
 local function observe_map(state, world)
@@ -72,7 +73,6 @@ local function observe_map(state, world)
         state.map, state.map_world, state.texture, state.level = map, world, nil, nil
     end
     if state.map_owners[owner] then return end
-    state.map_owners[owner] = true
     local texture, lerp = map.SetOverlayTexture, map.SetOverlayLerp
     owner.SetOverlayTexture = function(object, name, ...)
         if object == state.map then state.texture = name end
@@ -91,6 +91,7 @@ local function observe_map(state, world)
         end
         return lerp(object, level, ...)
     end
+    state.map_owners[owner] = owner.SetOverlayLerp
 end
 
 function M.install(env)
@@ -122,11 +123,11 @@ local function replay_world(state, self)
         if state.lut_world == self.world and state.pp then
             for index = 0, 2 do
                 local value = state.luts[index]
-                if value then state.pp:SetColourCubeData(unpack(value, 1, value.n)) end
+                if value then state.lut_observer(state.pp, unpack(value, 1, value.n)) end
             end
         end
         if state.map_world == self.world and state.level then
-            state.map:SetOverlayLerp(unpack(state.level, 1, state.level.n))
+            state.map_owners[methods(state.map)](state.map, unpack(state.level, 1, state.level.n))
         end
     end)
 end
@@ -184,9 +185,21 @@ local function comfort(self)
             end
         end)
     end
+    if ctx.config.reduce_distortion and G.PushLineDistortion then
+        scope:wrap(G, "PushLineDistortion", function(original)
+            return function(guid, x1, y1, x2, y2, aspect, width, displacement, ...)
+                if active(self.state) == self then
+                    width = finite(width) and width * 0.25 or width
+                    displacement = finite(displacement) and displacement * 0.25 or displacement
+                end
+                return original(guid, x1, y1, x2, y2, aspect, width, displacement, ...)
+            end
+        end)
+    end
     local cube = self.world.components and self.world.components.colourcube
     local latest = ctx.config.reduce_distortion and G.Profile and G.Profile:GetDistortionModifier()
     if cube and cube.SetDistortionModifier and finite(latest) then
+        local previous = cube.SetDistortionModifier
         scope:wrap(cube, "SetDistortionModifier", function(original)
             return function(component, modifier, ...)
                 latest = modifier
@@ -195,7 +208,7 @@ local function comfort(self)
         end)
         scope:defer(function()
             if G.TheWorld == self.world and self.world:IsValid() then
-                cube:SetDistortionModifier(latest)
+                previous(cube, latest)
             end
         end)
         cube:SetDistortionModifier(latest)

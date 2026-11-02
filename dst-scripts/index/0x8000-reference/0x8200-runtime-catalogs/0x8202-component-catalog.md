@@ -1,6 +1,6 @@
 # `0x82020000` Component Catalog
 
-The Component directory contains 830 Lua files.
+The Component directory contains 831 Lua files.
 
 ## `0x82021111` Component Files
 
@@ -148,6 +148,7 @@ The inventory keeps original paths for component modules, helpers, visual helper
 - `scripts/components/cookiecutterdrill.lua`
 - `scripts/components/cooldown.lua`
 - `scripts/components/corpsepersistmanager.lua`
+- `scripts/components/corruption.lua`
 - `scripts/components/counter.lua`
 - `scripts/components/crabkingspawner.lua`
 - `scripts/components/craftingstation.lua`

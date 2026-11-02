@@ -212,7 +212,7 @@ T.case("repeat_keeps_native_recipe_and_skin", function()
     assert(#ctx.calls == 2)
     ctx:complete()
     assert(ctx:tick(3) == "done" and not ctx.executor:is_running())
-    assert(not ctx.service:craft(ctx.recipe, 0) and not ctx.service:craft(ctx.recipe, 129))
+    assert(not ctx.service:craft(ctx.recipe, -1) and not ctx.service:craft(ctx.recipe, 129))
     ctx.scope:close()
 end)
 
@@ -235,6 +235,7 @@ T.case("invalid_sites_keep_materials", function()
     assert(ctx.service:area(ctx.area))
     ctx:tick(0)
     assert(#ctx.calls == 0 and not ctx.buffers, "illegal points skip before consuming building materials")
+    assert(ctx.job.reasons.unavailable == 1)
     ctx:tick(1); ctx:tick(2)
     assert(ctx.buffers == 1 and #ctx.calls == 1 and ctx.calls[1].x == 2 and ctx.calls[1].rotation == 45)
     ctx:complete(); ctx:tick(3)
@@ -1102,6 +1103,80 @@ T.each("manufactured oven requires collection", { false, true }, function(remote
     local state, message = ctx:tick(28)
     assert(state == "done" and job.completed == 1 and message:find("collect the station's product", 1, true))
     assert(ctx.manufactures == 1 and not station:HasTag("prototyper"), "ready oven output stops further submissions until collected")
+end)
+
+T.case("continuous crafting stops at ingredients", function()
+    local ctx = context()
+    ctx.materials, ctx.params.craft_count = 3, 0
+    assert(ctx.service:craft(ctx.recipe)); local job = ctx.job
+    ctx:tick(0)
+    for made = 1, 3 do
+        assert(#ctx.calls == made)
+        ctx:tick(made - .5)
+        assert(#ctx.calls == made and job.completed == made - 1, "each recipe waits for its receipt")
+        ctx:complete(); ctx:tick(made)
+    end
+    assert(not ctx.job and job.completed == 3 and ctx.materials == 0 and ctx.message:match("exhausted"))
+    ctx.scope:close()
+end)
+
+T.case("continuous fertilizer shares the selected area", function()
+    local ctx, inv = context()
+    ctx.params.repeat_count = 0
+    inv.active = ctx:item("poop", 3)
+    inv.active.tags.fertilizer, inv.active.tags.tile_deploy = true, true
+    ctx.field_action = { id = "DEPLOY_TILEARRIVE" }
+    assert(ctx.service:area(ctx.area, "fertilize")); local job = ctx.job
+    for use = 1, 3 do
+        ctx:tick(use * 2)
+        assert(#ctx.calls == use and ctx.pending.point.x == (use - 1) % 2 + 1)
+        ctx:complete(); ctx:tick(use * 2 + 1)
+    end
+    assert(ctx:tick(8) == "done" and job.completed == 3 and job.skipped == 0)
+end)
+
+T.each("continuous water reads native moisture and waits for receipts", { false, true }, function(remote)
+    local ctx, inv = context()
+    ctx.params.repeat_count = 0
+    local can = ctx:item("premiumwateringcan")
+    can.tags.wateringcan, can.percent, inv.hands = true, 1, can
+    ctx.field_action = { id = "POUR_WATER_GROUNDTILE", code = 123 }
+    if remote then ctx:remote() end
+    local overlays = {}
+    local update = T.eval(assert(T.source("prefabs/nutrients_overlay"):match("local function UpdateMoisture%b().-\nend"))
+        .. "\nreturn UpdateMoisture")
+    for x = 1, 2 do
+        local overlay = T.entity({ prefab = "nutrients_overlay", x = x })
+        overlay.AnimState = { SetPercent = function(_, anim, percent) assert(anim == "anim"); overlay.moisture = percent end,
+            GetCurrentAnimationTime = function() return overlay.moisture * 2 end,
+            GetCurrentAnimationLength = function() return 2 end }
+        update(overlay, .5); overlays[x] = overlay
+    end
+    ctx.G.TheSim.FindEntities = function(_, x) return { overlays[x] } end
+    assert(ctx.service:area(ctx.area, "water")); local job = ctx.job
+    for use = 1, 2 do
+        local now = (use - 1) * 2
+        ctx:tick(now)
+        assert(#ctx.calls == use and ctx.pending.point.x == use)
+        update(overlays[use], .9); ctx:tick(now + .1)
+        assert(job.completed == use - 1, "another player's watering does not confirm our request")
+        if remote then ctx.emit("performaction") else ctx.pending.success() end
+        can.percent = can.percent - .1
+        ctx.player:ClearBufferedAction(); ctx:tick(now + 1)
+    end
+    ctx:tick(4); ctx:tick(5)
+    assert(ctx:tick(6) == "done" and job.completed == 2 and job.skipped == 0 and #ctx.calls == 2)
+end)
+
+T.case("continuous water needs observable soil", function()
+    local ctx, inv = context()
+    ctx.params.repeat_count = 0
+    inv.hands = ctx:item("wateringcan")
+    inv.hands.tags.wateringcan, inv.hands.percent = true, 1
+    ctx.field_action = { id = "POUR_WATER_GROUNDTILE" }
+    assert(ctx.service:area(ctx.area, "water")); local job = ctx.job
+    ctx:tick(0); ctx:tick(16); ctx:tick(17); ctx:tick(33)
+    assert(ctx:tick(34) == "done" and job.skipped == 2 and #ctx.calls == 0)
 end)
 
 T.done()

@@ -12,7 +12,7 @@ Most post-init Add APIs register functions in `env.postinitfns`.
 
 Other APIs directly update registries for actions, component actions, or tiles.
 
-The runtime executes registered functions at call sites of `ModManager:GetPostInitFns()`.
+Prefab, component, and StateGraph consumers retrieve registered functions through `ModManager:GetPostInitFns()`.
 
 ## `0x23011211` Debug Boundary
 
@@ -26,6 +26,8 @@ They often call `DebugSpawn`, `GetDebugEntity`, and `SetDebugEntity`, but ordina
 | --- | --- | --- |
 | `scripts/main.lua` | `KnownModIndex:Load` / `BeginStartupSequence` | Gate `ModSafeStartup` on mod-index startup |
 | `scripts/modindex.lua` | `KnownModIndex = ModIndex()` | Create the global mod-index object |
+| `scripts/modindex.lua` | `CanDownloadWorkshopMods` / `ModIndex:DoesModExist` | Check download support and installed mod versions |
+| `scripts/networking.lua` | `DownloadMods` | Check required client mods before completing a server join |
 | `scripts/mods.lua` | `ModWrangler:LoadMods` / `CreateEnvironment` | Select mods and create their environments |
 | `scripts/mods.lua` | `ModManager:GetPostInitFns` | Retrieve registered post-init functions |
 | `scripts/modutil.lua` | `InsertPostInitFunctions` / `AddPrefabPostInit` | Install APIs and register prefab hooks |
@@ -33,6 +35,7 @@ They often call `DebugSpawn`, `GetDebugEntity`, and `SetDebugEntity`, but ordina
 | `scripts/modutil.lua` | `AddStategraphPostInit` | Register a StateGraph post-init function |
 | `scripts/debugtools.lua` | `debugstack` / `dumptable` / `instrument_userdata` | Inspect runtime data |
 | `scripts/knownerrors.lua` | `known_assert` | Map a known error key to a user-visible error |
+| `scripts/mainfunctions.lua` | `SetGlobalErrorWidget` / `ShowPendingGlobalError` | Preserve an error raised before frontend creation |
 | `scripts/consolecommands.lua` | `c_spawn` | Spawn a prefab from the console |
 | `scripts/debugcommands.lua` | `d_*` | Provide debug commands |
 | `scripts/debughelpers.lua` | `debug.getinfo` | Support introspection helpers |
@@ -94,13 +97,19 @@ It calls `ModManager:GetPostInitFns("ComponentPostInit", name)` and runs the res
 
 `debugcommands.lua` and `debugkeys.lua` load only when `CHEATS_ENABLED` is true.
 
+`CAN_USE_DBUI` additionally restricts the debug UI to `WIN32_STEAM` and `LINUX_STEAM`.
+
+Its skin-debug hooks load after `main.lua` installs the custom Lua loader.
+
 ## `0x23014111` `env.postinitfns`
 
 `PrefabPostInit`, `PrefabPostInitAny`, `ComponentPostInit`, and `StategraphPostInit` use separate buckets.
 
-World-generation, game, simulation, shader, recipe, level, task-set, task, and room hooks also have separate buckets.
+Game, simulation, shader, recipe, level, task-set, task, and room hooks also have separate buckets.
 
-Named hooks use nested tables, while Any hooks use arrays.
+Named hooks use nested tables, while Any hooks, `GamePostInit`, and `SimPostInit` use arrays.
+
+`ModWrangler:GamePostInit()` and `SimPostInit()` iterate their arrays directly.
 
 ## `0x23014211` `KnownModIndex`
 
@@ -116,7 +125,27 @@ Named hooks use nested tables, while Any hooks use arrays.
 
 `knownerrors.lua` supplies `ERRORS` and `known_assert` for stable error keys and messages.
 
+`SetGlobalErrorWidget()` lives in `mainfunctions.lua` and retains the first pending error until `Start()` creates `TheFrontEnd`.
+
+`ModWrangler:InitializeModMain()` passes a single combined message to `moderror(message, level)` when mod execution fails.
+
+The optional second argument is an error-stack level.
+
 World-mutating entries are concentrated in `consolecommands.lua` and `debugcommands.lua`.
+
+## `0x23014411` Workshop Download Availability
+
+`CanDownloadWorkshopMods()` uses `TheSim:CanDownloadWorkshopMods()` when the binding exists and otherwise returns true.
+
+In `DownloadMods()`, required client mods normally need the exact server version before the download step can be skipped.
+
+When downloading is unavailable, the check also tries `DoesModExist(name, version, version_compatible)`.
+
+An accepted installed version satisfies the requirement.
+
+Without `version_compatible`, `DoesModExist` still requires an exact version.
+
+Missing or incompatible mods continue through the download failure path.
 
 ## `0x23015100` Verification
 
@@ -129,10 +158,15 @@ rg -n \
   -e "CreateEnvironment" \
   -e "InsertPostInitFunctions" \
   -e "GetPostInitFns" \
+  -e "CanDownloadWorkshopMods" \
+  -e "DoesModExist" \
+  -e "SetGlobalErrorWidget" \
+  -e "ShowPendingGlobalError" \
   scripts/main.lua \
   scripts/mods.lua \
   scripts/modutil.lua \
   scripts/modindex.lua \
+  scripts/networking.lua \
   scripts/mainfunctions.lua \
   scripts/stategraph.lua \
   scripts/debugtools.lua \
@@ -140,7 +174,9 @@ rg -n \
   scripts/consolecommands.lua \
   scripts/debugcommands.lua \
   scripts/debughelpers.lua
-rg -n "AddPrefabPostInit|AddComponentPostInit|AddStategraphPostInit|c_spawn|DebugSpawn|CHEATS_ENABLED" \
+rg -n \
+  -e "AddPrefabPostInit|AddComponentPostInit|AddStategraphPostInit" \
+  -e "c_spawn|DebugSpawn|CHEATS_ENABLED|CAN_USE_DBUI|moderror" \
   scripts/main.lua \
   scripts/entityscript.lua \
   scripts/mods.lua \

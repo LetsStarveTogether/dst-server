@@ -55,7 +55,7 @@ T.case("awareness contracts", function()
     local gem = entity("greengem", 45, 50)
     gem.replica.inventoryitem = { IsHeld = function() return gem.held end }
     entities = { boss, gem }
-    local feature = Awareness.new(ctx)
+    local feature = Awareness.new(ctx, require("fieldkit/ui/indicators").new(ctx))
     assert(#rendered.bosses == 0, "host simulation cannot discover a never-seen off-screen boss")
     assert(#rendered.loot == 1 and not rendered.loot[1].label:find("newly") and sounds == 0, "baseline loot is not a new drop")
     boss.x, now = 70, 1; tick()

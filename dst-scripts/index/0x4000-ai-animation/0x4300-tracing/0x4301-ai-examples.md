@@ -1,6 +1,6 @@
 # `0x43010000` AI Tracing Examples
 
-Rabbit, Wilson, and Deerclops show complete paths across prefabs, Brains, behaviours, StateGraphs, and components.
+Rabbit, Wilson, Deerclops, and Shrouden show paths across prefabs, Brains, behaviours, StateGraphs, and components.
 A Brain chooses or advances behaviour, while a StateGraph responds to actions, events, movement intent, and attack state.
 
 ## `0x43011100` Purpose
@@ -15,6 +15,7 @@ The SG maps buffered actions, movement intent, and events to concrete states.
 Rabbit covers escape, return-home, and food actions for a small creature.
 Wilson shows a minimal Brain that wraps `ChaseAndAttack` in a player-control condition.
 Deerclops shows a boss Brain combining `ActionNode`, `AttackWall`, `ChaseAndAttack`, `DoAction`, and `Wander`.
+Shrouden shows simultaneous pursuit and attack events, then delegates summoned attacks to other entities' StateGraphs.
 
 #### `0x43011111` Key Checks
 
@@ -35,6 +36,10 @@ Deerclops shows a boss Brain combining `ActionNode`, `AttackWall`, `ChaseAndAtta
 | `scripts/prefabs/deerclops.lua` | `fn` | Binds `SGdeerclops` before the Deerclops Brain |
 | `scripts/brains/deerclopsbrain.lua` | `DeerclopsBrain:OnStart` | Mixes events, combat, structure destruction, and wandering |
 | `scripts/stategraphs/SGdeerclops.lua` | `ActionHandler(ACTIONS.HAMMER, "attack")` | Routes the hammer action from `DoAction(BaseDestroy)` into `attack` |
+| `scripts/stategraphs/SGcharlie_boss.lua` | `name = "death"` | Spawns Shrouden at the end of the first boss phase |
+| `scripts/prefabs/shrouden.lua` | `SetStateGraph`, `SetBrain` | Binds Shrouden's server systems |
+| `scripts/brains/shroudenbrain.lua` | `ShroudenBrain:OnStart` | Combines pursuit, far-attack checks, and devoured-target events |
+| `scripts/stategraphs/SGshrouden.lua` | `ChooseAttack`, `DoPortalSummon` | Selects attacks and initializes summoned thralls |
 
 ### `0x43012110` Rabbit Prefab Anchor
 
@@ -155,6 +160,39 @@ Structure destruction therefore crosses Brain, `DoAction`, `locomotor`, the SG a
 - The `doattack` event concerns the `combat` target and differs from `DoAction(BaseDestroy)`.
 - `ACTIONS.HAMMER` uses special logic in the `attack` timeline instead of generic `PerformBufferedAction()`.
 
+### `0x43013410` Shrouden Boss Transition
+
+At frame 69 of Charlie's `death` state, `SGcharlie_boss.lua` spawns `shrouden` and transfers its AOE attack tag set.
+It enters the new entity's `spawn` state and emits `track_charlie_boss` with that entity.
+`prefabs/shrouden.lua` creates `combat`, `timer`, `grouptargeter`, and `locomotor` on the master sim.
+It then binds `SGshrouden` and its Brain.
+`ShroudenBrain:OnInitializationComplete` remembers `spawnpoint` for wandering and arena movement.
+
+### `0x43013420` Shrouden Decisions and Events
+
+`ShroudenBrain:OnStart` builds a `PriorityNode` with a `.25` period.
+Its first branch uses `ParallelNodeAny` to run `ChaseAndAttack` alongside a `ConditionWaitNode`.
+The condition pushes `dofarattack` when the target is beyond melee range and the combat cooldown has expired.
+The condition always returns false, keeping that check active while pursuit runs.
+`SGshrouden` handles `doattack` and `dofarattack` through `ChooseAttack`.
+State tags, arena position, capabilities, and timers determine whether to use a portal attack, teleport, or optic blast.
+When pursuit cannot continue, a `FaceEntity` branch can track a devoured target and push `targetdevoured`.
+The SG uses that event to transition from portal attacks to a taunt.
+
+### `0x43013430` Summoned Thrall Execution
+
+`SGshrouden` calls `DoPortalSummon` from the `attack_loop` timeline, then calls the spawned prefab's `OnShroudenSummon`.
+That callback removes the thrall's Brain with `SetBrain(nil)` and disables persistence and normal combat targeting.
+It then enters the dedicated summon state, which runs the attack through the StateGraph.
+The thrall is removed on completion, entity sleep, or the boss's `resetboss` event.
+
+| Prefab source | StateGraph source | Entry state |
+| --- | --- | --- |
+| `scripts/prefabs/shadowthrall_hands.lua` | `scripts/stategraphs/SGshadowthrall_hands.lua` | `shrouden_run` |
+| `scripts/prefabs/shadowthrall_horns.lua` | `scripts/stategraphs/SGshadowthrall_horns.lua` | `shrouden_jump` |
+| `scripts/prefabs/shadowthrall_mouth.lua` | `scripts/stategraphs/SGshadowthrall_mouth.lua` | `shrouden_bite` |
+| `scripts/prefabs/shadowthrall_wings.lua` | `scripts/stategraphs/SGshadowthrall_wings.lua` | `shrouden_flyby` |
+
 ## `0x43014110` Trace Order
 
 Find `require "brains/..."`, `SetStateGraph`, and `SetBrain` in the prefab.
@@ -189,6 +227,16 @@ rg -n "SetStateGraph|SetBrain|PriorityNode|DoAction|ChaseAndAttack|ActionHandler
   scripts/prefabs/deerclops.lua \
   scripts/brains/deerclopsbrain.lua \
   scripts/stategraphs/SGdeerclops.lua
+
+rg -n "track_charlie_boss|SetStateGraph|SetBrain|ParallelNodeAny|dofarattack|targetdevoured|DoPortalSummon" \
+  scripts/stategraphs/SGcharlie_boss.lua \
+  scripts/prefabs/shrouden.lua \
+  scripts/brains/shroudenbrain.lua \
+  scripts/stategraphs/SGshrouden.lua
+
+rg -n "OnShroudenSummon|SetBrain|resetboss|shrouden_(run|jump|bite|flyby)" \
+  scripts/prefabs/shadowthrall_{hands,horns,mouth,wings}.lua \
+  scripts/stategraphs/SGshadowthrall_{hands,horns,mouth,wings}.lua
 ~~~
 
 ### `0x43015110` Reading Order

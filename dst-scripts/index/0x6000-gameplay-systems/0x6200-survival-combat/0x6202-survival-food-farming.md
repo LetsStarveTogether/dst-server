@@ -76,8 +76,9 @@ Search for `GetSanity`, `GetHunger`, `GetHealth`, `IsStale`, `IsSpoiled`, and `f
 
 ### `0x62022140` `scripts/components/hunger.lua`
 
-`Hunger:DoDelta` changes only the current hunger value.
-`Hunger:DoDec` performs timed depletion and calls `health:DoDelta(..., "hunger")` when hunger is zero.
+`Hunger:DoDelta` checks redirection, invincibility, and teleporting before calling `SetCurrent`.
+`SetCurrent` updates hunger and emits hunger or starvation events.
+`Hunger:DoDec` performs timed depletion and applies the configured starvation behavior when hunger is zero.
 
 #### `0x62022141` Search Terms
 
@@ -142,7 +143,9 @@ It supplies values and an `OnEaten` callback; `eater` writes through the actor's
 ### `0x62023210` Starvation Damage
 
 `Hunger:DoDec` reduces positive hunger.
-When hunger is zero and `ignore_damage` is false, it calls `health:DoDelta(-hurtrate * dt, true, "hunger")`.
+When hunger is zero and `ignore_damage` is false, it invokes `overridestarvefn` if configured.
+Otherwise, it calls `health:DoDelta(-hurtrate * dt, true, "hunger")`.
+A paused hunger component does neither, and `LongUpdate` passes `ignore_damage = true`.
 
 #### `0x62023211` Check
 
@@ -177,6 +180,10 @@ When the owner is not dry, an overheated desiccant is clamped to `DESICCANT_HELD
 `eater` stores diet rules and absorption multipliers.
 `sanity` receives one-time food deltas and calculates continuous equipment, light, and aura effects.
 `gelblob_storage.lua` remembers whether an item was perishing before storage and resumes only those items when removed.
+
+Wanda and Maxwell install `GetEquippableDapperness` through `sanity.get_equippable_dappernessfn`.
+Their shadow-item resistance applies only when the item has `shadow_item` and its calculated dapperness is negative.
+Positive equipment sanity effects retain their value.
 
 ### `0x62024111` Fields to Check
 
@@ -217,6 +224,10 @@ rg -n "DoDelta|DoDec|overridestarvefn|hurtrate" \
 
 rg -n "Sanity:DoDelta|Sanity:Recalc|dapperness|sanityaura|externalmodifiers" \
   scripts/components/sanity.lua
+
+rg -n "GetEquippableDapperness|get_equippable_dappernessfn|dapperness < 0" \
+  scripts/prefabs/wanda.lua \
+  scripts/prefabs/waxwell.lua
 
 rg -n "FarmPlantable:Plant|FarmPlantTendable:TendTo|SetTendable|MakePlant" \
   scripts/components/farmplantable.lua \

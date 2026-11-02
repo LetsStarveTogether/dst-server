@@ -1,5 +1,7 @@
 local Parameters = require("fieldkit/core/parameters")
 local Query = require("fieldkit/game/query")
+local Targets = require("fieldkit/game/targets")
+local Rules = require("fieldkit/rules/work")
 local Geometry = require("fieldkit/rules/geometry")
 local M = {}
 
@@ -22,11 +24,12 @@ function M.new(ctx)
     local function available()
         if ctx.scope.closed then return false end
         if ctx.config.work == false then return false, ctx:text("交互辅助已关闭", "Interaction assistance is disabled") end
-        return ctx:ready()
+        return ctx:ready("work")
     end
 
     local function action(target, button)
-        if not Query.visible(ctx, target) or target == ctx.player or target:HasTag("player") then return end
+        if not Query.visible(ctx, target) then return end
+        if not Targets.accepts(target, ctx.params.target_filter) then return end
         if ctx.player:GetDistanceSqToInst(target) > ctx.params.search_radius ^ 2 then return end
         return ctx.work:preview(target, button)
     end
@@ -152,10 +155,11 @@ function M.new(ctx)
         button = button == "right" and "right" or "left"
         local expected = action(target, button)
         if not expected then return false end
+        local sample = Targets.describe(target)
         local added, reason = add(target, button)
         if not added then return false, reason end
         local function matching(candidate)
-            if candidate.prefab == target.prefab then
+            if Rules.expand(expected.action.id, target, ctx.player) and Targets.matches(sample, candidate) then
                 local candidate_action = action(candidate, button)
                 return candidate_action and candidate_action.action.id == expected.action.id
             end

@@ -1,6 +1,5 @@
 local Query = require("fieldkit/game/query")
 local Ranges = require("fieldkit/rules/ranges")
-local Indicators = require("fieldkit/ui/indicators")
 local Loot = require("fieldkit/features/loot")
 local M = {}
 
@@ -21,9 +20,9 @@ local function inventory_hover(ctx)
     end
 end
 
-function M.new(ctx)
+function M.new(ctx, renderer)
     local G, pins, bosses = ctx.G, {}, {}
-    local renderer, loot = Indicators.new(ctx), Loot.new(ctx)
+    local loot = Loot.new(ctx)
     local suppressed_hover, pin_serial = nil, 0
     local self = { frame = { ranges = {}, bosses = {}, loot = {} } }
 

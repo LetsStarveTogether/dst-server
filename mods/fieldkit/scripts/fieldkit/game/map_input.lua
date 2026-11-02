@@ -79,7 +79,7 @@ function M.request(ctx, point, append, screen, control)
     return ctx.travel:navigate(point, false)
 end
 
-function M.install(env, get_context)
+function M.install(env, get_context, create_overlay)
     local G = env.GLOBAL
     env.AddClassPostConstruct("screens/mapscreen", function(screen)
         local ctx = get_context()
@@ -89,7 +89,7 @@ function M.install(env, get_context)
         local scope = Scope.new(ctx.player, function(err) ctx:report(err) end)
         state.screen_scope, state.screen = scope, screen
         ctx.travel:pause_route(state)
-        local overlay = require("fieldkit/ui/map_overlay").new(ctx, screen.minimap, screen.minimap, function()
+        local overlay = create_overlay(ctx, screen.minimap, screen.minimap, function()
             local width, height = G.TheSim:GetScreenSize()
             return width, height, width, height
         end)

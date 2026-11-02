@@ -118,7 +118,7 @@ function M.new(ctx)
                         if not record.alive and entity.prefab ~= "walrus" then
                             local old = book:get(boss_key(entity))
                             if old and old.due then
-                                old.state = "seen"
+                                old.state, old.at = "seen", book:time()
                                 book:put(old)
                             end
                         end

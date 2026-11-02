@@ -11,8 +11,9 @@ Then trace `EntityScript:PerformBufferedAction` into `BufferedAction:Do`.
 
 ## `0x32021211` `pre_action_cb` Boundary
 
-`BufferedAction:Do` only checks `IsValid()` and calls `self.action.fn(self)`.
-`ACTIONS.*.pre_action_cb` normally runs earlier in `PlayerController:DoAction` or another submission path.
+`BufferedAction:Do` checks `IsValid()` before calling `self.action.fn(self)` and dispatching result callbacks.
+`ACTIONS.*.pre_action_cb` normally runs earlier in `locomotor:PushAction` or `locomotor:PreviewAction`.
+Submission paths that bypass locomotor, including non-predicting clients in `PlayerController:DoAction`, call it separately.
 It is not part of `BufferedAction:Do`.
 
 ## `0x32022000` Source Anchors
@@ -56,7 +57,9 @@ flowchart TD
     H --> J["State frame or event calls PerformBufferedAction"]
     I --> K["BufferedAction:Do"]
     J --> K
-    K --> L["ACTIONS.*.fn"]
+    K --> T{"IsValid"}
+    T -->|false| U["return false; caller handles failure"]
+    T -->|true| L["ACTIONS.*.fn"]
     L --> M{"success"}
     M -->|true| N["OnUsedAsItem + Succeed"]
     M -->|false| O["Fail"]
@@ -64,7 +67,8 @@ flowchart TD
 
 ### `0x32023111` Initial Submission
 
-`PushBufferedAction` ignores a matching submission and keeps the current `self.bufferedaction`.
+`PushBufferedAction` ignores a matching target, action, and inventory object while the SG is not idle or no SG exists.
+An idle SG permits the matching submission to restart.
 
 For a different submission, it fails and clears the current action.
 It then calls `bufferedaction:TestForStart()`, which points to `BufferedAction:IsValid`.
@@ -91,9 +95,10 @@ It keeps a local `bufferedaction` reference because code inside `Do()` can still
 
 ### `0x32023221` `BufferedAction:Do`
 
-`Do()` calls `IsValid()`, then `action.fn(self)`, and records the failure `reason`.
+If `IsValid()` fails, `Do()` returns `false` immediately without calling `Fail()`.
+Otherwise it calls `action.fn(self)` and records the returned `reason`.
 Success runs `OnUsedAsItem` and `Succeed()`.
-Failure runs `Fail()`.
+An action function that returns failure runs `Fail()`.
 After a failed call, `EntityScript:PerformBufferedAction` also emits `actionfailed`.
 
 ### `0x32023231` Failure Matrix
@@ -103,8 +108,9 @@ Not every failed `BufferedAction:Do()` emits `actionfailed`.
 | Failure point | Event and callback behaviour |
 | --- | --- |
 | `TestForStart()` inside `PushBufferedAction` | Emit only `actionfailed`, then return. |
-| Instant `Do()` returns false | `performaction` fired; `Do()` calls `Fail()` without another `actionfailed`. |
-| SG `PerformBufferedAction()` returns false | The caller emits `actionfailed`, then revisits `Fail()`. |
+| Instant `Do()` fails `IsValid()` | `performaction` fired; no failure callback or `actionfailed` follows. |
+| Instant `action.fn` returns false | `Do()` calls `Fail()` without another `actionfailed`. |
+| SG `PerformBufferedAction()` returns false | Emit `actionfailed`, then call `Fail()`; an action-function failure already cleared its callback list. |
 | No usable SG action handler | Emit `performaction`, then call `Fail()`. |
 
 ## `0x32024111` Stored Context
@@ -136,8 +142,9 @@ The latter then revisits an already-cleared callback list.
 
 A predicting client usually enters through `PlayerController:DoAction` and `locomotor:PreviewAction`.
 `EntityScript:PreviewBufferedAction` handles `ACTIONS.WALKTO` specially.
-`bufferedaction.options.instant` or `action.instant` enters `PerformPreviewBufferedAction` directly.
-With an SG, preview first tries `sg:PreviewAction(bufferedaction)`.
+`bufferedaction.options.instant` enters `PerformPreviewBufferedAction` directly.
+Otherwise an SG receives `sg:PreviewAction(bufferedaction)`, including actions with `action.instant`.
+Without an SG, `action.instant` enters `PerformPreviewBufferedAction` directly.
 With an action-handler table, a missing handler for a non-instant action enters `previewaction`.
 
 A failed handler condition or nil destination returns without that fallback.
@@ -160,6 +167,7 @@ rg -n "PreviewBufferedAction|RemoteBufferedAction|PreviewAction" \
   scripts/entityscript.lua \
   scripts/stategraph.lua \
   scripts/components/playercontroller.lua
+rg -n "pre_action_cb|function LocoMotor:(PushAction|PreviewAction)" scripts/components/locomotor.lua
 rg -n "ActionHandler\\(ACTIONS\\.(CHOP|ATTACK|DEPLOY|PICKUP|WALKTO)" \
   scripts/stategraphs/SGwilson.lua \
   scripts/stategraphs/SGwilson_client.lua

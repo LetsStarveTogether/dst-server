@@ -1,4 +1,6 @@
 local Parameters = require("fieldkit/core/parameters")
+local Progress = require("fieldkit/core/progress")
+local Config = require("fieldkit/core/config")
 local Screen = require("widgets/screen")
 local Widget = require("widgets/widget")
 local Text = require("widgets/text")
@@ -139,6 +141,8 @@ end
 
 sections.tools = function(self)
     local ctx = self.ctx
+    if ctx.executor then self:Section("progress", "任务进度与最近结果", "Task progress and last result") end
+    if ctx.bindings then self:Section("bindings", "快捷键与冲突", "Shortcuts and conflicts") end
     if ctx.config.work then self:Section("work", "交互与选择", "Interaction and selection") end
     if ctx.config.work then self:Section("construction", "施工、农田与制作", "Construction, farming and crafting") end
     if ctx.config.work then self:Section("drying", "晾晒收成与补挂", "Drying: harvest and refill") end
@@ -160,6 +164,56 @@ sections.tools = function(self)
     end
     if ctx.config.inventory_scroll or ctx.config.inventory_middle then
         self:Parameter("inventory_batch", "库存批量操作数量", "Inventory batch amount")
+    end
+end
+
+sections.progress = function(self)
+    local ctx = self.ctx
+    local function show(result)
+        if not result then return end
+        self:Add(Progress.label(ctx, result), function() self:Rebuild() end)
+        local reasons = Progress.reasons(ctx, result)
+        if reasons ~= "" then self:Add(reasons, function() self:Rebuild() end) end
+        if result.message then self:Add(result.message, function() self:Rebuild() end) end
+    end
+    show(Progress.snapshot(ctx.executor.current))
+    show(ctx.executor.last_result)
+    self:Action("停止当前操作", "Stop current operation", function()
+        ctx.params.auto_repair = false
+        ctx.executor:cancel("cancelled")
+        ctx.selection:clear()
+        return true
+    end)
+end
+
+sections.bindings = function(self)
+    local ctx, bindings = self.ctx, self.ctx.bindings
+    for _, name in ipairs(Config.keys) do
+        local id, conflict = name, bindings.conflicts[name]
+        local label = bindings:label(name) .. ": " .. bindings:key_label(name)
+        if conflict then label = label .. ctx:text(" · 已停用，与以下绑定冲突：", " · Disabled; conflicts with: ") .. bindings:label(conflict) end
+        self:Add(label, function()
+            self.binding, self.section, self.page = id, "binding_keys", 1
+            self:Rebuild()
+        end)
+    end
+    self:Add(ctx:text("恢复模组配置的快捷键", "Restore shortcuts from mod configuration"), function()
+        local _, reason = bindings:reset()
+        self:Rebuild()
+        if reason then self.hint:SetString(reason) end
+    end)
+end
+
+sections.binding_keys = function(self)
+    local ctx, name = self.ctx, self.binding
+    for _, choice in ipairs(ctx.config.key_options[name].options) do
+        local key = choice.data
+        self:Add(ctx.bindings:label(name) .. ": " .. choice.description, function()
+            local ok, reason = ctx.bindings:set(name, key)
+            if ok then self.section, self.page = "bindings", 1 end
+            self:Rebuild()
+            if reason then self.hint:SetString(reason) end
+        end)
     end
 end
 
@@ -194,6 +248,7 @@ end
 
 sections.work = function(self)
     local ctx = self.ctx
+    self:Parameter("target_filter", "目标筛选", "Target filter")
     self:Action("对所指目标及同类执行主动作", "Primary action on target and nearby matches", function() return ctx.work:start(self.intent.target) end)
     self:Action("切换所指目标的左键选择", "Toggle target's left-click selection", function() return ctx.selection:toggle(self.intent.target, "left") end)
     self:Action("切换所指目标的右键选择", "Toggle target's right-click selection", function() return ctx.selection:toggle(self.intent.target, "right") end)
@@ -259,7 +314,8 @@ sections.construction = function(self)
     self:Action("按地块浇水", "Water selected farm tiles", function() return region("water") end)
     self:Action("按地块施肥", "Fertilize selected farm tiles", function() return region("fertilize") end)
     self:Action("在区域内建造当前预览建筑", "Build previewed structure across area", function() return region("build") end)
-    self:Action("重复最近制作配方 ×" .. ctx.params.craft_count, "Repeat last recipe ×" .. ctx.params.craft_count,
+    local craft_count = Parameters.label(ctx, "craft_count")
+    self:Action("重复最近制作配方（" .. craft_count .. "）", "Repeat last recipe (" .. craft_count .. ")",
         function() return ctx.construction:repeat_recipe(ctx.params.craft_count) end)
     self:Parameter("craft_count", "批量制作次数", "Crafting repetitions")
     self:Parameter("repeat_count", "每地块水肥次数", "Water / fertilizer applications per tile")

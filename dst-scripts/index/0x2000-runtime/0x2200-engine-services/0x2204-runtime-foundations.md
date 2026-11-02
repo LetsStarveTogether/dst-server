@@ -57,6 +57,12 @@ A component, widget, or manager created with `Class(...)` is therefore more than
 
 `json.decode` and `json.null` handle decoding and null values.
 
+The encoder comments reserve `json.encode` for game data and `json.encode_compliant` for external services.
+
+They explicitly decline decoder support for the compliant encoder's output.
+
+Do not assume both encoders share a round-trip contract.
+
 Confirm the chosen encoding path when reading save, configuration, server-data, or external-text tools.
 
 ### `0x22043311` Constants
@@ -76,7 +82,7 @@ rg -n "require\\(\"json\"\\)|require\\(\"constants\"\\)|require\\(\"class\"\\)" 
 rg -n "function Class|ClassRegistry|makereadonly|addsetter|removesetter" \
   scripts/class.lua
 
-rg -n "json\\.encode|json\\.decode|encode_compliant|null" \
+rg -n "module\\(\"json\"\\)|function (encode|decode)|encode_compliant|null" \
   scripts/json.lua
 
 rg -n "RESET_ACTION|SAVELOAD|REMOTESHARDSTATE|SHARDID|SHARDTRANSACTIONTYPES" \

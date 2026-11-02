@@ -6,6 +6,19 @@ local Executor = require("fieldkit/core/executor")
 local native_env = { require = function() return {} end, Class = T.Class, math = setmetatable({}, { __index = math }) }
 T.native("mathutil", native_env)
 local NativeInventory = T.native("components/inventory", native_env)
+local NativeContainer = T.native("components/container", native_env)
+
+local function replace_source(owner, slot, replacement)
+    local other = T.entity()
+    local inventory = Fixtures.new():inventory(other, 4)
+    other.components.inventory = inventory
+    inventory.slots[2] = replacement
+    NativeContainer.TakeActiveItemFromAllOfSlot(owner, slot, other)
+    NativeInventory.PutAllOfActiveItemInSlot(inventory, 1)
+    NativeInventory.TakeActiveItemFromAllOfSlot(inventory, 2)
+    NativeContainer.PutAllOfActiveItemInSlot(owner, slot, other)
+    assert(owner:GetItemInSlot(slot) == replacement and inventory:GetActiveItem() == nil)
+end
 
 local function fixture()
     local state = Fixtures.new()
@@ -253,6 +266,75 @@ T.case("native remote validator", function()
     inv.slots[1] = s:item("log", 8)
     assert(Inventory.take(ctx, inv, 1, 3) and s.server_received,
         "our remote take reaches the current native RPC validator with the correct argument positions")
+end)
+T.each("queued source identity", { "move", "take", "merge", "temporary" }, function(kind)
+    T.each("replacement", { "log", "thulecite" }, function(prefab)
+        local ctx, s, inv, chest = fixture()
+        chest.slots[1] = s:item("log", kind == "temporary" and 20 or 3)
+        if kind == "merge" or kind == "temporary" then inv.active = s:item("log", 2) end
+        local active = inv.active
+        if kind == "move" then assert(ctx.storage:transfer(chest, 1, 1))
+        else assert(ctx.storage:scroll(chest, 1, 1)) end
+        local replacement = s:item(prefab, 3)
+        replace_source(chest, 1, replacement)
+        s:tick()
+        assert(not ctx.executor.current and s.calls == 0 and chest.slots[1] == replacement
+            and inv.active == active and next(inv.slots) == nil and #s.messages == 1,
+            "a source replaced before dispatch must stop without moving either player's items")
+    end)
+end)
+T.case("temporary merge keeps the selected source", function()
+    local ctx, s, inv, chest = fixture()
+    chest.slots[1], inv.active = s:item("log", 20), s:item("log", 2)
+    assert(ctx.storage:scroll(chest, 1, 1)); s:tick(); s:deliver()
+    local replacement = s:item("log", 20)
+    replace_source(chest, 1, replacement)
+    s:tick()
+    assert(not ctx.executor.current and s.calls == 1 and chest.slots[1] == replacement
+        and inv.active == nil and inv.slots[1].count == 2,
+        "the receipt for parking the cursor cannot authorize taking a replaced source")
+end)
+T.case("queued wheel keeps the original source after its temporary merge", function()
+    local ctx, s, inv, chest = fixture()
+    chest.slots[1], inv.active = s:item("log", 20), s:item("log", 2)
+    assert(ctx.storage:scroll(chest, 1, 1))
+    s:tick()
+    assert(ctx.storage:scroll(chest, 1, 1), "same-slot input may queue while prediction is busy")
+    s:deliver()
+    for _ = 1, 3 do s:tick(); s:deliver() end
+    assert(s.calls == 4 and inv.active.count == 3 and chest.slots[1].count == 19)
+    local replacement = s:item("log", 19)
+    replace_source(chest, 1, replacement)
+    s:tick()
+    assert(not ctx.executor.current and s.calls == 4 and inv.active.count == 3 and chest.slots[1] == replacement,
+        "a deferred wheel intent cannot select a newly inserted stack after the prior receipt")
+end)
+T.case("collect keeps every selected stack", function()
+    local ctx, s, inv, chest = fixture()
+    chest.slots[1], chest.slots[2] = s:item("log", 2), s:item("log", 3)
+    assert(ctx.storage:collect(chest, 1)); s:tick(); s:deliver()
+    local replacement = s:item("log", 3)
+    replace_source(chest, 2, replacement)
+    s:tick()
+    assert(not ctx.executor.current and s.calls == 1 and inv.active.count == 2 and chest.slots[2] == replacement,
+        "collect cannot reselect a same-prefab replacement when planning a later slot")
+end)
+T.each("queued source availability", { "closed", "busy", "insufficient", "reduced" }, function(change)
+    local ctx, s, inv, chest = fixture()
+    local original = s:item("log", 3)
+    chest.slots[1] = original
+    assert(ctx.storage:transfer(chest, 1, 2))
+    if change == "closed" then chest.open = false
+    elseif change == "busy" then chest.busy = true
+    else original.count = change == "reduced" and 2 or 1 end
+    s:tick()
+    if change == "reduced" then
+        s:deliver(); s:tick()
+        assert(not ctx.executor.current and s.calls == 1 and inv.slots[1].count == 2 and not chest.slots[1],
+            "the same selected entity may lose quantity while retaining enough for the requested move")
+    else
+        assert(not ctx.executor.current and s.calls == 0 and chest.slots[1] == original)
+    end
 end)
 T.case("incremental wheel queue", function()
     local ctx, s, inv = fixture()

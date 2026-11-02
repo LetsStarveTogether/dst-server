@@ -32,8 +32,11 @@ It commonly carries private or frequently updated state for player replicas.
 | `scripts/netvars.lua` | `GetIdealUnsignedNetVarForCount` | Select an unsigned netvar for a count range |
 | `scripts/networking.lua` | `SerializeUserSession` | Include a classified entity in player-session saves |
 | `scripts/networking.lua` | `SerializeWorldSession` | Send world-session data to `TheNet` |
+| `scripts/networking.lua` | `JoinServer` | Pass the selected server GUID and row to the engine |
 | `scripts/shardnetworking.lua` | `Shard_UpdateWorldState` | Record remote state and refresh shard metadata |
 | `scripts/shardnetworking.lua` | `Shard_WorldSave` | Convert a shard-save callback into local `ms_save` |
+| `scripts/components/autosaver.lua` | `OnSave` / `OnAutoSaverUpdate` | Schedule saves and reconcile secondary snapshot numbers |
+| `scripts/components/shard_autosaver.lua` | `OnAutoSaverUpdate` / `OnSnapshotDirty` | Replicate the master's snapshot number to secondary shards |
 | `scripts/shardnetworking.lua` | shard transaction helpers | Synchronize votes, bosses, merms, and shard transactions |
 
 ### `0x22032111` Replica Anchor
@@ -105,7 +108,13 @@ On a ready connection, `Shard_OnShardConnected` sends master settings or request
 
 `Shard_WorldSave` only pushes `ms_save` on the local master shard.
 
-The engine-facing shard layer coordinates the wider save.
+`autosaver` handles the master's `ms_save` and schedules the local save.
+
+It pushes `master_autosaverupdate` with the current snapshot number.
+
+`shard_autosaver` replicates that number and emits `secondary_autosaverupdate` on secondary shards.
+
+Their `autosaver` components then schedule a save or roll back according to the received snapshot number.
 
 The same file handles portals, votes, bosses, merms, and shard transactions.
 
@@ -127,7 +136,9 @@ Trace action collection through both `componentactions.lua` and these network fi
 
 Player-session saving calls `player:GetSaveRecord()`.
 
-The server passes `player.player_classified.entity` to `TheNet:SerializeUserSession()`.
+The caller passes `player.player_classified.entity` to `TheNet:SerializeUserSession()` when available.
+
+Otherwise, it passes `nil` for that argument.
 
 ## `0x22034411` Netvar Selection
 
@@ -140,6 +151,12 @@ It returns `nil` above the `net_uint` range.
 `shardnetworking.lua` tracks connected shards, portals, and server world-generation data as a cross-world message bus.
 
 For surface, cave, or multi-shard behaviour, inspect both `networking.lua` and `shardnetworking.lua`.
+
+## `0x22034611` Server Selection
+
+`JoinServer` passes both `server_listing.guid` and `server_listing.row`, along with the password, to `TheNet:JoinServerResponse`.
+
+Preserve the selected listing when tracing a join request; the engine receives its row as well as its GUID.
 
 ## `0x22035100` Verification
 
@@ -158,14 +175,18 @@ rg -n "actionreplica|player_classified|SerializeUserSession" \
   scripts/networking.lua
 rg -n \
   -e "SerializeWorldSession" \
+  -e "JoinServerResponse" \
   -e "Shard_UpdateWorldState" \
   -e "Shard_OnShardConnected" \
   -e "Shard_SyncWorldSettings" \
   -e "Shard_WorldSave" \
   -e "ShardPortals" \
   -e "Shard_CreateTransaction" \
+  -e "master_autosaverupdate|secondary_autosaverupdate" \
   scripts/networking.lua \
-  scripts/shardnetworking.lua
+  scripts/shardnetworking.lua \
+  scripts/components/autosaver.lua \
+  scripts/components/shard_autosaver.lua
 ~~~
 
 ### `0x22035111` Next Read

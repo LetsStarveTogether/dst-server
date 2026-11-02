@@ -1,7 +1,7 @@
 name = "Fieldkit · 随行工具箱"
 description = "One client toolkit for interaction, construction, travel and readable information.\n统一的交互、施工、移动与信息工具箱。F6 打开，F7 停止；Alt 拖选。"
 author = "Fieldkit contributors"
-version = "0.15.0"
+version = "0.16.0"
 api_version = 10
 dst_compatible = true
 client_only_mod = true

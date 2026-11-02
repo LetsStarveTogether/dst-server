@@ -122,6 +122,38 @@ T.case("execution evidence respects native range and failures", function()
     ticket:close()
 end)
 
+T.each("custom arrival execution evidence", {
+    { name = "accepted beyond collision", x = 4, reached = true, performed = true },
+    { name = "rejected at collision", x = 0, reached = false },
+    { name = "nil at collision", x = 0 },
+    { name = "invalid at collision", x = 0, reached = true, invalid = true },
+    { name = "identified attempt", x = 0, reached = false, identified = true, performed = true },
+    { name = "removed target", x = 0, removed = true },
+}, function(row)
+    local actor, target = T.entity(), T.entity({ x = row.x })
+    local pc = { ismastersim = false, IsEnabled = function() return true end, IsBusy = function() return false end }
+    function pc:DoAction(action) action.non_preview_cb() end
+    function pc:GetPlatformRelativePosition(x, z) return nil, x, z end
+    actor.components.playercontroller = pc
+    local game = { ACTIONS = G.ACTIONS, RPC = G.RPC, GetTime = function() return 0 end, SendRPCToServer = function() end }
+    local action = { doer = actor, target = target, action = { code = 4 }, rotation = 0,
+        IsValid = function() return true end, GetActionPoint = function() return target:GetPosition() end }
+    local checked = false
+    action.action.customarrivecheck = function(doer, destination, buffered)
+        assert(target:IsValid(), "a vanished native target may return true only to fail its action")
+        assert(doer == actor and buffered == action and destination:GetPoint() == target.x)
+        checked = true
+        return row.reached, row.invalid
+    end
+    local ticket = assert(Actions.dispatch({ player = actor, G = game }, action))
+    assert(not ticket:performed())
+    if row.removed then target:Remove() end
+    actor:PushEvent("performaction", row.identified and { action = action } or nil)
+    assert(ticket:performed() == (row.performed == true), "special native arrival must govern anonymous execution evidence")
+    assert(checked == not row.removed, "evaluate the native predicate only while the target exists")
+    ticket:close()
+end)
+
 T.case("arrival matches native entity movement", function()
     local actor, target, owner = T.entity(), T.entity({ x = 10 }), T.entity()
     actor.Physics, target.Physics, owner.Physics = { GetRadius = function() return .5 end },
@@ -370,4 +402,30 @@ T.case("native deployment query uses planned rotation", function()
         raises = false
     end
 end)
+T.each("self inventory transport", { "host", "prediction", "remote" }, function(mode)
+    local actor, item, sent, pre = T.entity(), T.entity(), 0, 0
+    local pc = { ismastersim = mode == "host", IsEnabled = function() return true end,
+        IsBusy = function() return false end, CanLocomote = function() return true end }
+    actor.components.playercontroller = pc
+    local action = { doer = actor, invobject = item, action = { id = "READ", code = 19, mod_name = "test",
+        pre_action_cb = function() pre = pre + 1 end }, IsValid = function() return true end }
+    function action:AddSuccessAction(fn) self.success = fn end
+    function action:AddFailAction(fn) self.failure = fn end
+    function action:GetActionPoint() return nil end
+    if mode ~= "remote" then
+        pc.locomotor = { PushAction = function(_, a) assert(a == action); a.success() end,
+            PreviewAction = function(_, a) assert(a == action); a.preview_cb() end }
+    end
+    local game = { ACTIONS = {}, GetTime = function() return 1 end,
+        RPC = { ControllerUseItemOnSelfFromInvTile = 5 }, SendRPCToServer = function(rpc, code, used, mod)
+            assert(rpc == 5 and code == 19 and used == item and mod == "test"); sent = sent + 1
+        end }
+    local ticket = assert(Actions.dispatch({ player = actor, G = game }, action, "self"))
+    assert(ticket.sent and (mode == "host" and ticket.succeeded or mode ~= "host" and sent == 1))
+    assert(pre == (mode == "remote" and 1 or 0))
+    if mode ~= "host" then actor:PushEvent("performaction"); assert(ticket.attempt.in_range) end
+    ticket:close()
+    if action.preview_cb then action.preview_cb(); assert(sent == 1) end
+end)
+
 T.done()

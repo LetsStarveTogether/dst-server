@@ -69,7 +69,7 @@ function M.new(ctx, movement, origin, goal, options)
     local grid = { x = x, z = z, size = G.TILE_SCALE }
     local self = { origin = { x = origin.x, z = origin.z }, goal = { x = goal.x, z = goal.z }, state = "planning" }
     local hazards, checked = {}, -math.huge
-    local search, handle, started
+    local search, handle, started, candidate, failure
     local fast = options.fast and not movement.sailing
     local locomotor = player.components.playercontroller.locomotor
     local multiplier = locomotor and locomotor.fastmultiplier or 1.3
@@ -121,35 +121,46 @@ function M.new(ctx, movement, origin, goal, options)
         search = Search.new(origin, goal, grid, clear, explored,
             function(point) return movement:passable(point) end, cost, fast and 1 / multiplier or 1)
     end
+    local function native_search(now)
+        if options.native and not movement.sailing then
+            handle = finder:SubmitSearch(origin.x, 0, origin.z, goal.x, 0, goal.z, movement:capabilities())
+            if handle then started = now; return true end
+        end
+    end
     function self:step(now)
         now = now or G.GetTime()
         if self.state ~= "planning" then return self.state, self.path, self.reason end
         if not movement:valid() then return complete(nil, "invalid_destination") end
         if search then
-            local state, points, reason = search:step()
+            -- A verified direct route bounds optional road optimization.
+            local state, points, reason = search:step(candidate and math.min(24, 512 - search.visited) or nil)
+            if state == "done" then return complete(points) end
+            if state == "planning" and (not candidate or search.visited < 512) then return state end
+            checked = -math.huge
+            points = Route.plan(origin, goal, nil, grid, clear, explored)
+            if points then return complete(points) end
+            candidate = nil
             if state == "planning" then return state end
-            return complete(points, reason)
+            search, failure = nil, reason
+            if fast and native_search(now) then return "planning" end
+            return complete(nil, reason)
         end
         if handle then
             local status = finder:GetSearchStatus(handle)
             if status == 0 and now - started <= 10 then return "planning" end
             local result = status == 1 and finder:GetSearchResult(handle)
             kill()
+            checked = -math.huge
             local points = result and result.steps and Route.plan(origin, goal, result.steps, grid, clear, explored)
             if points then return complete(points) end
+            if failure then return complete(nil, failure) end
             grid_search()
             return "planning"
         end
-        local direct_reason
-        if not fast then
-            local points, reason = Route.plan(origin, goal, nil, grid, clear, explored)
-            if points then return complete(points) end
-            direct_reason = reason
-        end
-        if options.native and not fast and not movement.sailing and direct_reason == "blocked_path" then
-            handle = finder:SubmitSearch(origin.x, 0, origin.z, goal.x, 0, goal.z, movement:capabilities())
-            if handle then started = now; return "planning" end
-        end
+        local points, reason = Route.plan(origin, goal, nil, grid, clear, explored)
+        if points and not fast then return complete(points) end
+        candidate = points ~= nil
+        if not fast and reason == "blocked_path" and native_search(now) then return "planning" end
         grid_search()
         return "planning"
     end

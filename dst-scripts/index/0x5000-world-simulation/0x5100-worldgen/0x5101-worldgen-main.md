@@ -132,7 +132,9 @@ It also writes `WorldSim:GenerateSessionIdentifier()` and the save version.
 
 It serializes each entity array separately.
 
-It returns a dumped `data` table for the host, not the original `savedata` table.
+It returns the `data` table to the host.
+
+Each non-entity field and each `data.ents[prefab]` value contains a serialized string.
 
 ## `0x51014211` Set Piece Inputs
 
@@ -171,4 +173,4 @@ Then return to `CheckMapSaveData` and `worldentities.AddWorldEntities`.
 - `level:ChooseTasks()` runs before set-piece assignment.
 - `forest_map.Generate` returns `savedata`, not spawned runtime entities.
 - `worldentities.AddWorldEntities(savedata)` follows `CheckMapSaveData(savedata)`.
-- `GenerateNew` returns `DataDumper` output.
+- `GenerateNew` returns a table containing the separate `DataDumper` results.

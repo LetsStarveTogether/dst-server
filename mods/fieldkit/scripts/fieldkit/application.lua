@@ -46,7 +46,7 @@ function M.attach(G, player, config, store, params)
         ctx.selection = require("fieldkit/features/selection").new(ctx)
         ctx.mapview = require("fieldkit/game/map_view").new(ctx)
         ctx.minimap = require("fieldkit/ui/minimap").new(ctx, ctx.mapview)
-        ctx.awareness = require("fieldkit/features/awareness").new(ctx)
+        ctx.awareness = require("fieldkit/features/awareness").new(ctx, require("fieldkit/ui/indicators").new(ctx))
         local Panel = require("fieldkit/ui/panel")
         function ctx:open()
             if self.screen then self.screen:Close(); return end
@@ -91,44 +91,35 @@ function M.attach(G, player, config, store, params)
             if G.ThePlayer ~= player or player.HUD ~= ctx.hud then ctx.scope:close() end
         end)
 
-        local function bind(key, fn, down)
-            if key and key ~= 0 then
-                local register = down and G.TheInput.AddKeyDownHandler or G.TheInput.AddKeyUpHandler
-                local handler = register(G.TheInput, key, function()
-                    if not G.TheFrontEnd.textProcessorWidget then fn() end
-                end)
-                ctx.scope:defer(function() handler:Remove() end)
-            end
-        end
-        bind(config.cancel_key, function()
-            ctx.params.auto_repair = false
-            ctx.executor:cancel("cancelled")
-            ctx.selection:clear()
-            if ctx.screen then ctx.screen:Close() end
-            if ctx.ground_dock then ctx.ground_dock:release_focus() end
-        end)
-        bind(config.panel_key, function() ctx:open() end)
-        bind(config.gesture_key, function() ctx:open_emotes(config.gesture_key) end, true)
-        bind(config.range_key, function()
-            if ctx:ready() then
-                local ok, reason = ctx.awareness:toggle_pin(G.TheInput:GetWorldEntityUnderMouse())
-                if not ok and reason then ctx:notify(reason) end
-            end
-        end)
-        bind(config.range_clear_key, function()
-            if ctx:ready() then ctx.awareness:clear_pins() end
-        end)
-        bind(config.cooking_key, function()
-            local _, reason = ctx.cooking:shortcut()
-            if reason then ctx:notify(reason) end
-        end)
-        bind(config.grid_key, function()
-            if config.grid and ctx:ready() then
-                ctx.placement:swap_shape()
-                ctx:notify(ctx:text("放置格型：", "Grid: ") .. Parameters.label(ctx, "grid_shape"))
-            end
-        end)
-        ctx.scope:periodic(.1, function() ctx.executor:tick() end)
+        ctx.bindings = require("fieldkit/game/keybindings").new(ctx, {
+            cancel_key = { fn = function()
+                ctx.params.auto_repair = false
+                ctx.executor:cancel("cancelled")
+                ctx.selection:clear()
+                if ctx.screen then ctx.screen:Close() end
+                if ctx.ground_dock then ctx.ground_dock:release_focus() end
+            end },
+            panel_key = { fn = function() ctx:open() end },
+            gesture_key = { down = true, fn = function() ctx:open_emotes(config.gesture_key) end },
+            range_key = { fn = function()
+                if ctx:ready() then
+                    local ok, reason = ctx.awareness:toggle_pin(G.TheInput:GetWorldEntityUnderMouse())
+                    if not ok and reason then ctx:notify(reason) end
+                end
+            end },
+            range_clear_key = { fn = function() if ctx:ready() then ctx.awareness:clear_pins() end end },
+            cooking_key = { fn = function()
+                local _, reason = ctx.cooking:shortcut()
+                if reason then ctx:notify(reason) end
+            end },
+            grid_key = { fn = function()
+                if config.grid and ctx:ready() then
+                    ctx.placement:swap_shape()
+                    ctx:notify(ctx:text("放置格型：", "Grid: ") .. Parameters.label(ctx, "grid_shape"))
+                end
+            end },
+        })
+        ctx.scope:periodic(require("fieldkit/game/action_state").INTERVAL, function() ctx.executor:tick() end)
     end
     local ok, err = pcall(mount)
     if not ok then
@@ -148,7 +139,8 @@ function M.install(env)
     require("fieldkit/features/placement").install(env, function() return active end)
     require("fieldkit/features/visual").install(env)
     require("fieldkit/features/cooking").install(env, function() return active end)
-    require("fieldkit/game/map_input").install(env, function() return active end)
+    require("fieldkit/game/map_input").install(env, function() return active end,
+        function(...) return require("fieldkit/ui/map_overlay").new(...) end)
     require("fieldkit/game/map_view").install(env, function() return active end)
     require("fieldkit/game/inventory_input").install(env, function() return active end)
     require("fieldkit/ui/announcement_controls").install(env, function() return active end)

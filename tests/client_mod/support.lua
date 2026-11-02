@@ -104,6 +104,7 @@ function Entity:GetDistanceSq(point)
     return (self.x - point.x)^2 + (self.y - (point.y or 0))^2 + (self.z - point.z)^2
 end
 function Entity:GetDistanceSqToInst(other) return self:GetDistanceSq(other:GetPosition()) end
+Entity.IsNear = event_env.EntityScript.IsNear
 function Entity:GetCurrentPlatform() return self.platform end
 function Entity:GetPhysicsRadius(default) return self.Physics and self.Physics:GetRadius() or default or 0 end
 function Entity:GetDisplayName() return self.name or self.prefab end

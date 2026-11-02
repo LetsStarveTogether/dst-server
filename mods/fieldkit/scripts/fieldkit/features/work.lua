@@ -1,8 +1,11 @@
 local Parameters = require("fieldkit/core/parameters")
 local Actions = require("fieldkit/game/actions")
+local ActionState = require("fieldkit/game/action_state")
 local Inventory = require("fieldkit/game/inventory")
 local Query = require("fieldkit/game/query")
+local Targets = require("fieldkit/game/targets")
 local Rules = require("fieldkit/rules/work")
+local Progress = require("fieldkit/core/progress")
 local M = {}
 
 function M.new(ctx)
@@ -17,10 +20,11 @@ function M.new(ctx)
         return equip and equip:EquipSlot() == G.EQUIPSLOTS.HANDS
     end
     local function acceptable(action, target, id)
-        return Rules.accept(action, player) and action.target == target and (not id or action.action.id == id)
+        return Rules.accept(action, player) and (action.target == target or target == player and action.target == nil)
+            and (not id or action.action.id == id)
     end
     local function resolve(target, button, id)
-        if not Query.visible(ctx, target) or target == player or target:HasTag("player") then return end
+        if not Query.visible(ctx, target) then return end
         local exhausted
         local function usable(action, tools_only)
             if not acceptable(action, target, id) then return false end
@@ -35,6 +39,7 @@ function M.new(ctx)
         for _, action in ipairs(Actions.candidates(ctx, target, button)) do
             if usable(action) then return action end
         end
+        if target == player or player:HasTag("playerghost") then return nil, exhausted end
         -- An active consumable is the player's explicit intent; never substitute another item.
         if inventory:GetActiveItem() or ctx.config.queue_tools == false then return nil, exhausted end
         local picker = player.components.playeractionpicker
@@ -79,10 +84,14 @@ function M.new(ctx)
         if action.action.id == "REEL" then return end
         local active = inventory:GetActiveItem()
         local policy = Rules.policies[action.action.id]
+        local followup = policy.followup
+        if followup and (followup.source and followup.source ~= target.prefab
+            or followup.permission and ctx.params[followup.permission] ~= true) then followup = nil end
         return { target = target, button = button, id = action.action.id,
+            selection = Targets.describe(target),
             remaining = action.action.id == "FISH" and ctx.params.fish_count or nil,
             applications = policy.mode == "count" and action.invobject and (ctx.params.repeat_count or 1) or nil,
-            clear_stump = action.action.id == "CHOP" and ctx.params.clear_stumps == true,
+            followup = followup,
             cursor = active and not (policy.tool and hands(active)) and active.prefab or nil }
     end
     local function forget(target)
@@ -93,19 +102,22 @@ function M.new(ctx)
         return action and action.action.id ~= "REEL" and action or nil
     end
 
-    local function settled()
+    local function settled(id)
         if controller:IsBusy() then return false end
-        if player.sg then return player.sg:HasStateTag("idle") or player.sg:HasStateTag("moving") end
-        return controller.ismastersim or player:HasTag("idle") or player:HasTag("moving")
+        local policy = Rules.policies[id]
+        if policy and policy.ready and policy.ready(player) then return true end
+        return ActionState.idle(ctx)
     end
 
     local function new_job(entries)
         local active = inventory:GetActiveItem()
         local job = { entries = entries, completed = 0, skipped = 0, caught = 0, applied = 0, timeout = 600,
             name = ctx:text("实体交互队列", "Interaction queue"),
-            input = { mode = "world", cursor = active and active.prefab, placement = active ~= nil },
+            input = { mode = "world", cursor = active and active.prefab, placement = active ~= nil,
+                actor = player:HasTag("playerghost") and "ghost" or "alive" },
             timeout_message = ctx:text("交互队列已达到时限", "Interaction queue reached its time limit"),
             error_message = ctx:text("交互队列发生错误，已停止", "Interaction queue failed; stopped") }
+        function job:remaining() return #self.entries end
         local state
         local function close(reason)
             if state then Actions.stop(ctx, state.ticket, reason) end
@@ -168,29 +180,64 @@ function M.new(ctx)
             return not state.drops[identity] and (fishing
                 or target:GetTimeAlive() <= G.GetTime() - state.started_at)
         end
-        local function new_drop()
+        local function new_drop(prefab)
             if not state.drops then return false end
             for identity, target in pairs(dropped(state.drop_point)) do
-                if new_item(identity, target) then return true end
+                if (not prefab or target.prefab == prefab) and new_item(identity, target) then return true end
             end
             return false
         end
+        local function replacements()
+            local found = {}
+            local point = state.replacement_point
+            for _, target in ipairs(G.TheSim:FindEntities(point.x, point.y or 0, point.z, .25)) do
+                if target.prefab == state.entry.followup.prefab and Query.visible(ctx, target)
+                    and target:GetCurrentPlatform() == state.replacement_platform then
+                    found[target.GUID or target] = target
+                end
+            end
+            return found
+        end
+        local function replacement()
+            -- shortcut: replicas expose no spawn parent; use source identity if the game adds it.
+            local candidate
+            for identity, target in pairs(replacements()) do
+                if not state.replacements[identity] and target:GetTimeAlive() <= G.GetTime() - state.started_at then
+                    if candidate then return nil, "ambiguous" end
+                    candidate = target
+                end
+            end
+            return candidate
+        end
         local function observe_execution()
             local ticket, target = state.ticket, state.entry.target
-            if not ticket or not ticket.sent then return end
-            local rangecheck = ticket.action and ticket.action.action.rangecheckfn
-            if target:IsValid() and rangecheck and rangecheck(player, target) then
-                -- Preserve a native in-range observation for an echo delivered after removal.
-                state.arrival = math.max(state.arrival, math.sqrt(player:GetDistanceSqToInst(target)))
+            if not ticket or not ticket.sent or not ticket.action then return end
+            local definition, valid_target = ticket.action.action, target:IsValid()
+            if valid_target then
+                local in_range = Actions.in_range(ctx, ticket.action)
+                if definition.customarrivecheck then
+                    state.custom_arrival = in_range and { position = player:GetPosition(), target_position = target:GetPosition() } or nil
+                elseif in_range then
+                    -- Preserve a native in-range observation for an echo delivered after removal.
+                    state.arrival = math.max(state.arrival, math.sqrt(player:GetDistanceSqToInst(target)))
+                end
             end
             local attempt = ticket.attempt
             if attempt and attempt ~= state.attempt_seen then
                 state.attempt_seen = attempt
                 local point = attempt.target_position or state.drop_point
+                    or Rules.policies[state.entry.id].removes_target and state.target_point
+                    or ticket.action.target == nil and target == player and attempt.position
                 if point then
                     local distance = (attempt.position.x - point.x)^2 + (attempt.position.z - point.z)^2
+                    local observed = state.custom_arrival
+                    -- Special arrival areas need the accepted position, not a circle around the target.
+                    local retained = not valid_target and observed and observed.position.x == attempt.position.x
+                        and observed.position.z == attempt.position.z and observed.target_position.x == point.x
+                        and observed.target_position.z == point.z
                     if attempt.identified or attempt.in_range == true
-                        or attempt.in_range == nil and distance <= state.arrival ^ 2 then
+                        or attempt.in_range == nil and (definition.customarrivecheck and retained
+                            or not definition.customarrivecheck and distance <= state.arrival ^ 2) then
                         state.execution = { position = attempt.position, ticket = ticket,
                             reach = math.max(state.arrival, math.sqrt(distance)) }
                         if state.drops then state.drop_point = point end
@@ -252,6 +299,20 @@ function M.new(ctx)
             end
         end
         local function advance(success, reason, fishing)
+            local followup, next_entry = state.entry.followup, state.followup_entry
+            if success and followup and not state.followup_resolved then
+                local target = state.entry.target
+                if followup.prefab and not target:IsValid() and state.replacements then
+                    state.replaced_at = state.replaced_at or G.GetTime()
+                    local candidate, why = replacement()
+                    next_entry = candidate and (capture(candidate, "right", followup.action) or capture(candidate, "left", followup.action))
+                    if not next_entry and why ~= "ambiguous" and G.GetTime() - state.replaced_at < 8 then return end
+                    if not next_entry then state.followup_skipped = true end
+                elseif followup.tag and target:IsValid() and target:HasTag(followup.tag) then
+                    next_entry = capture(target, "right", followup.action) or capture(target, "left", followup.action)
+                end
+                state.followup_resolved, state.followup_entry = true, next_entry
+            end
             -- ponytail: one-second replication window; collecting arbitrarily late loot needs server receipts.
             if success and ctx.config.queue_collect and state.drops and not state.fishing then
                 state.collect_at = state.collect_at or G.GetTime()
@@ -261,13 +322,10 @@ function M.new(ctx)
             close(success and "done" or "skipped")
             table.remove(job.entries, 1)
             if success then
-                local target = state.entry.target
-                if state.entry.clear_stump and state.worked and target:IsValid() and target:HasTag("stump") then
-                    local stump = capture(target, "right", "DIG") or capture(target, "left", "DIG")
-                    if stump and #job.entries < limit then table.insert(job.entries, 1, stump) end
-                end
+                if state.followup_skipped then job.followup_skipped = (job.followup_skipped or 0) + 1 end
+                if next_entry and #job.entries < limit then table.insert(job.entries, 1, next_entry) end
                 append_drops(fishing); job.completed = job.completed + 1
-            else job.skipped = job.skipped + 1 end
+            else Progress.skip(job, reason) end
             forget(state.entry.target)
             return_tool()
             state = nil
@@ -275,9 +333,11 @@ function M.new(ctx)
         local function applied(now)
             local entry = state.entry
             if not entry.applications then advance(true); return end
-            job.applied, entry.applications = job.applied + 1, entry.applications - 1
+            local bounded = entry.applications > 0
+            job.applied = job.applied + 1
+            if bounded then entry.applications = entry.applications - 1 end
             state.applied = (state.applied or 0) + 1
-            if entry.applications == 0 then advance(true); return end
+            if bounded and entry.applications == 0 then advance(true); return end
             state.ticket:close()
             state.ticket, state.effect, state.success_seen = nil, nil, nil
             state.progress, state.count, state.usage = now, nil, nil
@@ -286,7 +346,7 @@ function M.new(ctx)
             local ticket = state.ticket
             if not ticket then return false end
             if ticket.succeeded then return true end
-            if state.entry.applications and ticket.usage_resolution then
+            if (state.entry.applications or Rules.policies[state.entry.id].consumes) and ticket.usage_resolution then
                 local item = state.item
                 return ticket:consumed(state.effect, state.execution ~= nil and state.execution.ticket == ticket
                     and now - state.sent_at >= .5 and settled()
@@ -313,14 +373,21 @@ function M.new(ctx)
             if usage then state.usage = usage end
             if state.prefab and state.count and (not refills or state.usage == nil) then
                 local count = Inventory.count(ctx, state.prefab)
-                if count and (state.entry.id == "PICKUP" and count > state.count
-                    or state.entry.id ~= "PICKUP" and count < state.count) then state.effect, state.progress = true, now end
+                if count and (state.pickup and count > state.count
+                    or not state.pickup and count < state.count) then state.effect, state.progress = true, now end
                 -- A consumed/broken item is one change, not fresh progress on every tick.
                 if count then state.count = count end
             end
+            local policy = Rules.policies[state.entry.id]
+            if state.execution and (policy.moves_target and state.entry.target:IsValid()
+                and state.entry.target:GetDistanceSq(state.target_point) > .01
+                or policy.product and new_drop(policy.product)
+                or state.replacements and not state.entry.target:IsValid() and replacement()) then
+                state.effect, state.progress = true, now
+            end
             if state.execution and (Rules.policies[state.entry.id].mode == "work" and state.entry.target:IsValid()
                 and not Rules.workable(state.entry.target, G.ACTIONS[state.entry.id], state.entry.button)
-                or not Query.visible(ctx, state.entry.target) and new_drop()) then
+                or not Query.visible(ctx, state.entry.target) and (new_drop() or Rules.policies[state.entry.id].removes_target)) then
                 state.effect, state.progress = true, now
             end
             if ticket.succeeded or state.effect then state.worked = true end
@@ -374,14 +441,24 @@ function M.new(ctx)
         end
         local function dispatch(action, now)
             if state.ticket then state.ticket:close() end
-            state.arrival = Actions.arrival(ctx, action)
+            state.arrival = Actions.arrival(ctx, action) or 0
+            state.target_point = state.entry.target:GetPosition()
+            if state.entry.followup and state.entry.followup.prefab and not state.replacements then
+                state.replacement_point = state.target_point
+                state.replacement_platform = state.entry.target:GetCurrentPlatform()
+                state.replacements = replacements()
+            end
+            state.custom_arrival = nil
             state.item = action.invobject
-            state.prefab = state.entry.id == "PICKUP" and state.entry.target.prefab
+            local product = Rules.policies[state.entry.id].product
+            state.pickup = state.entry.id == "PICKUP" or state.entry.id == "NABBAG" or product ~= nil
+            state.prefab = product or state.pickup and state.entry.target.prefab
                 or action.invobject and action.invobject.prefab
             state.usage = Inventory.usage(state.item)
             state.count = state.prefab and Inventory.count(ctx, state.prefab)
             state.effect, state.success_seen, state.sent_at = false, false, now
-            state.ticket = Actions.dispatch(ctx, action, state.entry.button)
+            local button = action.target == nil and action.invobject and state.entry.target == player and "self" or state.entry.button
+            state.ticket = Actions.dispatch(ctx, action, button)
             if state.ticket then state.started_at = state.started_at or now end
             return state.ticket ~= nil
         end
@@ -452,29 +529,31 @@ function M.new(ctx)
                     .. self.completed .. "/" .. self.skipped
                     .. (self.caught > 0 and ctx:text("；钓获：", "; caught: ") .. self.caught or "")
                     .. (self.applied > 0 and ctx:text("；投入次数：", "; applications: ") .. self.applied or "")
+                    .. (self.followup_skipped and ctx:text("；续接跳过：", "; followups skipped: ") .. self.followup_skipped or "")
+                    .. (self.skipped > 0 and " · " .. Progress.reasons(ctx, self) or "")
             end
             if not state then state = { entry = entry, progress = now } end
             if state.ticket and state.ticket.failed then
                 if entry.applications then return "failed", ctx:text("投入被拒绝，已停止", "Item use was rejected; stopped") end
-                advance(false); return "running"
+                advance(false, "rejected"); return "running"
             end
             observe_execution()
             track_drops()
             progress(now)
             if not Query.visible(ctx, entry.target) or entry.target:HasTag("dead") then
-                if entry.id == "FISH" then advance(false)
+                if entry.id == "FISH" then advance(false, "changed")
                 elseif confirmed(now) then
                     if entry.applications then
                         self.applied = self.applied + 1
                         advance(true)
                     else advance(true) end
                 elseif state.applied and not state.ticket then advance(true)
-                elseif not state.ticket or not state.ticket.sent then advance(false)
+                elseif not state.ticket or not state.ticket.sent then advance(false, "changed")
                 else
                     -- Entity removal and owner-inventory replication can arrive separately.
                     -- Disappearance by itself is never an action receipt.
                     state.lost_at = state.lost_at or now
-                    if now - state.lost_at >= 1 then advance(false) end
+                    if now - state.lost_at >= (state.replacements and 8 or 1) then advance(false) end
                 end
                 return "running"
             end
@@ -482,6 +561,16 @@ function M.new(ctx)
                 if state.fishing == "cast" and now - state.progress > 8 then advance(false)
                 else fish(now) end
                 return "running"
+            end
+            local approaching = false
+            if state.ticket and state.ticket.action and not state.worked and not state.execution then
+                local in_range = Actions.in_range(ctx, state.ticket.action)
+                approaching = in_range == false or in_range == nil
+                    and player:GetDistanceSqToInst(entry.target) > state.arrival ^ 2
+            end
+            if (not state.started_at or approaching) and entry.selection and entry.selection.phase ~= false
+                and not Targets.matches(entry.selection, entry.target) then
+                advance(false, "changed"); return "running"
             end
             if state.preparing then
                 local pending = state.preparing
@@ -494,8 +583,18 @@ function M.new(ctx)
                 if pending.kind == "craft" then state.ticket:close(); state.ticket = nil end
                 state.preparing, state.progress = nil, now
             end
-            if now - state.progress > 8 then advance(false); return "running" end
+            if now - state.progress > 8 then advance(false, approaching and "unreached" or "unconfirmed"); return "running" end
             local action, unavailable = resolve(entry.target, entry.button, entry.id)
+            if state.started_at and Rules.policies[entry.id].mode == "work" and not action
+                and not Rules.workable(entry.target, G.ACTIONS[entry.id], entry.button) then
+                if state.worked then advance(true)
+                else
+                    state.lost_at = state.lost_at or now
+                    if now - state.lost_at >= 1 then advance(false) end
+                end
+                return "running"
+            end
+            local continuing = false
             if state.ticket then
                 if Rules.policies[entry.id].mode ~= "work" then
                     if confirmed(now) then applied(now); return "running" end
@@ -507,30 +606,27 @@ function M.new(ctx)
                         and now - state.sent_at >= .5 then advance(true) end
                     return "running"
                 end
-                if not action and not Rules.workable(entry.target, G.ACTIONS[entry.id], entry.button) then
-                    if state.worked then advance(true)
-                    else
-                        state.lost_at = state.lost_at or now
-                        if now - state.lost_at >= 1 then advance(false) end
-                    end
-                    return "running"
-                end
-                if not settled() or now - state.sent_at < .3
+                continuing = ActionState.repeat_ready(ctx, action, state.ticket)
+                    or Rules.policies[entry.id].ready and settled(entry.id)
+                if not continuing or now - state.sent_at < ActionState.INTERVAL
                     or not (state.ticket.succeeded or state.execution and state.execution.ticket == state.ticket
                         or state.effect) then return "running" end
                 state.ticket:close(); state.ticket = nil
             end
-            if not settled() then return "running" end
+            if not continuing and not settled(entry.id) then return "running" end
             local prepared = prepare(action, now, unavailable)
             if prepared == "complete" then advance(true); return "running" end
             if prepared == "skip" then
+                if entry.applications == 0 then
+                    return "done", ctx:text("材料或工具已耗尽；投入次数：", "Materials or tools exhausted; applications: ") .. self.applied
+                end
                 if entry.applications then return "failed", ctx:text("材料不足或无法取用，已停止", "Materials are exhausted or unavailable; stopped") end
-                advance(false); return "running"
+                advance(false, "materials"); return "running"
             end
             if prepared == "wait" then return "running" end
             -- Equipment/cursor mutations can change action priority; always ask again.
             action = resolve(entry.target, entry.button, entry.id)
-            if not action or action.recipe_to_make then advance(false); return "running" end
+            if not action or action.recipe_to_make then advance(false, "unavailable"); return "running" end
             if Rules.policies[entry.id].collect and not state.drops then
                 state.drop_point = entry.target:GetPosition()
                 state.drops = dropped(state.drop_point)
@@ -582,7 +678,7 @@ function M.new(ctx)
         if single and ctx.config.ground == false or not single and ctx.config.work == false then
             return false, ctx:text("交互辅助已关闭", "Interaction assistance is disabled")
         end
-        local ready, reason = ctx:ready()
+        local ready, reason = ctx:ready("work")
         if not ready then return false, reason end
         local current = ctx.executor.current
         local radius = ctx.params.search_radius
@@ -595,7 +691,8 @@ function M.new(ctx)
         for _, supplied in ipairs(entries or {}) do
             local target = supplied.target
             if seen[target] then retained = true end
-            if not seen[target] and Query.visible(ctx, target) and player:GetDistanceSqToInst(target) <= radius * radius then
+            if not seen[target] and Query.visible(ctx, target) and player:GetDistanceSqToInst(target) <= radius * radius
+                and (single or Targets.accepts(target, ctx.params.target_filter)) then
                 local entry = capture(target, supplied.button == "right" and "right" or "left", supplied.id)
                 if entry then
                     if #selected >= remaining then limited = true; break end
@@ -632,10 +729,9 @@ function M.new(ctx)
         if not entry and id then entry = capture(target, "right", id) end
         if not entry then return false, ctx:text("目标没有可执行的交互", "Target has no available interaction") end
         local entries = { entry }
-        -- Fish exactly the selected pond; similar nearby ponds are not an implicit intent.
-        if entry.id ~= "FISH" then
+        if Rules.expand(entry.id, target, player) then
             for _, candidate in ipairs(Query.nearby(ctx, radius, nil, nil, nil, function(entity)
-                return entity ~= target and entity.prefab == target.prefab and resolve(entity, entry.button, entry.id) ~= nil
+                return entity ~= target and Targets.matches(entry.selection, entity) and resolve(entity, entry.button, entry.id) ~= nil
             end, limit)) do
                 entries[#entries + 1] = { target = candidate, button = entry.button, id = entry.id }
             end

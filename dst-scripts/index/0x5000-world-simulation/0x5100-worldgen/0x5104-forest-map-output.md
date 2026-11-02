@@ -76,7 +76,9 @@ It copies `has_ocean` and related graph options into `story_gen_params`, while r
 
 ### `0x51043112` Map Size
 
-`world_size` becomes `min_size`; on non-PS4 platforms both the default and `large` use `425`, while `tiny` uses `1`.
+`world_size` becomes `min_size`; on non-PS4 platforms both `default` and `large` use `425`, while `tiny` uses `1`.
+
+Here `default` means the explicit override value; an absent or invalid `world_size` leaves `min_size` at `350`.
 
 Both `map_width` and `map_height` are set to `min_size`.
 
@@ -160,7 +162,9 @@ It also includes room `required_prefabs` from `storygen.ocean_population`.
 
 A required prefab disabled by a `never` override only produces a disabled message.
 
-Any other missing required prefab makes `Generate` return `nil`.
+Any other missing required prefab makes `Generate` return `nil` while `SKIP_GEN_CHECKS` is `false`.
+
+The current source sets `SKIP_GEN_CHECKS` to `false`.
 
 ### `0x51043521` Start Location
 
@@ -191,6 +195,7 @@ rg -n "TileManager\\.AddTile|RegisterTileRange|GetTileInfo|IsLandTile|IsOceanTil
   scripts/worldtiledefs.lua \
   scripts/tilemanager.lua \
   scripts/tilegroups.lua
+rg -c '^TileManager\.AddTile\(' scripts/tiledefs.lua
 
 rg -n "DoInitGame|PopulateWorld|AddWorldEntities|SpawnSaveRecord|savedata\.ents" \
   scripts/worldgen_main.lua \

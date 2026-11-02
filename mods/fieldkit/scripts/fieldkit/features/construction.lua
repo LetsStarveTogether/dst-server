@@ -1,4 +1,5 @@
 local Parameters = require("fieldkit/core/parameters")
+local Progress = require("fieldkit/core/progress")
 local Actions = require("fieldkit/game/actions")
 local Inventory = require("fieldkit/game/inventory")
 local Placement = require("fieldkit/game/placement")
@@ -59,7 +60,7 @@ function M.new(ctx)
     local function count_limit(value, fallback)
         local n = value == nil and fallback or value
         local limit = Parameters.LIMIT
-        if not finite(n) or n < 1 or n ~= math.floor(n) or n > limit then return end
+        if not finite(n) or n < 0 or n ~= math.floor(n) or n > limit then return end
         return n
     end
     local function begin(job)
@@ -72,6 +73,7 @@ function M.new(ctx)
         return text("已完成 ", "Completed ") .. job.completed
             .. text("，跳过 ", "; skipped ") .. (job.skipped or 0)
             .. (exhausted and text("；材料或工具已耗尽", "; materials or tools exhausted") or "")
+            .. (job.skipped and job.skipped > 0 and " · " .. Progress.reasons(ctx, job) or "")
     end
 
     function self:repeat_recipe(count)
@@ -104,7 +106,7 @@ function M.new(ctx)
                     local station = ticket.station
                     ticket:close(); ticket = nil
                     self.completed, deadline = self.completed + (finished and 1 or 0), now + 12
-                    if self.completed >= self.total then return "done", summary(self) end
+                    if self.total > 0 and self.completed >= self.total then return "done", summary(self) end
                     if station and station:HasTag("pickable") and not station:HasTag("prototyper") then
                         return "done", summary(self) .. text("；请收取制造站成品后继续", "; collect the station's product before continuing")
                     end
@@ -155,6 +157,15 @@ function M.new(ctx)
             if valid(entity) then return true end
         end
         return false
+    end
+    local function soil_moisture(point)
+        for _, entity in ipairs(ctx.G.TheSim:FindEntities(point.x, point.y or 0, point.z, .25)) do
+            local anim = valid(entity) and entity.prefab == "nutrients_overlay" and entity.AnimState
+            if anim then
+                local time, length = anim:GetCurrentAnimationTime(), anim:GetCurrentAnimationLength()
+                if finite(time) and finite(length) and length > 0 then return time / length end
+            end
+        end
     end
     local function tool(item, kind)
         if not valid(item) then return false end
@@ -241,11 +252,22 @@ function M.new(ctx)
         local function close_ticket()
             if ticket then ticket:close(); ticket = nil end
         end
-        local function advance(completed)
+        local function advance(completed, reason)
             close_ticket()
-            if completed then job.completed, applied = job.completed + 1, applied + 1
-            else job.skipped, applied = job.skipped + repetitions - applied, repetitions end
-            if applied == repetitions then index, applied = index + 1, 0 end
+            if repetitions == 0 then
+                if completed then
+                    job.completed = job.completed + 1
+                    index = index % #records + 1
+                else
+                    if reason ~= "satisfied" then Progress.skip(job, reason) end
+                    table.remove(records, index)
+                    if index > #records then index = 1 end
+                end
+            else
+                if completed then job.completed, applied = job.completed + 1, applied + 1
+                else Progress.skip(job, reason, repetitions - applied); applied = repetitions end
+                if applied == repetitions then index, applied = index + 1, 0 end
+            end
             deadline, count_before, buffered, tile_before = nil, nil, nil, nil
         end
         function job:step(now)
@@ -295,8 +317,8 @@ function M.new(ctx)
                     return "running"
                 end
                 if ticket.failed then
-                    if repetitions > 1 then return "failed", text("水肥投入被拒绝，已停止", "Watering or fertilizing was rejected; stopped") end
-                    advance(false); return "running"
+                    if repetitions ~= 1 then return "failed", text("水肥投入被拒绝，已停止", "Watering or fertilizing was rejected; stopped") end
+                    advance(false, "rejected"); return "running"
                 end
                 if now >= deadline then
                     return "failed", text("未观察到施工结果，已停止", "No construction result observed; stopped")
@@ -306,6 +328,15 @@ function M.new(ctx)
             if controller:IsBusy() or builder and builder:IsBusy() or inventory_busy() then
                 if now >= deadline then return "failed", text("等待施工同步超时", "Construction synchronization timed out") end
                 return "running"
+            end
+            if kind == "water" and repetitions == 0 then
+                local moisture = soil_moisture(point)
+                if moisture == nil then
+                    if now >= deadline then advance(false) end
+                    return "running"
+                elseif moisture >= .9 then
+                    advance(false, "satisfied"); return "running"
+                end
             end
             if cursor_item then
                 local active = inv:GetActiveItem()
@@ -348,7 +379,7 @@ function M.new(ctx)
             end
             local _, planned_rotation = ctx.placement:resolve(record)
             local can, projected, rotation = ctx.placement:validate(point, item, recipe, kind, planned_rotation or record.rotation)
-            if not can then advance(false); return "running" end
+            if not can then advance(false, "unavailable"); return "running" end
             point = projected or point
             rotation = rotation or record.rotation or 0
             if kind == "build" then
@@ -370,11 +401,11 @@ function M.new(ctx)
                     end
                     return "running"
                 end
-                if not builder:CanBuildAtPoint(point, recipe, rotation) then advance(false); return "running" end
+                if not builder:CanBuildAtPoint(point, recipe, rotation) then advance(false, "unavailable"); return "running" end
                 ticket, reason = Actions.build(ctx, recipe, point, rotation, skin)
             else
                 local action = point_action(point, item, kind, rotation)
-                if not action then advance(false); return "running" end
+                if not action then advance(false, "unavailable"); return "running" end
                 action:SetActionPoint(point)
                 action.rotation = rotation
                 if kind == "water" and Inventory.usage(item) == nil then

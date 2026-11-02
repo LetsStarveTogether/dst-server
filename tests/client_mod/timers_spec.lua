@@ -113,13 +113,37 @@ T.case("consumption receipts, death and observed boss lifecycle", function()
     assert(#timers:snapshot().bosses == 0, "streaming removal is not a confirmed death")
     boss = T.entity({ prefab = "beequeen", x = 50, z = 50 })
     boss.replica.health = { IsDead = function() return boss.dead end }
+    world.state.cycles, world.state.time = 0, .5
     entities, now = { boss }, 25; timers:update()
     boss.dead = true; boss:PushEvent("death")
     assert(#timers:snapshot().bosses == 1 and timers:snapshot().bosses[1].low == 9600)
     local alive = T.entity({ prefab = "beequeen", x = 50, z = 50 })
+    alive.replica.health = { IsDead = function() return alive.dead end }
+    world.state.cycles = 21
     entities, now = { alive }, 26; timers:update()
     assert(timers:snapshot().bosses[1].state == "seen", "a living observation supersedes an estimated cooldown")
+    ctx.journal:flush()
+    local seen_profile = store.data.journal
+    world.state.cycles = 22
+    alive.dead = true; alive:PushEvent("death")
+    local later_death = ctx.journal:get("boss:beequeen")
+    assert(later_death.state == "cooldown" and later_death.at == 22.5 * 480
+        and later_death.due == 22.5 * 480 + 9600, "a later confirmed death starts a new cooldown")
+    local death_profile = store.data.journal
     ctx.scope:close()
     assert(G.SendRPCToServer == original and T.listener_count(player) == 0 and T.listener_count(alive) == 0)
+
+    local function restored(profile, cycles)
+        store.data.journal, world.state.cycles = profile, cycles
+        local scope = Scope.new(player, error)
+        local book = require("fieldkit/game/journal").new({ G = G, player = player, scope = scope, store = store })
+        local record = book:get("boss:beequeen")
+        scope:close()
+        return record
+    end
+    assert(restored(seen_profile, 21.25).state == "seen", "ordinary reconnect preserves a living observation")
+    assert(restored(death_profile, 22).state == "cooldown", "ordinary reconnect preserves the latest death")
+    assert(restored(death_profile, 21.75) == nil, "rollback removes a future death")
+    assert(restored(seen_profile, 20) == nil, "rollback removes a future living observation, even when its death was earlier")
 end)
 T.done()

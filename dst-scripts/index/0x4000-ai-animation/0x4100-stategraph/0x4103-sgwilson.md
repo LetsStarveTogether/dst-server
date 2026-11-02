@@ -24,6 +24,7 @@ Avoid reading all of `SGwilson.lua` in file order.
 | `scripts/stategraphs/SGwilson.lua` | `CommonStates.AddHopStates` | Reuses player boat-jump states |
 | `scripts/stategraphs/SGwilson_client.lua` | `server_states` | Matches predicted states to server states |
 | `scripts/actions.lua` | `ACTIONS` | Defines action constants |
+| `scripts/components/corruption.lua` | `Corruption:OnTargetCorruptable` | Stuns a corruptable target before the cast completes |
 
 ### `0x41032111` Server Search Path
 
@@ -84,6 +85,27 @@ The state's `onenter`, `timeline`, `ontimeout`, or event handler decides when to
 `forward_server_states = true` carries the previous matching set across a transition.
 These fields feed the client branches of `StateGraphInstance:ServerStateMatches` and `GoToState` in `stategraph.lua`.
 
+## `0x41034411` Corruption Cast
+
+Both player graphs map `ACTIONS.CORRUPTNIGHTMARE` to `castspell`.
+The client previews the action and waits for `server_states = { "castspell" }` to match.
+The server takes the corruption staff and target from the buffered action.
+It calls `OnTargetCorruptable` at frame 8 and performs the action at frame 53.
+Its `onexit` calls `OnUntargetCorruptable` when the stored staff and target remain valid.
+This releases the target when the cast ends or is interrupted.
+A staff with `DoGemShine` provides its own casting effect.
+`castsoundparams` selects `PlaySoundWithParams` for the sound at frame 13.
+
+## `0x41034511` Teleport and Knockback Boundaries
+
+The wereplayer and ordinary branches of the `knockback` handler respect `nointerrupt`.
+Shield and parry handling have separate branches.
+`charliearena_teleport` carries `noattack` and `nointerrupt` and selects a riding animation when mounted.
+Its interrupted exit path calls `onplayerready`.
+The `vault_teleport` event forwards `fxprefab` to its destination state; the `vault_teleport` state otherwise uses `vault_portal_fx`.
+Check `SGwilsonghost.lua` separately for the ghost arena teleport.
+Its readiness callback remains, but that state does not call `ScreenFade`.
+
 ## `0x41035100` Verification
 
 ~~~bash
@@ -94,6 +116,12 @@ rg -n "ActionHandler\\(ACTIONS\\.(PICKUP|CHOP|ATTACK)|PerformBufferedAction|serv
 rg -n "name = \\\"(doshortaction|chop_start|chop|attack)\\\"" \
   scripts/stategraphs/SGwilson.lua \
   scripts/stategraphs/SGwilson_client.lua
+
+rg -n "CORRUPTNIGHTMARE|OnTargetCorruptable|OnUntargetCorruptable|charliearena_teleport|fxprefab" \
+  scripts/stategraphs/SGwilson.lua \
+  scripts/stategraphs/SGwilson_client.lua \
+  scripts/stategraphs/SGwilsonghost.lua \
+  scripts/components/corruption.lua
 ~~~
 
 ### `0x41035111` Minimum Trace

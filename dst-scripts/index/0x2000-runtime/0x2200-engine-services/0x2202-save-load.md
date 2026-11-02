@@ -21,7 +21,9 @@ Existing world data comes from `ShardGameIndex:GetSaveData()` or `ShardGameIndex
 | File | Entry | Role |
 | --- | --- | --- |
 | `scripts/mainfunctions.lua` | `SaveGame` | Server-side world-save entry point |
-| `scripts/mainfunctions.lua` | `SerializeWorldSession` | Send chunked world data to `TheNet` |
+| `scripts/networking.lua` | `SerializeWorldSession` | Send serialized world data to `TheNet` |
+| `scripts/consolecommands.lua` | `c_shutdown` | Despawn players and save before quitting by default |
+| `scripts/mainfunctions.lua` | `Shutdown` | Set the shutdown flag and call `TheSim:Quit` |
 | `scripts/networking.lua` | `SerializeUserSession` | Save a player session and optional `player_classified` |
 | `scripts/entityscript.lua` | `GetSaveRecord` | Build one entity save record |
 | `scripts/entityscript.lua` | `GetPersistData` | Collect component `OnSave` data |
@@ -29,6 +31,7 @@ Existing world data comes from `ShardGameIndex:GetSaveData()` or `ShardGameIndex
 | `scripts/gamelogic.lua` | `DoLoadWorld` | Read world data from the shard index and initialize the game |
 | `scripts/saveindex.lua` | `SaveIndex:Save` | Retained index entry that only calls its callback |
 | `scripts/shardindex.lua` | `ShardIndex:Save` | Save world, server, and session indexes for a shard |
+| `scripts/shardindex.lua` | `ShardIndex:SaveCurrent` | Check disk space and pass the completion callback to `SaveGame` |
 | `scripts/shardsaveindex.lua` | `ShardSaveIndex:GetShardIndex` | Cache shard indexes by slot |
 
 ### `0x22022111` Save Anchor
@@ -57,8 +60,10 @@ flowchart TD
     C --> D["EntityScript:GetPersistData"]
     D --> E["DataDumper per save section"]
     E --> F["SerializeWorldSession"]
-    F --> G["ShardGameIndex:Save"]
+    F --> O["UpdateWorldGenOverride"]
+    O --> G["ShardGameIndex:Save"]
     G --> H["ShardGameIndex:WriteTimeFile"]
+    H --> I["TheNet:EndWorldSave and caller callback"]
 ~~~
 
 ### `0x22023111` World Snapshot
@@ -117,11 +122,43 @@ The load path creates `ShardGameIndex = ShardIndex()` in `gamelogic.lua`.
 
 World-generation overrides, the shard index, and the time file are updated afterward.
 
+## `0x22024411` Saving Before Shutdown
+
+On a running server, `c_shutdown()` calls `OnDespawn()` for each player and enables storage.
+
+It then invokes `ShardGameIndex:SaveCurrent(Shutdown, true)`.
+
+Each shard process saves its own world through this path.
+
+`SaveCurrent` checks free disk space and records the session identifier.
+
+It calls `SaveGame` with the supplied shutdown flag and callback.
+
+`SaveGame` completes its world, override, shard-index, and time-file callbacks.
+
+It then calls `TheNet:EndWorldSave()` followed by `Shutdown()`.
+
+`Shutdown()` runs world-overseer cleanup, sets `SimShuttingDown`, and calls `TheSim:Quit()`.
+
+`c_shutdown(false)` skips the save, as does a call without a world.
+
+A client console forwards `c_shutdown()` to the server before handling the `save` argument.
+
+The Lua path has no guard against another `c_shutdown()` call while saving.
+
+Callers should submit it once per server process.
+
+The final quit and disk-write implementation belongs to the engine; these callbacks establish the Lua ordering.
+
 ## `0x22025100` Verification
 
 ~~~bash
 rg -n \
   -e "SaveGame" \
+  -e "SerializeWorldSession" \
+  -e "c_shutdown" \
+  -e "function Shutdown" \
+  -e "SaveCurrent" \
   -e "GetSaveRecord" \
   -e "GetPersistData" \
   -e "SetPersistData" \
@@ -131,6 +168,7 @@ rg -n \
   -e "ShardIndex:Save" \
   -e "SaveIndex:Save" \
   scripts/mainfunctions.lua \
+  scripts/consolecommands.lua \
   scripts/entityscript.lua \
   scripts/prefabs/gravestone.lua \
   scripts/gamelogic.lua \

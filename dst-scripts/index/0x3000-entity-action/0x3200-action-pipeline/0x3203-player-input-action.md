@@ -59,12 +59,14 @@ flowchart TD
     G --> H{"Execution side"}
     H -->|mastersim| I["locomotor:PushAction"]
     H -->|client without locomotor| J["non_preview_cb -> RPC"]
-    H -->|predicting client| K["locomotor:PreviewAction + preview_cb -> RPC"]
+    H -->|predicting client| K["locomotor:PreviewAction"]
     I --> L["EntityScript:PushBufferedAction"]
     J --> M["server OnRemote* rebuilds action"]
-    K --> M
+    K --> R["PreviewBufferedAction / SGwilson_client"]
+    R --> S["PerformPreviewBufferedAction -> preview_cb -> RPC"]
+    S --> M
     M --> L
-    L --> N["SGwilson / SGwilson_client ActionHandler"]
+    L --> N["SGwilson ActionHandler"]
     N --> O["PerformBufferedAction"]
     O --> P["BufferedAction:Do"]
     P --> Q["ACTIONS.*.fn / component side effect"]
@@ -101,6 +103,9 @@ This early call occurs when the action has no `pre_action_cb`.
 It then validates the action objects, busy state, and duplicate actions.
 On that same path, when `pre_action_cb` exists, it and `non_preview_cb` run later, after validation and automatic equipment.
 The function then handles attack retargeting, highlighting, automatic equipment, and held actions.
+It records `lastheldaction` only when the action is valid, non-instant, and lacks `invalid_hold_action`.
+`CASTSPELL`, `BLINK`, channel start/stop actions, and `CORRUPTNIGHTMARE` set that flag.
+They do not enter this held-action repeat path.
 The master simulation calls `locomotor:PushAction(buffaction, true)`.
 A non-predicting client without a locomotor sends through `non_preview_cb`.
 A movable predicting client calls `locomotor:PreviewAction(buffaction, true)`.
@@ -116,6 +121,8 @@ The boat cannon branch in `OnRemoteControllerActionButtonPoint` passes the playe
 The call is `GetCannonAimActions(self.inst, position, false)`.
 The golf charging branch calls `GetGolfAimActions(position, false)`.
 When tracing controller cannon use, verify the picker signature instead of assuming the mouse arguments.
+`PullUpMap` returns the active inventory item only when it differs from `maptarget`.
+An item used as the map target stays active while its map action is opened.
 
 ### `0x32033331` RPC and Prediction
 
@@ -147,6 +154,7 @@ The final checkpoints are `EntityScript:PushBufferedAction`, `StateGraphInstance
 rg -n "LMBaction|RMBaction|DoGetMouseActions|GetLeftMouseAction|GetRightMouseAction" \
   scripts/components/playercontroller.lua
 rg -n "OnLeftClick|OnRightClick|function PlayerController:DoAction" scripts/components/playercontroller.lua
+rg -n "invalid_hold_action|lastheldaction|PullUpMap|maptarget ~= activeitem" scripts/components/playercontroller.lua scripts/actions.lua
 rg -n "OnRemoteControllerActionButtonPoint|GetCannonAimActions|GetGolfAimActions" \
   scripts/components/playercontroller.lua \
   scripts/components/playeractionpicker.lua

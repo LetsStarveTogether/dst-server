@@ -6,6 +6,7 @@ Their differences come from component parameters, Brain complexity, StateGraphs,
 ## `0x61021000` Purpose
 
 This guide compares `rabbit.lua` with `deerclops.lua` to establish a reusable source-reading pattern.
+The Charlie and Shrouden encounter then shows how a boss transition crosses prefabs, StateGraphs, and an arena owner.
 
 ### `0x61021100` Comparison
 
@@ -29,6 +30,11 @@ Both connect to shared systems through components such as `health`, `combat`, an
 | --- | --- | --- |
 | `scripts/prefabs/rabbit.lua` | `Prefab("rabbit", fn, ...)` | Ordinary creature example |
 | `scripts/prefabs/deerclops.lua` | `Prefab("deerclops", normalfn, ...)` | Boss and variant example |
+| `scripts/prefabs/charlie_boss_trial.lua` | `TrackCharlieBoss` / `SpawnExitCrack` | Owns the encounter, hazards, boss replacement, and victory effects |
+| `scripts/stategraphs/SGcharlie_boss.lua` | `death` / `track_charlie_boss` | Spawns Shrouden and transfers arena tracking |
+| `scripts/prefabs/shrouden.lua` | `TryReset` / `OnSave` | Assembles the boss and restores its encounter state |
+| `scripts/brains/shroudenbrain.lua` | `ShroudenBrain:OnStart` | Chooses chase, distant attacks, and devoured-target behavior |
+| `scripts/stategraphs/SGshrouden.lua` | `death_final` / `ms_charlie_boss_defeated` | Completes the encounter after the final death sequence |
 | `scripts/prefabs/critters.lua` | `MakeCritter` | Pet creature factory |
 | `scripts/stategraphs/SGcritter_common.lua` | `SGCritterStates` | Shared pet state factory |
 | `scripts/stategraphs/SGcritter_eets.lua` | `StateGraph("SGcritter_eets", ...)` | Eets-specific pet states |
@@ -120,6 +126,25 @@ The mutated form uses `TUNING.MUTATED_DEERCLOPS_HEALTH` and planar components.
 `SGcritter_eets.lua` uses `QueueStateAfterEat` to select pepper, onion, or mushroom emotes from the food prefab.
 It composes the remaining trait, combat, hungry, nuzzle, pet, sleep, and wake states from shared helpers.
 
+### `0x61023230` Arena Encounter: Charlie and Shrouden
+
+`charlie_boss_trial.lua` creates `charlie_boss` and tracks it through `TrackCharlieBoss`.
+In `SGcharlie_boss`, frame 69 of `death` spawns `shrouden`, transfers the AOE tag set, and pushes `track_charlie_boss`.
+The arena then follows the new boss through the same tracking callbacks.
+`shrouden.lua` installs `shroudenbrain`, `SGshrouden`, retargeting, and phase-dependent attacks.
+Its Brain handles chasing, `dofarattack`, and facing devoured players; its StateGraph performs the attacks.
+
+`SGshrouden` emits `ms_charlie_boss_defeated` when `death_final` times out inside the arena.
+The arena callback pushes `resetvault` and `ms_defeated_shrouden`, synchronizes Charlie defeat, and opens `charliearena_teleporter`.
+The arena therefore completes after the final StateGraph sequence rather than at the initial health-zero event.
+The gate creates `king_cane` and `queen_torch` during ritual arena entry, before boss defeat.
+See [Items and Crafting](../0x6300-items-crafting-events/0x6301-items-crafting.md) for those items.
+
+Both boss prefabs use `TryReset` after losing targets.
+The ordinary reset waits until the Atrium room set has no players, then restores health and the first phase.
+Shrouden saves `looted` to distinguish its two death-loot stages and `changearena` to restore an arena transition.
+Room and Vault reset rules are covered in [Caves, Ocean, and Ruins](../../0x5000-world-simulation/0x5200-world-state/0x5202-caves-ocean-ruins.md).
+
 ## `0x61024110` Assembly Responsibilities
 
 The prefab attaches components and sets initial parameters.
@@ -159,6 +184,18 @@ rg -n "SetMaxHealth|SetVal|DoDelta|death" \
 rg -n "MakeCharacterPhysics|Make.*BurnableCharacter|Make.*FreezableCharacter" \
   scripts/standardcomponents.lua
 
+rg -n "TrackCharlieBoss|track_charlie_boss|ms_charlie_boss_defeated|TryReset|looted|changearena" \
+  scripts/prefabs/charlie_boss_trial.lua \
+  scripts/prefabs/charlie_boss.lua \
+  scripts/prefabs/shrouden.lua \
+  scripts/stategraphs/SGcharlie_boss.lua \
+  scripts/stategraphs/SGshrouden.lua
+
+rg -n "ShroudenBrain:OnStart|dofarattack|targetdevoured|SpawnShroudenLootSetPiece|ms_defeated_shrouden|SpawnExitCrack" \
+  scripts/brains/shroudenbrain.lua \
+  scripts/prefabs/atrium_gate.lua \
+  scripts/prefabs/charlie_boss_trial.lua
+
 rg -n "MakeCritter|critter_eets|SGCritterStates\\.AddEat|QueueStateAfterEat|OnTraitChanged|AddSleepExStates" \
   scripts/prefabs/critters.lua \
   scripts/stategraphs/SGcritter_common.lua \
@@ -173,4 +210,5 @@ Then inspect `deerclops.lua` and mark its targeting functions, phase logic, and 
 #### `0x61025111` Minimal Trace
 
 Start at `RetargetFn` in `deerclops.lua`.
-Follow `combat:SetTarget`, `combat:DoAttack`, the target's `combat:GetAttacked`, `health:DoDelta`, and the loot path.
+Follow `combat:SetTarget` and `combat:DoAttack` to the target's `combat:GetAttacked_Internal`.
+Continue through `health:DoDelta` and the loot path.

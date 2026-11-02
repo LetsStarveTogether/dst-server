@@ -2,6 +2,7 @@ local Widget = require("widgets/widget")
 local Text = require("widgets/text")
 local TextButton = require("widgets/textbutton")
 local Status = require("fieldkit/ui/status")
+local Progress = require("fieldkit/core/progress")
 
 local function number(value, quality)
     if value == nil or quality == "unknown" then return "?" end
@@ -68,7 +69,7 @@ function Hud.lines(ctx, snapshot)
         end
         detail[#detail + 1] = ctx:text("骑乘 ", "Riding ") .. number(ride.observed) .. "s / " .. remaining .. "s"
     end
-    if ctx.executor.current then activity[#activity + 1] = ctx.executor.current.name end
+    if ctx.executor.current then activity[#activity + 1] = Progress.label(ctx, Progress.snapshot(ctx.executor.current)) end
     if ctx.message_until and ctx.G.GetTime() < ctx.message_until then
         activity[#activity + 1] = ctx.message
     end

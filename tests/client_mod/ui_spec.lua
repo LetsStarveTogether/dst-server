@@ -134,7 +134,7 @@ T.case("panel and HUD", function()
         { "construction", "Drop one held item per grid point", "drop" },
         { "construction", "Water selected farm tiles", "water" },
         { "construction", "Fertilize selected farm tiles", "fertilize" },
-        { "construction", "Repeat last recipe ×5", "craft" },
+        { "construction", "Repeat last recipe (5)", "craft" },
         { "cooking", "Cook nearby pots ×10", "cooking" },
         { "cooking", "Remember recipe from first inventory slots", "inventory" },
         { "cooking", "Remember recipe from first backpack slots", "backpack" },
@@ -327,7 +327,7 @@ T.case("panel and HUD", function()
     ctx.active_screen = ctx.hud
     ctx.scope = require("fieldkit/core/scope").new(ctx.player, error)
     function ctx.scope:periodic(_, fn) self.refresh = fn end
-    ctx.executor = { current = { name = "Crafting" }, cancel = function(_, reason) cancelled = reason end }
+    ctx.executor = { current = { name = "Crafting", completed = 2, total = 5, skipped = 1 }, cancel = function(_, reason) cancelled = reason end }
     ctx.information = { snapshot = function() return snapshot end }
     ctx.selection = { status = function() return "Selected 5" end, clear = function() cleared = true end }
     ctx.placement.status = function() return "Grid square" end
@@ -380,6 +380,7 @@ T.case("panel and HUD", function()
     snapshot.own.temperature.value, snapshot.world.temperature, snapshot.naughtiness = 12, 22, nil
     assert(lines[1]:match("Warning 25%% ≈35s") and lines[2]:match("12s / ≈5–15s"))
     assert(lines[3]:match("Crafting") and lines[3]:match("Selected 5") and lines[3]:match("Pins 1"))
+    assert(lines[3]:match("Completed 2") and lines[3]:match("Remaining 2") and lines[3]:match("Skipped 1"))
     assert(hud.shown and #hud.labels == 4 and hud.labels[3].position.y < -150)
     assert(hud.labels[3].width == 600 and not hud.labels[3].value:match("\n"), "each HUD row stays within its width")
     assert(ctx.minimap.top > 50 - hud.labels[3].position.y, "minimap begins below the information and activity area")

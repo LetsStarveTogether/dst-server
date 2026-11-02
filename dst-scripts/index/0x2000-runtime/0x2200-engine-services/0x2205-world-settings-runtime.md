@@ -36,7 +36,7 @@ Shard updates use `Shard_SyncWorldSettings` and the `SyncWorldSettings` RPC hand
 | `scripts/worldsettingsutil.lua` | `WorldSettings_Spawner_SpawnDelay` | Drive a spawner through `worldsettingstimer` |
 | `scripts/worldsettingsutil.lua` | `WorldSettings_Pickable_RegenTime` | Drive pickable regeneration |
 | `scripts/components/worldsettingstimer.lua` | `WorldSettingsTimer` | Persist setting-driven timers |
-| `scripts/components/worldsettingstimer.lua` | `LongUpdate` | Advance timers across offline time or long frames |
+| `scripts/components/worldsettingstimer.lua` | `LongUpdate` | Subtract supplied elapsed time from eligible timers |
 
 ## `0x22053000` Runtime Flow
 
@@ -61,7 +61,7 @@ flowchart TD
 
 ### `0x22053111` Pre Phase
 
-The Pre phase runs after world generation but before the world prefab spawns.
+The Pre phase runs before the world prefab spawns for both generated and loaded world data.
 
 It can change configuration needed during world initialization.
 
@@ -93,11 +93,17 @@ The current Sync table is empty.
 
 ## `0x22054111` `worldsettingstimer`
 
-`WorldSettingsTimer:AddTimer` stores a name, maximum duration, enabled state, callback, and long-update handler.
+`WorldSettingsTimer:AddTimer` stores a name, maximum duration, enabled state, callback, and `externallongupdate` flag.
 
 `StartTimer`, `PauseTimer`, `ResumeTimer`, and `StopTimer` control execution, while `OnSave` and `OnLoad` persist it.
 
-`LongUpdate(dt)` advances timers across offline time or a long frame.
+`OnSave` stores remaining time as a fraction of the maximum duration, and `OnLoad` rescales it using the current maximum.
+
+If a timer has not been registered yet, `OnLoad` caches its data until `AddTimer` registers it.
+
+`LongUpdate(dt)` subtracts the supplied elapsed time from active, enabled timers.
+
+It skips timers with `paused`, `blocklongupdate`, or `externallongupdate` set.
 
 ## `0x22054211` Timer Migration
 

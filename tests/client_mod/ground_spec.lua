@@ -209,7 +209,7 @@ T.case("ground_search_and_native_ui", function()
             if type(value) == "function" then return value(...) end
             return value
         end })
-    for _, method in ipairs({ "SetFocus", "SetFocusFromChild", "ClearFocus", "IsVisible", "OnControl", "OnRawKey" }) do
+    for _, method in ipairs({ "SetFocus", "SetFocusFromChild", "ClearFocus", "IsVisible", "OnControl", "OnRawKey", "OnTextInput" }) do
         Base[method] = NativeWidget[method]
     end
     function Base:SetPosition(x, y) self.position = { x = x, y = y } end
@@ -238,7 +238,15 @@ T.case("ground_search_and_native_ui", function()
     STRINGS = { UI = { HELP = {} } }
     TheInput = { EnableDebugToggle = function() end, IsPasteKey = function() return false end }
     TheInputProxy = { FlushInput = function() end }
-    CONTROL_ACCEPT, CONTROL_CANCEL, CONTROL_MOVE_UP, KEY_ENTER = 1, 2, 3, 13
+    local frontend = {}
+    for _, name in ipairs({ "DoHoverFocusUpdate", "OnTextInput", "OnControl", "SetForceProcessTextInput" }) do
+        frontend[name] = T.eval("local FrontEnd = {}\n"
+            .. assert(T.source("frontend"):match("function FrontEnd:" .. name .. "%b().-\nend"))
+            .. "\nreturn FrontEnd." .. name)
+    end
+    function frontend:IsControlsDisabled() return false end
+    TheFrontEnd = frontend
+    CONTROL_ACCEPT, CONTROL_CANCEL, CONTROL_MOVE_UP, CONTROL_PRIMARY, KEY_ENTER = 1, 2, 3, 4, 13
     MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT = 1, 2, 3, 4
     function string:utf8len() local _, length = self:gsub("[^\128-\191]", ""); return length end
     package.loaded["fieldkit/ui/indicators"] = { new = function()
@@ -258,8 +266,10 @@ T.case("ground_search_and_native_ui", function()
     assert(list.search:OnRawKey(289, true), "native text input consumes unrelated hotkeys")
     assert(list.search:OnControl(CONTROL_MOVE_UP, true), "editing consumes gameplay movement")
     assert(list.search:OnControl(CONTROL_CANCEL, false) and not list:IsEditing())
+    assert(frontend.textProcessorWidget == nil, "cancel releases the native text owner")
     list:FocusSearch()
     assert(list.search:OnControl(CONTROL_ACCEPT, false) and list.selected == "log:")
+    assert(frontend.textProcessorWidget == nil, "accept releases the native text owner")
     assert(list.indicators.record and list.indicators.record.point.x == log.x)
     exit:SetFocus()
     assert(not list.indicators.record, "leaving the item clears its world marker immediately")
@@ -301,6 +311,7 @@ T.case("ground_search_and_native_ui", function()
     list:FocusSearch()
     list:Kill()
     assert(list.killed and not list.updating and not list:IsEditing(), "closing releases text editing and updates")
+    assert(frontend.textProcessorWidget == nil, "removing the list releases the native text owner")
     assert(list.indicators.closed and not list.indicators.record, "closing releases the locator")
 
     -- The persistent dock releases native input ownership without closing after a command.
@@ -313,9 +324,18 @@ T.case("ground_search_and_native_ui", function()
         player.HUD = ctx.hud
         local active_screen, controller, cancelled = ctx.hud, false
         ctx.G.ThePlayer = player
-        ctx.G.TheFrontEnd = { GetActiveScreen = function() return active_screen end, GetHUDScale = function() return 1 end }
-        ctx.G.TheInput = { ControllerAttached = function() return controller end,
-            GetScreenPosition = function() return { x = 0, y = 0 } end }
+        ctx.G.TheFrontEnd, ctx.G.TheInput = frontend, TheInput
+        frontend.screenstack, frontend.tracking_mouse = { ctx.hud }, true
+        function frontend:GetActiveScreen() return active_screen end
+        function frontend:GetHUDScale() return 1 end
+        function TheInput:ControllerAttached() return controller end
+        function TheInput:GetScreenPosition() return { x = 0, y = 0 } end
+        local hovered
+        function TheInput:GetAllEntitiesUnderMouse() return hovered and { { widget = hovered } } or {} end
+        local function hover(widget)
+            hovered = widget
+            frontend:DoHoverFocusUpdate()
+        end
         ctx.G.CONTROL_CANCEL, ctx.G.KEY_ESCAPE = CONTROL_CANCEL, 27
         ctx.executor = { cancel = function(self, reason) cancelled, self.current = reason, nil end }
         T.tasks(player)
@@ -326,6 +346,39 @@ T.case("ground_search_and_native_ui", function()
         log.removed, log2.removed, ocean.removed = nil, nil, nil
         found = { log, flint }
         local dock = GroundList.dock(ctx)
+        T.case("native_hover_keeps_search_text", function()
+            local search, tile = dock.list.search, dock.list.tiles[1]
+            assert(dock:focus())
+            search:SetString("l")
+            hover(search)
+            frontend:OnTextInput("o")
+            assert(search:GetString() == "lo", "native text dispatch reaches the focused search")
+            hover(tile)
+            assert(not search.focus and tile.focus and search.editing and dock.focused and ctx.hud.modfocus,
+                "hovering another item retains the active search and dock input ownership")
+            frontend:OnTextInput("g")
+            assert(search:GetString() == "log", "hovering another item must not drop search text")
+            assert(frontend.textProcessorWidget == search and frontend.forceProcessText)
+
+            local original_control = tile.OnControl
+            tile.OnControl = T.eval(assert(T.source("widgets/button"):match("function Button:OnControl%b().-\nend"))
+                .. "\nreturn Button.OnControl", { Button = { _base = NativeWidget } })
+            tile.control, tile.stopclicksound, tile.clickoffset = CONTROL_ACCEPT, true, T.Vector3(0, 0, 0)
+            function tile:IsSelected() return false end
+            function tile:GetLocalPosition() return T.Vector3(0, 0, 0) end
+            function tile:ResetPreClickPosition() self.o_pos = nil end
+            local before = ctx.ground:selected_count()
+            frontend:OnControl(CONTROL_PRIMARY, true)
+            frontend:OnControl(CONTROL_PRIMARY, false)
+            assert(not search.editing and not dock.focused and not ctx.hud.modfocus)
+            assert(frontend.textProcessorWidget == nil and not frontend.forceProcessText,
+                "clicking an item exits search before native button dispatch")
+            assert(ctx.ground:selected_count() ~= before, "the native button click still selects an item group")
+            tile.OnControl = original_control
+            ctx.ground:clear()
+            search:SetString("")
+            dock.list:Refresh()
+        end)
         assert(dock.open and dock.root.shown)
         assert(dock.radius_button.value == "Nearby items · 20m ›")
         dock.radius_button.onclick()
@@ -339,33 +392,56 @@ T.case("ground_search_and_native_ui", function()
         assert(dock:execute(function() ctx.executor.current = job; return true end))
         assert(dock.open and not dock.focused and not ctx.hud.modfocus and not dock.list:IsEditing(),
             "executing hands control back while the browsing dock remains visible")
+        assert(frontend.textProcessorWidget == nil, "executing releases the native text owner")
+        assert(dock:focus())
         dock.list.tiles[1]:SetFocus()
         assert(dock.list.indicators.record)
         local unrelated = ctx.hud.root:AddChild(Widget("native_inventory"))
         unrelated:SetFocus()
         assert(not dock.root.focus and not dock.list.indicators.record and not ctx.hud.modfocus,
             "native sibling focus clears the whole dock branch and locator")
+        assert(not dock.list:IsEditing() and frontend.textProcessorWidget == nil)
+        assert(dock:focus())
         dock.list.tiles[1]:SetFocus()
         ctx.hud:Hide()
         assert(not dock.list.indicators.record, "native HUD hide synchronously removes world markers")
+        assert(not dock.list:IsEditing() and frontend.textProcessorWidget == nil and not ctx.hud.modfocus)
         ctx.hud:Show()
+        assert(dock:focus())
+        ctx.hud:OnBecomeInactive()
+        assert(not dock.list:IsEditing() and frontend.textProcessorWidget == nil and not ctx.hud.modfocus,
+            "an inactive HUD releases the native text owner")
         controller = true
         assert(dock:focus() and not dock.list:IsEditing())
+        assert(frontend.textProcessorWidget == nil)
+        assert(dock:handle_control(CONTROL_ACCEPT, false))
+        assert(dock.list:IsEditing() and frontend.textProcessorWidget == dock.list.search)
+        assert(dock:handle_control(CONTROL_CANCEL, false))
+        assert(not dock.list:IsEditing() and frontend.textProcessorWidget == nil and dock.focused,
+            "controller cancel exits editing while retaining navigation")
         assert(dock:handle_control(CONTROL_CANCEL, false) and not dock.focused and dock.open,
             "controller cancel releases navigation, retaining the list")
+        controller = false
+        assert(dock:focus())
         dock.list.tiles[1]:SetFocus()
         active_screen = {}
         dock:refresh()
         assert(not dock.root.shown and not dock.list.indicators.record and not ctx.hud.modfocus,
             "another screen hides the dock and releases its focus")
+        assert(not dock.list:IsEditing() and frontend.textProcessorWidget == nil)
         active_screen = ctx.hud
         dock:refresh()
         assert(dock.root.shown)
+        assert(dock:focus())
         ctx.executor.current, dock.job = job, job
         dock:set_open(false)
         assert(cancelled == "cancelled" and not ctx.executor.current, "closing cancels this dock's pickup job")
+        assert(not dock.list:IsEditing() and frontend.textProcessorWidget == nil)
+        assert(dock:focus())
         dock:close()
         assert(dock.root.killed and dock.list.indicators.closed)
+        assert(not dock.list:IsEditing() and frontend.textProcessorWidget == nil and not ctx.hud.modfocus,
+            "closing the dock releases the native text owner before removing its widgets")
         ctx.scope:close()
     end
 end)

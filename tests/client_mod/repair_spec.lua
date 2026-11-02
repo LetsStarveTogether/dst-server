@@ -4,7 +4,7 @@ local Inventory = require("fieldkit/game/inventory")
 local Repair = require("fieldkit/features/repair")
 
 local function fixture(mode)
-    local s, player = Fixtures.new(), T.entity()
+    local s, player = Fixtures.new(), T.entity({ tags = { idle = true } })
     T.tasks(player)
     local inv = s:inventory(player, 5)
     local ctx = { player = player, params = { auto_repair = true }, config = { work = true } }
@@ -96,12 +96,14 @@ T.each("native repair dispatch and replicated receipts", { "host", "predict", "r
     ctx.scope:close()
 end)
 
-T.each("automatic repair yields to player and other work", { "focus", "busy", "held", "cursor", "job", "off", "locked" }, function(kind)
+T.each("automatic repair yields to player and other work", { "focus", "busy", "held", "cursor", "job", "off", "locked", "working", "doing", "stategraph" }, function(kind)
     local s, ctx, inv = fixture("remote")
     if kind == "cursor" then inv.active = s.fuel
     elseif kind == "job" then ctx.executor.current = { name = "another task" }
     elseif kind == "off" then ctx.params.auto_repair = false
     elseif kind == "locked" then s.lamp.locked = true
+    elseif kind == "working" or kind == "doing" then ctx.player.tags[kind] = true
+    elseif kind == "stategraph" then ctx.player.sg = { HasStateTag = function(_, tag) return tag == "working" end }
     else s[kind] = true end
     s.service:update()
     assert(s.calls == 0 and (kind == "job" or not ctx.executor.current))
@@ -146,6 +148,21 @@ T.each("repair rechecks the threshold at dispatch", { "repaired", "disabled" }, 
     ctx.executor:tick()
     assert(s.calls == 0 and not ctx.executor.current, "a stale low-durability observation cannot authorize material use")
     ctx.scope:close()
+end)
+
+T.each("repair rechecks input ownership at dispatch", { "working", "moving", "buffered", "held" }, function(change)
+    local s, ctx = fixture("remote")
+    s.service:update()
+    assert(ctx.executor.current)
+    if change == "buffered" then ctx.player.bufferedaction = {}
+    elseif change == "held" then s.held = true
+    else ctx.player.tags[change] = true end
+    ctx.executor:tick()
+    assert(s.calls == 0 and ctx.executor.current)
+    ctx.player.bufferedaction, s.held, ctx.player.tags[change] = nil, nil, nil
+    ctx.executor:tick()
+    assert(s.calls == 1)
+    ctx.executor:cancel(); ctx.scope:close()
 end)
 
 T.case("repair waits for the material backpack to finish syncing", function()

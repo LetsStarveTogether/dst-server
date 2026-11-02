@@ -3,13 +3,14 @@ local M = { LIMIT = 128 }
 -- Session task choices; safety permissions remain in the Workshop configuration.
 local choices = {
     search_radius = { default = 20, values = { 12, 20, 30 } },
+    target_filter = { default = "all_targets", values = { "all_targets", "mature_crops", "weeds", "stumps" } },
     inventory_batch = { default = 5, values = { 1, 5, 10 } },
     fish_count = { default = 5, values = { 1, 5, 10, 20 } },
     fish_labels = { default = true, values = { true, false } },
-    craft_count = { default = 5, values = { 1, 5, 10, 20 } },
+    craft_count = { default = 5, values = { 1, 5, 10, 20, 0 } },
     cooking_count = { default = 5, values = { 1, 5, 10, 20 } },
     cooking_harvest = { default = true, values = { true, false } },
-    repeat_count = { default = 1, values = { 1, 5, 10, 20 } },
+    repeat_count = { default = 1, values = { 1, 5, 10, 20, 0 } },
     clear_stumps = { default = false, values = { false, true } },
     farm_layout = { default = 3, values = { 2, 3, 4 } },
     ground_ignore_full = { default = false, values = { false, true } },
@@ -29,6 +30,9 @@ local choices = {
 }
 
 local names = {
+    [0] = { "连续", "Continuous" },
+    all_targets = { "全部可操作目标", "All available targets" }, mature_crops = { "成熟作物", "Mature crops" },
+    weeds = { "仅杂草", "Weeds only" }, stumps = { "仅树桩", "Stumps only" },
     trail = { "历史轨迹", "Recorded trail" }, direct = { "直接靠近", "Direct approach" },
     square = { "方格", "Square" }, diamond = { "菱形", "Diamond" },
     hex = { "六角", "Hexagonal" }, hex45 = { "六角 45°", "Hexagonal 45°" },

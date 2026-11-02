@@ -14,8 +14,12 @@ end
 function M.ready(ctx, mode, job)
     local G, player, hud = ctx.G, ctx.player, ctx.hud
     mode = mode or job and job.input and job.input.mode or "world"
+    local ghost = player:HasTag("playerghost") == true
+    local actor = job and job.input and job.input.actor
+    local allow_ghost = actor == "ghost" or not job and (mode == "work" or mode == "ui")
     if ctx.scope.closed or G.ThePlayer ~= player or not player:IsValid() or player.HUD ~= hud
-        or player:HasTag("playerghost") or player.replica.health and player.replica.health:IsDead() then
+        or ghost and not allow_ghost or actor and (actor == "ghost") ~= ghost
+        or not ghost and player.replica.health and player.replica.health:IsDead() then
         return false, ctx:text("角色当前不可用", "Player is not available")
     end
     local controller = player.components.playercontroller

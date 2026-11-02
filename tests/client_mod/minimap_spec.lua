@@ -142,7 +142,7 @@ T.case("native map lifecycle", function()
         local NativeControls = load_native("widgets/controls")
         hud.controls = setmetatable({ owner = player, votedialog = { CloseControllerVoteScreen = function() end } }, NativeControls)
         local env = { GLOBAL = G, AddClassPostConstruct = function(_, fn) callbacks[#callbacks + 1] = fn end }
-        require("fieldkit/game/map_input").install(env, function() return ctx end)
+        require("fieldkit/game/map_input").install(env, function() return ctx end, require("fieldkit/ui/map_overlay").new)
         MapView.install(env, function() return ctx end)
         function state:context(replacement)
             if replacement then player.HUD = replacement; hud = replacement end
