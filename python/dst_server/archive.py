@@ -1,19 +1,19 @@
 # ruff: file-ignore[private-member-access]
 """Native room imports, exports in memory and cancellable S3 uploads."""
 
-from asyncio import CancelledError, shield
-from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from os import PathLike
 from typing import Any, BinaryIO, Protocol, Self, cast
+lazy from asyncio import CancelledError, shield
+lazy from collections.abc import AsyncGenerator, Mapping
+lazy from os import PathLike
 
-from ._native import ClusterArchive as _Archive
-from ._native import ImportedCluster
-from ._native import export_archive as _export_archive
-from ._native import import_archive as _import_archive
-from .host import Host
-from .settings import Configuration
+lazy from ._native import ClusterArchive as _Archive
+lazy from ._native import ImportedCluster
+lazy from ._native import export_archive as _export_archive
+lazy from ._native import import_archive as _import_archive
+lazy from .host import Host
+lazy from .settings import Configuration
 
 
 class SecretValue(Protocol):
@@ -102,7 +102,7 @@ async def export_cluster(
     host: Host,
     number: int,
     *,
-    configuration: Configuration | dict[str, Any] | None = None,
+    configuration: Configuration | Mapping[str, Any] | None = None,
     room_id: str | None = None,
     client_compatible: bool = False,
     compression_level: int = 9,

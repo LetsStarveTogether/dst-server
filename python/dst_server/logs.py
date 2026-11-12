@@ -7,10 +7,8 @@ from datetime import UTC, datetime, timedelta
 from os import PathLike
 from typing import Any, Literal, Self
 
-from . import _native
-
-JournalCursorError = _native.JournalCursorError
-LogProcessError = _native.LogProcessError
+lazy from . import _native
+lazy from ._native import JournalCursorError, LogProcessError
 
 __all__ = [
     "JournalCursorError",

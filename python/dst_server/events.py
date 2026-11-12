@@ -2,13 +2,13 @@
 
 from typing import Any, Literal, TypedDict, cast
 
-from ._native import event_names
-from ._native import validate_event as _validate_event
+lazy from ._native import event_names
+lazy from ._native import validate_event as _validate_event
 
 __all__ = ["GameEvent", "event_names", "validate_event"]
 
 
-class GameEvent(TypedDict):
+class GameEvent(TypedDict, closed=True):
     """Version 3 envelope validated by the native Rust event types."""
 
     v: Literal[3]

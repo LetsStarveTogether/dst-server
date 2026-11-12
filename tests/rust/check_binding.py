@@ -30,6 +30,11 @@ async def check(socket: str) -> None:
         }
         echoed = await client.call("configure", arguments)
         assert echoed["request"]["request"]["arguments"] == arguments
+        frozen = frozendict(
+            arguments | {"configuration": frozendict(arguments["configuration"])}
+        )
+        echoed = await client.call("configure", frozen)
+        assert echoed["request"]["request"]["arguments"] == arguments
         for require_empty in (None, False, True):
             echoed = await client.call("regenerate", {"require_empty": require_empty})
             assert (

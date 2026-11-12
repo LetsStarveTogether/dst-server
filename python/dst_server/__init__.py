@@ -1,14 +1,15 @@
 """Python bindings for the native DST room SDK."""
 
-from os import PathLike
-from typing import Any, Literal, Self
+lazy from collections.abc import Mapping
+lazy from os import PathLike
+lazy from typing import Any, Literal, Self
 
-from ._native import Client as _Client
-from ._native import DstError, describe, inspect
-from ._native import Subscription as _Subscription
-from .external import KleiClient
-from .host import Host
-from .logs import (
+lazy from ._native import Client as _Client
+lazy from ._native import DstError, describe, inspect
+lazy from ._native import Subscription as _Subscription
+lazy from .external import KleiClient
+lazy from .host import Host
+lazy from .logs import (
     JournalCursorError,
     JournalLogs,
     JournalQuery,
@@ -21,7 +22,7 @@ from .logs import (
     NetdataLogResult,
     NetdataLogs,
 )
-from .management import Permissions, VoteCommand, VoteStatus
+lazy from .management import Permissions, VoteCommand, VoteStatus
 
 __all__ = [
     "Client",
@@ -63,7 +64,7 @@ class Client:  # ruff: ignore[too-many-public-methods]
     async def call(
         self,
         method: str,
-        arguments: dict[str, Any] | None = None,
+        arguments: Mapping[str, Any] | None = None,
         *,
         shard: str | None = None,
         timeout: float | None = None,
