@@ -6,7 +6,7 @@ The output directory must not already exist; no deployed room is inspected.
 
 # The disposable acceptance harness deliberately polls external processes and uses
 # native game state. All executable paths are explicit test inputs.
-# ruff: file-ignore[suspicious-subprocess-import, subprocess-without-shell-equals-true, missing-return-type-special-method, missing-type-function-argument, missing-return-type-undocumented-public-function, missing-return-type-private-function, missing-type-args, async-busy-wait, pytest-composite-assertion, print]
+# ruff: file-ignore[suspicious-subprocess-import, subprocess-without-shell-equals-true, missing-return-type-special-method, missing-type-function-argument, missing-return-type-public-function, missing-return-type-private-function, missing-type-args, async-busy-wait, pytest-composite-assertion, print]
 
 import argparse
 import asyncio
