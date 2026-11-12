@@ -44,14 +44,14 @@ RUN install -D target/release/dst-server /out/native/dst-server-linux-x86_64 && 
 FROM sdk-build AS distributions
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_LINK_MODE=copy
-RUN uv python install 3 && \
-    uv build --python 3 --out-dir /out/python --no-sources \
+RUN uv python install && \
+    uv build --out-dir /out/python --no-sources \
         -C 'maturin.build-args=--compatibility pypi' && \
     python3 tools/build_manifest.py --output /out/build-manifest.json \
         --revision="${SOURCE_REVISION}" \
         --native-scripts-revision="${NATIVE_SCRIPTS_REVISION}" \
         --game-version="${GAME_VERSION}" ${BETA:+--beta} \
-        --python "$(uv python find 3)" \
+        --python "$(uv python find)" \
         --artifact /out/native/dst-server-linux-x86_64 \
         --artifact /out/python/*.whl --artifact /out/python/*.tar.gz
 
