@@ -327,7 +327,7 @@ Default Mod announcements use a 60-second countdown and 30-second intervals.
 One native download attempt has a 30-minute budget; policy permits two extra attempts five minutes apart.
 Closing takes precedence over automatic maintenance, which remains queued for the next opening.
 Explicit maintenance may run outside opening hours; the Agent waits for the next opening when games cannot open.
-Only `DST_SERVER_MOD_PROXY` supplies the native updater proxy.
+`DST_SERVER_MOD_PROXY` supplies the HTTP(S) proxy for native downloads and Workshop version checks.
 Idle regeneration is off by default and requires an open, ready, reliably empty room.
 Its world-age retention periods are 6, 24, 36, 72 and 168 hours.
 

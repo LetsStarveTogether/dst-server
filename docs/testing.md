@@ -81,6 +81,7 @@ Missing interpreters, native scripts or the SDK executable fail the suite instea
 Use `cargo test --locked -p dst-server --doc` when adding executable Rust documentation examples.
 
 The Steam API tests use local HTTP responses to exercise typed decoding, batch correlation, retries and cancellation.
+A local proxy verifies HTTPS CONNECT routing, proxy authentication and safe error reporting.
 Workshop monitor tests cover installed manifests, opaque content handles, unavailable items and bounded batches.
 Agent fixtures verify maintenance decisions, query failures, policy changes and shutdown during a stalled check.
 They also check deadlines and limits on compressed and streamed bodies.
@@ -96,6 +97,7 @@ cargo test --locked -p dst-server --test steam -- --ignored --nocapture
 ```
 
 The live test queries five public DST Workshop items, a nonexistent ID, repeated IDs and a single item without credentials.
+Set `DST_SERVER_MOD_PROXY` to exercise the configured proxy during live acceptance.
 It is ignored during ordinary test runs because network availability and Workshop visibility can change.
 
 ## Writing Cases That Survive Refactoring
