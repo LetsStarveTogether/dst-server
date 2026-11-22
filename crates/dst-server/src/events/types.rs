@@ -30,7 +30,7 @@ pub struct GameEvent {
 }
 
 macro_rules! game_events {
-    ($($variant:ident($data:ty) => $name:literal),+ $(,)?) => {
+    ($($variant:ident($data:ty) => $name:literal, $profile:ident, [$($hook:literal),+], [$($role:literal),*]),+ $(,)?) => {
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
         #[serde(tag = "event", content = "data", deny_unknown_fields)]
         pub enum EventBody {
@@ -38,6 +38,22 @@ macro_rules! game_events {
         }
 
         pub const EVENT_NAMES: &[&str] = &[$($name),+];
+
+        /// Minimum profile and producer hooks contributing to this event.
+        pub fn capture_requirements(name: &str) -> Option<(crate::driver::TelemetryProfile, &'static [&'static str])> {
+            match name {
+                $($name => Some((crate::driver::TelemetryProfile::$profile, &[$($hook),+])),)+
+                _ => None,
+            }
+        }
+
+        /// Body paths with a participant ID; array elements render as `[]` in Netdata.
+        pub fn participant_fields(name: &str) -> &'static [&'static str] {
+            match name {
+                $($name => &[$($role),*],)+
+                _ => &[],
+            }
+        }
 
         impl EventBody {
             pub fn name(&self) -> &'static str {
@@ -52,47 +68,53 @@ macro_rules! game_events {
 }
 
 game_events! {
-    ClientAuthenticated(ClientData) => "dst.client.authenticated",
-    ClientDisconnected(ClientData) => "dst.client.disconnected",
-    EntityDeath(EntityDeathData) => "dst.entity.death",
-    PlayerActionPerformed(ActionPerformedData) => "dst.player.action_performed",
-    PlayerAte(AteData) => "dst.player.ate",
-    PlayerCombatContact(CombatContactData) => "dst.player.combat_contact",
-    PlayerConditionChanged(ConditionData) => "dst.player.condition_changed",
-    PlayerCrafted(CraftedData) => "dst.player.crafted",
-    PlayerCreatureMurdered(CreatureMurderedData) => "dst.player.creature_murdered",
-    PlayerDiceRolled(DiceRolledData) => "dst.player.dice_rolled",
-    PlayerDishHarvested(DishHarvestedData) => "dst.player.dish_harvested",
-    PlayerFinishedWork(FinishedWorkData) => "dst.player.finished_work",
-    PlayerFished(FishedData) => "dst.player.fished",
-    PlayerGhosted(GhostedData) => "dst.player.ghosted",
-    PlayerHarvested(HarvestedData) => "dst.player.harvested",
-    PlayerIncident(IncidentData) => "dst.player.incident",
-    PlayerItemDeployed(ItemDeployedData) => "dst.player.item_deployed",
-    PlayerLoaded(PlayerLoadedData) => "dst.player.loaded",
-    PlayerMigrationStarted(MigrationStartedData) => "dst.player.migration_started",
-    PlayerPicked(PickedData) => "dst.player.picked",
-    PlayerPlanted(PlantedData) => "dst.player.planted",
-    PlayerPublicChat(PublicChatData) => "dst.player.public_chat",
-    PlayerRecipeUnlocked(RecipeUnlockedData) => "dst.player.recipe_unlocked",
-    PlayerRevivalBound(RevivalBoundData) => "dst.player.revival_bound",
-    PlayerRevived(RevivedData) => "dst.player.revived",
-    PlayerShardLeft(PlayerData) => "dst.player.shard_left",
-    PlayerTraded(TradedData) => "dst.player.traded",
-    ServerPauseChanged(PauseData) => "dst.server.pause_changed",
-    ServerPresence(PresenceData) => "dst.server.presence",
-    VoteResult(VoteResultData) => "dst.vote.result",
-    VoteStarted(VoteStartedData) => "dst.vote.started",
-    WorldDaywalkerDefeated(DaywalkerDefeatedData) => "dst.world.daywalker_defeated",
-    WorldRiftChanged(RiftChangedData) => "dst.world.rift_changed",
-    WorldRiftUnlocked(RiftUnlockedData) => "dst.world.rift_unlocked",
-    WorldStateChanged(StateData) => "dst.world.state_changed",
+    ClientAuthenticated(ClientData) => "dst.client.authenticated", Timeline, ["connections"], ["userid"],
+    ClientDisconnected(ClientData) => "dst.client.disconnected", Timeline, ["connections"], ["userid"],
+    EntityDeath(EntityDeathData) => "dst.entity.death", Timeline, ["world"], ["victim.userid", "afflicter.userid", "attributed_userid"],
+    PlayerActionPerformed(ActionPerformedData) => "dst.player.action_performed", Play, ["actions"], ["player.userid", "target.userid"],
+    PlayerAte(AteData) => "dst.player.ate", Play, ["players"], ["player.userid", "feeder.userid"],
+    PlayerCombatContact(CombatContactData) => "dst.player.combat_contact", Play, ["players"], ["source.userid", "target.userid"],
+    PlayerConditionChanged(ConditionData) => "dst.player.condition_changed", Play, ["players"], ["player.userid"],
+    PlayerCrafted(CraftedData) => "dst.player.crafted", Play, ["players"], ["player.userid"],
+    PlayerCreatureMurdered(CreatureMurderedData) => "dst.player.creature_murdered", Play, ["players"], ["player.userid"],
+    PlayerDiceRolled(DiceRolledData) => "dst.player.dice_rolled", Play, ["dice"], ["userid"],
+    PlayerDishHarvested(DishHarvestedData) => "dst.player.dish_harvested", Play, ["cooking"], ["player.userid", "chef_userid"],
+    PlayerFinishedWork(FinishedWorkData) => "dst.player.finished_work", Play, ["players"], ["player.userid", "target.userid"],
+    PlayerFished(FishedData) => "dst.player.fished", Play, ["players"], ["player.userid"],
+    PlayerGhosted(GhostedData) => "dst.player.ghosted", Timeline, ["players"], ["player.userid"],
+    PlayerHarvested(HarvestedData) => "dst.player.harvested", Play, ["players"], ["player.userid", "source.userid"],
+    PlayerIncident(IncidentData) => "dst.player.incident", Play, ["players"], ["player.userid"],
+    PlayerItemDeployed(ItemDeployedData) => "dst.player.item_deployed", Play, ["deployment"], ["player.userid"],
+    PlayerLoaded(PlayerLoadedData) => "dst.player.loaded", Timeline, ["players"], ["player.userid"],
+    PlayerMigrationStarted(MigrationStartedData) => "dst.player.migration_started", Timeline, ["world"], ["player.userid"],
+    PlayerPicked(PickedData) => "dst.player.picked", Play, ["players", "picking"], ["player.userid"],
+    PlayerPlanted(PlantedData) => "dst.player.planted", Play, ["world"], ["player.userid"],
+    PlayerPublicChat(PublicChatData) => "dst.player.public_chat", Timeline, ["public_chat"], ["userid"],
+    PlayerRecipeUnlocked(RecipeUnlockedData) => "dst.player.recipe_unlocked", Play, ["players"], ["player.userid"],
+    PlayerRevivalBound(RevivalBoundData) => "dst.player.revival_bound", Timeline, ["players"], ["player.userid"],
+    PlayerRevived(RevivedData) => "dst.player.revived", Timeline, ["players", "player_lifecycle"], ["player.userid", "reviver.userid"],
+    PlayerShardLeft(PlayerData) => "dst.player.shard_left", Timeline, ["world"], ["player.userid"],
+    PlayerTraded(TradedData) => "dst.player.traded", Play, ["players"], ["player.userid", "giver.userid"],
+    ServerPauseChanged(PauseData) => "dst.server.pause_changed", Timeline, ["world", "connections"], [],
+    ServerPresence(PresenceData) => "dst.server.presence", Timeline, ["presence"], ["clients[]", "players[].userid"],
+    VoteResult(VoteResultData) => "dst.vote.result", Timeline, ["votes"], ["starter_userid", "target_userid"],
+    VoteStarted(VoteStartedData) => "dst.vote.started", Timeline, ["votes"], ["starter_userid", "target_userid"],
+    WorldDaywalkerDefeated(DaywalkerDefeatedData) => "dst.world.daywalker_defeated", Timeline, ["world"], [],
+    WorldRiftChanged(RiftChangedData) => "dst.world.rift_changed", Timeline, ["world"], ["rift.userid"],
+    WorldRiftUnlocked(RiftUnlockedData) => "dst.world.rift_unlocked", Timeline, ["world"], [],
+    WorldStateChanged(StateData) => "dst.world.state_changed", Timeline, ["world"], [],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
 #[serde(transparent)]
 #[garde(transparent)]
 pub struct Identifier(#[garde(length(chars, min = 1, max = 128))] pub String);
+
+pub(crate) fn validate_userid(userid: &str) -> anyhow::Result<()> {
+    Identifier(userid.to_owned())
+        .validate()
+        .map_err(|_| anyhow::anyhow!("userid must contain 1 to 128 characters"))
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
 #[serde(transparent)]

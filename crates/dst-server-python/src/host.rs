@@ -209,6 +209,34 @@ impl Host {
         })
     }
 
+    fn history_page<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut query: dst_server::logs::history::HistoryQuery =
+            serde_json::from_value(from_python(request)?)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let host = self.inner.clone();
+        query.selection.user = host.systemd.user;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let page = query
+                .read(
+                    &host.journals,
+                    std::time::Duration::from_secs(30),
+                    std::future::pending(),
+                )
+                .await
+                .map_err(logs::error)?;
+            Python::attach(|py| {
+                to_python(
+                    py,
+                    serde_json::to_value(page).expect("serializable history page"),
+                )
+            })
+        })
+    }
+
     fn journal<'py>(
         &self,
         py: Python<'py>,

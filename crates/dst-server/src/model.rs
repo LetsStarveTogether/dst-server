@@ -589,8 +589,14 @@ pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result
     if bytes.len() > MAX_REQUEST_BYTES {
         return Err(Error::invalid("request", "request exceeds 1 MiB"));
     }
-    serde_json::from_slice::<JsonStructure>(bytes).map_err(json_error)?;
-    serde_json::from_slice(bytes).map_err(json_error)
+    parse_unique_json(bytes).map_err(json_error)
+}
+
+pub(crate) fn parse_unique_json<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> serde_json::Result<T> {
+    serde_json::from_slice::<JsonStructure>(bytes)?;
+    serde_json::from_slice(bytes)
 }
 
 fn json_error(error: serde_json::Error) -> Error {

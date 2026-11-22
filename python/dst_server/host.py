@@ -243,6 +243,25 @@ class Host:  # ruff: ignore[too-many-public-methods]
         async with dst_server.Client(await self._host.connect(number)) as client:
             yield client
 
+    async def history_page(
+        self,
+        selection: dst_server.HistorySelection,
+        *,
+        page_size: int = 500,
+        cursor: str | None = None,
+        checkpoint: dst_server.HistoryCheckpoint | None = None,
+    ) -> dst_server.HistoryPage:
+        """Read one page from the journal configured on this Host."""
+        raw = await self._host.history_page({
+            "selection": selection.to_native(),
+            "cursor": cursor,
+            "page_size": page_size,
+            "checkpoint": {"scope": checkpoint.scope, "cursor": checkpoint.cursor}
+            if checkpoint
+            else None,
+        })
+        return dst_server.HistoryPage.from_native(raw)
+
     async def journal(
         self, numbers: Sequence[int], request: JournalQuery | None = None
     ) -> JournalResult:

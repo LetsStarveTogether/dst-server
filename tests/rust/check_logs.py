@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import tempfile
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -72,7 +73,8 @@ if '--reverse' in sys.argv: records.reverse()
 if '--cursor' in args:
     index = next(i for i, r in enumerate(records) if r['__CURSOR'] == args['--cursor'])
     records = records[index:]
-for record in records[:int(args['--lines'])]: print(json.dumps(record))
+if '--lines' in args: records = records[:int(args['--lines'])]
+for record in records: print(json.dumps(record))
 """
 
 PLUGIN = r"""
@@ -98,7 +100,8 @@ async def check_journal(directory: Path) -> None:
         namespace="games",
         grep="--help",
     )
-    page = await logs.query(("dst-007-*.service",), request)
+    units = ("dst-007-*.service",)
+    page = await logs.query(units, request)
     assert [record.cursor for record in page.records] == ["0", "1"]
     assert page.has_more
     assert page.next_cursor == "1"
@@ -108,11 +111,12 @@ async def check_journal(directory: Path) -> None:
     assert record.message == "hi�"
     assert record.timestamp == datetime(1970, 1, 1, 0, 0, 1, 1, UTC)
     arguments = json.loads(journal.with_suffix(".args").read_text())
-    assert "--system" in arguments
+    assert "--unit=dst-007-*.service" in arguments
+    assert "--system" not in arguments
     assert "--since=2026-09-01 00:00:00.000000 UTC" in arguments
     assert "--grep=--help" in arguments
     resumed = await logs.query(
-        None, JournalQuery(limit=2, direction="forward", cursor=page.next_cursor)
+        units, replace(request, since=None, cursor=page.next_cursor)
     )
     assert [record.cursor for record in resumed.records] == ["2", "3"]
     await reaped(int(journal.with_suffix(".pid").read_text()))

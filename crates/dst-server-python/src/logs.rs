@@ -287,6 +287,23 @@ impl NetdataLogs {
         })
     }
 
+    fn search<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, PyAny>,
+        completion_timeout: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let search: native::history::TelemetrySearch =
+            serde_json::from_value(from_python(request)?)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let timeout = deadline(completion_timeout)?;
+        let reader = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = search.read(&reader, timeout).await.map_err(error)?;
+            Python::attach(|py| to_python(py, json!(result)))
+        })
+    }
+
     fn query<'py>(
         &self,
         py: Python<'py>,
@@ -306,17 +323,113 @@ impl NetdataLogs {
             let mut value = serde_json::to_value(&result)
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
             value["truncated"] = json!(result.truncated());
+            value["file_status"] = json!(result.file_status());
             Python::attach(|py| to_python(py, value))
         })
     }
 }
 
+fn event_filter(value: &Bound<'_, PyAny>) -> PyResult<native::history::EventFilter> {
+    let filter: native::history::EventFilter = serde_json::from_value(from_python(value)?)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    filter
+        .validate(false)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(filter)
+}
+
 #[pyfunction]
-fn event_userid_fields() -> Vec<&'static str> {
-    native::EVENT_USERID_FIELDS.to_vec()
+fn normalize_event_filter(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    to_python(py, json!(event_filter(value)?))
+}
+
+#[pyfunction]
+fn decode_room_message(
+    py: Python<'_>,
+    message: &Bound<'_, PyAny>,
+    unit: &str,
+    user: bool,
+    uid: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    if native::history::room_writer(unit, uid, user).is_none() {
+        return Ok(py.None());
+    }
+    let field = if let Ok(bytes) = message.cast::<pyo3::types::PyList>() {
+        Value::Array(
+            bytes
+                .iter()
+                .map(|b| from_python(&b))
+                .collect::<PyResult<_>>()?,
+        )
+    } else {
+        from_python(message)?
+    };
+    let result = native::history::decode_journal_field(Some(&field), &Default::default(), false)
+        .map_err(|reason| {
+            PyValueError::new_err(format!("invalid structured room log ({reason:?})"))
+        })?;
+    to_python(py, json!(result))
+}
+
+#[pyfunction]
+fn decode_live_batch(
+    py: Python<'_>,
+    records: &Bound<'_, pyo3::types::PyList>,
+    filter: &Bound<'_, PyAny>,
+    stream: &str,
+) -> PyResult<Py<PyAny>> {
+    let filter = event_filter(filter)?;
+    let lifecycle = match stream {
+        "lifecycle" => true,
+        "events" => false,
+        _ => {
+            return Err(PyValueError::new_err(
+                "history requires an events or lifecycle stream",
+            ));
+        }
+    };
+    let mut observations = Vec::new();
+    let mut observation_indices = Vec::new();
+    let mut auxiliary = Vec::new();
+    let mut auxiliary_indices = Vec::new();
+    let mut rejections = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        let result = from_python(&record)
+            .map_err(|_| native::history::Rejection::InvalidEnvelope)
+            .and_then(|log| {
+                if native::history::live_auxiliary(&log, lifecycle)? {
+                    auxiliary.push(log);
+                    auxiliary_indices.push(index);
+                    Ok(None)
+                } else {
+                    native::history::decode_record(log, &filter, false)
+                }
+            });
+        match result {
+            Ok(Some(obs)) => {
+                observations.push(obs);
+                observation_indices.push(index);
+            }
+            Ok(None) => (),
+            Err(reason) => rejections.push(json!({"index":index, "reason":reason})),
+        }
+    }
+    to_python(
+        py,
+        json!({"observations": observations, "observation_indices": observation_indices,
+            "rejections": rejections, "auxiliary": auxiliary, "auxiliary_indices": auxiliary_indices}),
+    )
+}
+
+#[pyfunction]
+fn event_userid_fields(name: &str) -> Vec<&'static str> {
+    dst_server::events::types::participant_fields(name).to_vec()
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(normalize_event_filter, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_room_message, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_live_batch, module)?)?;
     module.add_function(wrap_pyfunction!(event_userid_fields, module)?)?;
     module.add_class::<JournalLogs>()?;
     module.add_class::<JournalStream>()?;

@@ -2,6 +2,7 @@
 
 Use the room journal for past events and the Agent socket for live subscriptions.
 When OTLP export is enabled, the same gameplay record carries the same `log.record.uid` in each output.
+The [log query design](log-queries.md) traces a record through each output and defines the scope of each filter.
 
 ## Capture Profiles
 
@@ -29,6 +30,8 @@ dst-server call list_players --socket /srv/dst/299/.dst-agent.sock
 
 A journal query defaults to the most recent 100 entries in reverse order.
 Following starts at the live tail and sends matching entries forward.
+A named system service matches across every journal file the reader can access, including files owned by the game's UID.
+Omitting all units queries the system journal.
 For user services, add `--user` to the journal command or use `JournalLogs(user=True)` in Python.
 RPC offers `events` for gameplay, `lifecycle` for coverage and operations, and `logs` for game output.
 Read each batch's `records`, including the final batch with `closed=true`, and check `dropped` for subscriber loss.
@@ -65,6 +68,10 @@ Netdata returns flattened fields and queries whole seconds in `[since, until)`.
 The Python SDK rounds a fractional start down and a fractional end up and returns the effective window.
 Its `limit`, `matched` and `truncated` apply to that window.
 If the match count is unavailable or smaller than the returned row count, `matched` and `truncated` are unknown.
+
+For a known historical room instance, use `NetdataLogs.search` with a `RoomStream` derived from its journal resource.
+The structured search reports gameplay and coverage separately, including limits, file diagnostics and failed reads.
+Use `subscribe_history` to drain both live streams while reconciling overlapping journal receipt windows. [SDK examples](log-queries.md)
 
 ## Count Observed Events
 
@@ -108,10 +115,10 @@ For a trade, `data.giver.userid` identifies the giver.
 `record.participants()` returns each observed role and Client ID.
 An unknown account is null.
 Presence rosters include lobby clients, and `players[].loaded` can be unknown.
-Jobs that resume after a restart can commit a unique UID and `page.next_cursor` with their results.
-Resume with the same Host, rooms and `coverage_only` setting.
+Jobs that resume after a restart can commit unique UIDs, aggregates and the checkpoint together.
+Persist `page.checkpoint` and pass it as `checkpoint=` to validate the original selection on resume.
 
-`page.rejected` counts malformed entries.
+`page.rejections` gives the source positions and reasons for malformed or unsupported entries.
 Report activity as unknown in windows with missing coverage.
 Use `read_history(..., coverage_only=True)` on a preceding window to carry the last coverage for each `change.run`.
 Coverage records show the active profile, observer failures and loss counters.

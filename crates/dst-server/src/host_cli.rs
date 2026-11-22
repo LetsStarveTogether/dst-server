@@ -115,7 +115,7 @@ enum Command {
     },
 }
 
-fn numbers(values: &[String]) -> Result<Vec<u16>> {
+pub(super) fn numbers(values: &[String]) -> Result<Vec<u16>> {
     let mut result = BTreeSet::new();
     for value in values.iter().flat_map(|value| value.split(',')) {
         let bounds: Vec<_> = value.split('-').collect();

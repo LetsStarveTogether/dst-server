@@ -39,15 +39,19 @@ if 'show' in sys.argv:
 
 JOURNAL = """
 import json, os, sys, time
-domain, = (arg for arg in sys.argv if arg in ('--system', '--user'))
-unit, = (arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--unit='))
-fields = {'_SYSTEMD_UNIT': unit} if domain == '--system' else {
-    '_SYSTEMD_UNIT': f'user@{os.getuid()}.service', '_SYSTEMD_USER_UNIT': unit,
-}
-print(json.dumps({
-    '__CURSOR': 'host-log-1', '__REALTIME_TIMESTAMP': '1000000',
-    **fields, 'MESSAGE': domain,
-}), flush=True)
+unit, = (arg.split('=', 1)[1] for arg in sys.argv
+         if arg.startswith(('--unit=', '--user-unit=')))
+def emit(cursor, message, **fields):
+    print(json.dumps({'__CURSOR': cursor, '__REALTIME_TIMESTAMP': '1000000',
+                      'MESSAGE': message, **fields}), flush=True)
+if f'--user-unit={unit}' in sys.argv:
+    emit('agent', 'Agent stdout', _SYSTEMD_UNIT=f'user@{os.getuid()}.service',
+         _SYSTEMD_USER_UNIT=unit, _UID=str(os.geteuid()))
+else:
+    # The Agent writes to user-1000.journal and PID 1 writes to system.journal.
+    if '--system' not in sys.argv:
+        emit('agent', 'Agent stdout', _SYSTEMD_UNIT=unit, _UID='1000')
+    emit('manager', 'Started room', _SYSTEMD_UNIT='init.scope', UNIT=unit, _UID='0')
 if '--follow' in sys.argv:
     time.sleep(60)
 """
@@ -103,15 +107,19 @@ async def check_offline_failure(host: Host, root: Path) -> None:
     assert offline["recovery"]["last_failure"] == failure
 
 
-async def check_journal(host: Host, domain: str) -> None:
-    assert host.user == (domain == "--user")
-    logs = await host.journal([1], JournalQuery(limit=1))
-    assert logs.records[0].message == domain
-    assert logs.records[0].unit == "dst-001.service"
-    async with host.follow_journal([1], JournalQuery(grep=domain)) as stream:
+async def check_journal(host: Host, *, user: bool) -> None:
+    assert host.user == user
+    logs = await host.journal([1], JournalQuery(limit=2))
+    messages = [record.message for record in logs.records]
+    assert messages == (["Agent stdout"] if user else ["Agent stdout", "Started room"])
+    assert logs.records[0].emitting_unit(user=user) == "dst-001.service"
+    if not user:
+        assert logs.records[1].unit == "dst-001.service"
+        assert logs.records[1].emitting_unit() == "init.scope"
+    async with host.follow_journal([1]) as stream:
         record = await anext(stream)
         assert record.unit == "dst-001.service"
-        assert record.message == domain
+        assert record.message == "Agent stdout"
 
 
 async def check(directory: Path) -> tuple[Path, Path, Path]:  # ruff: ignore[too-many-statements]
@@ -206,9 +214,9 @@ async def check(directory: Path) -> tuple[Path, Path, Path]:  # ruff: ignore[too
         for action in ("start", "restart", "stop"):
             assert f"--no-block {action} -- dst-001.service" in commands
 
-        await check_journal(host, "--system")
+        await check_journal(host, user=False)
         await check_journal(
-            Host(root, units, journalctl=journalctl, user=True), "--user"
+            Host(root, units, journalctl=journalctl, user=True), user=True
         )
         assert (await host.diagnose(1))["logs"]["records"]
 

@@ -9,7 +9,16 @@ lazy from ._native import DstError, describe, inspect
 lazy from ._native import Subscription as _Subscription
 lazy from .events import SubscriptionBatch
 lazy from .external import KleiClient
+lazy from .history import (
+    EventFilter,
+    HistoryCheckpoint,
+    HistoryPage,
+    HistoryReader,
+    HistorySelection,
+    read_history,
+)
 lazy from .host import Host
+lazy from .live_history import LiveHistoryBatch, subscribe_history
 lazy from .logs import (
     JournalCursorError,
     JournalLogs,
@@ -24,10 +33,16 @@ lazy from .logs import (
     NetdataLogs,
 )
 lazy from .management import Permissions, VoteCommand, VoteStatus
+lazy from .telemetry_history import RoomStream, TelemetryHistory
 
 __all__ = [
     "Client",
     "DstError",
+    "EventFilter",
+    "HistoryCheckpoint",
+    "HistoryPage",
+    "HistoryReader",
+    "HistorySelection",
     "Host",
     "JournalCursorError",
     "JournalLogs",
@@ -36,18 +51,23 @@ __all__ = [
     "JournalResult",
     "JournalStream",
     "KleiClient",
+    "LiveHistoryBatch",
     "LogProcessError",
     "NetdataLogQuery",
     "NetdataLogRecord",
     "NetdataLogResult",
     "NetdataLogs",
     "Permissions",
+    "RoomStream",
     "Subscription",
     "SubscriptionBatch",
+    "TelemetryHistory",
     "VoteCommand",
     "VoteStatus",
     "describe",
     "inspect",
+    "read_history",
+    "subscribe_history",
 ]
 
 

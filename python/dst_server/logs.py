@@ -8,6 +8,8 @@ from math import ceil, floor
 from os import PathLike
 from typing import Any, Literal, Self
 
+lazy import dst_server
+
 lazy from . import _native
 lazy from ._native import JournalCursorError, LogProcessError
 
@@ -67,6 +69,11 @@ class JournalRecord:
     timestamp: datetime
     unit: str
     message: str
+
+    def emitting_unit(self, *, user: bool = False) -> str | None:
+        """Read the writer's unit from journald metadata for the selected manager."""
+        unit = self.fields.get("_SYSTEMD_USER_UNIT" if user else "_SYSTEMD_UNIT")
+        return unit if isinstance(unit, str) and unit else None
 
 
 def _journal_record(value: dict[str, Any]) -> JournalRecord:
@@ -134,6 +141,11 @@ class JournalStream:
 
 
 class JournalLogs:
+    """Read named system units from every accessible journal.
+
+    Omitting units selects the system journal or the current user's journal.
+    """
+
     __slots__ = ("_reader",)
 
     def __init__(
@@ -186,6 +198,7 @@ class NetdataLogQuery:
     userid: str | None = None
     fields: tuple[str, ...] = ()
     limit: int = 200
+    tenant: str | None = None
 
     def to_native(self) -> dict[str, Any]:
         value = asdict(self)
@@ -220,6 +233,7 @@ class NetdataLogResult:
     diagnostics: str
     diagnostics_truncated: bool
     truncated: bool | None
+    file_status: str = "unknown"
 
 
 class NetdataLogs:
@@ -243,6 +257,31 @@ class NetdataLogs:
             max_record_bytes,
             max_output_bytes,
         )
+
+    async def search(
+        self,
+        source: dst_server.RoomStream,
+        *,
+        since: datetime,
+        until: datetime,
+        where: dst_server.EventFilter | None = None,
+        fields: Sequence[str] = (),
+        limit: int = 200,
+        completion_timeout: float = 120.0,
+    ) -> dst_server.TelemetryHistory:
+        """Read gameplay and coverage for a known room instance."""
+        raw = await self._reader.search(
+            {
+                "source": asdict(source),
+                "since": _utc(since).isoformat(),
+                "until": _utc(until).isoformat(),
+                "where": asdict(where or dst_server.EventFilter()),
+                "fields": list(fields),
+                "limit": limit,
+            },
+            completion_timeout,
+        )
+        return dst_server.TelemetryHistory.from_native(raw)
 
     async def query(
         self, request: NetdataLogQuery, *, completion_timeout: float = 120.0

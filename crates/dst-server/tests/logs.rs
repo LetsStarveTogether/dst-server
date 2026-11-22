@@ -108,7 +108,8 @@ records = [{'__CURSOR': str(i), '__REALTIME_TIMESTAMP': '1000001', 'MESSAGE': st
 if '--grep' in args: records = records[::2]
 if '--reverse' in sys.argv: records.reverse()
 if '--cursor' in args: records = records[next(i for i, r in enumerate(records) if r['__CURSOR'] == args['--cursor']):]
-for record in records[:int(args['--lines'])]: print(json.dumps(record))
+if '--lines' in args: records = records[:int(args['--lines'])]
+for record in records: print(json.dumps(record))
 "#,
     )?;
     let units = [
@@ -161,14 +162,11 @@ for record in records[:int(args['--lines'])]: print(json.dumps(record))
                 1
             );
             assert!(args.contains(&"--namespace=games".into()));
-            assert!(args.contains(&format!(
-                "--lines={}4",
-                if direction == Direction::Forward {
-                    "+"
-                } else {
-                    ""
-                }
-            )));
+            if direction == Direction::Forward {
+                assert!(!args.iter().any(|arg| arg.starts_with("--lines=")));
+            } else {
+                assert!(args.contains(&"--lines=4".into()));
+            }
             assert!(reaped(script.pid()?));
         }
     }
@@ -181,6 +179,161 @@ for record in records[:int(args['--lines'])]: print(json.dumps(record))
     let args = script.args()?;
     assert!(args.contains(&"--lines=101".into()));
     assert!(!args.iter().any(|arg| arg.starts_with("--unit=")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn forward_page_stops_at_lookahead_and_finishes_diagnostics() -> Result<()> {
+    let _isolation = SCRIPT_TESTS.lock().await;
+    let script = Script::new(
+        r#"
+def stop(signum, frame):
+    print('closed page', file=sys.stderr, flush=True)
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+for i in range(3):
+    print(json.dumps({'__CURSOR': str(i), '__REALTIME_TIMESTAMP': '1'}), flush=True)
+print('x' * 5000, flush=True)
+time.sleep(60)
+"#,
+    )?;
+    let mut reader = script.journal();
+    reader.max_record_bytes = 100;
+    reader.max_output_bytes = 200;
+    let result = reader
+        .query(
+            None,
+            &JournalQuery {
+                direction: Some(Direction::Forward),
+                limit: Some(2),
+                ..Default::default()
+            },
+            DEADLINE,
+        )
+        .await?;
+    assert_eq!(result.next_cursor.as_deref(), Some("1"));
+    assert!(result.has_more);
+    assert_eq!(result.diagnostics, "closed page");
+    assert!(reaped(script.pid()?));
+    Ok(())
+}
+
+#[test]
+fn follow_cursor_and_time_select_the_backlog_across_boots() -> Result<()> {
+    let reader = JournalLogs::default();
+    let default = JournalQuery::follow();
+    let args = reader.command(None, &default, true)?;
+    assert!(args.iter().any(|a| a == "--lines=0"));
+    for request in [
+        JournalQuery {
+            since: Some("yesterday".into()),
+            ..default.clone()
+        },
+        JournalQuery {
+            cursor: Some("saved".into()),
+            ..default
+        },
+    ] {
+        let args = reader.command(None, &request, true)?;
+        assert!(args.iter().any(|a| a == "--boot=all"));
+        assert!(args.iter().any(|a| a == "--no-tail"));
+    }
+    for limit in [0, 2] {
+        let request = JournalQuery {
+            cursor: Some("saved".into()),
+            limit: Some(limit),
+            ..JournalQuery::follow()
+        };
+        assert!(
+            reader
+                .command(None, &request, true)
+                .unwrap_err()
+                .to_string()
+                .contains("cursor with a line limit")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn user_room_attribution_requires_the_invoking_uid() {
+    use dst_server::logs::history::room_writer;
+
+    // SAFETY: getuid takes no arguments and always returns the real user ID.
+    let uid = unsafe { libc::getuid() };
+    let unit = "dst-001.service";
+    assert_eq!(room_writer(unit, Some(&uid.to_string()), true), Some(1));
+    assert_eq!(room_writer(unit, Some(&(uid ^ 1).to_string()), true), None);
+    assert_eq!(room_writer(unit, None, true), None);
+    assert_eq!(room_writer(unit, None, false), Some(1));
+}
+
+#[tokio::test]
+async fn journal_history_rejects_a_leap_second_at_either_boundary() -> Result<()> {
+    let reader = JournalLogs {
+        executable: "/nonexistent-journal-fixture".into(),
+        ..JournalLogs::default()
+    };
+    for (since, until) in [
+        ("2016-12-31T23:59:60.25Z", "2017-01-01T00:00:01Z"),
+        ("2016-12-31T23:59:59Z", "2016-12-31T23:59:60.25Z"),
+    ] {
+        let query: dst_server::logs::history::HistoryQuery = serde_json::from_value(json!({
+            "selection":{"rooms":[1], "since":since, "until":until}, "page_size":1
+        }))?;
+        let error = query
+            .read(&reader, DEADLINE, std::future::pending())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("leap-second"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_preserves_utf8_and_rejects_binary_or_repeated_messages_by_cursor() -> Result<()> {
+    let _isolation = SCRIPT_TESTS.lock().await;
+    let script = Script::new(
+        r#"
+uid = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
+event = {'event_name':'dst.client.authenticated', 'observed_timestamp_ns':0,
+        'attributes':{'log.record.uid':uid, 'dst.cluster.name':'001', 'dst.shard.name':'Forest',
+                      'dst.game.attempt.id':uid, 'dst.runtime.generation':0, 'dst.event.sequence':1,
+                      'dst.tick':0, 'dst.monotonic_ms':0},
+        'body':{'userid':'KU_树'}}
+frame = 'DST_RECORD|' + json.dumps(event, ensure_ascii=False)
+data = frame.encode()
+for cursor, message in [('missing', None), ('ordinary', ['output', [255]]),
+                        ('string', frame), ('bytes', list(data)),
+                        ('bad-utf8', list(data.replace('树'.encode(), b'\xff'))),
+                        ('repeated', [frame, ' ']), ('nested', ['output', list(data)])]:
+    entry = {'__CURSOR':cursor,'__REALTIME_TIMESTAMP':'1000000','_SYSTEMD_UNIT':'dst-001.service'}
+    if message is not None: entry['MESSAGE'] = message
+    print(json.dumps(entry))
+"#,
+    )?;
+    let query: dst_server::logs::history::HistoryQuery = serde_json::from_value(json!({
+        "selection":{"rooms":[1], "since":"1970-01-01T00:00:00Z", "until":"1970-01-01T00:00:02Z"},
+        "page_size":8
+    }))?;
+    let page = serde_json::to_value(
+        query
+            .read(&script.journal(), DEADLINE, std::future::pending())
+            .await?,
+    )?;
+    let observations = page["observations"].as_array().unwrap();
+    assert_eq!(observations.len(), 2);
+    for (observation, cursor) in observations.iter().zip(["string", "bytes"]) {
+        assert_eq!(observation["cursor"], cursor);
+        assert_eq!(observation["event"]["data"]["userid"], "KU_树");
+    }
+    let rejections = page["rejections"].as_array().unwrap();
+    assert_eq!(rejections.len(), 3);
+    for (rejection, cursor) in rejections.iter().zip(["bad-utf8", "repeated", "nested"]) {
+        assert_eq!(rejection["cursor"], cursor);
+        assert_eq!(rejection["reason"], "invalid_envelope");
+    }
+    assert_eq!(page["next_cursor"], "nested");
     Ok(())
 }
 
@@ -662,7 +815,7 @@ fn netdata_request(query: &str) -> NetdataLogQuery {
 
 #[test]
 fn player_queries_match_identity_roles_and_escape_user_input() -> Result<()> {
-    let userid = "KU_a.b+[c]$";
+    let userid = "KU_\n\0a.b+[c]$";
     let request = NetdataLogQuery {
         userid: Some(userid.into()),
         ..NetdataLogQuery::new(1)
@@ -673,6 +826,7 @@ fn player_queries_match_identity_roles_and_escape_user_input() -> Result<()> {
         .find_map(|argument| argument.to_str()?.strip_prefix("--query="))
         .unwrap();
     let matcher = regex::Regex::new(query)?;
+    assert!(!query.contains('\0'));
     for field in [
         "userid",
         "player.userid",
@@ -706,7 +860,7 @@ fn player_queries_match_identity_roles_and_escape_user_input() -> Result<()> {
         assert!(!matcher.is_match(&format!("body.{field}={userid}")));
     }
     assert!(!matcher.is_match("body.userid=KU_aXb+c$"));
-    for userid in ["".into(), "x".repeat(129), "KU_\ncontrol".into()] {
+    for userid in ["".into(), "x".repeat(129)] {
         assert!(
             NetdataLogs::default()
                 .command(&NetdataLogQuery {

@@ -60,6 +60,34 @@ pub struct LogTrace {
     pub trace_flags: u8,
 }
 
+impl LogTrace {
+    pub(crate) fn ids(
+        &self,
+    ) -> Result<(opentelemetry::trace::TraceId, opentelemetry::trace::SpanId)> {
+        use opentelemetry::trace::{SpanId, TraceId};
+
+        let trace_id = TraceId::from_hex(&self.trace_id)?;
+        let span_id = SpanId::from_hex(&self.span_id)?;
+        ensure!(
+            self.trace_id.len() == 32
+                && self.span_id.len() == 16
+                && self.trace_id.bytes().all(|b| b.is_ascii_hexdigit())
+                && self.span_id.bytes().all(|b| b.is_ascii_hexdigit())
+                && trace_id != TraceId::INVALID
+                && span_id != SpanId::INVALID,
+            "invalid log trace identity"
+        );
+        Ok((trace_id, span_id))
+    }
+}
+
+pub(crate) fn log_severity(text: &str) -> Result<(String, SeverityNumber)> {
+    let text = text.to_ascii_uppercase();
+    let level = SeverityNumber::from_str_name(&format!("SEVERITY_NUMBER_{text}"))
+        .context("unknown OpenTelemetry severity")?;
+    Ok((text, level))
+}
+
 #[derive(Serialize)]
 struct LocalRecord<'a> {
     #[serde(flatten)]
@@ -178,17 +206,9 @@ impl LogEvent {
 
     pub fn to_otlp(&self) -> Result<LogRecord> {
         ensure!(!self.event_name.is_empty(), "event_name cannot be empty");
-        let severity_text = self.severity_text.to_ascii_uppercase();
-        let severity = SeverityNumber::from_str_name(&format!("SEVERITY_NUMBER_{severity_text}"))
-            .context("unknown OpenTelemetry severity")?;
+        let (severity_text, severity) = log_severity(&self.severity_text)?;
         let (trace_id, span_id, flags) = if let Some(trace) = &self.trace {
-            let trace_id = opentelemetry::trace::TraceId::from_hex(&trace.trace_id)?;
-            let span_id = opentelemetry::trace::SpanId::from_hex(&trace.span_id)?;
-            ensure!(
-                trace_id != opentelemetry::trace::TraceId::INVALID
-                    && span_id != opentelemetry::trace::SpanId::INVALID,
-                "invalid log trace identity"
-            );
+            let (trace_id, span_id) = trace.ids()?;
             (
                 trace_id.to_bytes().to_vec(),
                 span_id.to_bytes().to_vec(),

@@ -1,22 +1,31 @@
 """Read a bounded window of managed room history from the local journal."""
 
-import json
-import re
 from collections import Counter
 from collections.abc import AsyncIterator, Iterable, Iterator, MutableSet, Sequence
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Any, NamedTuple
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal, NamedTuple, Self
 
-from ._native import DstError, event_userid_fields, validate_coverage
-from .events import GameEvent, event_names, validate_event
+from ._native import (
+    decode_room_message,
+    event_capture,
+    event_userid_fields,
+    normalize_event_filter,
+)
+from .events import GameEvent
 from .host import Host
-from .logs import JournalQuery, JournalRecord, _utc
+from .logs import JournalRecord, _utc
 
 __all__ = [
     "CoverageChange",
+    "EventCapture",
+    "EventFilter",
+    "HistoryCheckpoint",
     "HistoryPage",
+    "HistoryReader",
     "HistoryRecord",
+    "HistoryRejection",
+    "HistorySelection",
     "ShardRun",
     "count_by",
     "participants",
@@ -25,18 +34,6 @@ __all__ = [
 ]
 
 type Scalar = str | int | float | bool | None
-_PREFIX = "DST_RECORD|"
-_COVERAGE = "dst.telemetry.coverage"
-_HISTORY_EVENTS = (*event_names(), _COVERAGE)
-_NAME_FIELD = r'"event_name"\s*:\s*'
-_COVERAGE_FIELD = rf'{_NAME_FIELD}"{re.escape(_COVERAGE)}"'
-_HISTORY_FIELDS = (
-    r'(?:"dst\.event\.sequence"\s*:|'
-    rf'{_NAME_FIELD}"(?:{"|".join(map(re.escape, _HISTORY_EVENTS))})")'
-)
-_UNIT = re.compile(r"dst-[0-2][0-9]{2}\.service")
-_ULID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
-_ACCOUNT_PATHS = {field: field.split(".") for field in event_userid_fields()}
 
 
 def _values(value: object, path: list[str]) -> Iterator[Scalar]:
@@ -57,10 +54,48 @@ def _values(value: object, path: list[str]) -> Iterator[Scalar]:
 
 def participants(event: GameEvent) -> Iterator[tuple[str, str]]:
     """Yield (body field, userid) for each observed role, including roster entries."""
-    for field, path in _ACCOUNT_PATHS.items():
-        for value in _values(event["data"], path):
+    for role in event_userid_fields(event["event"]):
+        for value in _values(event["data"], role.split(".")):
             if isinstance(value, str):
-                yield field, value
+                yield role, value
+
+
+@dataclass(frozen=True, slots=True)
+class EventFilter:
+    """Match exact event names, shard names and a participant in any recorded role."""
+
+    events: tuple[str, ...] = ()
+    shards: tuple[str, ...] = ()
+    userid: str | None = None
+
+    def __post_init__(self) -> None:
+        values = normalize_event_filter(asdict(self))
+        object.__setattr__(self, "events", tuple(values["events"]))
+        object.__setattr__(self, "shards", tuple(values["shards"]))
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryCheckpoint:
+    """Persist with the UID-based results of a page and return to the same reader."""
+
+    scope: str
+    cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class HistorySelection:
+    rooms: tuple[int, ...]
+    since: datetime
+    until: datetime
+    namespace: str | None = None
+    coverage_only: bool = False
+    where: EventFilter = field(default_factory=EventFilter)
+
+    def to_native(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["since"] = _utc(self.since).isoformat()
+        value["until"] = _utc(self.until).isoformat()
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +105,12 @@ class _Observation:
     cluster: str
     shard: str
     observed_timestamp_ns: int
+    resource: dict[str, Any] = field(default_factory=dict, kw_only=True)
+    attributes: dict[str, Any] = field(default_factory=dict, kw_only=True)
+    severity_text: str | None = field(default=None, kw_only=True)
+    trace: dict[str, Any] | None = field(default=None, kw_only=True)
+    receipt_time: datetime | None = field(default=None, kw_only=True)
+    cursor: str | None = field(default=None, kw_only=True)
 
 
 class ShardRun(NamedTuple):
@@ -104,8 +145,30 @@ class HistoryRecord(_Observation):
         entry: JournalRecord, *, user: bool = False
     ) -> HistoryRecord | None:
         """Read one gameplay fact. Malformed observations raise ValueError."""
-        observation = _decode(entry, user=user)
+        unit = entry.emitting_unit(user=user)
+        if unit is None:
+            return None
+        uid = entry.fields.get("_UID")
+        raw = decode_room_message(
+            entry.fields.get("MESSAGE"),
+            unit,
+            user,
+            uid if isinstance(uid, str) else None,
+        )
+        if raw is None:
+            return None
+        observation = _observation(raw, unit, entry.timestamp, entry.cursor)
         return observation if isinstance(observation, HistoryRecord) else None
+
+
+@dataclass(frozen=True, slots=True)
+class EventCapture:
+    """What one coverage sample says about the selected event's producer hooks."""
+
+    profile: str
+    profile_includes_event: bool
+    telemetry_status: str
+    capabilities: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +179,17 @@ class CoverageChange(_Observation):
     generation: int
     data: dict[str, Any]
     agent_instance_id: str
+
+    def capture_for(self, name: str) -> EventCapture:
+        """Read the installed hooks at this sample's time in this shard run."""
+        minimum, hooks = event_capture(name)
+        profile = self.data["profile"]
+        return EventCapture(
+            profile,
+            profile == "play" or (profile == "timeline" and minimum == "timeline"),
+            self.data["telemetry_status"],
+            {hook: self.data["capabilities"].get(hook, "unknown") for hook in hooks},
+        )
 
     @property
     def run(self) -> ShardRun:
@@ -155,104 +229,99 @@ def replay_by_run(
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryRejection:
+    unit: str
+    cursor: str
+    receipt_time: datetime
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryReader:
+    """Host and credentials that selected the journal files for this page."""
+
+    host_id: str
+    host_id_kind: Literal["machine_id", "boot_id"]
+    effective_uid: int
+    effective_gid: int
+    groups: tuple[int, ...]
+    executable: str
+
+
+@dataclass(frozen=True, slots=True)
 class HistoryPage:
-    records: tuple[HistoryRecord, ...]
-    coverage: tuple[CoverageChange, ...]
-    next_cursor: str | None
-    rejected: int
+    """Observations retain native order, including interleaved coverage changes."""
+
+    observations: tuple[HistoryRecord | CoverageChange, ...]
+    rejections: tuple[HistoryRejection, ...]
+    visible_units: tuple[str, ...]
+    reader: HistoryReader
+    selection: HistorySelection
+    user: bool
+    candidates_read: int
+    checkpoint: HistoryCheckpoint
+    has_more: bool
     diagnostics: str
     diagnostics_truncated: bool
 
+    @classmethod
+    def from_native(cls, raw: dict[str, Any]) -> Self:
+        raw["observations"] = tuple(
+            _observation(row, row.pop("unit"), _receipt(row), row.pop("cursor"))
+            for row in raw["observations"]
+        )
+        raw["rejections"] = tuple(
+            HistoryRejection(receipt_time=_receipt(row), **row)
+            for row in raw["rejections"]
+        )
+        raw["visible_units"] = tuple(raw["visible_units"])
+        reader = raw["reader"]
+        raw["reader"] = HistoryReader(**(reader | {"groups": tuple(reader["groups"])}))
+        raw["checkpoint"] = HistoryCheckpoint(**raw["checkpoint"])
+        raw.pop("next_cursor")
+        selection = raw["selection"]
+        selection["since"] = datetime.fromisoformat(selection["since"])
+        selection["until"] = datetime.fromisoformat(selection["until"])
+        selection["rooms"] = tuple(selection["rooms"])
+        selection["where"] = EventFilter(**selection["where"])
+        raw["user"] = selection.pop("user")
+        raw["selection"] = HistorySelection(**selection)
+        return cls(**raw)
+
+    @property
+    def next_cursor(self) -> str | None:
+        return self.checkpoint.cursor
+
+    @property
+    def records(self) -> tuple[HistoryRecord, ...]:
+        return tuple(row for row in self.observations if isinstance(row, HistoryRecord))
+
+    @property
+    def coverage(self) -> tuple[CoverageChange, ...]:
+        return tuple(
+            row for row in self.observations if isinstance(row, CoverageChange)
+        )
+
+    @property
+    def rejected(self) -> int:
+        return len(self.rejections)
+
 
 def _observation(
-    unit: str, log: dict[str, Any]
-) -> HistoryRecord | CoverageChange | None:
-    attrs = log["attributes"]
-    name = log["event_name"]
-    if "dst.event.sequence" not in attrs and name not in _HISTORY_EVENTS:
-        return None
-    data = log["body"]
-    uid = attrs["log.record.uid"]
-    cluster = attrs["dst.cluster.name"]
-    shard = attrs["dst.shard.name"]
-    nonce = attrs["dst.game.attempt.id"]
-    generation = attrs["dst.runtime.generation"]
-    observed = log["observed_timestamp_ns"]
-    if (
-        not _ULID.fullmatch(uid)
-        or not _ULID.fullmatch(nonce)
-        or not all(isinstance(v, str) and v for v in (cluster, shard))
-    ):
-        message = "invalid log observation identity"
-        raise ValueError(message)
-    if type(observed) is not int or not 0 <= observed < 2**64:
-        message = "invalid log observation timestamp"
-        raise ValueError(message)
-    if type(generation) is not int or not 0 <= generation < 2**53:
-        message = "invalid runtime generation"
-        raise ValueError(message)
-    if name == _COVERAGE:
-        instance = log["resource"]["service.instance.id"]
-        if not isinstance(instance, str) or not instance.strip():
-            message = "invalid coverage agent instance"
-            raise ValueError(message)
-        validate_coverage(data)
-        return CoverageChange(
-            uid,
-            unit,
-            cluster,
-            shard,
-            observed,
-            nonce,
-            generation,
-            data,
-            agent_instance_id=instance,
-        )
-    event = validate_event({
-        "event": name,
-        "nonce": nonce,
-        "generation": generation,
-        "session_id": attrs.get("dst.session.id"),
-        "seq": attrs["dst.event.sequence"],
-        "tick": attrs["dst.tick"],
-        "monotonic_ms": attrs["dst.monotonic_ms"],
-        "cycle": attrs.get("dst.world.cycle"),
-        "data": data,
-    })
-    return HistoryRecord(uid, unit, cluster, shard, observed, event)
+    raw: dict[str, Any],
+    unit: str,
+    receipt: datetime | None = None,
+    cursor: str | None = None,
+) -> HistoryRecord | CoverageChange:
+    kind = raw.pop("kind")
+    cls = CoverageChange if kind == "coverage" else HistoryRecord
+    return cls(unit=unit, receipt_time=receipt, cursor=cursor, **raw)
 
 
-def _decode(
-    entry: JournalRecord,
-    units: set[str] | None = None,
-    *,
-    user: bool,
-    coverage_only: bool = False,
-) -> HistoryRecord | CoverageChange | None:
-    # UNIT can name a service on another process's message.
-    unit = entry.fields.get("_SYSTEMD_USER_UNIT" if user else "_SYSTEMD_UNIT")
-    if (
-        not isinstance(unit, str)
-        or not _UNIT.fullmatch(unit)
-        or (units is not None and unit not in units)
-        or not entry.message.startswith(_PREFIX)
-    ):
-        return None
-    try:
-        log = json.loads(entry.message[len(_PREFIX) :])
-        if coverage_only and log["event_name"] != _COVERAGE:
-            return None
-        return _observation(unit, log)
-    except (
-        AttributeError,
-        KeyError,
-        RecursionError,
-        TypeError,
-        ValueError,
-        DstError,
-    ) as error:
-        message = f"invalid structured room log at journal cursor {entry.cursor}"
-        raise ValueError(message) from error
+def _receipt(raw: dict[str, Any]) -> datetime:
+    return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(
+        microseconds=raw.pop("receipt_timestamp_us")
+    )
 
 
 async def read_history(
@@ -262,78 +331,30 @@ async def read_history(
     since: datetime,
     until: datetime,
     cursor: str | None = None,
+    checkpoint: HistoryCheckpoint | None = None,
     page_size: int = 500,
     coverage_only: bool = False,
+    where: EventFilter | None = None,
+    namespace: str | None = None,
 ) -> AsyncIterator[HistoryPage]:
-    """Scan [since, until) in pages ordered by journal receipt time.
+    """Scan a half-open receipt window in native journal order.
 
-    The Host selects the system or user journal and its trusted service field.
-    Resume a cursor with the same Host, room selection and coverage_only setting.
-    An expired cursor or one outside the journal filter raises JournalCursorError.
-    Use coverage_only on a preceding window to read just the coverage changes
-    and carry the last known observation for each shard run into the next window.
-
+    Supply a saved checkpoint to validate the source and selection before resuming.
+    For a durable aggregate, commit the checkpoint and distinct UIDs together.
     Yields:
-        Each page contains every valid gameplay or coverage observation it reads.
-        A UID may repeat within a page, across pages or after resuming.
-        Rejected counts malformed journal entries. The cursor advances over them.
-        A resumable job can commit results keyed by UID and this cursor together.
-        A window with unknown coverage cannot establish a gameplay count of zero.
-
-    Raises:
-        ValueError: The window, room selection, or page size is invalid.
+        Pages with ordered observations, rejections and resumable progress.
     """
-    since, until = _utc(since), _utc(until)
-    if until <= since or page_size < 1:
-        message = "history requires a positive window and page size"
-        raise ValueError(message)
-    units = {f"dst-{number:03}.service" for number in numbers}
-    fields = _COVERAGE_FIELD if coverage_only else _HISTORY_FIELDS
-    pattern = rf"^DST_RECORD\|.*{fields}"
-    user = host.user
+    selection = HistorySelection(
+        tuple(numbers), since, until, namespace, coverage_only, where or EventFilter()
+    )
     while True:
-        result = await host.journal(
-            numbers,
-            JournalQuery(
-                limit=page_size,
-                direction="forward",
-                cursor=cursor,
-                # journalctl accepts either a start time or a cursor.
-                since=since if cursor is None else None,
-                until=until - timedelta(microseconds=1),
-                grep=pattern,
-            ),
+        page = await host.history_page(
+            selection, page_size=page_size, cursor=cursor, checkpoint=checkpoint
         )
-        records: list[HistoryRecord] = []
-        coverage: list[CoverageChange] = []
-        rejected = 0
-        for entry in result.records:
-            if not since <= entry.timestamp < until:
-                continue
-            try:
-                observation = _decode(
-                    entry, units, user=user, coverage_only=coverage_only
-                )
-            except ValueError:
-                rejected += 1
-                continue
-            if observation is None:
-                continue
-            if isinstance(observation, HistoryRecord):
-                records.append(observation)
-            else:
-                coverage.append(observation)
-        cursor = result.next_cursor or cursor
-        yield HistoryPage(
-            tuple(records),
-            tuple(coverage),
-            cursor,
-            rejected,
-            result.diagnostics,
-            result.diagnostics_truncated,
-        )
-        if not result.has_more:
+        yield page
+        if not page.has_more:
             return
+        cursor, checkpoint = None, page.checkpoint
 
 
 def count_by(
